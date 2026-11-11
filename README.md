@@ -18,7 +18,19 @@ format, and a Rust test client). The mobile and desktop apps come later.
 
 ## Status
 
-Planning. No code yet; work starts with [Prompt 1 — Foundations and platform](docs/prompts/01-foundations.md).
+Prompt 1 (foundations and platform) is built and waiting at its gate: see
+[the report](docs/reports/P01-foundations.md). Services are empty shells that start, report health
+and metrics, and drain; Prompt 2 builds the realtime delivery core.
+
+```bash
+cargo xtask ci            # the full fast quality bar, as CI runs it
+cargo xtask compose up    # SurrealDB, valkey-hot, valkey-jobs, Garage, LiveKit on localhost
+cargo xtask smoke         # start every service, check health and metrics, stop cleanly
+cargo xtask help          # everything else (fuzz, bench, release, sanitize, miri)
+```
+
+Infrastructure and operations: [deploy/](deploy/README.md). Running a censorship-resistant proxy:
+[deploy/proxy](deploy/proxy/README.md).
 
 ## Licence
 

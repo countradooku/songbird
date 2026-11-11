@@ -1,0 +1,45 @@
+[package]
+name = "songbird-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.12"
+songbird-types = { path = "../crates/types" }
+songbird-proxy = { path = "../services/proxy" }
+serde = { version = "1", features = ["derive"] }
+
+# Not part of the main workspace: fuzzing needs nightly and libFuzzer.
+[workspace]
+
+[[bin]]
+name = "client_hello"
+path = "fuzz_targets/client_hello.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proxy_link"
+path = "fuzz_targets/proxy_link.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_toml"
+path = "fuzz_targets/config_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "id_parse"
+path = "fuzz_targets/id_parse.rs"
+test = false
+doc = false
+bench = false

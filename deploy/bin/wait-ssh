@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Waits until every host in the generated inventory answers over SSH (fresh servers boot slowly).
+source "$(dirname "$0")/lib.sh"
+env=$1
+cd "$ANSIBLE_DIR"
+for _ in $(seq 1 60); do
+  if ansible -i "inventory/generated/$env.yml" all -m ansible.builtin.ping -o >/dev/null 2>&1; then exit 0; fi
+  sleep 5
+done
+die "hosts did not become reachable over SSH within 5 minutes"

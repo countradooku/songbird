@@ -1,0 +1,30 @@
+---
+- name: Install the container runtime (Debian package)
+  ansible.builtin.apt:
+    name: [docker.io]
+    state: present
+
+- name: Docker daemon settings
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    mode: "0644"
+    # Host networking only: no bridge and no Docker-managed iptables, so nftables stays the single
+    # source of truth for open ports (roles/firewall).
+    content: |
+      {
+        "bridge": "none",
+        "iptables": false,
+        "ip6tables": false,
+        "live-restore": true,
+        "no-new-privileges": true,
+        "userland-proxy": false,
+        "log-driver": "journald",
+        "icc": false
+      }
+  notify: Restart docker
+
+- name: Docker running
+  ansible.builtin.systemd_service:
+    name: docker
+    enabled: true
+    state: started

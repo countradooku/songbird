@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Installs pinned, checksum-verified deployment tools into /usr/local/bin (CI runners).
+# Checksums: sops, tofu and cosign from their published checksum files; age from the GitHub
+# release download (age publishes a transparency-log proof, not a checksum file). D-0009.
+set -euo pipefail
+
+SOPS_VERSION=3.13.3
+SOPS_SHA256=e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b
+AGE_VERSION=1.3.2
+AGE_SHA256=cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10
+TOFU_VERSION=1.13.9
+TOFU_SHA256=b34b327cc1ef07178207b6f2cd1f5276537d3e5b7be316500f6dac50d4c0a857
+COSIGN_VERSION=3.1.4
+COSIGN_SHA256=424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa
+
+[ "$(uname -sm)" = "Linux x86_64" ] || { echo "install-tools: linux x86_64 only (CI)"; exit 1; }
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+fetch() { # url sha256 out
+  curl -fsSL --proto '=https' --tlsv1.2 -o "$3" "$1"
+  echo "$2  $3" | sha256sum -c --quiet -
+}
+
+fetch "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.amd64" "$SOPS_SHA256" "$tmp/sops"
+fetch "https://github.com/FiloSottile/age/releases/download/v${AGE_VERSION}/age-v${AGE_VERSION}-linux-amd64.tar.gz" "$AGE_SHA256" "$tmp/age.tgz"
+fetch "https://github.com/opentofu/opentofu/releases/download/v${TOFU_VERSION}/tofu_${TOFU_VERSION}_linux_amd64.tar.gz" "$TOFU_SHA256" "$tmp/tofu.tgz"
+fetch "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64" "$COSIGN_SHA256" "$tmp/cosign"
+
+tar -xzf "$tmp/age.tgz" -C "$tmp" age/age age/age-keygen
+tar -xzf "$tmp/tofu.tgz" -C "$tmp" tofu
+sudo install -m 0755 "$tmp/sops" "$tmp/age/age" "$tmp/age/age-keygen" "$tmp/tofu" "$tmp/cosign" /usr/local/bin/
+sops --version >/dev/null && tofu version >/dev/null && cosign version >/dev/null
+echo "install-tools: sops ${SOPS_VERSION}, age ${AGE_VERSION}, tofu ${TOFU_VERSION}, cosign ${COSIGN_VERSION}"

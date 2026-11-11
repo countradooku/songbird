@@ -1,0 +1,9 @@
+# Managed by Ansible: songbird-{{ item }} on {{ inventory_hostname }} ({{ songbird_env }}).
+[common]
+environment = "{{ songbird_env_kind }}"
+admin_listen = "{{ private_ip }}:{{ songbird_admin_ports[item] }}"
+shutdown_grace_secs = 30
+
+[common.log]
+format = "json"
+filter = "info"

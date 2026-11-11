@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Destroys an environment's infrastructure at one provider.
+#   deploy/bin/env-down <env> <hetzner|scaleway> --yes-destroy-<env>
+# Data on the destroyed hosts is gone: take and verify a backup first (Prompt 10 runbook).
+source "$(dirname "$0")/lib.sh"
+[ $# -eq 3 ] && [ "$3" = "--yes-destroy-$1" ] || die "usage: env-down <env> <cloud> --yes-destroy-<env>"
+env=$1; cloud=$2
+check_env "$env"; check_cloud "$cloud"; need sops tofu
+start=$(date +%s)
+export_cloud_env "$env" "$cloud"
+tofu_init "$env" "$cloud"
+# shellcheck disable=SC2046
+tofu -chdir="$TOFU_DIR/envs/$cloud" destroy -input=false -auto-approve $(tofu_vars "$env" "$cloud")
+rm -f "$TOFU_DIR/environments/$env.active-cloud" "$ANSIBLE_DIR/inventory/generated/$env.yml"
+log "[$env@$cloud] destroyed in $(( $(date +%s) - start ))s"

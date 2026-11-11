@@ -1,0 +1,16 @@
+# Run a Songbird proxy with Docker Compose. See README.md in this directory.
+services:
+  songbird-proxy:
+    image: ghcr.io/countradooku/songbird-proxy:${SONGBIRD_PROXY_VERSION:?set SONGBIRD_PROXY_VERSION}
+    restart: unless-stopped
+    command: ["--config", "/etc/songbird-proxy/proxy.toml"]
+    ports: ["443:443"]
+    volumes: ["/etc/songbird-proxy:/etc/songbird-proxy:ro"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ulimits:
+      nofile: { soft: 65536, hard: 65536 }
+    # The proxy writes nothing; keep Docker from storing anything either.
+    logging:
+      driver: none

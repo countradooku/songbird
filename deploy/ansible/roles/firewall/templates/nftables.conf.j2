@@ -1,0 +1,45 @@
+#!/usr/sbin/nft -f
+# Managed by Ansible (deploy/ansible/roles/firewall). Default deny inbound.
+# Containers use host networking, so this INPUT chain is authoritative for every port.
+{% set roles = group_names %}
+{% set internal = [] %}
+{% for r in roles %}{% for p in internal_ports_by_role.get(r, []) %}{% set _ = internal.append(p) %}{% endfor %}{% endfor %}
+{% if 'calls' in roles %}{% for p in internal_ports_by_role.calls_admin %}{% set _ = internal.append(p) %}{% endfor %}{% endif %}
+table inet songbird
+delete table inet songbird
+table inet songbird {
+  chain input {
+    type filter hook input priority filter; policy drop;
+    ct state established,related accept
+    ct state invalid drop
+    iif "lo" accept
+    meta l4proto { icmp, ipv6-icmp } accept
+
+{% if 'bastion' in roles %}
+    # SSH: bastion only, from the admin ranges.
+{% for c in admin_cidrs %}
+    ip{{ '6' if ':' in c else '' }} saddr {{ c }} tcp dport 22 accept
+{% endfor %}
+{% else %}
+    # SSH: only from the bastion, over the private network.
+    ip saddr {{ hostvars[groups['bastion'][0]].private_ip }} tcp dport 22 accept
+{% endif %}
+
+{% if 'edge' in roles %}
+    tcp dport 443 accept comment "delivery (WSS), api (HTTPS)"
+{% endif %}
+{% if 'calls' in roles %}
+    tcp dport { 7881, 5349 } accept comment "LiveKit ICE/TCP, TURN/TLS"
+    udp dport { 3478, 50000-60000 } accept comment "LiveKit TURN/UDP, media"
+{% endif %}
+
+{% if internal | length > 0 %}
+    # Internal services: private network only.
+    ip saddr {{ private_cidr }} tcp dport { {{ internal | unique | sort | join(', ') }} } accept
+{% endif %}
+  }
+
+  chain forward {
+    type filter hook forward priority filter; policy drop;
+  }
+}

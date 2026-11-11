@@ -36,3 +36,30 @@ age.key
 keys.txt
 .DS_Store
 .claude/settings.local.json
+
+# Fuzzing and build outputs
+fuzz/target
+fuzz/artifacts
+fuzz/coverage
+junit.xml
+
+# Fuzz corpora: only hand-picked seeds are committed
+fuzz/corpus/*/*
+!fuzz/corpus/*/seed-*
+
+# OpenTofu: provider lock files ARE committed (deploy/tofu/envs/*/.terraform.lock.hcl)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+deploy/tofu/state/
+# Generated Ansible inventory (contains public IPs)
+deploy/ansible/inventory/generated/
+
+# Ansible collections installed locally
+deploy/ansible/.collections/
+
+# SBOMs are release artifacts (target/dist), never source files
+*.cdx.json
+# Provider-switch drill timings (copied into the drill report)
+deploy/drill-timings.tsv

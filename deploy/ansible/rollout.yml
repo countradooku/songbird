@@ -1,0 +1,49 @@
+---
+# Staged rollout of songbird_version with automatic rollback.
+#   batches: 1 host (canary), then 25%, then the rest; any failure stops the rollout.
+#   per host: deploy, wait for /readyz and a clean /metrics; on failure roll that host back to the
+#   version it ran before, wait for it to be healthy again, then fail the play so no further batch
+#   starts. Run by deploy/bin/rollout (and deploy.yml).
+- name: Staged rollout
+  hosts: edge:worker:calls
+  become: true
+  serial: [1, "25%", "100%"]
+  max_fail_percentage: 0
+  any_errors_fatal: true
+  vars:
+    target_version: "{{ songbird_version }}"
+  roles:
+    - secrets
+  tasks:
+    - name: Version currently running
+      ansible.builtin.slurp:
+        src: /etc/songbird/version
+      register: previous_raw
+      failed_when: false
+
+    - name: Remember it
+      ansible.builtin.set_fact:
+        previous_version: "{{ (previous_raw.content | b64decode | trim) if previous_raw.content is defined else '' }}"
+
+    # The songbird role records the version in /etc/songbird/version once it is healthy.
+    - name: Deploy, verify, or roll back
+      block:
+        - name: Deploy the target version
+          ansible.builtin.include_role:
+            name: songbird
+          vars:
+            songbird_version: "{{ target_version }}"
+      rescue:
+        - name: Roll back to the previous version
+          ansible.builtin.include_role:
+            name: songbird
+          vars:
+            songbird_version: "{{ previous_version }}"
+          when: previous_version | length > 0
+
+        - name: Stop the rollout
+          ansible.builtin.fail:
+            msg: >-
+              {{ target_version }} failed health checks on {{ inventory_hostname }};
+              {{ 'rolled back to ' ~ previous_version if previous_version | length > 0 else 'no previous version to roll back to' }}.
+              No further hosts were changed. See docs/RUNBOOKS/deploy-and-rollback.md.

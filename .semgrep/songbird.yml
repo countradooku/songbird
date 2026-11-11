@@ -1,0 +1,25 @@
+# Songbird-specific Semgrep rules (constitution: invariants 6 and 7, working rule 5).
+rules:
+  - id: songbird-no-sensitive-log-fields
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      Invariant 6: no device IDs, account IDs, IPs, secrets or content in logs. The telemetry
+      redaction layer drops this callsite at runtime; remove the field instead.
+    pattern-either:
+      - pattern-regex: '(trace|debug|info|warn|error)!\s*\([^;]*\b(device_id|account_id|user_id|session_id|ip|client_ip|peer_addr|remote_addr|password|secret|token|api_key|private_key|envelope|ciphertext|plaintext|content)\s*='
+      - pattern-regex: '(trace|debug|info|warn|error)_span!\s*\([^;]*\b(device_id|account_id|ip|peer_addr|remote_addr)\s*='
+    paths:
+      exclude: ["/crates/telemetry/tests/**", "/crates/telemetry/src/redaction.rs"]
+
+  - id: songbird-unredacted-id-in-format
+    languages: [rust]
+    severity: ERROR
+    message: Invariant 6. `to_hex_unredacted()` output must never reach a log or metric macro.
+    pattern-regex: '(trace|debug|info|warn|error|format|println|eprintln)!\s*\([^;]*to_hex_unredacted\(\)'
+
+  - id: songbird-no-unsafe-allow
+    languages: [rust]
+    severity: ERROR
+    message: Working rule 5. `unsafe` needs a measured, reviewed exception recorded in docs/DECISIONS.md.
+    pattern-regex: '#!?\[allow\(unsafe_code\)\]'

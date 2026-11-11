@@ -1,0 +1,31 @@
+[package]
+name = "songbird-proxy"
+description = "Censorship-resistant TLS relay for Songbird traffic. Forwards encrypted bytes only; logs nothing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "songbird-proxy"
+path = "src/main.rs"
+
+[dependencies]
+songbird-types.workspace = true
+mimalloc.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "io-util", "macros", "time", "signal", "sync"] }
+tokio-rustls.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+rcgen.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "io-util", "macros", "time", "signal", "sync"] }
+
+[lints]
+workspace = true

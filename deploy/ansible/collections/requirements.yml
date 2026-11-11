@@ -1,0 +1,8 @@
+# Pinned Ansible collections (docs/DECISIONS.md D-0009).
+collections:
+  - name: community.docker
+    version: "5.4.0"
+  - name: ansible.posix
+    version: "2.2.2"
+  - name: community.sops
+    version: "2.5.1"

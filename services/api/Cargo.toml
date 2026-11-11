@@ -1,0 +1,20 @@
+[package]
+name = "songbird-api"
+description = "Songbird api service."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "songbird-api"
+path = "src/main.rs"
+
+[dependencies]
+songbird-service.workspace = true
+mimalloc.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

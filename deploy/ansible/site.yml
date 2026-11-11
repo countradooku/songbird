@@ -1,0 +1,34 @@
+---
+# Builds a complete environment on fresh hosts. Run by deploy/bin/env-up after OpenTofu.
+- name: Base system
+  hosts: all
+  become: true
+  roles:
+    - secrets
+    - common
+    - firewall
+    - docker
+
+- name: Certificates
+  ansible.builtin.import_playbook: rotate-certs.yml
+
+- name: Data services
+  hosts: data
+  become: true
+  roles:
+    - secrets
+    - data
+
+- name: Calls SFU
+  hosts: calls
+  become: true
+  roles:
+    - secrets
+    - calls
+
+- name: Songbird services
+  hosts: edge:worker:calls
+  become: true
+  roles:
+    - secrets
+    - songbird

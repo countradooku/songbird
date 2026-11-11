@@ -1,0 +1,68 @@
+---
+# Runs the Songbird services this host's roles call for, at songbird_version, and waits until each
+# reports ready. Used by site.yml (first install) and rollout.yml (upgrades, rollback).
+- name: Services on this host
+  ansible.builtin.set_fact:
+    songbird_services: "{{ group_names | map('extract', songbird_services_by_role) | select('defined') | flatten | unique }}"
+
+- name: Service configuration (no secrets; those are referenced, see crates/types/src/secret.rs)
+  ansible.builtin.template:
+    src: service.toml.j2
+    dest: "/etc/songbird/{{ item }}.toml"
+    mode: "0644"
+  loop: "{{ songbird_services }}"
+
+- name: Log in to the image registry (read-only token; skipped when the packages are public)
+  community.docker.docker_login:
+    registry_url: "{{ songbird_registry.split('/')[0] }}"
+    username: "{{ secrets.ghcr_username }}"
+    password: "{{ secrets.ghcr_read_token }}"
+  when: (secrets.ghcr_read_token | default('')) not in ['', 'CHANGE_ME', 'public']
+  no_log: true
+
+- name: Service containers
+  community.docker.docker_container:
+    name: "songbird-{{ item }}"
+    image: "{{ songbird_registry }}/songbird-{{ item }}:{{ songbird_version }}"
+    pull: missing
+    network_mode: host
+    restart_policy: unless-stopped
+    command: [--config, /etc/songbird/config.toml]
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opts: [no-new-privileges]
+    ulimits: ["nofile:{{ open_files_limit }}:{{ open_files_limit }}"]
+    stop_timeout: 60
+    volumes:
+      - "/etc/songbird/{{ item }}.toml:/etc/songbird/config.toml:ro"
+      - "{{ songbird_pki_dir }}/{{ item }}:/etc/songbird/tls:ro"
+    labels:
+      songbird.version: "{{ songbird_version }}"
+  loop: "{{ songbird_services }}"
+
+- name: Wait until every service is ready
+  ansible.builtin.uri:
+    url: "http://{{ private_ip }}:{{ songbird_admin_ports[item] }}/readyz"
+    status_code: 200
+  register: ready
+  until: ready.status == 200
+  retries: 30
+  delay: 2
+  loop: "{{ songbird_services }}"
+
+- name: No log callsite refused for a sensitive field (invariant 6)
+  ansible.builtin.uri:
+    url: "http://{{ private_ip }}:{{ songbird_admin_ports[item] }}/metrics"
+    return_content: true
+  register: metrics
+  failed_when: "'songbird_telemetry_refused_callsites_total 0' not in metrics.content"
+  loop: "{{ songbird_services }}"
+
+# Written only after every service is healthy, so rollout.yml always has a known-good version to
+# roll back to, including after the first install by site.yml.
+- name: Record the running version
+  ansible.builtin.copy:
+    dest: /etc/songbird/version
+    content: "{{ songbird_version }}\n"
+    mode: "0644"

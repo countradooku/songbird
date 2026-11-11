@@ -1,0 +1,138 @@
+---
+# Issues or renews mutual-TLS leaf certificates (one per component per host) with songbird-admin,
+# installs them and restarts the components whose certificate changed.
+#   Renew what is within tls_renew_within_days:  ansible-playbook rotate-certs.yml
+#   Renew everything now (e.g. after a CA change): ansible-playbook rotate-certs.yml -e force_rotate=true
+# The intermediate CA key is decrypted from SOPS into a private temporary directory on the
+# controller and deleted at the end, also on failure.
+- name: Prepare the issuing CA on the controller
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Private working directory
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: songbird-pki-
+      register: pki_tmp
+
+    - name: Decrypt the intermediate CA
+      ansible.builtin.copy:
+        dest: "{{ pki_tmp.path }}/ca/{{ item.file }}"
+        content: "{{ (lookup('community.sops.sops', songbird_secrets_file) | from_yaml)[item.key] }}"
+        mode: "0600"
+      loop:
+        - { key: pki_intermediate_crt, file: intermediate.crt }
+        - { key: pki_intermediate_key, file: intermediate.key }
+        - { key: pki_root_crt, file: root.crt }
+      loop_control:
+        label: "{{ item.file }}"
+      no_log: true
+
+- name: Issue and install leaf certificates
+  hosts: all
+  become: true
+  gather_facts: false
+  serial: "25%"
+  vars:
+    songbird_local_pki: "{{ hostvars['localhost'].pki_tmp.path }}/leaves"
+    tls_components: "{{ group_names | map('extract', tls_components_by_role) | select('defined') | flatten | unique }}"
+  tasks:
+    - name: Current certificates
+      ansible.builtin.slurp:
+        src: "{{ songbird_pki_dir }}/{{ item }}/tls.crt"
+      register: current
+      failed_when: false
+      loop: "{{ tls_components }}"
+
+    - name: Local working directory per component
+      ansible.builtin.file:
+        path: "{{ songbird_local_pki }}/{{ inventory_hostname }}/{{ item }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+      loop: "{{ tls_components }}"
+
+    - name: Keep a local copy for the expiry check
+      ansible.builtin.copy:
+        dest: "{{ songbird_local_pki }}/{{ inventory_hostname }}/{{ item.item }}/current.crt"
+        content: "{{ item.content | b64decode }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      loop: "{{ current.results | selectattr('content', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Expiry check (exit 1 = inside the renewal window)
+      ansible.builtin.command:
+        argv:
+          - songbird-admin
+          - ca
+          - check
+          - --cert
+          - "{{ songbird_local_pki }}/{{ inventory_hostname }}/{{ item }}/current.crt"
+          - --renew-within
+          - "{{ tls_renew_within_days }}"
+      delegate_to: localhost
+      become: false
+      register: expiry
+      changed_when: false
+      failed_when: false
+      loop: "{{ tls_components }}"
+
+    - name: Issue new leaves where missing, expiring or forced
+      ansible.builtin.command:
+        argv:
+          - songbird-admin
+          - ca
+          - issue
+          - --ca
+          - "{{ hostvars['localhost'].pki_tmp.path }}/ca"
+          - --name
+          - "{{ item.item }}.{{ fqdn }}"
+          - --san
+          - "{{ item.item }}.{{ fqdn }}"
+          - --san
+          - "{{ fqdn }}"
+          - --san
+          - "{{ private_ip }}"
+          - --days
+          - "{{ tls_leaf_days }}"
+          - --out
+          - "{{ songbird_local_pki }}/{{ inventory_hostname }}/{{ item.item }}"
+      delegate_to: localhost
+      become: false
+      when: (force_rotate | default(false) | bool) or item.rc != 0
+      changed_when: true
+      loop: "{{ expiry.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      register: issued
+
+    - name: Install
+      ansible.builtin.include_role:
+        name: mtls
+
+    # Per-item restarts keyed on which certificate changed; a handler cannot express that.
+    - name: Restart components whose certificate changed # noqa: no-handler
+      community.docker.docker_container:
+        name: "songbird-{{ item.item.item }}"
+        state: started
+        restart: true
+      when: item is changed
+      failed_when: false # the component may not be deployed yet on a fresh host
+      loop: "{{ issued.results }}"
+      loop_control:
+        label: "{{ item.item.item }}"
+
+- name: Clean up the controller
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Delete decrypted CA material and issued keys
+      ansible.builtin.file:
+        path: "{{ pki_tmp.path }}"
+        state: absent

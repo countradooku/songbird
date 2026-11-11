@@ -1,0 +1,26 @@
+# songbird-proxy configuration. Copy to /etc/songbird-proxy/proxy.toml.
+# Validate with: docker run --rm -v /etc/songbird-proxy:/etc/songbird-proxy:ro IMAGE --check-config --config /etc/songbird-proxy/proxy.toml
+
+listen = "0.0.0.0:443"
+
+[tls]
+# Your proxy's own certificate for YOUR domain (any ACME client, e.g. certbot).
+cert = "/etc/songbird-proxy/fullchain.pem"
+# The private key, referenced (never pasted here). The file must not be world-readable.
+key = { file = "/etc/songbird-proxy/privkey.pem" }
+
+# Songbird endpoints this proxy may reach. Anything else is refused: this is not an open relay.
+# Do not change these unless the Songbird project publishes new endpoints.
+[[upstream]]
+sni = "chat.songbird.example"
+address = "chat.songbird.example:443"
+
+[[upstream]]
+sni = "api.songbird.example"
+address = "api.songbird.example:443"
+
+[limits]
+max_connections = 10000
+handshake_timeout_secs = 10
+connect_timeout_secs = 10
+idle_timeout_secs = 360

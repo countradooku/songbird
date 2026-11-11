@@ -1,0 +1,169 @@
+---
+- name: Data directories
+  ansible.builtin.file:
+    path: "/var/lib/songbird/{{ item.path }}"
+    state: directory
+    owner: "{{ item.uid }}"
+    group: "{{ item.uid }}"
+    mode: "0700"
+  loop:
+    - { path: surrealdb, uid: 65532 }
+    - { path: valkey-jobs, uid: 999 }
+    - { path: garage, uid: 65532 }
+    - { path: garage/meta, uid: 65532 }
+    - { path: garage/data, uid: 65532 }
+
+- name: SurrealDB (private address, TLS)
+  community.docker.docker_container:
+    name: songbird-surrealdb
+    image: "{{ images.surrealdb }}"
+    network_mode: host
+    restart_policy: unless-stopped
+    command:
+      - start
+      - --bind
+      - "{{ private_ip }}:8000"
+      - --web-crt
+      - /tls/tls.crt
+      - --web-key
+      - /tls/tls.key
+      - --log
+      - info
+      - --log-format
+      - json
+      - rocksdb:/data/songbird.db
+    env:
+      SURREAL_USER: "{{ secrets.surrealdb_user }}"
+      SURREAL_PASS: "{{ secrets.surrealdb_password }}"
+    volumes:
+      - /var/lib/songbird/surrealdb:/data
+      - "{{ songbird_pki_dir }}/surrealdb:/tls:ro"
+    security_opts: [no-new-privileges]
+    cap_drop: [ALL]
+  no_log: true
+
+- name: Valkey instances (TLS only, client certificates required)
+  community.docker.docker_container:
+    name: "songbird-{{ item.name }}"
+    image: "{{ images.valkey }}"
+    network_mode: host
+    restart_policy: unless-stopped
+    entrypoint: [sh, -c]
+    command:
+      - >-
+        exec valkey-server --port 0 --tls-port {{ item.port }} --bind {{ private_ip }}
+        --tls-cert-file /tls/tls.crt --tls-key-file /tls/tls.key --tls-ca-cert-file /tls/ca.crt
+        --tls-auth-clients yes --tls-protocols TLSv1.3
+        --maxmemory {{ item.maxmemory }} --maxmemory-policy noeviction {{ item.persistence }}
+        --requirepass "$VALKEY_PASSWORD" --dir /data
+    env:
+      VALKEY_PASSWORD: "{{ item.password }}"
+    volumes: "{{ (['/var/lib/songbird/' ~ item.name ~ ':/data'] if item.name == 'valkey-jobs' else []) + [songbird_pki_dir ~ '/' ~ item.name ~ ':/tls:ro'] }}"
+    user: "999:999"
+    security_opts: [no-new-privileges]
+    cap_drop: [ALL]
+  loop:
+    - name: valkey-hot
+      port: 6379
+      maxmemory: "{{ valkey_hot_maxmemory }}"
+      persistence: --save "" --appendonly no
+      password: "{{ secrets.valkey_hot_password }}"
+    - name: valkey-jobs
+      port: 6380
+      maxmemory: "{{ valkey_jobs_maxmemory }}"
+      persistence: --appendonly yes --appendfsync everysec
+      password: "{{ secrets.valkey_jobs_password }}"
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+
+- name: Garage configuration
+  ansible.builtin.template:
+    src: garage.toml.j2
+    dest: /etc/songbird/garage.toml
+    mode: "0644"
+
+- name: Garage (S3 and admin APIs on loopback; reached through the mTLS tunnel below)
+  community.docker.docker_container:
+    name: songbird-garage
+    image: "{{ images.garage }}"
+    network_mode: host
+    restart_policy: unless-stopped
+    user: "65532:65532"
+    env:
+      GARAGE_RPC_SECRET: "{{ secrets.garage_rpc_secret }}"
+      GARAGE_ADMIN_TOKEN: "{{ secrets.garage_admin_token }}"
+      GARAGE_METRICS_TOKEN: "{{ secrets.garage_metrics_token }}"
+    volumes:
+      - /etc/songbird/garage.toml:/etc/garage.toml:ro
+      - /var/lib/songbird/garage/meta:/var/lib/garage/meta
+      - /var/lib/songbird/garage/data:/var/lib/garage/data
+    security_opts: [no-new-privileges]
+    cap_drop: [ALL]
+  no_log: true
+
+- name: Wait until Garage answers on RPC
+  community.docker.docker_container_exec:
+    container: songbird-garage
+    argv: [/garage, status]
+  register: garage_status
+  until: garage_status.rc == 0
+  retries: 30
+  delay: 2
+  changed_when: false
+
+- name: Current Garage layout
+  community.docker.docker_container_exec:
+    container: songbird-garage
+    argv: [/garage, layout, show]
+  register: garage_layout
+  changed_when: false
+
+# A fresh single-node Garage has no layout and serves nothing until one is applied
+# (the compose equivalent is `cargo xtask compose up`). Idempotent: skipped once version >= 1.
+- name: Assign and apply the single-node layout
+  when: "'Current cluster layout version: 0' in garage_layout.stdout"
+  block:
+    - name: Garage node ID
+      community.docker.docker_container_exec:
+        container: songbird-garage
+        argv: [/garage, node, id, -q]
+      register: garage_node
+      changed_when: false
+
+    - name: Assign this node
+      community.docker.docker_container_exec:
+        container: songbird-garage
+        argv: [/garage, layout, assign, -z, "{{ songbird_env }}", -c, "{{ garage_capacity }}", "{{ garage_node.stdout | trim | split('@') | first }}"]
+      changed_when: true
+
+    - name: Apply layout version 1
+      community.docker.docker_container_exec:
+        container: songbird-garage
+        argv: [/garage, layout, apply, --version, "1"]
+      changed_when: true
+
+- name: Mutual-TLS tunnels in front of Garage (any client certificate from the internal CA)
+  community.docker.docker_container:
+    name: "songbird-garage-tls-{{ item.name }}"
+    image: "{{ images.ghostunnel }}"
+    network_mode: host
+    restart_policy: unless-stopped
+    user: "65532:65532"
+    command:
+      - server
+      - --listen={{ private_ip }}:{{ item.listen }}
+      - --target=127.0.0.1:{{ item.target }}
+      - --cert=/tls/tls.crt
+      - --key=/tls/tls.key
+      - --cacert=/tls/ca.crt
+      - --allow-all
+      - --timed-reload=1h
+    volumes: ["{{ songbird_pki_dir }}/garage:/tls:ro"]
+    security_opts: [no-new-privileges]
+    cap_drop: [ALL]
+  loop:
+    - { name: s3, listen: 3910, target: 3900 }
+    - { name: admin, listen: 3913, target: 3903 }
+  loop_control:
+    label: "{{ item.name }}"

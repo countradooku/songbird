@@ -1,0 +1,119 @@
+# Local development and CI integration environment.
+#
+#   cargo xtask compose up     # generates .env (random local secrets), starts, waits for health,
+#                              # applies the single-node Garage layout
+#   cargo xtask compose down   # stops and deletes volumes
+#
+# Every image is pinned by digest; versions and digests are recorded in docs/DECISIONS.md (D-0007).
+# Ports are published on 127.0.0.1 only, on non-default host ports (override with SB_PORT_*) so they
+# do not collide with services already running on a developer machine. Secrets come from .env.
+name: songbird
+
+x-defaults: &defaults
+  restart: unless-stopped
+  networks: [songbird]
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+  surrealdb:
+    <<: *defaults
+    image: surrealdb/surrealdb:v4.0.1@sha256:408eb8e5c9436670525e2bc2634b1e50ba74ce1b447eaf0094c35f73b67f9cb6
+    user: "0:0" # named volume is root-owned; production runs it as a dedicated user (deploy/ansible)
+    command: ["start", "--bind", "0.0.0.0:8000", "--log", "info", "--log-format", "json", "rocksdb:/data/songbird.db"]
+    environment:
+      SURREAL_USER: ${SURREAL_USER:?run cargo xtask dev-env}
+      SURREAL_PASS: ${SURREAL_PASS:?run cargo xtask dev-env}
+    volumes: [surrealdb:/data]
+    ports: ["127.0.0.1:${SB_PORT_SURREALDB:-47800}:8000"]
+    healthcheck:
+      test: ["CMD", "/surreal", "is-ready", "--endpoint", "http://127.0.0.1:8000"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  # Volatile state: per-device pub/sub, registry, rate limits. No persistence by design.
+  valkey-hot:
+    <<: *defaults
+    image: valkey/valkey:9.1.3-alpine3.24@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b
+    command:
+      - sh
+      - -c
+      - exec valkey-server --save "" --appendonly no --maxmemory 512mb --maxmemory-policy noeviction --requirepass "$$VALKEY_HOT_PASSWORD"
+    environment:
+      VALKEY_HOT_PASSWORD: ${VALKEY_HOT_PASSWORD:?run cargo xtask dev-env}
+      REDISCLI_AUTH: ${VALKEY_HOT_PASSWORD}
+    ports: ["127.0.0.1:${SB_PORT_VALKEY_HOT:-47379}:6379"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "--no-auth-warning", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Job queue (Valkey Streams). AOF everysec, never evicts.
+  valkey-jobs:
+    <<: *defaults
+    image: valkey/valkey:9.1.3-alpine3.24@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b
+    command:
+      - sh
+      - -c
+      - exec valkey-server --appendonly yes --appendfsync everysec --maxmemory 512mb --maxmemory-policy noeviction --requirepass "$$VALKEY_JOBS_PASSWORD"
+    environment:
+      VALKEY_JOBS_PASSWORD: ${VALKEY_JOBS_PASSWORD:?run cargo xtask dev-env}
+      REDISCLI_AUTH: ${VALKEY_JOBS_PASSWORD}
+    volumes: [valkey-jobs:/data]
+    ports: ["127.0.0.1:${SB_PORT_VALKEY_JOBS:-47380}:6379"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "--no-auth-warning", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # S3-compatible object storage for encrypted attachments and backup vaults.
+  garage:
+    <<: *defaults
+    image: dxflrs/garage:v2.5.0@sha256:677e5b758e4425a325b811c425c026bf35a4bf42f7ddbaa773de3f4fd779a5a5
+    environment:
+      GARAGE_RPC_SECRET: ${GARAGE_RPC_SECRET:?run cargo xtask dev-env}
+      GARAGE_ADMIN_TOKEN: ${GARAGE_ADMIN_TOKEN:?run cargo xtask dev-env}
+      GARAGE_METRICS_TOKEN: ${GARAGE_METRICS_TOKEN:?run cargo xtask dev-env}
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+    ports: ["127.0.0.1:${SB_PORT_GARAGE_S3:-47900}:3900", "127.0.0.1:${SB_PORT_GARAGE_ADMIN:-47903}:3903"]
+    healthcheck:
+      test: ["CMD", "/garage", "status"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 3s
+
+  # Calls SFU. Single node, no TURN in development.
+  livekit:
+    <<: *defaults
+    image: livekit/livekit-server:v1.13.11@sha256:25cd902de7cacbd5f1f779f6a6ac1eae20ba8f56b0935934ce6b0ab80d1e3d20
+    command: ["--config", "/etc/livekit.yaml"]
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:?run cargo xtask dev-env}: ${LIVEKIT_API_SECRET:?run cargo xtask dev-env}"
+    volumes: ["./livekit.yaml:/etc/livekit.yaml:ro"]
+    ports:
+      - "127.0.0.1:${SB_PORT_LIVEKIT:-47880}:7880"
+      - "127.0.0.1:${SB_PORT_LIVEKIT_TCP:-47881}:7881"
+      - "127.0.0.1:${SB_PORT_LIVEKIT_UDP:-47882}:7882/udp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7880/"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+networks:
+  songbird: {}
+
+volumes:
+  surrealdb: {}
+  valkey-jobs: {}
+  garage-meta: {}
+  garage-data: {}

@@ -54,7 +54,7 @@ services:
       IGGY_QUIC_ENABLED: "false"
       IGGY_WEBSOCKET_ENABLED: "false"
       IGGY_SHARDING_CPU_ALLOCATION: "2"
-      IGGY_MEMORY_POOL_SIZE: "256 MiB"
+      IGGY_MEMORY_POOL_SIZE: "512 MiB" # Iggy's minimum
       IGGY_ROOT_USERNAME: ${IGGY_ROOT_USERNAME:?run cargo xtask dev-env --force}
       IGGY_ROOT_PASSWORD: ${IGGY_ROOT_PASSWORD:?run cargo xtask dev-env --force}
     volumes: [iggy:/data]

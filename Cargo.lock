@@ -1329,6 +1329,7 @@ dependencies = [
  "songbird-proto",
  "songbird-router",
  "songbird-service",
+ "songbird-surreal",
  "songbird-types",
  "thiserror",
  "tokio",
@@ -1354,6 +1355,7 @@ dependencies = [
  "songbird-proto",
  "songbird-router",
  "songbird-service",
+ "songbird-surreal",
  "songbird-types",
  "tempfile",
  "tokio",
@@ -1390,9 +1392,11 @@ dependencies = [
  "bytes",
  "getrandom 0.4.3",
  "proptest",
+ "songbird-surreal",
  "songbird-types",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1453,6 +1457,24 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "songbird-surreal"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "hex",
+ "proptest",
+ "rustls",
+ "rustls-pki-types",
+ "sockudo-ws",
+ "songbird-types",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]

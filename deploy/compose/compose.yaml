@@ -21,7 +21,9 @@ services:
     <<: *defaults
     image: surrealdb/surrealdb:v4.0.1@sha256:408eb8e5c9436670525e2bc2634b1e50ba74ce1b447eaf0094c35f73b67f9cb6
     user: "0:0" # named volume is root-owned; production runs it as a dedicated user (deploy/ansible)
-    command: ["start", "--bind", "0.0.0.0:8000", "--log", "info", "--log-format", "json", "rocksdb:/data/songbird.db"]
+    # SurrealKV with an fsync on every commit: the mailbox acknowledges a send only after its
+    # commit, so this is invariant 1 (D-0027). v4.0.1 opens `rocksdb:` paths as SurrealKV anyway.
+    command: ["start", "--bind", "0.0.0.0:8000", "--log", "info", "--log-format", "json", "surrealkv:///data/songbird.db?sync=every"]
     environment:
       SURREAL_USER: ${SURREAL_USER:?run cargo xtask dev-env}
       SURREAL_PASS: ${SURREAL_PASS:?run cargo xtask dev-env}

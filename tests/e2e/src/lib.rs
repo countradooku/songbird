@@ -18,8 +18,9 @@ use bytes::Bytes;
 use songbird_client::{Client, ClientConfig, DeviceKey, Event, ResumeState};
 use songbird_delivery::config::DeliveryConfig;
 use songbird_delivery::{DeliveryMetrics, DeliverySettings, Directory, Shared, server};
-use songbird_mailbox::Mailbox;
 use songbird_mailbox::memory::MemoryMailbox;
+use songbird_mailbox::surreal::{SurrealConfig, SurrealMailbox};
+use songbird_mailbox::{AnyMailbox, Mailbox};
 use songbird_proto::frame::Recipient;
 use songbird_router::LocalRouter;
 use songbird_types::DeviceId;
@@ -53,12 +54,52 @@ pub struct TestServer<M: Mailbox> {
     task: JoinHandle<()>,
 }
 
-/// Starts a server with `n` known devices and the in-memory mailbox.
-pub async fn start(
-    n: usize,
-    tweak: impl FnOnce(&mut DeliverySettings),
-) -> TestServer<MemoryMailbox> {
-    start_with(MemoryMailbox::new(10_000, 1), n, tweak).await
+/// SurrealDB for the tests, if `SONGBIRD_TEST_SURREALDB` (`host:port`) and
+/// `SONGBIRD_TEST_SURREALDB_PASS` are set; each call gets a fresh database. With
+/// `SONGBIRD_REQUIRE_SURREALDB=1` (the compose CI job) a missing database fails the test instead of
+/// falling back to the in-memory store.
+#[must_use]
+pub fn surreal_config() -> Option<SurrealConfig> {
+    let Ok(addr) = std::env::var("SONGBIRD_TEST_SURREALDB") else {
+        assert!(
+            std::env::var("SONGBIRD_REQUIRE_SURREALDB").is_err(),
+            "SONGBIRD_REQUIRE_SURREALDB is set but SONGBIRD_TEST_SURREALDB is not"
+        );
+        return None;
+    };
+    let db = DeviceId::random().unwrap().to_hex_unredacted();
+    Some(SurrealConfig {
+        rpc: songbird_surreal::Config {
+            host: addr.split(':').next().unwrap_or("localhost").to_owned(),
+            addr,
+            tls: None,
+            user: std::env::var("SONGBIRD_TEST_SURREALDB_USER").unwrap_or_else(|_| "root".into()),
+            pass: std::env::var("SONGBIRD_TEST_SURREALDB_PASS")
+                .expect("SONGBIRD_TEST_SURREALDB_PASS"),
+            namespace: "songbird_e2e".into(),
+            database: format!("e2e_{}", &db[..16]),
+            timeout: Duration::from_secs(10),
+            max_message_bytes: 64 << 20,
+        },
+        max_batch: 256,
+        max_wait: Duration::ZERO,
+        ack_interval: Duration::from_millis(10),
+        max_per_device: 10_000,
+        idempotency_secret: [9; 32],
+    })
+}
+
+/// The mailbox the invariant tests run on: SurrealDB when configured, else in memory.
+pub async fn test_mailbox() -> AnyMailbox {
+    match surreal_config() {
+        Some(cfg) => AnyMailbox::Surreal(SurrealMailbox::connect(cfg).await.unwrap()),
+        None => AnyMailbox::Memory(MemoryMailbox::new(10_000, 1)),
+    }
+}
+
+/// Starts a server with `n` known devices on [`test_mailbox`].
+pub async fn start(n: usize, tweak: impl FnOnce(&mut DeliverySettings)) -> TestServer<AnyMailbox> {
+    start_with(test_mailbox().await, n, tweak).await
 }
 
 /// Starts a server with `n` known devices and the given mailbox.
@@ -67,22 +108,36 @@ pub async fn start_with<M: Mailbox>(
     n: usize,
     tweak: impl FnOnce(&mut DeliverySettings),
 ) -> TestServer<M> {
+    start_accounts(mailbox, &vec![1; n], tweak).await
+}
+
+/// Starts a server whose devices form accounts: `layout[a]` devices for account `a`, numbered
+/// consecutively (device indices `0..sum(layout)`).
+pub async fn start_accounts<M: Mailbox>(
+    mailbox: M,
+    layout: &[usize],
+    tweak: impl FnOnce(&mut DeliverySettings),
+) -> TestServer<M> {
     let mut cfg = settings();
     tweak(&mut cfg);
+    let n: usize = layout.iter().sum();
     let mut seeds = Vec::with_capacity(n);
     let mut keys = Vec::with_capacity(n);
-    for _ in 0..n {
-        let device = DeviceId::random().unwrap();
-        let (key, seed) = DeviceKey::generate(device).unwrap();
-        keys.push((device, key.public_key()));
-        seeds.push((device, seed));
+    for &count in layout {
+        let account = songbird_types::AccountId::random().unwrap();
+        for _ in 0..count {
+            let device = DeviceId::random().unwrap();
+            let (key, seed) = DeviceKey::generate(device).unwrap();
+            keys.push((device, key.public_key(), account));
+            seeds.push((device, seed));
+        }
     }
     let listener = tokio::net::TcpListener::bind(cfg.listen).await.unwrap();
     let addr = listener.local_addr().unwrap();
     let tls = cfg.tls.as_ref().map(|t| server::tls_acceptor(t).unwrap());
     let shared = Arc::new(Shared::new(
         cfg,
-        Directory::from_keys(keys),
+        Directory::from_accounts(keys),
         mailbox,
         LocalRouter::new(),
         DeliveryMetrics::default(),
@@ -99,6 +154,28 @@ pub async fn start_with<M: Mailbox>(
 }
 
 impl<M: Mailbox> TestServer<M> {
+    /// Unacknowledged envelopes of device `i` (a mailbox range count).
+    pub async fn pending(&self, i: usize) -> u64 {
+        self.shared
+            .mailbox
+            .count_pending(&self.device(i))
+            .await
+            .unwrap()
+    }
+
+    /// Waits up to 5 s until device `i` has `want` unacknowledged envelopes (ACK deletes are
+    /// batched).
+    pub async fn wait_pending(&self, i: usize, want: u64) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while self.pending(i).await != want {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pending of device {i} never reached {want}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     /// Device `i`.
     #[must_use]
     pub fn device(&self, i: usize) -> DeviceId {

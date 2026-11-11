@@ -16,6 +16,7 @@ songbird-mailbox.workspace = true
 songbird-proto.workspace = true
 songbird-router.workspace = true
 songbird-service.workspace = true
+songbird-surreal.workspace = true
 songbird-types.workspace = true
 bytes.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "io-util", "macros", "time", "sync"] }

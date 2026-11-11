@@ -8,15 +8,18 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
+songbird-surreal.workspace = true
 songbird-types.workspace = true
 aws-lc-rs.workspace = true
 getrandom.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 
 [dev-dependencies]
 proptest.workspace = true
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 
 [lints]
 workspace = true

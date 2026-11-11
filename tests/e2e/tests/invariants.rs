@@ -10,7 +10,7 @@
 )]
 
 use std::collections::HashSet;
-use std::future::{Future, poll_fn};
+use std::future::poll_fn;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,8 +24,8 @@ use sockudo_ws::{Http1, Message, WebSocketStream};
 use songbird_client::{ClientConfig, Event, ResumeState};
 use songbird_e2e::{SERVER_NAME, key, next_delivery, next_event, start, start_with, to};
 use songbird_mailbox::memory::MemoryMailbox;
-use songbird_mailbox::{Mailbox, MailboxError, NewEnvelope, StoreOutcome, Stored};
-use songbird_proto::frame::{RejectReason, SendStatus};
+use songbird_mailbox::{AnyMailbox, Mailbox, MailboxError, StoreOutcome, StoreRequest, Stored};
+use songbird_proto::frame::{MlsCommitRef, RejectReason, SendPayload, SendStatus};
 use songbird_proto::{ClientFrame, CloseCode, Limits, ServerFrame, control};
 use songbird_types::DeviceId;
 use tokio::net::TcpStream;
@@ -148,7 +148,7 @@ async fn inv1_store_before_acknowledge() {
     let r = alice.send(key(), vec![to(bob, "hello")]).await.unwrap();
     assert_eq!(r, SendStatus::Accepted);
     // Accepted implies stored: the mailbox holds it although Bob never connected.
-    assert_eq!(s.shared.mailbox.pending(&bob), 1);
+    assert_eq!(s.pending(1).await, 1);
     assert_eq!(s.shared.metrics.routes_offline.get(), 1);
     let (_b, mut bev) = s.connect(1).await;
     let (seq, env) = next_delivery(&mut bev).await;
@@ -242,10 +242,10 @@ async fn inv3_delete_on_ack_and_expiry() {
         assert_eq!(next_delivery(&mut bev).await.0, want);
     }
     b.ack(3).await.unwrap();
-    wait_until("ack to delete", || s.shared.mailbox.pending(&bob) == 2).await;
+    s.wait_pending(1, 2).await;
     b.ack(5).await.unwrap();
-    wait_until("ack to delete", || s.shared.mailbox.pending(&bob) == 0).await;
-    assert_eq!(s.shared.metrics.acked.get(), 5);
+    s.wait_pending(1, 0).await;
+    assert!(s.shared.metrics.acks.get() >= 2);
 
     // ACK beyond what this connection sent: closed with 4003.
     let mut raw = raw_authenticated(&s, 1).await;
@@ -265,7 +265,7 @@ async fn inv3_delete_on_ack_and_expiry() {
             .unwrap(),
         1
     );
-    assert_eq!(s.shared.mailbox.pending(&bob), 0);
+    assert_eq!(s.pending(1).await, 0);
     assert_eq!(
         songbird_mailbox::MAX_ENVELOPE_AGE,
         Duration::from_secs(30 * 24 * 3600)
@@ -346,7 +346,7 @@ async fn inv5_slow_client_never_slows_anyone_else() {
         "carol was slowed: {worst:?}"
     );
     // Device 1 reconnects and gets everything that was stored for it, in order.
-    let stored = u64::try_from(s.shared.mailbox.pending(&s.device(1))).unwrap();
+    let stored = s.pending(1).await;
     assert!(stored > 0);
     let (b, mut bev) = s.connect(1).await;
     for want in 1..=stored {
@@ -486,47 +486,36 @@ async fn inv7_bounded_and_validated_input() {
 
 /// A mailbox whose store can be switched off, for the degraded-mode test.
 struct Flaky {
-    inner: MemoryMailbox,
+    inner: AnyMailbox,
     down: AtomicBool,
 }
 
 impl Mailbox for Flaky {
-    fn store_batch(
-        &self,
-        k: Option<[u8; 16]>,
-        items: &[NewEnvelope],
-    ) -> impl Future<Output = Result<StoreOutcome, MailboxError>> + Send {
-        // The in-memory store works eagerly, so only call it while up.
-        let r = if self.down.load(Ordering::SeqCst) {
-            Err(MailboxError::Unavailable)
-        } else {
-            self.inner.store_now_for_tests(k, items)
-        };
-        std::future::ready(r)
+    async fn store(&self, req: StoreRequest) -> Result<StoreOutcome, MailboxError> {
+        if self.down.load(Ordering::SeqCst) {
+            return Err(MailboxError::Unavailable);
+        }
+        self.inner.store(req).await
     }
-    fn fetch_after(
+    async fn fetch_after(
         &self,
         d: &DeviceId,
         after: u64,
         limit: usize,
-    ) -> impl Future<Output = Result<Vec<Stored>, MailboxError>> + Send {
-        self.inner.fetch_after(d, after, limit)
+    ) -> Result<Vec<Stored>, MailboxError> {
+        self.inner.fetch_after(d, after, limit).await
     }
-    fn ack_up_to(
-        &self,
-        d: &DeviceId,
-        up: u64,
-    ) -> impl Future<Output = Result<u64, MailboxError>> + Send {
-        self.inner.ack_up_to(d, up)
+    async fn ack_up_to(&self, d: &DeviceId, up: u64) -> Result<(), MailboxError> {
+        self.inner.ack_up_to(d, up).await
     }
-    fn expire_older_than(
-        &self,
-        age: Duration,
-    ) -> impl Future<Output = Result<u64, MailboxError>> + Send {
-        self.inner.expire_older_than(age)
+    async fn expire_older_than(&self, age: Duration) -> Result<u64, MailboxError> {
+        self.inner.expire_older_than(age).await
     }
-    fn store_generation(&self) -> impl Future<Output = Result<u64, MailboxError>> + Send {
-        self.inner.store_generation()
+    async fn store_generation(&self) -> Result<u64, MailboxError> {
+        self.inner.store_generation().await
+    }
+    async fn count_pending(&self, d: &DeviceId) -> Result<u64, MailboxError> {
+        self.inner.count_pending(d).await
     }
 }
 
@@ -536,7 +525,7 @@ impl Mailbox for Flaky {
 #[tokio::test]
 async fn inv8_store_unavailable_rejects_retryably_and_keeps_sockets() {
     let flaky = Flaky {
-        inner: MemoryMailbox::new(100, 1),
+        inner: songbird_e2e::test_mailbox().await,
         down: AtomicBool::new(true),
     };
     let s = start_with(flaky, 2, |_| {}).await;
@@ -563,11 +552,7 @@ async fn inv8_store_unavailable_rejects_retryably_and_keeps_sockets() {
         SendStatus::Accepted
     );
     assert_eq!(next_delivery(&mut bev).await.0, 1);
-    assert_eq!(
-        s.shared.mailbox.inner.pending(&s.device(1)),
-        1,
-        "stored once"
-    );
+    assert_eq!(s.pending(1).await, 1, "stored once");
     assert_eq!(s.shared.metrics.sends_replayed.get(), 1);
     s.stop().await;
 }
@@ -621,13 +606,12 @@ async fn inv9_server_side_authorization() {
         .send(key(), vec![to(stranger.device(), "x")])
         .await
         .unwrap();
-    assert!(matches!(
-        r,
-        SendStatus::Rejected {
-            reason: RejectReason::UnknownRecipient,
-            ..
-        }
-    ));
+    // A device that does not exist is "extra" in the device-list check (status 2).
+    let SendStatus::DeviceMismatch(m) = r else {
+        panic!("expected a device mismatch, got {r:?}")
+    };
+    assert_eq!(m.extra, vec![stranger.device().as_bytes().to_vec()]);
+    assert_eq!(m.missing, Vec::<Vec<u8>>::new());
     let r = alice
         .send(key(), vec![to(s.device(1), "x"), to(s.device(1), "y")])
         .await
@@ -639,7 +623,7 @@ async fn inv9_server_side_authorization() {
             ..
         }
     ));
-    assert_eq!(s.shared.mailbox.total_pending(), 0);
+    assert_eq!(s.pending(1).await, 0, "nothing stored");
     assert!(s.shared.metrics.auth_failures.get() >= 4);
     s.stop().await;
 }
@@ -703,7 +687,7 @@ async fn ephemeral_events_are_relayed_and_never_stored() {
         Event::Ephemeral { payload } => assert_eq!(payload.as_ref(), b"typing"),
         other => panic!("unexpected {other:?}"),
     }
-    assert_eq!(s.shared.mailbox.total_pending(), 0);
+    assert_eq!(s.pending(1).await, 0, "never stored");
     s.stop().await;
 }
 
@@ -902,5 +886,84 @@ async fn unacked_window_bounds_in_flight() {
     for want in 17..=20 {
         assert_eq!(next_delivery(&mut bev).await.0, want);
     }
+    s.stop().await;
+}
+
+/// The send path (master prompt §5, `send`; D-0026): device lists per account, shared group
+/// bodies stored once, and MLS commits ordered by epoch.
+#[tokio::test]
+async fn send_path_device_lists_shared_bodies_and_mls_ordering() {
+    // Account A: devices 0, 1. Account B: devices 2, 3, 4.
+    let s = songbird_e2e::start_accounts(songbird_e2e::test_mailbox().await, &[2, 3], |_| {}).await;
+    let (a0, _a0e) = s.connect(0).await;
+    let (a1, mut a1e) = s.connect(1).await;
+    let (_b2, mut b2e) = s.connect(2).await;
+    let (_b3, mut b3e) = s.connect(3).await;
+    let (_b4, mut b4e) = s.connect(4).await;
+    let dev = |i| s.device(i);
+
+    // Leaving out one of B's devices is a mismatch naming it; nothing is stored.
+    let r = a0
+        .send(key(), vec![to(dev(2), "x"), to(dev(3), "x")])
+        .await
+        .unwrap();
+    let SendStatus::DeviceMismatch(m) = r else {
+        panic!("expected mismatch, got {r:?}")
+    };
+    assert_eq!(m.missing, vec![dev(4).as_bytes().to_vec()]);
+    assert_eq!(s.pending(2).await, 0);
+
+    // A shared body to all of B's devices and A's other device: one ciphertext, stored once.
+    let body = Bytes::from(vec![0x5Au8; 2000]);
+    let shared = SendPayload::Shared {
+        devices: vec![dev(2), dev(3), dev(4), dev(1)],
+        body: body.clone(),
+    };
+    assert_eq!(
+        a0.send_with(key(), None, shared).await.unwrap(),
+        SendStatus::Accepted
+    );
+    for ev in [&mut b2e, &mut b3e, &mut b4e, &mut a1e] {
+        let (seq, env) = next_delivery(ev).await;
+        assert_eq!((seq, env), (1, body.clone()));
+    }
+
+    // MLS: two members commit from epoch 0 at the same time; exactly one wins.
+    let commit = |e| {
+        Some(MlsCommitRef {
+            group: [0x77; 16],
+            epoch: e,
+        })
+    };
+    let payload = || SendPayload::Shared {
+        devices: vec![dev(2), dev(3), dev(4)],
+        body: Bytes::from_static(b"commit"),
+    };
+    let (r0, r1) = tokio::join!(
+        a0.send_with(key(), commit(0), payload()),
+        a1.send_with(
+            key(),
+            commit(0),
+            SendPayload::Shared {
+                devices: vec![dev(2), dev(3), dev(4), dev(0)],
+                body: Bytes::from_static(b"commit"),
+            }
+        ),
+    );
+    let stale = SendStatus::Rejected {
+        reason: RejectReason::StaleEpoch,
+        retry_after_ms: 0,
+    };
+    let (r0, r1) = (r0.unwrap(), r1.unwrap());
+    assert!(
+        (r0 == SendStatus::Accepted && r1 == stale) || (r1 == SendStatus::Accepted && r0 == stale),
+        "{r0:?} / {r1:?}"
+    );
+    assert!(!RejectReason::StaleEpoch.is_retryable());
+    // The loser retries from the new epoch.
+    assert_eq!(
+        a0.send_with(key(), commit(1), payload()).await.unwrap(),
+        SendStatus::Accepted
+    );
     s.stop().await;
 }

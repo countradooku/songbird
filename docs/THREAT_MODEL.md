@@ -16,6 +16,10 @@ server in plaintext. Adding to this list requires the owner's approval.
 | Envelope ciphertext | Store and relay (opaque, never decrypted) | Until acknowledged, at most 30 days | Prompt 2 (M1) |
 | Keyed hash (HMAC-SHA256, server secret) of a send's idempotency key, with the recipient devices and `seq`s; **not** the sender, never the key itself | Store a retried send once | 6 hours | Prompt 2 (M1), D-0021, D-0024 (owner delegated) |
 | Sender device at send time | Authorization and rate limits | Memory only, for the request; never stored with the envelope | Prompt 2 (M1) |
+| Device-to-account mapping (the device list of each account) | Device-list check on every send | Life of the device | Prompt 2 (M2); owned by Prompt 3 |
+| Per-device counters: last `seq` allocated, last `seq` acknowledged | Ordering, delete on ACK, mailbox capacity | Life of the device | Prompt 2 (M2) |
+| Shared group/channel bodies (ciphertext) with a count of devices still to fetch them | Store a group message once | Until the last device acknowledges, at most 30 days | Prompt 2 (M2) |
+| MLS group ID (16 opaque client-chosen bytes) and its current epoch | Order commits (one winner per epoch) | Life of the group | Prompt 2 (M2); group membership is Prompt 5 |
 
 Prompt 1 adds two operational views, neither of which is user data on the server:
 
@@ -97,6 +101,11 @@ One subsection per component. Each threat names its mitigation and the test or p
 | Losing, duplicating or reordering messages | T | Faults, races | Store before acknowledge; per-device `seq`; attach before drain; cursor rule; idempotency keys; client dedupe by `seq` | `ordering.rs` property test; `inv1`, `inv2`, `inv8`; load-generator checker (steady and reconnect storm) |
 | Identifiers or content in logs and metrics | I | Insider, log store | No per-device log fields; IDs and frames redact themselves in `Debug`; aggregate counters only | `inv6_no_identifiers_in_logs_or_metrics`; `frame.rs` `debug_output_hides_identifiers` |
 | Bugs in the WebSocket library | T, D | Supply chain, malicious client | Pinned version; Autobahn in CI; our own upgrade and limits; vet exemption recorded for audit | `cargo xtask autobahn`; D-0017, D-0023 |
+| Losing an acknowledged send (crash, power loss) | T | Faults | SurrealKV with an fsync on every commit; `SendResult` only after the commit | D-0027; compose and Ansible `?sync=every`; `inv1_store_before_acknowledge` on SurrealDB |
+| Reused or skipped `seq` with several writers | T | Faults, races | Counters advanced by compare-and-set in the store transaction; stale cache aborts and reloads | `concurrent_senders_get_gap_free_unique_seqs`; D-0027 |
+| Racing MLS commits forking a group | T | Malicious or racing members | Epoch compare-and-set in the store transaction; one winner | `mls_commits_are_ordered_by_epoch`; `send_path_device_lists_shared_bodies_and_mls_ordering` |
+| Malformed SurrealDB responses | T, D | Compromised database, network | Bounded CBOR decoder (depth, lengths before allocation), fuzzed; TLS with the internal CA outside development | `cbor.rs` tests; `surreal_cbor` fuzz target |
+| A compromised database reads metadata | I | Insider, attacker on the data host | Holds only ciphertext and the metadata listed in §1; idempotency keys only as keyed hashes; no sender stored with envelopes | §1; D-0024 |
 
 ## 4. Server-enforced settings
 
@@ -110,8 +119,10 @@ One subsection per component. Each threat names its mitigation and the test or p
 - cargo-vet: 57 of 167 crates are exempted rather than vetted; accepted by the owner (report P01, D-0016).
 - Root SSH through the bastion (owner decision open, D-0014).
 - The proxy is identifiable by traffic analysis; it is a reachability tool, not an anonymity tool.
-- Delivery milestone 1 keeps mailboxes in memory (not durable) and reads device keys from a static
-  file; neither is deployable (configuration validation refuses the static directory outside
-  development and CI). SurrealDB (M2) and the identity service (Prompt 3) replace them.
+- Delivery reads device keys and accounts from a static file (refused outside development and CI)
+  until the identity service (Prompt 3) replaces it, so it is not deployable yet. Mailboxes are in
+  SurrealDB since M2.
+- The delivery service connects to SurrealDB as the root user; a least-privilege database user is
+  Prompt 12's.
 - sockudo-ws (parses every client byte, contains `unsafe` SIMD code) and quanta are exempted in
   cargo-vet, not audited (D-0017).

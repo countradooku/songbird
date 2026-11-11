@@ -31,7 +31,8 @@
       - info
       - --log-format
       - json
-      - rocksdb:/data/songbird.db
+      # SurrealKV, fsync on every commit (invariant 1, D-0027).
+      - surrealkv:///data/songbird.db?sync=every
     env:
       SURREAL_USER: "{{ secrets.surrealdb_user }}"
       SURREAL_PASS: "{{ secrets.surrealdb_password }}"

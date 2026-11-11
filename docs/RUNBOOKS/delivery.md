@@ -35,8 +35,15 @@ aggregate counters only; nothing in them or in the logs identifies a device (inv
 - Impact: sends are rejected as retryable; clients keep their messages and retry with the same
   idempotency key; sockets stay open; delivery of already-stored envelopes resumes when the store
   returns (failed drains retry every second).
-- Immediate actions: restore the store (milestone 2: SurrealDB runbook). Nothing to do on the
-  delivery side.
+- Logs: `mailbox store request failed` (with the error kind: timeout, connection lost) and
+  `mailbox ack flush failed`. The mailbox reconnects by itself on the next request; ACK flushes
+  that failed are kept and retried every 50 ms.
+- Immediate actions: check SurrealDB (`/health`, its logs, disk space, the data host). Nothing to
+  do on the delivery side: sends wait up to the request timeout (`timeout_ms`, 5 s), are retried by
+  the writer, then rejected as retryable; clients retry with the same idempotency key.
+- Verification: `mailbox_errors_total` and `sends_rejected_total` flat again; the load generator's
+  SurrealDB-pause run (8 s pause, report P02-M2) shows the expected behaviour: sends stall for the
+  pause, nothing is lost.
 - Verification: `inv8_store_unavailable_rejects_retryably_and_keeps_sockets`; rejected sends stop
   and the load-generator checker passes afterwards.
 

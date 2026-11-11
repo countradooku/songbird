@@ -6,7 +6,7 @@
 //!
 //! | Type | Direction | Frame | Body |
 //! | --- | --- | --- | --- |
-//! | `0x01` | C→S | `Send` | `req_id u32`, `idempotency_key [16]`, `count u16`, `count ×` (`device_id [16]`, `len u32`, `envelope [len]`) |
+//! | `0x01` | C→S | `Send` | `req_id u32`, `idempotency_key [16]`, `flags u8`, [MLS: `group [16]`, `epoch u64`], `count u16`, then per device `count ×` (`device_id [16]`, `len u32`, `envelope [len]`) or shared `count × device_id [16]`, `len u32`, `body [len]` |
 //! | `0x02` | C→S | `Ack` | `up_to_seq u64` |
 //! | `0x03` | C→S | `Ephemeral` | `to [16]`, `payload` |
 //! | `0x10` | C→S | `Auth` | protobuf [`control::Auth`] |
@@ -57,8 +57,12 @@ pub mod ty {
 
 /// Bytes in a `Deliver` frame before the envelope.
 pub const DELIVER_HEADER_LEN: usize = 1 + 8;
-/// Bytes in a `Send` frame before the first recipient.
-pub const SEND_HEADER_LEN: usize = 1 + 4 + IDEMPOTENCY_KEY_LEN + 2;
+/// Bytes in a `Send` frame before the first recipient (no MLS block).
+pub const SEND_HEADER_LEN: usize = 1 + 4 + IDEMPOTENCY_KEY_LEN + 1 + 2;
+/// `Send` flag: an MLS commit block (`group [16]`, `epoch u64`) follows the flags.
+pub const SEND_FLAG_MLS: u8 = 0x01;
+/// `Send` flag: one shared body for every recipient device.
+pub const SEND_FLAG_SHARED: u8 = 0x02;
 /// Bytes per recipient in a `Send` frame, before its envelope.
 pub const RECIPIENT_HEADER_LEN: usize = ID_LEN + 4;
 
@@ -158,6 +162,76 @@ impl std::fmt::Debug for Recipient {
     }
 }
 
+/// What a `Send` carries.
+#[derive(Clone, PartialEq, Eq)]
+pub enum SendPayload {
+    /// One ciphertext per recipient device (pairwise sessions).
+    PerDevice(Vec<Recipient>),
+    /// One ciphertext for every listed device (an MLS group or channel message), stored once.
+    Shared {
+        /// Recipient devices.
+        devices: Vec<DeviceId>,
+        /// The ciphertext.
+        body: Bytes,
+    },
+}
+
+impl SendPayload {
+    /// Number of recipient devices.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::PerDevice(r) => r.len(),
+            Self::Shared { devices, .. } => devices.len(),
+        }
+    }
+
+    /// Whether there are no recipients.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The recipient devices, in order.
+    pub fn devices(&self) -> impl Iterator<Item = &DeviceId> {
+        let (a, b) = match self {
+            Self::PerDevice(items) => (Some(items.iter().map(|i| &i.device)), None),
+            Self::Shared { devices, .. } => (None, Some(devices.iter())),
+        };
+        a.into_iter().flatten().chain(b.into_iter().flatten())
+    }
+}
+
+impl std::fmt::Debug for SendPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PerDevice(r) => f.debug_tuple("PerDevice").field(&r.len()).finish(),
+            Self::Shared { devices, body } => f
+                .debug_struct("Shared")
+                .field("devices", &devices.len())
+                .field("len", &body.len())
+                .finish(),
+        }
+    }
+}
+
+/// The MLS commit a `Send` carries: stored only if the group is at `epoch` (D-0026).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct MlsCommitRef {
+    /// Group identifier (opaque, chosen by clients).
+    pub group: [u8; 16],
+    /// Epoch the commit was made from.
+    pub epoch: u64,
+}
+
+impl std::fmt::Debug for MlsCommitRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MlsCommitRef")
+            .field("epoch", &self.epoch)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A `Send` frame.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SendFrame {
@@ -165,15 +239,35 @@ pub struct SendFrame {
     pub req_id: u32,
     /// Random per logical message; a retry reuses it so the server stores it once.
     pub idempotency_key: [u8; IDEMPOTENCY_KEY_LEN],
-    /// One entry per recipient device, at most [`Limits::max_recipients`].
-    pub recipients: Vec<Recipient>,
+    /// Set when this send is an MLS commit.
+    pub mls: Option<MlsCommitRef>,
+    /// Recipients and ciphertext, at most [`Limits::max_recipients`] devices.
+    pub payload: SendPayload,
+}
+
+impl SendFrame {
+    /// A plain per-device send.
+    #[must_use]
+    pub const fn per_device(
+        req_id: u32,
+        idempotency_key: [u8; IDEMPOTENCY_KEY_LEN],
+        recipients: Vec<Recipient>,
+    ) -> Self {
+        Self {
+            req_id,
+            idempotency_key,
+            mls: None,
+            payload: SendPayload::PerDevice(recipients),
+        }
+    }
 }
 
 impl std::fmt::Debug for SendFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SendFrame")
             .field("req_id", &self.req_id)
-            .field("recipients", &self.recipients.len())
+            .field("mls", &self.mls)
+            .field("payload", &self.payload)
             .finish_non_exhaustive()
     }
 }
@@ -216,6 +310,8 @@ pub enum RejectReason {
     Unavailable,
     /// The idempotency key was already used for other recipients; use a fresh key.
     IdempotencyConflict,
+    /// An MLS commit from an epoch the group has left: process the winning commit, retry.
+    StaleEpoch,
     /// A code this version does not know (forward compatibility).
     Other(u16),
 }
@@ -232,6 +328,7 @@ impl RejectReason {
             Self::DuplicateRecipient => 5,
             Self::Unavailable => 6,
             Self::IdempotencyConflict => 7,
+            Self::StaleEpoch => 8,
             Self::Other(c) => c,
         }
     }
@@ -247,6 +344,7 @@ impl RejectReason {
             5 => Self::DuplicateRecipient,
             6 => Self::Unavailable,
             7 => Self::IdempotencyConflict,
+            8 => Self::StaleEpoch,
             c => Self::Other(c),
         }
     }
@@ -475,56 +573,119 @@ fn decode_send(msg: &Bytes, limits: &Limits) -> Result<SendFrame, FrameError> {
     let mut c = Cursor::new(msg, 1);
     let req_id = c.u32()?;
     let idempotency_key = c.array::<IDEMPOTENCY_KEY_LEN>()?;
+    let [flags] = c.array::<1>()?;
+    if flags & !(SEND_FLAG_MLS | SEND_FLAG_SHARED) != 0 {
+        return Err(FrameError::Control("send.flags"));
+    }
+    let mls = if flags & SEND_FLAG_MLS == 0 {
+        None
+    } else {
+        Some(MlsCommitRef {
+            group: c.array()?,
+            epoch: c.u64()?,
+        })
+    };
     let count = usize::from(c.u16()?);
     if count == 0 {
         return Err(FrameError::NoRecipients);
     }
     check_len("recipients", count, limits.max_recipients)?;
-    // Every recipient needs at least its header and one envelope byte: refuse a count the
-    // message cannot hold before reserving space for it.
-    let min = count
-        .checked_mul(RECIPIENT_HEADER_LEN + 1)
-        .ok_or(FrameError::Truncated)?;
-    if c.remaining() < min {
-        return Err(FrameError::Truncated);
-    }
-    let mut recipients = Vec::with_capacity(count);
-    for _ in 0..count {
-        let device = c.device()?;
+    let payload = if flags & SEND_FLAG_SHARED == 0 {
+        // Every recipient needs at least its header and one envelope byte: refuse a count the
+        // message cannot hold before reserving space for it.
+        let min = count
+            .checked_mul(RECIPIENT_HEADER_LEN + 1)
+            .ok_or(FrameError::Truncated)?;
+        if c.remaining() < min {
+            return Err(FrameError::Truncated);
+        }
+        let mut recipients = Vec::with_capacity(count);
+        for _ in 0..count {
+            let device = c.device()?;
+            let len = usize::try_from(c.u32()?).map_err(|_| FrameError::Truncated)?;
+            if len == 0 {
+                return Err(FrameError::EmptyPayload);
+            }
+            check_len("envelope", len, limits.max_envelope_bytes)?;
+            let r = c.range(len)?;
+            recipients.push(Recipient {
+                device,
+                envelope: msg.slice(r),
+            });
+        }
+        SendPayload::PerDevice(recipients)
+    } else {
+        let min = count
+            .checked_mul(ID_LEN)
+            .and_then(|n| n.checked_add(4 + 1))
+            .ok_or(FrameError::Truncated)?;
+        if c.remaining() < min {
+            return Err(FrameError::Truncated);
+        }
+        let mut devices = Vec::with_capacity(count);
+        for _ in 0..count {
+            devices.push(c.device()?);
+        }
         let len = usize::try_from(c.u32()?).map_err(|_| FrameError::Truncated)?;
         if len == 0 {
             return Err(FrameError::EmptyPayload);
         }
         check_len("envelope", len, limits.max_envelope_bytes)?;
         let r = c.range(len)?;
-        recipients.push(Recipient {
-            device,
-            envelope: msg.slice(r),
-        });
-    }
+        SendPayload::Shared {
+            devices,
+            body: msg.slice(r),
+        }
+    };
     c.finish()?;
     Ok(SendFrame {
         req_id,
         idempotency_key,
-        recipients,
+        mls,
+        payload,
     })
 }
 
 fn encode_send(s: &SendFrame, out: &mut BytesMut) {
-    let body: usize = s
-        .recipients
-        .iter()
-        .map(|r| RECIPIENT_HEADER_LEN.saturating_add(r.envelope.len()))
-        .fold(0, usize::saturating_add);
-    out.reserve(SEND_HEADER_LEN.saturating_add(body));
+    let body: usize = match &s.payload {
+        SendPayload::PerDevice(rs) => rs
+            .iter()
+            .map(|r| RECIPIENT_HEADER_LEN.saturating_add(r.envelope.len()))
+            .fold(0, usize::saturating_add),
+        SendPayload::Shared { devices, body } => (devices.len() * ID_LEN) + 4 + body.len(),
+    };
+    out.reserve(SEND_HEADER_LEN.saturating_add(24).saturating_add(body));
     out.put_u8(ty::SEND);
     out.put_u32(s.req_id);
     out.put_slice(&s.idempotency_key);
-    out.put_u16(u16::try_from(s.recipients.len()).unwrap_or(u16::MAX));
-    for r in &s.recipients {
-        out.put_slice(r.device.as_bytes());
-        put_len(out, r.envelope.len());
-        out.put_slice(&r.envelope);
+    let mut flags = 0;
+    if s.mls.is_some() {
+        flags |= SEND_FLAG_MLS;
+    }
+    if matches!(s.payload, SendPayload::Shared { .. }) {
+        flags |= SEND_FLAG_SHARED;
+    }
+    out.put_u8(flags);
+    if let Some(m) = &s.mls {
+        out.put_slice(&m.group);
+        out.put_u64(m.epoch);
+    }
+    out.put_u16(u16::try_from(s.payload.len()).unwrap_or(u16::MAX));
+    match &s.payload {
+        SendPayload::PerDevice(rs) => {
+            for r in rs {
+                out.put_slice(r.device.as_bytes());
+                put_len(out, r.envelope.len());
+                out.put_slice(&r.envelope);
+            }
+        }
+        SendPayload::Shared { devices, body } => {
+            for d in devices {
+                out.put_slice(d.as_bytes());
+            }
+            put_len(out, body.len());
+            out.put_slice(body);
+        }
     }
 }
 
@@ -681,15 +842,29 @@ mod tests {
                 proptest::collection::vec((arb_device(), arb_payload(64)), 1..8)
             )
                 .prop_map(|(req_id, idempotency_key, rs)| ClientFrame::Send(
-                    SendFrame {
+                    SendFrame::per_device(
                         req_id,
                         idempotency_key,
-                        recipients: rs
-                            .into_iter()
+                        rs.into_iter()
                             .map(|(device, envelope)| Recipient { device, envelope })
                             .collect(),
-                    }
+                    )
                 )),
+            (
+                any::<u32>(),
+                any::<[u8; 16]>(),
+                proptest::option::of((any::<[u8; 16]>(), any::<u64>())),
+                proptest::collection::vec(arb_device(), 1..8),
+                arb_payload(64)
+            )
+                .prop_map(|(req_id, idempotency_key, mls, devices, body)| {
+                    ClientFrame::Send(SendFrame {
+                        req_id,
+                        idempotency_key,
+                        mls: mls.map(|(group, epoch)| MlsCommitRef { group, epoch }),
+                        payload: SendPayload::Shared { devices, body },
+                    })
+                }),
             (
                 any::<[u8; 16]>(),
                 any::<[u8; 64]>(),
@@ -790,14 +965,28 @@ mod tests {
     #[test]
     fn send_count_is_checked_before_allocation() {
         // Claims 1024 recipients but carries none: rejected without reserving 1024 slots.
+        for flags in [0, SEND_FLAG_SHARED] {
+            let mut b = BytesMut::new();
+            b.put_u8(ty::SEND);
+            b.put_u32(7);
+            b.put_slice(&[0; 16]);
+            b.put_u8(flags);
+            b.put_u16(1024);
+            assert_eq!(
+                ClientFrame::decode(&b.freeze(), &Limits::DEFAULT),
+                Err(FrameError::Truncated)
+            );
+        }
+        // Unknown flags are refused.
         let mut b = BytesMut::new();
         b.put_u8(ty::SEND);
         b.put_u32(7);
         b.put_slice(&[0; 16]);
-        b.put_u16(1024);
+        b.put_u8(0x80);
+        b.put_u16(1);
         assert_eq!(
             ClientFrame::decode(&b.freeze(), &Limits::DEFAULT),
-            Err(FrameError::Truncated)
+            Err(FrameError::Control("send.flags"))
         );
     }
 
@@ -812,12 +1001,7 @@ mod tests {
         };
         let big = |n: usize| Bytes::from(vec![1u8; n]);
         let send = |rs: Vec<Recipient>| {
-            ClientFrame::Send(SendFrame {
-                req_id: 1,
-                idempotency_key: [0; 16],
-                recipients: rs,
-            })
-            .to_bytes()
+            ClientFrame::Send(SendFrame::per_device(1, [0; 16], rs)).to_bytes()
         };
         let r = |n| Recipient {
             device: dev(1),
@@ -907,14 +1091,14 @@ mod tests {
 
     #[test]
     fn debug_output_hides_identifiers() {
-        let f = ClientFrame::Send(SendFrame {
-            req_id: 9,
-            idempotency_key: [0xAB; 16],
-            recipients: vec![Recipient {
+        let f = ClientFrame::Send(SendFrame::per_device(
+            9,
+            [0xAB; 16],
+            vec![Recipient {
                 device: dev(0xCD),
                 envelope: Bytes::from_static(b"secret"),
             }],
-        });
+        ));
         let auth = ClientFrame::Auth(control::Auth {
             device_id: vec![0xEF; 16],
             signature: vec![0x12; 64],

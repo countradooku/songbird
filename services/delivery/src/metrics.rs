@@ -45,8 +45,8 @@ pub struct DeliveryMetrics {
     pub routes_lagged: Counter,
     /// Envelopes stored for devices with no session (push jobs from milestone 5).
     pub routes_offline: Counter,
-    /// Envelopes acknowledged and deleted.
-    pub acked: Counter,
+    /// ACKs processed (cumulative; deletes are batched by the mailbox).
+    pub acks: Counter,
     /// Ephemeral events delivered to a session's lane.
     pub ephemeral_routed: Counter,
     /// Ephemeral events dropped (offline, lane full, or rate limited).
@@ -158,9 +158,9 @@ impl DeliveryMetrics {
                 &self.routes_offline,
             ),
             (
-                "delivery_acked",
-                "Envelopes acknowledged and deleted",
-                &self.acked,
+                "delivery_acks",
+                "ACKs processed (deletes are batched by the mailbox)",
+                &self.acks,
             ),
             (
                 "delivery_ephemeral_routed",

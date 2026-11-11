@@ -32,7 +32,7 @@ use bytes::{Bytes, BytesMut};
 use sockudo_ws::client::WebSocketClient;
 use sockudo_ws::{Http1, Message, WebSocketStream};
 use songbird_proto::close::{self, Reconnect};
-use songbird_proto::frame::{Recipient, SendFrame, SendStatus};
+use songbird_proto::frame::{MlsCommitRef, Recipient, SendFrame, SendPayload, SendStatus};
 use songbird_proto::{ClientFrame, CloseCode, Limits, PROTOCOL_VERSION, ServerFrame, control};
 use songbird_types::DeviceId;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -167,7 +167,8 @@ pub enum ClientError {
 enum Command {
     Send {
         idempotency_key: [u8; 16],
-        recipients: Vec<Recipient>,
+        mls: Option<MlsCommitRef>,
+        payload: SendPayload,
         reply: oneshot::Sender<Result<SendStatus, ClientError>>,
     },
     Ephemeral {
@@ -253,11 +254,26 @@ impl Client {
         idempotency_key: [u8; 16],
         recipients: Vec<Recipient>,
     ) -> Result<SendStatus, ClientError> {
+        self.send_with(idempotency_key, None, SendPayload::PerDevice(recipients))
+            .await
+    }
+
+    /// Sends any payload (a shared body for a group, an MLS commit) and waits for the result.
+    ///
+    /// # Errors
+    /// As [`Client::send`].
+    pub async fn send_with(
+        &self,
+        idempotency_key: [u8; 16],
+        mls: Option<MlsCommitRef>,
+        payload: SendPayload,
+    ) -> Result<SendStatus, ClientError> {
         let (reply, rx) = oneshot::channel();
         self.cmds
             .send(Command::Send {
                 idempotency_key,
-                recipients,
+                mls,
+                payload,
                 reply,
             })
             .await
@@ -633,11 +649,11 @@ impl Task {
                         Some(Command::Ephemeral { to, payload }) => {
                             self.write(&mut ws, &ClientFrame::Ephemeral { to, payload }).await
                         }
-                        Some(Command::Send { idempotency_key, recipients, reply }) => {
+                        Some(Command::Send { idempotency_key, mls, payload, reply }) => {
                             let req_id = self.next_req;
                             self.next_req = self.next_req.wrapping_add(1);
                             self.pending.insert(req_id, reply);
-                            let f = ClientFrame::Send(SendFrame { req_id, idempotency_key, recipients });
+                            let f = ClientFrame::Send(SendFrame { req_id, idempotency_key, mls, payload });
                             self.write(&mut ws, &f).await
                         }
                     };

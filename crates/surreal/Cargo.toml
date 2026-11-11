@@ -1,0 +1,27 @@
+[package]
+name = "songbird-surreal"
+description = "Minimal SurrealDB 4 RPC client: bounded CBOR codec and pipelined requests over one WebSocket (sockudo-ws). Replaces the official SDK's 264-crate dependency tree (D-0025)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+songbird-types.workspace = true
+bytes.workspace = true
+futures-core.workspace = true
+futures-sink.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+sockudo-ws.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros", "io-util"] }
+tokio-rustls.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+hex.workspace = true
+
+[lints]
+workspace = true

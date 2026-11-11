@@ -22,9 +22,9 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use sockudo_ws::{Message, WebSocketStream};
-use songbird_mailbox::{Mailbox, MailboxError, NewEnvelope};
+use songbird_mailbox::{Mailbox, MailboxError, MlsCommit, NewEnvelope, Payload, StoreRequest};
 use songbird_proto::auth::CHANNEL_BINDING_LEN;
-use songbird_proto::frame::{self, RejectReason, SendFrame, SendStatus};
+use songbird_proto::frame::{self, RejectReason, SendFrame, SendPayload, SendStatus};
 use songbird_proto::{ClientFrame, CloseCode, NONCE_LEN, PROTOCOL_VERSION, ServerFrame, control};
 use songbird_router::{InboxSizes, Live, Routed, Router};
 use songbird_types::DeviceId;
@@ -216,8 +216,8 @@ where
     // after a lost ACK frame still deletes (invariant 3).
     if auth.last_acked_seq > 0 {
         match shared.mailbox.ack_up_to(&device, auth.last_acked_seq).await {
-            Ok(n) => {
-                shared.metrics.acked.inc_by(n);
+            Ok(()) => {
+                shared.metrics.acks.inc();
             }
             Err(_) => {
                 shared.metrics.mailbox_errors.inc();
@@ -511,8 +511,8 @@ impl<M: Mailbox, R: Router> Session<M, R> {
                 }
                 // Milestone 2 batches ACK deletes per core every 50–100 ms.
                 match self.shared.mailbox.ack_up_to(&self.device, up_to_seq).await {
-                    Ok(n) => {
-                        self.shared.metrics.acked.inc_by(n);
+                    Ok(()) => {
+                        self.shared.metrics.acks.inc();
                     }
                     Err(_) => {
                         // Not fatal: the next ACK or reconnect (Auth.last_acked_seq) repeats it.
@@ -578,37 +578,38 @@ impl<M: Mailbox, R: Router> Session<M, R> {
                 .reply(ws, s.req_id, reject(RejectReason::RateLimited, ms))
                 .await;
         }
-        let dir = &self.shared.directory;
-        if s.recipients.iter().any(|r| !dir.contains(&r.device)) {
-            return self
-                .reply(ws, s.req_id, reject(RejectReason::UnknownRecipient, 0))
-                .await;
-        }
+        let devices: Vec<&DeviceId> = s.payload.devices().collect();
         // Bounded by max_recipients (checked by the decoder).
-        if has_duplicate_device(&s.recipients) {
+        if has_duplicate_device(&devices) {
             return self
                 .reply(ws, s.req_id, reject(RejectReason::DuplicateRecipient, 0))
                 .await;
         }
-        let items: Vec<NewEnvelope> = s
-            .recipients
-            .iter()
-            .map(|r| NewEnvelope {
-                device: r.device,
-                envelope: r.envelope.clone(),
-            })
-            .collect();
+        // Device lists (master prompt §5, `send`): every device of each addressed account, no
+        // device that does not exist. The client re-encrypts for the corrected list.
+        if let Err(mm) = self.shared.directory.check_devices(&self.device, &devices) {
+            let ids = |v: Vec<DeviceId>| v.iter().map(|d| d.as_bytes().to_vec()).collect();
+            let status = SendStatus::DeviceMismatch(control::DeviceMismatch {
+                missing: ids(mm.missing),
+                extra: ids(mm.extra),
+                stale: Vec::new(),
+            });
+            return self.reply(ws, s.req_id, status).await;
+        }
+        drop(devices);
+        let req = store_request(&s);
+        let recipients = req.payload.len();
         // Invariant 1: store first; only then acknowledge and route.
-        let outcome = match self
-            .shared
-            .mailbox
-            .store_batch(Some(s.idempotency_key), &items)
-            .await
-        {
+        let outcome = match self.shared.mailbox.store(req).await {
             Ok(o) => o,
             Err(MailboxError::IdempotencyConflict) => {
                 return self
                     .reply(ws, s.req_id, reject(RejectReason::IdempotencyConflict, 0))
+                    .await;
+            }
+            Err(MailboxError::StaleEpoch) => {
+                return self
+                    .reply(ws, s.req_id, reject(RejectReason::StaleEpoch, 0))
                     .await;
             }
             Err(MailboxError::Full | MailboxError::Unavailable) => {
@@ -624,7 +625,7 @@ impl<M: Mailbox, R: Router> Session<M, R> {
         } else {
             m.sends_accepted.inc();
             m.envelopes_stored
-                .inc_by(u64::try_from(items.len()).unwrap_or(u64::MAX));
+                .inc_by(u64::try_from(recipients).unwrap_or(u64::MAX));
         }
         frame::encode_send_accepted(&mut self.buf, s.req_id);
         let ack = self.buf.split().freeze();
@@ -637,12 +638,16 @@ impl<M: Mailbox, R: Router> Session<M, R> {
         // Route even a replayed send: if the original route was lost (crash between store and
         // route), this retry delivers it now instead of at the next safety sweep; a duplicate
         // is dropped by the recipient session's cursor.
-        for (r, seq) in s.recipients.into_iter().zip(outcome.seqs) {
-            let live = Live {
-                seq,
-                envelope: r.envelope,
-            };
-            match self.shared.router.route(&r.device, live).await {
+        let routes: Vec<(DeviceId, Bytes)> = match s.payload {
+            SendPayload::PerDevice(rs) => rs.into_iter().map(|r| (r.device, r.envelope)).collect(),
+            // One buffer for every recipient: `Bytes` clones share it (no copy per device).
+            SendPayload::Shared { devices, body } => {
+                devices.into_iter().map(|d| (d, body.clone())).collect()
+            }
+        };
+        for ((device, envelope), seq) in routes.into_iter().zip(outcome.seqs) {
+            let live = Live { seq, envelope };
+            match self.shared.router.route(&device, live).await {
                 Routed::Queued => {}
                 Routed::Lagged => {
                     m.routes_lagged.inc();
@@ -657,21 +662,47 @@ impl<M: Mailbox, R: Router> Session<M, R> {
     }
 }
 
+/// The mailbox request for a decoded `Send` (payload bytes are shared, not copied).
+fn store_request(s: &SendFrame) -> StoreRequest {
+    let payload = match &s.payload {
+        SendPayload::PerDevice(rs) => Payload::PerDevice(
+            rs.iter()
+                .map(|r| NewEnvelope {
+                    device: r.device,
+                    envelope: r.envelope.clone(),
+                })
+                .collect(),
+        ),
+        SendPayload::Shared { devices, body } => Payload::Shared {
+            devices: devices.clone(),
+            body: body.clone(),
+        },
+    };
+    StoreRequest {
+        idempotency_key: Some(s.idempotency_key),
+        mls: s.mls.map(|c| MlsCommit {
+            group: c.group,
+            epoch: c.epoch,
+        }),
+        payload,
+    }
+}
+
 /// Whether a device appears twice. Pairwise for the common small sends (no allocation; a
 /// per-send `HashSet` was 8 % of user CPU in the M1 flamegraph), sorting above that.
-fn has_duplicate_device(recipients: &[frame::Recipient]) -> bool {
+fn has_duplicate_device(devices: &[&DeviceId]) -> bool {
     const PAIRWISE_MAX: usize = 32;
-    if recipients.len() <= PAIRWISE_MAX {
-        return recipients.iter().enumerate().any(|(i, r)| {
-            recipients
+    if devices.len() <= PAIRWISE_MAX {
+        return devices.iter().enumerate().any(|(i, d)| {
+            devices
                 .get(i + 1..)
                 .unwrap_or_default()
                 .iter()
-                .any(|o| o.device == r.device)
+                .any(|o| o == d)
         });
     }
     // Bounded by max_recipients (checked by the decoder).
-    let mut ids: Vec<&[u8; 16]> = recipients.iter().map(|r| r.device.as_bytes()).collect();
+    let mut ids: Vec<&[u8; 16]> = devices.iter().map(|d| d.as_bytes()).collect();
     ids.sort_unstable();
     ids.windows(2).any(|w| w.first() == w.get(1))
 }
@@ -679,25 +710,21 @@ fn has_duplicate_device(recipients: &[frame::Recipient]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use songbird_proto::frame::Recipient;
 
-    fn rs(ids: &[u8]) -> Vec<Recipient> {
-        ids.iter()
-            .map(|b| Recipient {
-                device: DeviceId::from_bytes([*b; 16]),
-                envelope: Bytes::from_static(b"e"),
-            })
-            .collect()
+    fn check(ids: &[u8]) -> bool {
+        let devices: Vec<DeviceId> = ids.iter().map(|b| DeviceId::from_bytes([*b; 16])).collect();
+        let refs: Vec<&DeviceId> = devices.iter().collect();
+        has_duplicate_device(&refs)
     }
 
     #[test]
     fn duplicate_detection_small_and_large() {
-        assert!(!has_duplicate_device(&rs(&[1, 2, 3])));
-        assert!(has_duplicate_device(&rs(&[1, 2, 1])));
+        assert!(!check(&[1, 2, 3]));
+        assert!(check(&[1, 2, 1]));
         let many: Vec<u8> = (0..100).collect();
-        assert!(!has_duplicate_device(&rs(&many)));
+        assert!(!check(&many));
         let mut dup = many.clone();
         dup.push(57);
-        assert!(has_duplicate_device(&rs(&dup)));
+        assert!(check(&dup));
     }
 }

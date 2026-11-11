@@ -32,6 +32,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (D-0014). Alternatives: WireGuard-only access, a non-root deploy user with sudo.
 - GitHub environments `staging` and `production` with required reviewers, and their secrets
   (`SOPS_AGE_KEY`, `DEPLOY_SSH_KEY`), must be created by the owner before `deploy.yml` can run.
+
 ## Decisions
 
 ## D-0024 — Milestone 1 decisions compared with Signal and WhatsApp; changes adopted

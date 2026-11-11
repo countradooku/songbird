@@ -10,6 +10,7 @@ Every degraded mode is explicit, tested and has a runbook (constitution, invaria
 | Internal certificate expiry or compromise | [mtls-rotation.md](mtls-rotation.md) | leaf issue/renew: tests only |
 | Secret exposure, rotation, people changes | [secrets-rotation.md](secrets-rotation.md) | not yet |
 | Provider loss, rebuild at the second provider | [provider-switch.md](provider-switch.md) | not yet (Prompt 1 gate drill) |
+| Delivery: overload, slow consumers, store unavailable, auth failures, deploy drain | [delivery.md](delivery.md) | load-generator runs and e2e tests (P02-M1) |
 
 ## Runbook template
 

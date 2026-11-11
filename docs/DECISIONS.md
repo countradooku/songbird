@@ -35,6 +35,243 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0024 — Milestone 1 decisions compared with Signal and WhatsApp; changes adopted
+
+- Date: 2026-11-11
+- Status: accepted
+- Decided by: agent (the owner delegated D-0018, D-0020 and D-0021: "see how others would do
+  that, like WhatsApp and Signal; if you have better ideas, do them")
+- Context: the M1 gate report asked the owner to rule on three proposals.
+- Evidence (primary sources, read 2026-11-11):
+  - Signal-Server `main`, `websocket/WebSocketConnection.java`: one reactive stream per device
+    from the message store; "new message" events only wake the reader; at most 256 messages sent
+    and not acknowledged (`MESSAGE_SENDER_MAX_CONCURRENCY`); a slow client is never actively
+    disconnected; a device connecting elsewhere is closed with 4409. The previous design
+    (until 2024–2025) used a "new message available" flag plus a re-read of the store, the same as
+    our lag flag. No server-side send idempotency: clients drop duplicates (libsignal
+    `DuplicateMessageException`; Signal-Desktop dedupes by sender and timestamp). Devices
+    authenticate the WebSocket with HTTP Basic and a random per-device token stored as a salted
+    HKDF hash (`auth/SaltedTokenHash.java`): a bearer secret, no channel binding.
+  - WhatsApp Encryption Overview (2026-10-30), "Transport Security": Noise Pipes with Curve25519;
+    the client authenticates with a per-device static key pair and the server stores only the
+    public key; Noise binds that authentication to the session by construction. The document
+    does not say how retries are deduplicated or how slow clients are handled.
+  - RFC 9266 (`tls-exporter` channel binding) is used by XMPP SCRAM-PLUS (XEP-0440); no messenger
+    found using it with TLS, because WhatsApp gets the property from Noise.
+- Decisions:
+  1. **D-0020 accepted, plus a bounded un-acked window.** Keep "store is the truth, notifications
+     are hints, a full inbox means re-read the mailbox" (Signal's earlier design). Add Signal's
+     in-flight bound: at most `max_unacked` (default 256) envelopes sent and not acknowledged per
+     connection; delivery pauses at the limit and resumes with a drain on the next ACK. This
+     bounds memory per session regardless of socket progress. The write-stall close (4100) stays
+     as the last resort, with the timeout raised from 10 s to 30 s for mobile networks (a stalled
+     reader holds nobody else up).
+  2. **D-0021 accepted, hardened.** Signal keeps no server-side idempotency, so our record is
+     extra; it now holds HMAC-SHA256(server secret, key) instead of the key, lives 6 h (the
+     client's retry horizon) instead of 24 h, and is scoped to the recipient devices: the same key
+     for other recipients is refused (`SendResult` reason 7, not retryable) and stores nothing.
+     Apps still drop duplicates by the message ID inside the envelope (as Signal's clients do),
+     which covers retries after 6 h.
+  3. **D-0018 accepted, with TLS channel binding.** A separate per-device Ed25519 key matches
+     WhatsApp's separate static key and is stronger than Signal's bearer token (the server holds
+     only public keys). The signed transcript now ends with the 32-byte RFC 9266 TLS exporter
+     (label `EXPORTER-Channel-Binding`, no context), which gives what Noise gives WhatsApp: a
+     relay that terminates TLS (misissued certificate, interception proxy) cannot reuse the
+     device's signature on its own session to the server. TLS must therefore end at `delivery`
+     itself (no TLS-terminating load balancer in front; `SO_REUSEPORT` spreading is in-process).
+- Evidence for the changes: `tests/e2e` `unacked_window_bounds_in_flight`,
+  `tls_connection_works` (a valid signature without this session's binding is refused with
+  4000); `crates/mailbox` `retried_send_is_stored_once` (keyed hash, recipient scope);
+  `crates/proto/tests/vectors.rs` (new transcript vector).
+- Consequences: protocol v1 changes before any client ships (transcript, reason 7). Revisit
+  the Noise alternative only if TLS termination ever has to move off the delivery host.
+
+## D-0023 — Autobahn conformance: two passes, image pinned by digest
+
+- Date: 2026-11-11
+- Status: accepted
+- Decided by: agent
+- Context: the M1 gate requires the Autobahn suite to pass against `delivery`'s own WebSocket
+  configuration. The Songbird endpoint is binary-only and authenticated, so the suite runs against
+  `songbird-delivery-autobahn`, an echo server built from the same upgrade code and
+  `ws::ws_config` (same limits, timeouts, buffers, no compression). Production limits refuse
+  messages over 1 MiB (invariant 7); the suite sends up to 16 MiB.
+- Options considered: run everything and accept failures; raise the production limit; two passes.
+- Evidence: `cargo xtask autobahn` (wstest 0.8.2, `crossbario/autobahn-testsuite@sha256:519915fb…`,
+  run with podman 5.8.9 on the development machine, report P02-M1): production pass 493 cases,
+  274 OK, 3 INFORMATIONAL, 216 UNIMPLEMENTED (groups 12 and 13, permessage-deflate, deliberately not
+  offered), 0 FAILED; the 24 cases with 4–16 MiB messages (9.1.4–6, 9.2.4–6, 9.3.\*, 9.4.\*) are
+  excluded there and run in the second pass with the limit raised to 16 MiB: 54 of 54 group-9
+  cases OK. Run without the exclusion, those 24 are FAILED: the connection is failed on the frame
+  header, before buffering.
+- Decision: `cargo xtask autobahn` runs both passes, fails on any other outcome, and CI runs it on
+  every push (`autobahn` job, reports kept 30 days). Docker or podman, whichever is installed.
+- Consequences: a regression in framing, UTF-8 validation, close handling or fragmentation fails
+  CI. Revisit if compression is ever offered (it should not be: ciphertext does not compress).
+
+## D-0022 — Load generator v0, delivery checker and the milestone 1 baselines
+
+- Date: 2026-11-11
+- Status: accepted
+- Decided by: agent
+- Context: M1 gate: "checker passes; first baseline numbers versus Sockudo".
+- Decision: `tools/loadgen` drives the real `songbird-client` (one client task per simulated
+  device), sends 1:1 traffic at a fixed total rate to random peers, acknowledges every delivery,
+  and runs the checker (`tools/loadgen/src/checker.rs`): nothing lost, nothing delivered twice,
+  `seq` strictly increasing and gap-free, per-sender FIFO, nothing unexpected. Each run tags its
+  payloads with a random run ID, so messages an earlier run left in a mailbox are reported
+  (`stale_from_earlier_runs`) instead of miscounted. The `reconnect` scenario drops one random
+  connection every 20 ms and every connection at once halfway through. `echo` measures raw
+  WebSocket round trips against any echo server. `tools/loadgen/bench/m1.sh` reproduces every
+  gate number with the server pinned to CPU 0 and the load generator to CPUs 8–15.
+- Baseline choice: the sockudo-ws library's own `simple_echo` example (3.1.1, built from the
+  registry source, `TOKIO_WORKER_THREADS=1`) against `songbird-delivery-autobahn` (our upgrade and
+  configuration, current-thread runtime), same client, same machine. The Sockudo *server* speaks
+  the Pusher protocol (channels, HTTP publish API); a like-for-like driver is milestone 3 work,
+  when `delivery` runs on all cores. **Owner decision (2026-11-11): the library baseline is
+  accepted for M1.** The Pusher-protocol driver (`songbird-loadgen pusher`) stays for a later
+  comparison against the Sockudo server (5.2.0, `sha256:802c27d7…`) if wanted.
+- Evidence: report P02-M1 (AMD Ryzen 9 7950X, Linux 7.3.1, Rust 1.99.1).
+- Consequences: every later load, chaos and failover run uses the same checker.
+
+## D-0021 — Milestone 1 stand-ins: in-memory mailbox and in-process router; idempotency keys
+
+- Date: 2026-11-11
+- Status: accepted (idempotency record hardened by D-0024)
+- Decided by: agent
+- Context: M1 builds the session algorithm "on an in-memory mailbox"; SurrealDB is M2 and Valkey
+  routing M4.
+- Decision: `songbird-mailbox` defines the `Mailbox` trait (`store_batch`, `fetch_after`,
+  `ack_up_to`, `expire_older_than`, `store_generation`) and ships `MemoryMailbox`;
+  `songbird-router` defines the `Router` trait (`attach`, `detach`, `route`, `route_ephemeral`) and
+  ships `LocalRouter`. Both stand-ins use one `std::sync::Mutex` each: a lock between socket read
+  and socket write, which the constitution forbids on the hot path. It is accepted only for these
+  stand-ins and disappears with SurrealDB group commit (M2) and the per-core directory (M3).
+  `store_batch` takes the send's idempotency key and stores it with the resulting `seq`s (24 h at
+  first; D-0024: keyed hash, 6 h, scoped to the recipients);
+  a retry returns the original result (`replayed`) and is routed again (duplicates are dropped by
+  the recipient session). The key is 16 random bytes chosen by the client and is not stored with
+  the sender's identity. M2 moves it into the same SurrealDB transaction as the envelopes. The
+  server's listener runs `expire_older_than(30 days)` hourly until the worker takes it over (M5).
+- Evidence: `crates/mailbox/src/memory.rs` tests (gap-free per-device `seq`, never reused, all or
+  nothing, retry stored once, expiry, property test of fetch ordering);
+  `tests/e2e` `inv8_store_unavailable_rejects_retryably_and_keeps_sockets`.
+- Consequences: M1 numbers measure the WebSocket and session path, not storage; the SurrealDB
+  write path (M2) sets the real ceiling.
+
+## D-0020 — Session algorithm and backpressure
+
+- Date: 2026-11-11
+- Status: accepted (owner delegated; extended with an un-acked window by D-0024)
+- Decided by: agent
+- Context: master prompt §5 `delivery`: subscribe before drain, deduplicate by `seq`, gaps trigger
+  a drain, safety sweep, "bounded per-connection queue; when full, disconnect with a 41xx code".
+- Options considered: (a) disconnect when the inbox is full, as written; (b) drop the notification,
+  mark the session lagged, drain from the mailbox, and disconnect only when the socket itself
+  stops accepting writes.
+- Evidence: `services/delivery/src/ordering.rs` (`Cursor`, property test
+  `every_seq_once_in_order`: random stores, dropped, duplicated and late notifications, inbox
+  overflow, any page size: the socket sees every `seq` once, in order); `tests/e2e`
+  `inv2_per_device_order_without_gaps_or_duplicates` (inbox of 8, four concurrent senders, a dropped
+  connection) and `inv5_slow_client_never_slows_anyone_else`.
+- Decision: (b). The router never blocks: `try_send` into a bounded inbox (default 256); on full
+  it sets a lock-free lag flag and wakes the session, which drains the mailbox after its cursor.
+  Ephemeral events use a separate lane (default 32) and are simply dropped. A socket write or
+  flush that makes no progress for `write_timeout_ms` (default 10 s) closes the connection with
+  4100 and a retry hint. Under (a), a session that is merely busy draining after a reconnect storm
+  would be disconnected and reconnect into the same storm; under (b) it catches up, and nothing
+  waits on it either way. The session attaches before its first drain; live `seq = cursor + 1` is
+  sent inline, `seq ≤ cursor` dropped, anything else drains. Writes are fed and flushed once per
+  wake-up (up to 64 live envelopes per batch). The safety sweep runs every 120 s ± 20 % per
+  session (1 s while the store is failing).
+- Consequences: invariant 5 holds without disconnect storms. Timers are Tokio timers per session
+  for now; M3 measures a per-core sweep against them.
+
+## D-0019 — Wire protocol v1: hand-encoded hot frames, prost control frames, close codes
+
+- Date: 2026-11-11
+- Status: accepted
+- Decided by: agent
+- Context: master prompt §5 (client wire protocol), `docs/PROTOCOL.md` §1–§3.
+- Decision: one WebSocket binary message per frame; type byte then big-endian fixed-width fields;
+  hot frames hand-encoded (`Send`, `Ack`, `Ephemeral`, `Deliver`, `SendResult`); control frames
+  (`Hello`, `Auth`, `AuthOk`, `Error`, `DeviceMismatch`) are protobuf via `prost` 0.14.5 derive
+  on hand-written structs (no `.proto` build step, no `protoc`). Decoders check every length
+  against `Limits` before allocating, reject trailing bytes (one encoding per frame) and return
+  payloads as zero-copy `Bytes` slices. `Debug` never prints device IDs, keys or payloads
+  (`prost(skip_debug)` plus manual impls). Close codes: 4000–4099 never reconnect, 4100–4199
+  back off, 4200–4299 reconnect now; retry hint `retry_ms=<n>` in the close reason. Defaults:
+  envelope 64 KiB, 1,024 recipients, `Send` 1 MiB, ephemeral 4 KiB, control body 4 KiB.
+- Evidence: `crates/proto` unit and property tests (round trips, truncation, trailing bytes, limits
+  before allocation, redacted `Debug`, test vectors); fuzz targets `proto_client_frame` and
+  `proto_server_frame` (30 s each locally: 3.7 M and 3.0 M runs, no crash; nightly 10 min).
+- Consequences: a `Deliver` frame is built by copying the envelope behind a 9-byte header (one copy
+  per delivery). M3 removes it (zero allocation per message) by writing the header as its own
+  vectored segment.
+
+## D-0018 — Device authentication: Ed25519 challenge signature with aws-lc-rs
+
+- Date: 2026-11-11
+- Status: accepted (owner delegated; TLS channel binding added by D-0024)
+- Decided by: agent
+- Context: master prompt §5 handshake: the device signs a domain-separated string containing the
+  nonce and server name.
+- Options considered: XEdDSA with the libsignal identity key; a separate Ed25519 device
+  authentication key; bearer tokens (forbidden).
+- Decision: a per-device Ed25519 authentication key, verified with aws-lc-rs 1.19.0 (already in
+  the tree through rustls, so no new cryptography crate). Transcript
+  `"songbird.v1/device-auth\0" || len || server_name || nonce[32] || device_id[16] ||
+  protocol_version`, server name from the client's own configuration. 32-byte nonce from the OS per
+  connection; `Auth` within 5 s (4102 otherwise). An unknown device and a bad signature get the
+  same close code (4000) and both run one signature verification (against a dummy key for an
+  unknown device), so authentication is not a device-existence oracle. `Auth.last_acked_seq` also
+  acknowledges, so a lost `Ack` frame still deletes. Milestone 1 reads public keys from a static
+  file (`[delivery.directory] file`), refused by validation in staging and production.
+- Evidence: `services/delivery/src/directory.rs` tests; `crates/proto/src/auth.rs` test vector;
+  `tests/e2e` `inv9_server_side_authorization` (unknown device, other server name, replayed
+  signature, wrong key: all 4000; the client stops instead of reconnecting).
+- Consequences: Prompt 3 decides whether the authentication key stays separate from the identity
+  key and replaces the static directory with the identity service.
+
+## D-0017 — Dependencies of Prompt 2, milestone 1
+
+- Date: 2026-11-11
+- Status: accepted
+- Decided by: agent
+- Context: Constitution: no new dependency without a recorded reason; read the pinned version's
+  source first.
+- Evidence: APIs used were read in the registry sources of these exact versions before writing
+  code: sockudo-ws `handshake::{parse_request, generate_accept_key, build_response}`,
+  `WebSocketStream::from_raw_with_leftover`, its `Stream`/`Sink` implementations and `close`,
+  `client::WebSocketClient::connect_raw`, `Config`/`ConfigBuilder`, `init_clock`, error variants;
+  prost 0.14.5 `Message` and the derive's `skip_debug`; aws-lc-rs 1.19.0
+  `signature::{Ed25519KeyPair, UnparsedPublicKey, ED25519}`. `cargo deny` clean (advisories,
+  licences, bans, sources); `cargo vet --locked`: 120 fully audited, 3 partially, 76 exempted.
+- Decision (version, reason):
+  - `sockudo-ws` 3.1.1, `default-features = false`, feature `tokio-runtime` only (locked stack).
+    Not enabled: `permessage-deflate` (ciphertext does not compress), `http2`/`http3`/`io-uring`
+    (later experiments), `mimalloc` (we install it ourselves). Its `simd` feature is a no-op in
+    3.1.1 (SIMD paths are always compiled in). We use our own HTTP upgrade on top of its
+    `handshake` module so a wrong path or subprotocol gets an HTTP error, and drive one unified
+    stream per connection from a single task: no split, so no lock between read and write.
+  - `prost` 0.14.5 (control frames; locked stack).
+  - `futures-core`, `futures-sink` 0.3.34: the `Stream` and `Sink` traits only, to poll sockudo-ws
+    without `futures-util`.
+  - `aws-lc-rs` 1.19.0 as a direct dependency (device authentication; already in the tree).
+  - Transitive, new to the lock file: `quanta` 0.13.0 and `raw-cpuid` 11.6.0 (sockudo-ws clock),
+    `sha1` 0.11 with `digest`, `block-buffer`, `crypto-common`, `hybrid-array`, `typenum`,
+    `const-oid` (the handshake's `Sec-WebSocket-Accept`), `tokio-util` 0.7.20, `prost-derive`
+    0.14.5 with `itertools` 0.15 and `either`, and wasm-only crates pulled by `quanta`'s
+    `web-sys` dependency (`wasm-bindgen*`, `js-sys`, `web-sys`, `futures-util`, `futures-task`,
+    `slab`, never built for our targets).
+  - cargo-vet: `either` (cuviper), `rustversion` (dtolnay), `slab` and `tokio-util` (Darksonn)
+    are covered by trust entries under D-0016's rule (publishers already trusted); 22 crates are
+    new exemptions in `supply-chain/config.toml`, 6 of them wasm-only. Highest-value audits to
+    do: `sockudo-ws` (parses every client byte; contains `unsafe` SIMD masking), `prost`,
+    `quanta`.
+- Consequences: Songbird crates stay `#![forbid(unsafe_code)]`; the `unsafe` in sockudo-ws and
+  quanta is a supply-chain risk tracked with the exemptions.
+
 ## D-0016 — cargo-vet: trust publishers that two or more imported organizations trust
 
 - Date: 2026-11-11
@@ -76,6 +313,11 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 - Decision: `codeql.yml` grants `actions: read` and `contents: read` only, runs analysis with
   `upload: never`, fails the job when the SARIF holds any result (each shown as an annotation), and
   keeps the SARIF as a 30-day artifact.
+- Amendment (2026-11-11, owner-approved during P02 M1): `rust/hard-coded-cryptographic-value`
+  flags the fixed nonce of the published device-auth test vector (`crates/proto/tests/vectors.rs`,
+  `PROTOCOL.md` §13). The gate skips that one rule for files under a `tests/` directory only;
+  checked against the run's SARIF (the same rule in `src/` still fails the job). Unit tests that do
+  not need a fixed value use random nonces instead.
 - Consequences: no Security tab alerts or dismissal workflow; a false positive is fixed in code or
   excluded in the workflow. If code scanning is enabled later, switch back to uploading and grant
   `security-events: write`.

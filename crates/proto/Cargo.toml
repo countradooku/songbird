@@ -1,0 +1,22 @@
+[package]
+name = "songbird-proto"
+description = "Songbird client wire protocol: hand-encoded hot-path frames, protobuf control frames, close codes, device-auth transcript. Shared by server and clients."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+songbird-types.workspace = true
+bytes.workspace = true
+prost.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+getrandom.workspace = true
+proptest.workspace = true
+hex.workspace = true
+
+[lints]
+workspace = true

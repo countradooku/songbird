@@ -11,6 +11,8 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4.12"
 songbird-types = { path = "../crates/types" }
 songbird-proxy = { path = "../services/proxy" }
+songbird-proto = { path = "../crates/proto" }
+bytes = "1"
 serde = { version = "1", features = ["derive"] }
 
 # Not part of the main workspace: fuzzing needs nightly and libFuzzer.
@@ -40,6 +42,20 @@ bench = false
 [[bin]]
 name = "id_parse"
 path = "fuzz_targets/id_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proto_client_frame"
+path = "fuzz_targets/proto_client_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proto_server_frame"
+path = "fuzz_targets/proto_server_frame.rs"
 test = false
 doc = false
 bench = false

@@ -53,9 +53,13 @@ jobs:
         run: |
           set -euo pipefail
           sarif="sarif-results/${LANGUAGE}.sarif"
-          count=$(jq '[.runs[].results[]?] | length' "$sarif")
+          # Owner-approved waiver (D-0015 amendment): published test vectors use fixed nonces by
+          # design, so rust/hard-coded-cryptographic-value is skipped for files under a tests/
+          # directory only. Every other rule, and this rule everywhere else, still fails the job.
+          results='.runs[].results[]? | select((.ruleId == "rust/hard-coded-cryptographic-value" and ((.locations[0].physicalLocation.artifactLocation.uri // "") | test("(^|/)tests/"))) | not)'
+          count=$(jq "[$results] | length" "$sarif")
           if [ "$count" -ne 0 ]; then
-            jq -r '.runs[].results[]? |
+            jq -r "$results"' |
               "::error file=\(.locations[0].physicalLocation.artifactLocation.uri // "?"),line=\(.locations[0].physicalLocation.region.startLine // 1)::\(.ruleId): \(.message.text)"' "$sarif"
             echo "CodeQL reported $count finding(s) for $LANGUAGE." >&2
             exit 1

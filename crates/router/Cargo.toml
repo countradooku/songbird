@@ -1,0 +1,19 @@
+[package]
+name = "songbird-router"
+description = "Routes stored envelopes to the session that holds a device: one live connection per device, bounded inboxes, lag signalling. In-process router for M1; Valkey pub/sub in M4."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+songbird-types.workspace = true
+bytes.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["sync", "rt", "macros"] }
+
+[lints]
+workspace = true

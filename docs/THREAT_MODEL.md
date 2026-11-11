@@ -9,7 +9,13 @@ server in plaintext. Adding to this list requires the owner's approval.
 
 | Data | Why the server needs it | Retention | Introduced by |
 | --- | --- | --- | --- |
-| _Nothing yet: Prompt 1 services handle no user data._ | | | |
+| Device ID | Authenticate the connection, address mailboxes | Life of the device | Prompt 2 (M1) |
+| Device authentication public key (Ed25519) | Verify the connection challenge | Life of the device | Prompt 2 (M1) |
+| Connection times and source IP | Accepting the TCP connection; rate limits | Memory only, for the connection's life; never logged or exported | Prompt 2 (M1) |
+| Recipient device ID, `seq`, envelope size and store time per stored envelope | Store, order and deliver | Until acknowledged, at most 30 days | Prompt 2 (M1) |
+| Envelope ciphertext | Store and relay (opaque, never decrypted) | Until acknowledged, at most 30 days | Prompt 2 (M1) |
+| Keyed hash (HMAC-SHA256, server secret) of a send's idempotency key, with the recipient devices and `seq`s; **not** the sender, never the key itself | Store a retried send once | 6 hours | Prompt 2 (M1), D-0021, D-0024 (owner delegated) |
+| Sender device at send time | Authorization and rate limits | Memory only, for the request; never stored with the envelope | Prompt 2 (M1) |
 
 Prompt 1 adds two operational views, neither of which is user data on the server:
 
@@ -74,6 +80,24 @@ One subsection per component. Each threat names its mitigation and the test or p
 | Users' IPs logged by operator | I | Proxy operator | No logging code; operator compose disables Docker logs; documented honestly | `deploy/proxy/README.md` |
 | Malicious proxy link | S, T | Phisher | Strict, bounded link parser; host in the URL fragment; app shows the proxy host before use (Prompt 9 UI requirement) | `link.rs` tests; `proxy_link` fuzz target |
 
+### 3.5 Delivery service (Prompt 2, milestone 1)
+
+| Threat | STRIDE | Attacker | Mitigation | Test or proof |
+| --- | --- | --- | --- | --- |
+| Impersonating a device | S | Network, malicious client | Ed25519 signature over a transcript binding a fresh 32-byte nonce, the server name, the device ID, the protocol version and the TLS session (RFC 9266 exporter); TLS 1.3 | `inv9_server_side_authorization` (unknown device, other server name, replayed signature, wrong key); `tls_connection_works` (signature without this session's binding refused); `vectors.rs` |
+| Relaying a device's login through a TLS-terminating man in the middle | S | Network with a misissued certificate, interception proxy | Channel binding: the device signs its own TLS session's exporter, which differs from the attacker's session to the server (D-0024) | `tls_connection_works` |
+| Probing which device IDs exist | I | Malicious client | Unknown device and bad signature: same close code, same work (dummy-key verification) | `directory.rs` tests; `inv9_server_side_authorization` |
+| Reading or deleting another device's mailbox | I, T, E | Malicious client | Every mailbox operation uses the authenticated device only; ACKs beyond what was sent close the connection | `inv3_delete_on_ack_and_expiry`; session code review |
+| Sending to devices that do not exist, or one device twice | T | Malicious client | Recipients checked against the directory; duplicates refused; nothing stored on rejection | `inv9_server_side_authorization` |
+| Memory exhaustion by large or malformed input | D | Malicious client | Limits checked before allocation; WebSocket layer refuses oversize frames from the header; upgrade request ≤ 8 KiB; fuzzed decoders | `inv7_bounded_and_validated_input`; `frame.rs` property tests; `proto_*` fuzz targets; Autobahn |
+| Connection or reconnect floods | D | Botnet, reconnect storm | Accept-rate token bucket and connection cap (close 4101 with retry hint); handshake and auth timeouts; jittered client backoff | `accept_rate_limit_closes_with_retry_hint`; reconnect storm in the load generator |
+| Frame or send floods from one connection | D | Malicious client | Per-connection token buckets: frames (close 4103), sends (rejected), ephemeral (dropped) | `bucket.rs` tests; session code |
+| A slow or stalled reader holding others back, or server memory | D | Malicious or broken client | Bounded inboxes, non-blocking routing with lag flag and mailbox drain; at most 256 envelopes in flight per connection; write-progress timeout closes 4100 | `inv5_slow_client_never_slows_anyone_else`; `unacked_window_bounds_in_flight`; D-0020, D-0024 |
+| Suppressing another send by reusing its idempotency key | T | Party that learned a key | Keys are 128 random bits seen only by sender and server (TLS); records are scoped to the recipients (reuse for others is refused, reason 7) and kept 6 h under a keyed hash | `retried_send_is_stored_once` |
+| Losing, duplicating or reordering messages | T | Faults, races | Store before acknowledge; per-device `seq`; attach before drain; cursor rule; idempotency keys; client dedupe by `seq` | `ordering.rs` property test; `inv1`, `inv2`, `inv8`; load-generator checker (steady and reconnect storm) |
+| Identifiers or content in logs and metrics | I | Insider, log store | No per-device log fields; IDs and frames redact themselves in `Debug`; aggregate counters only | `inv6_no_identifiers_in_logs_or_metrics`; `frame.rs` `debug_output_hides_identifiers` |
+| Bugs in the WebSocket library | T, D | Supply chain, malicious client | Pinned version; Autobahn in CI; our own upgrade and limits; vet exemption recorded for audit | `cargo xtask autobahn`; D-0017, D-0023 |
+
 ## 4. Server-enforced settings
 
 ## 5. Compliance notes (GDPR, age of digital consent per EU country)
@@ -86,3 +110,8 @@ One subsection per component. Each threat names its mitigation and the test or p
 - cargo-vet: 57 of 167 crates are exempted rather than vetted; accepted by the owner (report P01, D-0016).
 - Root SSH through the bastion (owner decision open, D-0014).
 - The proxy is identifiable by traffic analysis; it is a reachability tool, not an anonymity tool.
+- Delivery milestone 1 keeps mailboxes in memory (not durable) and reads device keys from a static
+  file; neither is deployable (configuration validation refuses the static directory outside
+  development and CI). SurrealDB (M2) and the identity service (Prompt 3) replace them.
+- sockudo-ws (parses every client byte, contains `unsafe` SIMD code) and quanta are exempted in
+  cargo-vet, not audited (D-0017).

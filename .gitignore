@@ -63,3 +63,7 @@ deploy/ansible/.collections/
 *.cdx.json
 # Provider-switch drill timings (copied into the drill report)
 deploy/drill-timings.tsv
+
+# Python bytecode (deploy/bin scripts)
+__pycache__/
+*.py[co]

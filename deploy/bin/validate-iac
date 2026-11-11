@@ -22,6 +22,8 @@ if [ "$what" = ansible ] || [ "$what" = all ]; then
     ansible-playbook -i inventory/example --syntax-check "$p" >/dev/null
   done
   ANSIBLE_COLLECTIONS_PATH=.collections ansible-lint -q
-  python3 -m py_compile "$DEPLOY_DIR/bin/inventory-from-tofu"
+  # Syntax check in memory: py_compile would write __pycache__ next to the script.
+  python3 -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' \
+    "$DEPLOY_DIR/bin/inventory-from-tofu"
 fi
 log "iac ($what): ok"

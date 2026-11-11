@@ -24,6 +24,7 @@ path = "src/bin/autobahn.rs"
 songbird-service.workspace = true
 songbird-proto.workspace = true
 songbird-mailbox.workspace = true
+songbird-surreal.workspace = true
 songbird-router.workspace = true
 songbird-types.workspace = true
 aws-lc-rs.workspace = true

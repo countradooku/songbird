@@ -19,6 +19,12 @@ allow = [
     "Unicode-3.0",
 ]
 confidence-threshold = 0.93
+# Per-crate exceptions, each recorded in docs/DECISIONS.md (D-0030: Iggy SDK dependencies).
+exceptions = [
+    { allow = ["Zlib"], crate = "foldhash" },
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs" },
+]
 
 [licenses.private]
 # Songbird's own crates are unpublished (publish = false); their licence is chosen later.

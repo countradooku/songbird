@@ -1,0 +1,20 @@
+[package]
+name = "songbird-bench-stores"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Mailbox store comparison (SurrealDB, Valkey, Apache Iggy). Not part of the workspace."
+
+# Standalone: its own lockfile, so the comparison's clients do not enter the workspace's vet and
+# deny graph until one is chosen.
+[workspace]
+
+[dependencies]
+songbird-mailbox = { path = "../../crates/mailbox" }
+songbird-surreal = { path = "../../crates/surreal" }
+songbird-types = { path = "../../crates/types" }
+bytes = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+redis = { version = "=1.8.1", default-features = false, features = ["tokio-comp", "script", "streams"] }
+iggy = "=0.12.0"
+aws-lc-rs = "1"

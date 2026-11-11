@@ -9,6 +9,7 @@ images:
   valkey: "valkey/valkey:9.1.3-alpine3.24@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b"
   garage: "dxflrs/garage:v2.5.0@sha256:677e5b758e4425a325b811c425c026bf35a4bf42f7ddbaa773de3f4fd779a5a5"
   livekit: "livekit/livekit-server:v1.13.11@sha256:25cd902de7cacbd5f1f779f6a6ac1eae20ba8f56b0935934ce6b0ab80d1e3d20"
+  iggy: "apache/iggy:0.10.0@sha256:176125a0580f526b0fee8b98ccf4ed5f77e243066183243d87282abce4851bf3"
   ghostunnel: "ghostunnel/ghostunnel:v1.11.5@sha256:65c4e34ec0ee0f30ea1f72b7411ec70a91c32fc50f067a8466ad2adb1e7420f2"
 
 # Which Songbird services run on which role, and their private admin ports.
@@ -25,7 +26,7 @@ songbird_admin_ports:
 
 # Internal (private network only) ports by role, opened in nftables from private_cidr only.
 internal_ports_by_role:
-  data: [8000, 6379, 6380, 3901, 3910, 3913]
+  data: [8000, 8090, 6379, 6380, 3901, 3910, 3913]
   calls: [7880]
   edge: [9101, 9102]
   worker: [9103, 9104]
@@ -52,12 +53,13 @@ open_files_limit: 1048576
 # Mutual TLS: one leaf certificate per component per host, issued by the internal intermediate CA
 # (tools/admin, `songbird-admin ca`). Files are owned by the uid the component runs as.
 tls_components_by_role:
-  data: [surrealdb, valkey-hot, valkey-jobs, garage]
+  data: [surrealdb, iggy, valkey-hot, valkey-jobs, garage]
   edge: [delivery, api]
   worker: [push, worker]
   calls: [calls, livekit]
 tls_owner_uid:
   surrealdb: 65532
+  iggy: 0
   valkey-hot: 999
   valkey-jobs: 999
   garage: 65532
@@ -72,6 +74,10 @@ tls_renew_within_days: 10
 
 # Storage Garage may use on a data host (single-node layout).
 garage_capacity: 100G
+
+# Iggy (mailbox log, D-0029): shard threads and buffer pool on the shared beta data host.
+iggy_cpu_allocation: "2"
+iggy_memory_pool: "1 GiB"
 
 valkey_hot_maxmemory: 2gb
 valkey_jobs_maxmemory: 2gb

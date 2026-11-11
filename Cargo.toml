@@ -8,6 +8,7 @@ members = [
     "crates/mailbox",
     "crates/router",
     "crates/client",
+    "crates/surreal",
     "services/delivery",
     "services/api",
     "services/push",
@@ -39,6 +40,7 @@ songbird-proto = { path = "crates/proto" }
 songbird-mailbox = { path = "crates/mailbox" }
 songbird-router = { path = "crates/router" }
 songbird-client = { path = "crates/client" }
+songbird-surreal = { path = "crates/surreal" }
 songbird-delivery = { path = "services/delivery" }
 
 anyhow = "1.0.104"
@@ -61,6 +63,9 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", 
 rustls-pki-types = { version = "1.16.0", features = ["std"] }
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
+# Apache Iggy client SDK (owner decision D-0030); pinned with the server image (0.10.0).
+iggy = "=0.12.0"
+secrecy = "0.10"
 time = { version = "0.3.55", features = ["std"] }
 tokio = { version = "1.54.1", default-features = false }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }

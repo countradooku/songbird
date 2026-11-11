@@ -21,7 +21,9 @@ services:
     <<: *defaults
     image: surrealdb/surrealdb:v4.0.1@sha256:408eb8e5c9436670525e2bc2634b1e50ba74ce1b447eaf0094c35f73b67f9cb6
     user: "0:0" # named volume is root-owned; production runs it as a dedicated user (deploy/ansible)
-    command: ["start", "--bind", "0.0.0.0:8000", "--log", "info", "--log-format", "json", "rocksdb:/data/songbird.db"]
+    # SurrealKV with an fsync on every commit: the mailbox acknowledges a send only after its
+    # commit, so this is invariant 1 (D-0027). v4.0.1 opens `rocksdb:` paths as SurrealKV anyway.
+    command: ["start", "--bind", "0.0.0.0:8000", "--log", "info", "--log-format", "json", "surrealkv:///data/songbird.db?sync=every"]
     environment:
       SURREAL_USER: ${SURREAL_USER:?run cargo xtask dev-env}
       SURREAL_PASS: ${SURREAL_PASS:?run cargo xtask dev-env}
@@ -29,6 +31,36 @@ services:
     ports: ["127.0.0.1:${SB_PORT_SURREALDB:-47800}:8000"]
     healthcheck:
       test: ["CMD", "/surreal", "is-ready", "--endpoint", "http://127.0.0.1:8000"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  # Mailbox log (D-0029). Topic durability `persisted` is set by the mailbox when it creates the
+  # topic: Iggy fsyncs before it confirms an append (invariant 1). Iggy 0.10 runs on io_uring,
+  # which the default container seccomp profile blocks; iggy-seccomp.json is Docker's default
+  # profile (moby/profiles seccomp/v0.1.0) plus the three io_uring syscalls, nothing else.
+  # It listens on the same port inside and outside the container so the address it advertises is
+  # the one clients dial.
+  iggy:
+    <<: *defaults
+    image: apache/iggy:0.10.0@sha256:176125a0580f526b0fee8b98ccf4ed5f77e243066183243d87282abce4851bf3
+    security_opt: ["seccomp=./iggy-seccomp.json", "no-new-privileges:true"]
+    environment:
+      IGGY_PATH: /data
+      IGGY_TCP_ADDRESS: "0.0.0.0:${SB_PORT_IGGY:-47890}"
+      IGGY_NODE_ADVERTISED_ADDRESS: 127.0.0.1
+      IGGY_HTTP_ENABLED: "false"
+      IGGY_QUIC_ENABLED: "false"
+      IGGY_WEBSOCKET_ENABLED: "false"
+      IGGY_SHARDING_CPU_ALLOCATION: "2"
+      IGGY_MEMORY_POOL_SIZE: "512 MiB" # Iggy's minimum
+      IGGY_ROOT_USERNAME: ${IGGY_ROOT_USERNAME:?run cargo xtask dev-env --force}
+      IGGY_ROOT_PASSWORD: ${IGGY_ROOT_PASSWORD:?run cargo xtask dev-env --force}
+    volumes: [iggy:/data]
+    ports: ["127.0.0.1:${SB_PORT_IGGY:-47890}:${SB_PORT_IGGY:-47890}"]
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/${SB_PORT_IGGY:-47890}"]
       interval: 2s
       timeout: 3s
       retries: 30
@@ -114,6 +146,7 @@ networks:
 
 volumes:
   surrealdb: {}
+  iggy: {}
   valkey-jobs: {}
   garage-meta: {}
   garage-data: {}

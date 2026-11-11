@@ -12,6 +12,8 @@ libfuzzer-sys = "0.4.12"
 songbird-types = { path = "../crates/types" }
 songbird-proxy = { path = "../services/proxy" }
 songbird-proto = { path = "../crates/proto" }
+songbird-surreal = { path = "../crates/surreal" }
+songbird-mailbox = { path = "../crates/mailbox" }
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
 
@@ -56,6 +58,20 @@ bench = false
 [[bin]]
 name = "proto_server_frame"
 path = "fuzz_targets/proto_server_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "iggy_record"
+path = "fuzz_targets/iggy_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "surreal_cbor"
+path = "fuzz_targets/surreal_cbor.rs"
 test = false
 doc = false
 bench = false

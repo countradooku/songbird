@@ -2,7 +2,9 @@
 #![allow(clippy::unwrap_used, reason = "tests")]
 
 use bytes::Bytes;
-use songbird_proto::frame::{Recipient, RejectReason, SendFrame, SendStatus};
+use songbird_proto::frame::{
+    MlsCommitRef, Recipient, RejectReason, SendFrame, SendPayload, SendStatus,
+};
 use songbird_proto::{ClientFrame, Limits, ServerFrame};
 use songbird_types::DeviceId;
 
@@ -26,10 +28,10 @@ fn client_frames() {
             "03 44444444444444444444444444444444 747970696e67",
         ),
         (
-            ClientFrame::Send(SendFrame {
-                req_id: 7,
-                idempotency_key: [0x11; 16],
-                recipients: vec![
+            ClientFrame::Send(SendFrame::per_device(
+                7,
+                [0x11; 16],
+                vec![
                     Recipient {
                         device: dev(0x22),
                         envelope: Bytes::from_static(b"abc"),
@@ -39,10 +41,28 @@ fn client_frames() {
                         envelope: Bytes::from_static(b"z"),
                     },
                 ],
-            }),
-            "01 00000007 11111111111111111111111111111111 0002 \
+            )),
+            "01 00000007 11111111111111111111111111111111 00 0002 \
              22222222222222222222222222222222 00000003 616263 \
              33333333333333333333333333333333 00000001 7a",
+        ),
+        (
+            ClientFrame::Send(SendFrame {
+                req_id: 8,
+                idempotency_key: [0x11; 16],
+                mls: Some(MlsCommitRef {
+                    group: [0x44; 16],
+                    epoch: 3,
+                }),
+                payload: SendPayload::Shared {
+                    devices: vec![dev(0x22), dev(0x33)],
+                    body: Bytes::from_static(b"grp"),
+                },
+            }),
+            "01 00000008 11111111111111111111111111111111 03 \
+             44444444444444444444444444444444 0000000000000003 0002 \
+             22222222222222222222222222222222 33333333333333333333333333333333 \
+             00000003 677270",
         ),
     ];
     for (frame, hex) in cases {

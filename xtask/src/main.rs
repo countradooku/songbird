@@ -593,7 +593,9 @@ fn dev_env(force: bool) -> Result {
          GARAGE_ADMIN_TOKEN={}\n\
          GARAGE_METRICS_TOKEN={}\n\
          LIVEKIT_API_KEY=dev{}\n\
-         LIVEKIT_API_SECRET={}\n",
+         LIVEKIT_API_SECRET={}\n\
+         IGGY_ROOT_USERNAME=iggy\n\
+         IGGY_ROOT_PASSWORD={}\n",
         random_hex(16)?,
         random_hex(32)?,
         random_hex(32)?,
@@ -601,6 +603,7 @@ fn dev_env(force: bool) -> Result {
         random_hex(32)?,
         random_hex(32)?,
         random_hex(4)?,
+        random_hex(32)?,
         random_hex(32)?,
     );
     let mut opts = std::fs::OpenOptions::new();

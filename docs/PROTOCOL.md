@@ -21,7 +21,7 @@ Implemented in `crates/proto` (shared by server and clients); decisions D-0019, 
 
 | Type | Direction | Frame | Body |
 | --- | --- | --- | --- |
-| `0x01` | C→S | `Send` | `req_id u32`, `idempotency_key [16]`, `count u16` (≥ 1), `count ×` (`device_id [16]`, `len u32` (≥ 1), `envelope [len]`) |
+| `0x01` | C→S | `Send` | `req_id u32`, `idempotency_key [16]`, `flags u8`, [if flag `0x01`: `group [16]`, `epoch u64`], `count u16` (≥ 1), then per device (no flag `0x02`) `count ×` (`device_id [16]`, `len u32` (≥ 1), `envelope [len]`), or shared (flag `0x02`) `count × device_id [16]`, `len u32` (≥ 1), `body [len]` |
 | `0x02` | C→S | `Ack` | `up_to_seq u64` |
 | `0x03` | C→S | `Ephemeral` | `to [16]`, `payload` (≥ 1 byte) |
 | `0x10` | C→S | `Auth` | protobuf `Auth` (§2) |
@@ -32,8 +32,14 @@ Implemented in `crates/proto` (shared by server and clients); decisions D-0019, 
 | `0x91` | S→C | `AuthOk` | protobuf `AuthOk` |
 | `0x92` | S→C | `Error` | protobuf `Error` (`code u32`, `retry_after_ms u32`), sent before a close when needed |
 
-Rejection reasons: 1 rate limited, 2 too large, 3 too many recipients, 4 unknown recipient,
-5 duplicate recipient, 6 store unavailable, 7 idempotency key already used for other recipients.
+`Send` flags: `0x01` MLS commit, `0x02` shared body; other bits must be zero.
+
+Rejection reasons: 1 rate limited, 2 too large, 3 too many recipients, 4 unknown recipient
+(unused since milestone 2: unknown devices are reported in a device mismatch), 5 duplicate
+recipient, 6 store unavailable, 7 idempotency key already used for other recipients (detected
+when the earlier send shares a mailbox partition with this one; a reuse that cannot be detected is
+stored as a new send, never dropped), 8 stale
+MLS epoch (the group moved on; process the winning commit, then retry from the new epoch).
 1 and 6 are retryable after `retry_after_ms`, with the
 same idempotency key. Unknown reason codes are kept (forward compatibility).
 
@@ -154,11 +160,27 @@ Decisions D-0020, D-0021.
 
 ### 3.1 Sending
 
-A `Send` carries one opaque, client-encrypted envelope per recipient device. The server checks
-limits, rate limits and recipients (each must exist; no device twice), stores every envelope in the
-recipient's mailbox with the next per-device `seq` (all or nothing), and only then answers
-`SendResult` accepted (invariant 1) and routes the envelopes to connected recipients. A send
-rejected for any reason stored nothing.
+A `Send` carries either one opaque, client-encrypted envelope per recipient device (pairwise
+sessions) or, with flag `0x02`, one ciphertext for every listed device (an MLS group or channel
+message), which the server stores once with a small entry per device. The server checks limits,
+rate limits and recipients, stores every envelope in the recipients' mailboxes with each device's
+next `seq` (fsynced), and only then answers `SendResult` accepted (invariant 1) and routes the
+envelopes to connected recipients. A send rejected for a reason other than 6 stored nothing. After
+reason 6 (store unavailable) the send may already be recorded, and if so the server stores it for
+every recipient by itself; retrying with the same idempotency key returns the original result and
+stores nothing twice.
+
+**Device lists.** Every addressed device must exist, and a send that addresses an account must
+address all of that account's devices except the sending device. Otherwise the answer is
+`SendResult` status 2 with a `DeviceMismatch`: `missing` (devices to add), `extra` (devices that do
+not exist), `stale` (devices whose keys changed; filled from Prompt 3). The client updates its view,
+re-encrypts and retries with the same idempotency key.
+
+**MLS commits.** A `Send` with flag `0x01` names the group and the epoch the commit was made
+from. The server stores it only if the group is at that epoch and advances the group to `epoch +
+1` in the same transaction, so of several concurrent commits exactly one is accepted; the others
+are rejected with reason 8 and stored nothing. The group ID is 16 opaque bytes chosen by the
+clients.
 
 ### 3.2 Idempotency
 
@@ -176,7 +198,8 @@ After `AuthOk` the server sends every stored envelope after `last_acked_seq` in 
 streams new ones. A device can receive a `seq` again after a reconnect if its `Ack` had not reached
 the server; clients drop any `seq` at or below the last one they handed to the app, so the app
 sees each envelope exactly once and in order. A `seq` may be skipped only where an envelope expired
-(30 days, §3.5).
+(30 days, §3.5). `seq`s are allocated in the same durable transaction as the envelope, so they are
+never reused, even across restarts or several server nodes.
 
 ### 3.4 Acknowledgement
 
@@ -238,7 +261,8 @@ Frames (hex; from `crates/proto` tests and the fuzz seeds in `fuzz/corpus/proto_
 | `SendResult{req_id: 7, accepted}` | `82 00000007 00` |
 | `SendResult{req_id: 7, rejected: rate limited, retry 500 ms}` | `82 00000007 01 0001 000001f4` |
 | `Ephemeral{to: 44…44, "typing"}` | `03 44444444444444444444444444444444 747970696e67` |
-| `Send{req_id 7, key 11…11, [(22…22, "abc"), (33…33, "z")]}` | `01 00000007 11111111111111111111111111111111 0002 22222222222222222222222222222222 00000003 616263 33333333333333333333333333333333 00000001 7a` |
+| `Send{req_id 7, key 11…11, [(22…22, "abc"), (33…33, "z")]}` | `01 00000007 11111111111111111111111111111111 00 0002 22222222222222222222222222222222 00000003 616263 33333333333333333333333333333333 00000001 7a` |
+| `Send{req_id 8, key 11…11, MLS commit (group 44…44, epoch 3), shared "grp" to 22…22, 33…33}` | `01 00000008 11111111111111111111111111111111 03 44444444444444444444444444444444 0000000000000003 0002 22222222222222222222222222222222 33333333333333333333333333333333 00000003 677270` |
 
 Authentication transcript for server name `chat.example`, nonce 32 × `11`, device 16 × `22`,
 version 1, channel binding 32 × `33`:

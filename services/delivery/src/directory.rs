@@ -1,19 +1,24 @@
-//! Device directory: which devices exist and their authentication keys.
+//! Device directory: which devices exist, which account each belongs to, and their
+//! authentication keys.
 //!
-//! Milestone 1 loads a static file (development and CI only; refused in staging and production
-//! by configuration validation). The identity service (Prompt 3) replaces it with SurrealDB.
+//! Loaded from a static file (development and CI only; refused in staging and production by
+//! configuration validation). The identity service (Prompt 3) replaces it with SurrealDB tables
+//! behind the same calls.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read as _;
 use std::path::Path;
 
 use aws_lc_rs::signature::{ED25519, UnparsedPublicKey};
 use serde::Deserialize;
 use songbird_proto::PUBLIC_KEY_LEN;
-use songbird_types::DeviceId;
+use songbird_types::{AccountId, DeviceId};
 
 /// Largest directory file accepted (checked before reading).
 pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Above this many recipients the device-list check uses hash sets instead of linear scans.
+const LINEAR_MAX: usize = 32;
 
 /// Directory loading errors. Never echo file contents.
 #[derive(Debug, thiserror::Error)]
@@ -44,20 +49,45 @@ struct File {
 struct Entry {
     id: String,
     auth_key: String,
+    /// Owning account; absent means the device is an account of its own.
+    #[serde(default)]
+    account: Option<String>,
 }
 
-/// Known devices and their Ed25519 authentication public keys.
+#[derive(Clone, Copy)]
+struct Device {
+    key: [u8; PUBLIC_KEY_LEN],
+    account: AccountId,
+}
+
+/// The sender's view of some accounts' devices is out of date (`SendResult` status 2).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Mismatch {
+    /// Devices of the addressed accounts the send left out.
+    pub missing: Vec<DeviceId>,
+    /// Addressed devices that do not exist.
+    pub extra: Vec<DeviceId>,
+}
+
+/// Known devices, their accounts and Ed25519 authentication public keys.
 #[derive(Default)]
 pub struct Directory {
-    keys: HashMap<DeviceId, [u8; PUBLIC_KEY_LEN]>,
+    devices: HashMap<DeviceId, Device>,
+    accounts: HashMap<AccountId, Vec<DeviceId>>,
 }
 
 impl std::fmt::Debug for Directory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Directory")
-            .field("devices", &self.keys.len())
+            .field("devices", &self.devices.len())
+            .field("accounts", &self.accounts.len())
             .finish()
     }
+}
+
+/// The account a device forms on its own (static files without an `account` field).
+fn own_account(d: &DeviceId) -> AccountId {
+    AccountId::from_bytes(*d.as_bytes())
 }
 
 impl Directory {
@@ -87,42 +117,75 @@ impl Directory {
     /// [`DirectoryError`].
     pub fn parse(text: &str) -> Result<Self, DirectoryError> {
         let file: File = toml::from_str(text).map_err(|_| DirectoryError::Malformed)?;
-        let mut keys = HashMap::with_capacity(file.devices.len());
+        let mut entries = Vec::with_capacity(file.devices.len());
         for (i, e) in file.devices.iter().enumerate() {
             let id = DeviceId::parse_hex(&e.id).map_err(|_| DirectoryError::Entry(i))?;
             let mut key = [0u8; PUBLIC_KEY_LEN];
             hex::decode_to_slice(&e.auth_key, &mut key).map_err(|_| DirectoryError::Entry(i))?;
-            if keys.insert(id, key).is_some() {
-                return Err(DirectoryError::Entry(i));
-            }
+            let account = match &e.account {
+                Some(a) => AccountId::parse_hex(a).map_err(|_| DirectoryError::Entry(i))?,
+                None => own_account(&id),
+            };
+            entries.push((id, key, account));
         }
-        Ok(Self { keys })
+        let mut dir = Self::from_entries(entries.iter().copied());
+        if dir.devices.len() != entries.len() {
+            // A duplicate device ID: report the first repeat.
+            let mut seen = HashSet::new();
+            let i = entries
+                .iter()
+                .position(|(id, _, _)| !seen.insert(*id))
+                .unwrap_or(0);
+            return Err(DirectoryError::Entry(i));
+        }
+        dir.accounts.values_mut().for_each(|v| v.sort_unstable());
+        Ok(dir)
     }
 
-    /// Builds a directory from known keys (tests, load generator).
+    fn from_entries(
+        entries: impl IntoIterator<Item = (DeviceId, [u8; PUBLIC_KEY_LEN], AccountId)>,
+    ) -> Self {
+        let mut dir = Self::default();
+        for (id, key, account) in entries {
+            if dir.devices.insert(id, Device { key, account }).is_none() {
+                dir.accounts.entry(account).or_default().push(id);
+            }
+        }
+        dir
+    }
+
+    /// Builds a directory where every device is an account of its own (tests, load generator).
     #[must_use]
     pub fn from_keys(keys: impl IntoIterator<Item = (DeviceId, [u8; PUBLIC_KEY_LEN])>) -> Self {
-        Self {
-            keys: keys.into_iter().collect(),
-        }
+        Self::from_entries(keys.into_iter().map(|(d, k)| (d, k, own_account(&d))))
+    }
+
+    /// Builds a directory with explicit accounts (tests).
+    #[must_use]
+    pub fn from_accounts(
+        entries: impl IntoIterator<Item = (DeviceId, [u8; PUBLIC_KEY_LEN], AccountId)>,
+    ) -> Self {
+        let mut dir = Self::from_entries(entries);
+        dir.accounts.values_mut().for_each(|v| v.sort_unstable());
+        dir
     }
 
     /// Number of devices.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.keys.len()
+        self.devices.len()
     }
 
     /// Whether the directory is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
+        self.devices.is_empty()
     }
 
     /// Whether `device` exists.
     #[must_use]
     pub fn contains(&self, device: &DeviceId) -> bool {
-        self.keys.contains_key(device)
+        self.devices.contains_key(device)
     }
 
     /// Whether `signature` over `msg` verifies under `device`'s key. An unknown device and a bad
@@ -131,15 +194,57 @@ impl Directory {
     pub fn verify(&self, device: &DeviceId, msg: &[u8], signature: &[u8]) -> bool {
         // Verify against a fixed dummy key for unknown devices so both paths cost the same.
         const DUMMY: [u8; PUBLIC_KEY_LEN] = [0x5a; PUBLIC_KEY_LEN];
-        let (key, known) = self.keys.get(device).map_or((&DUMMY, false), |k| (k, true));
+        let (key, known) = self
+            .devices
+            .get(device)
+            .map_or((&DUMMY, false), |d| (&d.key, true));
         let ok = UnparsedPublicKey::new(&ED25519, key)
             .verify(msg, signature)
             .is_ok();
         ok && known
     }
+
+    /// The device-list check (master prompt §5, `send`): every addressed device must exist, and
+    /// a send that addresses an account must address all of its devices (except the sender).
+    ///
+    /// # Errors
+    /// [`Mismatch`] listing missing and extra devices; the client re-encrypts and retries.
+    pub fn check_devices(
+        &self,
+        sender: &DeviceId,
+        recipients: &[&DeviceId],
+    ) -> Result<(), Mismatch> {
+        let mut m = Mismatch::default();
+        let mut accounts: Vec<AccountId> = Vec::new();
+        for r in recipients {
+            match self.devices.get(*r) {
+                None => m.extra.push(**r),
+                Some(d) if !accounts.contains(&d.account) => accounts.push(d.account),
+                Some(_) => {}
+            }
+        }
+        let set: Option<HashSet<&DeviceId>> =
+            (recipients.len() > LINEAR_MAX).then(|| recipients.iter().copied().collect());
+        let addressed = |d: &DeviceId| match &set {
+            Some(s) => s.contains(d),
+            None => recipients.contains(&d),
+        };
+        for a in &accounts {
+            for d in self.accounts.get(a).map(Vec::as_slice).unwrap_or_default() {
+                if d != sender && !addressed(d) {
+                    m.missing.push(*d);
+                }
+            }
+        }
+        if m.missing.is_empty() && m.extra.is_empty() {
+            Ok(())
+        } else {
+            Err(m)
+        }
+    }
 }
 
-/// Renders a directory file (used by the load generator and tests).
+/// Renders a directory file (used by tests).
 #[must_use]
 pub fn render(entries: &[(DeviceId, [u8; PUBLIC_KEY_LEN])]) -> String {
     let mut out = String::with_capacity(entries.len().saturating_mul(120));
@@ -159,19 +264,22 @@ mod tests {
     use super::*;
     use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair as _};
 
+    fn dev(b: u8) -> DeviceId {
+        DeviceId::from_bytes([b; 16])
+    }
+
     #[test]
     fn verifies_known_devices_only() {
         let pair = Ed25519KeyPair::from_seed_unchecked(&[3; 32]).unwrap();
         let mut pk = [0u8; 32];
         pk.copy_from_slice(pair.public_key().as_ref());
-        let dev = DeviceId::from_bytes([1; 16]);
-        let dir = Directory::parse(&render(&[(dev, pk)])).unwrap();
+        let dir = Directory::parse(&render(&[(dev(1), pk)])).unwrap();
         assert_eq!(dir.len(), 1);
         let sig = pair.sign(b"msg");
-        assert!(dir.verify(&dev, b"msg", sig.as_ref()));
-        assert!(!dir.verify(&dev, b"other", sig.as_ref()));
-        assert!(!dir.verify(&DeviceId::from_bytes([2; 16]), b"msg", sig.as_ref()));
-        assert!(!dir.verify(&dev, b"msg", &[0; 64]));
+        assert!(dir.verify(&dev(1), b"msg", sig.as_ref()));
+        assert!(!dir.verify(&dev(1), b"other", sig.as_ref()));
+        assert!(!dir.verify(&dev(2), b"msg", sig.as_ref()));
+        assert!(!dir.verify(&dev(1), b"msg", &[0; 64]));
     }
 
     #[test]
@@ -182,13 +290,41 @@ mod tests {
         ));
         let e = Directory::parse("[[devices]]\nid = \"zz\"\nauth_key = \"00\"\n").unwrap_err();
         assert_eq!(e.to_string(), "device directory entry 0 is invalid");
-        let dup = render(&[
-            (DeviceId::from_bytes([1; 16]), [0; 32]),
-            (DeviceId::from_bytes([1; 16]), [1; 32]),
-        ]);
+        let dup = render(&[(dev(1), [0; 32]), (dev(1), [1; 32])]);
         assert!(matches!(
             Directory::parse(&dup),
             Err(DirectoryError::Entry(1))
         ));
+    }
+
+    #[test]
+    fn device_list_check() {
+        let alice = AccountId::from_bytes([0xA; 16]);
+        let bob = AccountId::from_bytes([0xB; 16]);
+        let dir = Directory::from_accounts([
+            (dev(1), [0; 32], alice),
+            (dev(2), [0; 32], alice),
+            (dev(3), [0; 32], bob),
+            (dev(4), [0; 32], bob),
+        ]);
+        // Alice's device 1 to Bob (both devices) and her own other device: complete.
+        assert_eq!(
+            dir.check_devices(&dev(1), &[&dev(3), &dev(4), &dev(2)]),
+            Ok(())
+        );
+        // Not syncing to her own devices is allowed (her account is not addressed).
+        assert_eq!(dir.check_devices(&dev(1), &[&dev(3), &dev(4)]), Ok(()));
+        // Bob's device 4 left out, an unknown device added.
+        let m = dir.check_devices(&dev(1), &[&dev(3), &dev(9)]).unwrap_err();
+        assert_eq!(m.missing, vec![dev(4)]);
+        assert_eq!(m.extra, vec![dev(9)]);
+        // Large sends use sets and give the same answer.
+        let many: Vec<DeviceId> = (100..200).map(dev).collect();
+        let three = dev(3);
+        let mut refs: Vec<&DeviceId> = many.iter().collect();
+        refs.push(&three);
+        let m = dir.check_devices(&dev(1), &refs).unwrap_err();
+        assert_eq!(m.missing, vec![dev(4)]);
+        assert_eq!(m.extra.len(), 100);
     }
 }

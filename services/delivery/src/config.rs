@@ -42,6 +42,19 @@ impl Validate for DeliveryConfig {
                 "delivery.directory.file",
                 "a static device directory is for development and CI only",
             );
+            v.check(
+                d.mailbox.backend == MailboxBackend::Iggy,
+                "delivery.mailbox.backend",
+                "must be iggy in staging and production",
+            );
+            v.check(
+                d.mailbox
+                    .iggy
+                    .as_ref()
+                    .is_some_and(|s| s.tls_ca.is_some() && s.tls_domain.is_some()),
+                "delivery.mailbox.iggy.tls_ca",
+                "and tls_domain are required in staging and production",
+            );
         }
         v.check(
             d.session.drain_window_ms < self.common.shutdown_grace_secs.saturating_mul(1000),
@@ -71,9 +84,9 @@ pub struct DeliverySettings {
     /// Where device authentication keys come from.
     #[serde(default)]
     pub directory: DirectoryConfig,
-    /// The in-memory mailbox (milestone 1).
+    /// Mailbox store.
     #[serde(default)]
-    pub mailbox: MemoryMailboxConfig,
+    pub mailbox: MailboxConfig,
 }
 
 impl Validate for DeliverySettings {
@@ -108,26 +121,48 @@ pub struct DirectoryConfig {
     pub file: Option<PathBuf>,
 }
 
+/// Mailbox store backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MailboxBackend {
+    /// In memory, lost on restart (development and tests).
+    #[default]
+    Memory,
+    /// SurrealDB with group commit (M2's first design; development).
+    Surrealdb,
+    /// Apache Iggy log (deployments, D-0029).
+    Iggy,
+}
+
 /// `[delivery.mailbox]`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub struct MemoryMailboxConfig {
+pub struct MailboxConfig {
+    /// Which store.
+    pub backend: MailboxBackend,
     /// Unacknowledged envelopes kept per device before sends to it are refused (retryable).
     pub max_per_device: usize,
-    /// Store generation announced in `Hello`.
+    /// Store generation announced in `Hello` (memory backend; SurrealDB keeps its own).
     pub store_generation: u64,
+    /// SurrealDB settings (required for that backend).
+    pub surrealdb: Option<SurrealSettings>,
+    /// Iggy settings (required for that backend).
+    pub iggy: Option<IggySettings>,
 }
 
-impl Default for MemoryMailboxConfig {
+impl Default for MailboxConfig {
     fn default() -> Self {
         Self {
+            backend: MailboxBackend::Memory,
             max_per_device: 10_000,
             store_generation: 1,
+            surrealdb: None,
+            iggy: None,
         }
     }
 }
 
-impl Validate for MemoryMailboxConfig {
+impl Validate for MailboxConfig {
     fn validate(&self, v: &mut Validator) {
         v.check(
             (1..=1_000_000).contains(&self.max_per_device),
@@ -138,6 +173,222 @@ impl Validate for MemoryMailboxConfig {
             self.store_generation >= 1,
             "store_generation",
             "must be >= 1",
+        );
+        v.check(
+            self.backend != MailboxBackend::Surrealdb || self.surrealdb.is_some(),
+            "surrealdb",
+            "is required when backend = \"surrealdb\"",
+        );
+        v.check(
+            self.backend != MailboxBackend::Iggy || self.iggy.is_some(),
+            "iggy",
+            "is required when backend = \"iggy\"",
+        );
+        if let Some(s) = &self.surrealdb {
+            v.section("surrealdb", s);
+        }
+        if let Some(s) = &self.iggy {
+            v.section("iggy", s);
+        }
+    }
+}
+
+/// `[delivery.mailbox.surrealdb]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SurrealSettings {
+    /// `host:port` of the RPC endpoint.
+    pub addr: String,
+    /// Host name for TLS and the `Host` header.
+    pub host: String,
+    /// PEM CA certificate for the server's TLS (required outside development).
+    #[serde(default)]
+    pub tls_ca: Option<PathBuf>,
+    /// Root user.
+    pub user: String,
+    /// Root password.
+    pub pass: SecretRef,
+    /// Namespace.
+    #[serde(default = "default_ns")]
+    pub namespace: String,
+    /// Database.
+    #[serde(default = "default_ns")]
+    pub database: String,
+    /// 64 hex characters keying idempotency records; the same on every node.
+    pub idempotency_secret: SecretRef,
+    /// Most sends per group-commit transaction.
+    #[serde(default = "default_max_batch")]
+    pub max_batch: usize,
+    /// Longest a send waits for others to share its transaction, in microseconds (0: commit
+    /// what is queued at once; batches still form while a commit is in flight).
+    #[serde(default = "default_max_wait_us")]
+    pub max_wait_us: u64,
+    /// Batched ACK deletes are written this often.
+    #[serde(default = "default_ack_interval_ms")]
+    pub ack_interval_ms: u64,
+    /// Connect and per-request timeout.
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_ns() -> String {
+    "songbird".into()
+}
+const fn default_max_batch() -> usize {
+    256
+}
+const fn default_max_wait_us() -> u64 {
+    // No artificial wait: a batch is whatever queued during the previous commit (measured best
+    // at every load, D-0027).
+    0
+}
+const fn default_ack_interval_ms() -> u64 {
+    50
+}
+const fn default_timeout_ms() -> u64 {
+    5_000
+}
+
+impl Validate for SurrealSettings {
+    fn validate(&self, v: &mut Validator) {
+        v.check(
+            songbird_types::dns::is_valid_host(self.host.as_bytes()),
+            "host",
+            "must be a DNS host name",
+        );
+        v.check(!self.addr.is_empty(), "addr", "must be host:port");
+        v.check(
+            (1..=4096).contains(&self.max_batch),
+            "max_batch",
+            "must be in 1..=4096",
+        );
+        v.check(
+            self.max_wait_us <= 100_000,
+            "max_wait_us",
+            "must be at most 100000",
+        );
+        v.check(
+            (1..=1_000).contains(&self.ack_interval_ms),
+            "ack_interval_ms",
+            "must be in 1..=1000",
+        );
+        v.check(
+            (100..=60_000).contains(&self.timeout_ms),
+            "timeout_ms",
+            "must be in 100..=60000",
+        );
+    }
+}
+
+/// `[delivery.mailbox.iggy]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IggySettings {
+    /// `host:port` of the TCP endpoint.
+    pub addr: String,
+    /// TLS server name (required outside development).
+    #[serde(default)]
+    pub tls_domain: Option<String>,
+    /// PEM CA certificate for the server's TLS (required outside development).
+    #[serde(default)]
+    pub tls_ca: Option<PathBuf>,
+    /// User.
+    pub user: String,
+    /// Password.
+    pub pass: SecretRef,
+    /// Stream name.
+    #[serde(default = "default_ns")]
+    pub stream: String,
+    /// Topic name.
+    #[serde(default = "default_topic")]
+    pub topic: String,
+    /// Partitions, one writer each (fixed when the topic is created).
+    #[serde(default = "default_partitions")]
+    pub partitions: u32,
+    /// 64 hex characters keying idempotency records; the same on every node.
+    pub idempotency_secret: SecretRef,
+    /// Most sends per append.
+    #[serde(default = "default_max_batch")]
+    pub max_batch: usize,
+    /// ACK checkpoints are written this often.
+    #[serde(default = "default_ack_interval_ms")]
+    pub ack_interval_ms: u64,
+    /// How long a send waits for its writers.
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+    /// Pending entries older than this are copied forward so old segments can be deleted.
+    #[serde(default = "default_relocate_after_secs")]
+    pub relocate_after_secs: u64,
+    /// Sealed segments below the low-water offset are deleted after this (topic
+    /// `message_expiry`, applied when the topic is created).
+    #[serde(default = "default_segment_expiry_secs")]
+    pub segment_expiry_secs: u64,
+    /// Log records cached in memory per partition for reads, in MiB.
+    #[serde(default = "default_cache_mib")]
+    pub cache_mib: usize,
+}
+
+fn default_topic() -> String {
+    "mailbox".into()
+}
+const fn default_partitions() -> u32 {
+    4
+}
+const fn default_relocate_after_secs() -> u64 {
+    3600
+}
+const fn default_segment_expiry_secs() -> u64 {
+    8 * 3600
+}
+const fn default_cache_mib() -> usize {
+    64
+}
+
+impl Validate for IggySettings {
+    fn validate(&self, v: &mut Validator) {
+        v.check(!self.addr.is_empty(), "addr", "must be host:port");
+        if let Some(d) = &self.tls_domain {
+            v.check(
+                songbird_types::dns::is_valid_host(d.as_bytes()),
+                "tls_domain",
+                "must be a DNS host name",
+            );
+        }
+        v.check(
+            (1..=1024).contains(&self.partitions),
+            "partitions",
+            "must be in 1..=1024",
+        );
+        v.check(
+            (1..=4096).contains(&self.max_batch),
+            "max_batch",
+            "must be in 1..=4096",
+        );
+        v.check(
+            (1..=1_000).contains(&self.ack_interval_ms),
+            "ack_interval_ms",
+            "must be in 1..=1000",
+        );
+        v.check(
+            (100..=60_000).contains(&self.timeout_ms),
+            "timeout_ms",
+            "must be in 100..=60000",
+        );
+        v.check(
+            (60..=7 * 24 * 3600).contains(&self.relocate_after_secs),
+            "relocate_after_secs",
+            "must be in 60..=604800",
+        );
+        // Idempotency records must outlive their 6-hour window on disk.
+        v.check(
+            self.segment_expiry_secs >= 7 * 3600,
+            "segment_expiry_secs",
+            "must be at least 25200 (7 h)",
+        );
+        v.check(
+            (1..=65_536).contains(&self.cache_mib),
+            "cache_mib",
+            "must be in 1..=65536",
         );
     }
 }

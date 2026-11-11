@@ -43,17 +43,17 @@ impl Validate for DeliveryConfig {
                 "a static device directory is for development and CI only",
             );
             v.check(
-                d.mailbox.backend == MailboxBackend::Surrealdb,
+                d.mailbox.backend == MailboxBackend::Iggy,
                 "delivery.mailbox.backend",
-                "must be surrealdb in staging and production",
+                "must be iggy in staging and production",
             );
             v.check(
                 d.mailbox
-                    .surrealdb
+                    .iggy
                     .as_ref()
-                    .is_some_and(|s| s.tls_ca.is_some()),
-                "delivery.mailbox.surrealdb.tls_ca",
-                "is required in staging and production",
+                    .is_some_and(|s| s.tls_ca.is_some() && s.tls_domain.is_some()),
+                "delivery.mailbox.iggy.tls_ca",
+                "and tls_domain are required in staging and production",
             );
         }
         v.check(
@@ -128,8 +128,10 @@ pub enum MailboxBackend {
     /// In memory, lost on restart (development and tests).
     #[default]
     Memory,
-    /// SurrealDB with group commit (deployments).
+    /// SurrealDB with group commit (M2's first design; development).
     Surrealdb,
+    /// Apache Iggy log (deployments, D-0029).
+    Iggy,
 }
 
 /// `[delivery.mailbox]`.
@@ -144,6 +146,8 @@ pub struct MailboxConfig {
     pub store_generation: u64,
     /// SurrealDB settings (required for that backend).
     pub surrealdb: Option<SurrealSettings>,
+    /// Iggy settings (required for that backend).
+    pub iggy: Option<IggySettings>,
 }
 
 impl Default for MailboxConfig {
@@ -153,6 +157,7 @@ impl Default for MailboxConfig {
             max_per_device: 10_000,
             store_generation: 1,
             surrealdb: None,
+            iggy: None,
         }
     }
 }
@@ -174,8 +179,16 @@ impl Validate for MailboxConfig {
             "surrealdb",
             "is required when backend = \"surrealdb\"",
         );
+        v.check(
+            self.backend != MailboxBackend::Iggy || self.iggy.is_some(),
+            "iggy",
+            "is required when backend = \"iggy\"",
+        );
         if let Some(s) = &self.surrealdb {
             v.section("surrealdb", s);
+        }
+        if let Some(s) = &self.iggy {
+            v.section("iggy", s);
         }
     }
 }
@@ -263,6 +276,119 @@ impl Validate for SurrealSettings {
             (100..=60_000).contains(&self.timeout_ms),
             "timeout_ms",
             "must be in 100..=60000",
+        );
+    }
+}
+
+/// `[delivery.mailbox.iggy]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IggySettings {
+    /// `host:port` of the TCP endpoint.
+    pub addr: String,
+    /// TLS server name (required outside development).
+    #[serde(default)]
+    pub tls_domain: Option<String>,
+    /// PEM CA certificate for the server's TLS (required outside development).
+    #[serde(default)]
+    pub tls_ca: Option<PathBuf>,
+    /// User.
+    pub user: String,
+    /// Password.
+    pub pass: SecretRef,
+    /// Stream name.
+    #[serde(default = "default_ns")]
+    pub stream: String,
+    /// Topic name.
+    #[serde(default = "default_topic")]
+    pub topic: String,
+    /// Partitions, one writer each (fixed when the topic is created).
+    #[serde(default = "default_partitions")]
+    pub partitions: u32,
+    /// 64 hex characters keying idempotency records; the same on every node.
+    pub idempotency_secret: SecretRef,
+    /// Most sends per append.
+    #[serde(default = "default_max_batch")]
+    pub max_batch: usize,
+    /// ACK checkpoints are written this often.
+    #[serde(default = "default_ack_interval_ms")]
+    pub ack_interval_ms: u64,
+    /// How long a send waits for its writers.
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+    /// Pending entries older than this are copied forward so old segments can be deleted.
+    #[serde(default = "default_relocate_after_secs")]
+    pub relocate_after_secs: u64,
+    /// Sealed segments below the low-water offset are deleted after this (topic
+    /// `message_expiry`, applied when the topic is created).
+    #[serde(default = "default_segment_expiry_secs")]
+    pub segment_expiry_secs: u64,
+    /// Log records cached in memory per partition for reads, in MiB.
+    #[serde(default = "default_cache_mib")]
+    pub cache_mib: usize,
+}
+
+fn default_topic() -> String {
+    "mailbox".into()
+}
+const fn default_partitions() -> u32 {
+    4
+}
+const fn default_relocate_after_secs() -> u64 {
+    3600
+}
+const fn default_segment_expiry_secs() -> u64 {
+    8 * 3600
+}
+const fn default_cache_mib() -> usize {
+    64
+}
+
+impl Validate for IggySettings {
+    fn validate(&self, v: &mut Validator) {
+        v.check(!self.addr.is_empty(), "addr", "must be host:port");
+        if let Some(d) = &self.tls_domain {
+            v.check(
+                songbird_types::dns::is_valid_host(d.as_bytes()),
+                "tls_domain",
+                "must be a DNS host name",
+            );
+        }
+        v.check(
+            (1..=1024).contains(&self.partitions),
+            "partitions",
+            "must be in 1..=1024",
+        );
+        v.check(
+            (1..=4096).contains(&self.max_batch),
+            "max_batch",
+            "must be in 1..=4096",
+        );
+        v.check(
+            (1..=1_000).contains(&self.ack_interval_ms),
+            "ack_interval_ms",
+            "must be in 1..=1000",
+        );
+        v.check(
+            (100..=60_000).contains(&self.timeout_ms),
+            "timeout_ms",
+            "must be in 100..=60000",
+        );
+        v.check(
+            (60..=7 * 24 * 3600).contains(&self.relocate_after_secs),
+            "relocate_after_secs",
+            "must be in 60..=604800",
+        );
+        // Idempotency records must outlive their 6-hour window on disk.
+        v.check(
+            self.segment_expiry_secs >= 7 * 3600,
+            "segment_expiry_secs",
+            "must be at least 25200 (7 h)",
+        );
+        v.check(
+            (1..=65_536).contains(&self.cache_mib),
+            "cache_mib",
+            "must be in 1..=65536",
         );
     }
 }

@@ -18,6 +18,7 @@ use bytes::Bytes;
 use songbird_client::{Client, ClientConfig, DeviceKey, Event, ResumeState};
 use songbird_delivery::config::DeliveryConfig;
 use songbird_delivery::{DeliveryMetrics, DeliverySettings, Directory, Shared, server};
+use songbird_mailbox::iggy::{IggyConfig, IggyConnection, IggyMailbox};
 use songbird_mailbox::memory::MemoryMailbox;
 use songbird_mailbox::surreal::{SurrealConfig, SurrealMailbox};
 use songbird_mailbox::{AnyMailbox, Mailbox};
@@ -89,8 +90,39 @@ pub fn surreal_config() -> Option<SurrealConfig> {
     })
 }
 
-/// The mailbox the invariant tests run on: SurrealDB when configured, else in memory.
+/// Apache Iggy for the tests, if `SONGBIRD_TEST_IGGY` (`host:port`) and `SONGBIRD_TEST_IGGY_PASS`
+/// are set (`SONGBIRD_TEST_IGGY_USER` defaults to `iggy`); each call gets a fresh stream. With
+/// `SONGBIRD_REQUIRE_IGGY=1` (the compose CI job) a missing server fails the test.
+#[must_use]
+pub fn iggy_config() -> Option<IggyConfig> {
+    let Ok(addr) = std::env::var("SONGBIRD_TEST_IGGY") else {
+        assert!(
+            std::env::var("SONGBIRD_REQUIRE_IGGY").is_err(),
+            "SONGBIRD_REQUIRE_IGGY is set but SONGBIRD_TEST_IGGY is not"
+        );
+        return None;
+    };
+    let connection = IggyConnection {
+        addr,
+        tls_domain: None,
+        tls_ca_file: None,
+        user: std::env::var("SONGBIRD_TEST_IGGY_USER").unwrap_or_else(|_| "iggy".into()),
+        pass: std::env::var("SONGBIRD_TEST_IGGY_PASS").expect("SONGBIRD_TEST_IGGY_PASS"),
+    };
+    let mut cfg = IggyConfig::new(connection, [9; 32]);
+    let id = DeviceId::random().unwrap().to_hex_unredacted();
+    cfg.stream = format!("e2e_{}", &id[..16]);
+    cfg.ack_interval = Duration::from_millis(10);
+    cfg.timeout = Duration::from_secs(10);
+    Some(cfg)
+}
+
+/// The mailbox the invariant tests run on: Iggy when configured (the deployed store), else
+/// SurrealDB when configured, else in memory.
 pub async fn test_mailbox() -> AnyMailbox {
+    if let Some(cfg) = iggy_config() {
+        return AnyMailbox::Iggy(IggyMailbox::connect(cfg).await.unwrap());
+    }
     match surreal_config() {
         Some(cfg) => AnyMailbox::Surreal(SurrealMailbox::connect(cfg).await.unwrap()),
         None => AnyMailbox::Memory(MemoryMailbox::new(10_000, 1)),

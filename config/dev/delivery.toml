@@ -14,8 +14,19 @@ listen = "127.0.0.1:9201"
 server_name = "localhost"
 # No [delivery.directory] file: no device can authenticate. `songbird-loadgen keys` writes one.
 
-# Mailbox store. `memory` (default) loses everything on restart. To use the docker compose
-# SurrealDB (`cargo xtask compose up`), uncomment and point the secrets at files you create:
+# Mailbox store. `memory` (default) loses everything on restart. To use the docker compose stores:
+# Iggy, the deployed store (`cargo xtask compose up`), uncomment and point the secrets at files
+# you create:
+#
+# [delivery.mailbox]
+# backend = "iggy"
+# [delivery.mailbox.iggy]
+# addr = "127.0.0.1:47890"
+# user = "iggy"
+# pass = { env = "IGGY_ROOT_PASSWORD" }
+# idempotency_secret = { file = "/path/to/idempotency-secret.hex" }   # 64 hex chars, mode 0600
+#
+# Or SurrealDB (M2's first design), likewise:
 #
 # [delivery.mailbox]
 # backend = "surrealdb"

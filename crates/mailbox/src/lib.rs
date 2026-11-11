@@ -12,8 +12,9 @@
 //!   implementations may batch the deletes for a few tens of milliseconds.
 //! - [`Mailbox::expire_older_than`]: delete what has waited too long (30 days, invariant 3).
 //!
-//! Implementations: [`memory::MemoryMailbox`] (tests and development) and
-//! [`surreal::SurrealMailbox`] (SurrealDB with group commit, milestone 2).
+//! Implementations: [`memory::MemoryMailbox`] (tests and development),
+//! [`surreal::SurrealMailbox`] (SurrealDB with group commit, milestone 2's first design) and
+//! [`iggy::IggyMailbox`] (Apache Iggy log, deployments, D-0029).
 #![forbid(unsafe_code)]
 
 use std::future::Future;
@@ -23,6 +24,7 @@ use aws_lc_rs::hmac;
 use bytes::Bytes;
 use songbird_types::DeviceId;
 
+pub mod iggy;
 pub mod memory;
 pub mod surreal;
 
@@ -256,8 +258,10 @@ pub(crate) fn idempotency_tag(key: &hmac::Key, k: &[u8; 16]) -> [u8; 32] {
 pub enum AnyMailbox {
     /// In memory (development, tests).
     Memory(memory::MemoryMailbox),
-    /// SurrealDB (deployments).
+    /// SurrealDB (M2 first design; development).
     Surreal(surreal::SurrealMailbox),
+    /// Apache Iggy (deployments, D-0029).
+    Iggy(iggy::IggyMailbox),
 }
 
 impl Mailbox for AnyMailbox {
@@ -265,6 +269,7 @@ impl Mailbox for AnyMailbox {
         match self {
             Self::Memory(m) => m.store(req).await,
             Self::Surreal(m) => m.store(req).await,
+            Self::Iggy(m) => m.store(req).await,
         }
     }
 
@@ -277,6 +282,7 @@ impl Mailbox for AnyMailbox {
         match self {
             Self::Memory(m) => m.fetch_after(device, after_seq, limit).await,
             Self::Surreal(m) => m.fetch_after(device, after_seq, limit).await,
+            Self::Iggy(m) => m.fetch_after(device, after_seq, limit).await,
         }
     }
 
@@ -284,6 +290,7 @@ impl Mailbox for AnyMailbox {
         match self {
             Self::Memory(m) => m.ack_up_to(device, up_to_seq).await,
             Self::Surreal(m) => m.ack_up_to(device, up_to_seq).await,
+            Self::Iggy(m) => m.ack_up_to(device, up_to_seq).await,
         }
     }
 
@@ -291,6 +298,7 @@ impl Mailbox for AnyMailbox {
         match self {
             Self::Memory(m) => m.expire_older_than(age).await,
             Self::Surreal(m) => m.expire_older_than(age).await,
+            Self::Iggy(m) => m.expire_older_than(age).await,
         }
     }
 
@@ -298,6 +306,7 @@ impl Mailbox for AnyMailbox {
         match self {
             Self::Memory(m) => m.store_generation().await,
             Self::Surreal(m) => m.store_generation().await,
+            Self::Iggy(m) => m.store_generation().await,
         }
     }
 
@@ -305,6 +314,7 @@ impl Mailbox for AnyMailbox {
         match self {
             Self::Memory(m) => m.count_pending(device).await,
             Self::Surreal(m) => m.count_pending(device).await,
+            Self::Iggy(m) => m.count_pending(device).await,
         }
     }
 }

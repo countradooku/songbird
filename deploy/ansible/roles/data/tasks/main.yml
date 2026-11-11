@@ -8,6 +8,7 @@
     mode: "0700"
   loop:
     - { path: surrealdb, uid: 65532 }
+    - { path: iggy, uid: 0 }
     - { path: valkey-jobs, uid: 999 }
     - { path: garage, uid: 65532 }
     - { path: garage/meta, uid: 65532 }
@@ -40,6 +41,38 @@
       - /var/lib/songbird/surrealdb:/data
       - "{{ songbird_pki_dir }}/surrealdb:/tls:ro"
     security_opts: [no-new-privileges]
+    cap_drop: [ALL]
+  no_log: true
+
+# Mailbox log (D-0029). Topic durability `persisted` (set by the mailbox) makes Iggy fsync before
+# it confirms (invariant 1). Iggy 0.10 runs on io_uring: the seccomp profile is Docker's default
+# plus the three io_uring syscalls (deploy/compose/iggy-seccomp.json). HTTP, QUIC and WebSocket
+# listeners are off; TCP with TLS on the private address only.
+- name: Iggy (private address, TLS)
+  community.docker.docker_container:
+    name: songbird-iggy
+    image: "{{ images.iggy }}"
+    network_mode: host
+    restart_policy: unless-stopped
+    env:
+      IGGY_PATH: /data
+      IGGY_TCP_ADDRESS: "{{ private_ip }}:8090"
+      IGGY_TCP_TLS_ENABLED: "true"
+      IGGY_TCP_TLS_CERT_FILE: /tls/tls.crt
+      IGGY_TCP_TLS_KEY_FILE: /tls/tls.key
+      IGGY_HTTP_ENABLED: "false"
+      IGGY_QUIC_ENABLED: "false"
+      IGGY_WEBSOCKET_ENABLED: "false"
+      IGGY_SHARDING_CPU_ALLOCATION: "{{ iggy_cpu_allocation }}"
+      IGGY_MEMORY_POOL_SIZE: "{{ iggy_memory_pool }}"
+      IGGY_ROOT_USERNAME: "{{ secrets.iggy_user }}"
+      IGGY_ROOT_PASSWORD: "{{ secrets.iggy_password }}"
+    volumes:
+      - /var/lib/songbird/iggy:/data
+      - "{{ songbird_pki_dir }}/iggy:/tls:ro"
+    security_opts:
+      - no-new-privileges
+      - "seccomp={{ lookup('ansible.builtin.file', playbook_dir ~ '/../compose/iggy-seccomp.json') | from_json | to_json }}"
     cap_drop: [ALL]
   no_log: true
 

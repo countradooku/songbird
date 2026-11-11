@@ -7,11 +7,12 @@ use std::time::Duration;
 
 use rustls_pki_types::CertificateDer;
 use rustls_pki_types::pem::PemObject as _;
-use songbird_delivery::config::{MailboxBackend, SurrealSettings};
+use songbird_delivery::config::{IggySettings, MailboxBackend, SurrealSettings};
 use songbird_delivery::{
     DeliveryConfig, DeliveryMetrics, DeliverySettings, Directory, Shared, server,
 };
 use songbird_mailbox::AnyMailbox;
+use songbird_mailbox::iggy::{IggyConfig, IggyConnection, IggyMailbox};
 use songbird_mailbox::memory::MemoryMailbox;
 use songbird_mailbox::surreal::{SurrealConfig, SurrealMailbox};
 use songbird_router::LocalRouter;
@@ -27,13 +28,60 @@ struct Delivery {
     directory: Directory,
     metrics: DeliveryMetrics,
     tls: Option<tokio_rustls::TlsAcceptor>,
-    surreal: Option<SurrealConfig>,
+    store: Store,
+}
+
+/// The mailbox store chosen by configuration, resolved before anything listens.
+enum Store {
+    Memory,
+    Surreal(Box<SurrealConfig>),
+    Iggy(Box<IggyConfig>),
 }
 
 impl std::fmt::Debug for Delivery {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Delivery").finish_non_exhaustive()
     }
+}
+
+fn idempotency_secret(r: &songbird_types::SecretRef) -> Result<[u8; 32], BoxError> {
+    let secret_hex = r.resolve()?;
+    let mut out = [0u8; 32];
+    hex::decode_to_slice(secret_hex.expose().trim(), &mut out)
+        .map_err(|_| "idempotency_secret must be 64 hex characters")?;
+    Ok(out)
+}
+
+/// Resolves the Iggy settings (secrets) at startup, before anything listens.
+fn iggy_config(
+    s: &IggySettings,
+    max_per_device: usize,
+    generation: u64,
+) -> Result<IggyConfig, BoxError> {
+    let connection = IggyConnection {
+        addr: s.addr.clone(),
+        tls_domain: s.tls_domain.clone(),
+        tls_ca_file: s
+            .tls_ca
+            .as_ref()
+            .map(|p| p.to_str().map(str::to_owned).ok_or("tls_ca must be UTF-8"))
+            .transpose()?,
+        user: s.user.clone(),
+        pass: s.pass.resolve()?.expose().to_owned(),
+    };
+    let mut cfg = IggyConfig::new(connection, idempotency_secret(&s.idempotency_secret)?);
+    cfg.stream.clone_from(&s.stream);
+    cfg.topic.clone_from(&s.topic);
+    cfg.partitions = s.partitions;
+    cfg.max_batch = s.max_batch;
+    cfg.max_per_device = u64::try_from(max_per_device).unwrap_or(u64::MAX);
+    cfg.ack_interval = Duration::from_millis(s.ack_interval_ms);
+    cfg.timeout = Duration::from_millis(s.timeout_ms);
+    cfg.relocate_after = Duration::from_secs(s.relocate_after_secs);
+    cfg.segment_expiry = Duration::from_secs(s.segment_expiry_secs);
+    cfg.cache_bytes = s.cache_mib.saturating_mul(1 << 20);
+    cfg.store_generation = generation;
+    Ok(cfg)
 }
 
 /// Resolves the SurrealDB settings (secrets, CA) at startup, before anything listens.
@@ -54,10 +102,7 @@ fn surreal_config(s: &SurrealSettings, max_per_device: usize) -> Result<SurrealC
             Some(Arc::new(cfg))
         }
     };
-    let secret_hex = s.idempotency_secret.resolve()?;
-    let mut idempotency_secret = [0u8; 32];
-    hex::decode_to_slice(secret_hex.expose().trim(), &mut idempotency_secret)
-        .map_err(|_| "idempotency_secret must be 64 hex characters")?;
+    let idempotency_secret = idempotency_secret(&s.idempotency_secret)?;
     Ok(SurrealConfig {
         rpc: songbird_surreal::Config {
             addr: s.addr.clone(),
@@ -90,12 +135,24 @@ impl Service for Delivery {
         };
         tracing::info!(devices = directory.len(), "device directory loaded");
         let tls = d.tls.as_ref().map(server::tls_acceptor).transpose()?;
-        let surreal = match (d.mailbox.backend, &d.mailbox.surrealdb) {
-            (MailboxBackend::Surrealdb, Some(s)) => {
-                Some(surreal_config(s, d.mailbox.max_per_device)?)
+        let store = match d.mailbox.backend {
+            MailboxBackend::Memory => Store::Memory,
+            MailboxBackend::Surrealdb => {
+                let s = d
+                    .mailbox
+                    .surrealdb
+                    .as_ref()
+                    .ok_or("mailbox.surrealdb is required")?;
+                Store::Surreal(Box::new(surreal_config(s, d.mailbox.max_per_device)?))
             }
-            (MailboxBackend::Surrealdb, None) => return Err("mailbox.surrealdb is required".into()),
-            (MailboxBackend::Memory, _) => None,
+            MailboxBackend::Iggy => {
+                let s = d.mailbox.iggy.as_ref().ok_or("mailbox.iggy is required")?;
+                Store::Iggy(Box::new(iggy_config(
+                    s,
+                    d.mailbox.max_per_device,
+                    d.mailbox.store_generation,
+                )?))
+            }
         };
         let m = DeliveryMetrics::default();
         m.register(metrics)?;
@@ -104,18 +161,23 @@ impl Service for Delivery {
             directory,
             metrics: m,
             tls,
-            surreal,
+            store,
         })
     }
 
     async fn run(self, mut ctx: Ctx) -> Result<(), BoxError> {
-        let mailbox = match self.surreal {
-            Some(cfg) => {
-                let m = SurrealMailbox::connect(cfg).await?;
+        let mailbox = match self.store {
+            Store::Surreal(cfg) => {
+                let m = SurrealMailbox::connect(*cfg).await?;
                 tracing::info!("surrealdb mailbox connected");
                 AnyMailbox::Surreal(m)
             }
-            None => AnyMailbox::Memory(MemoryMailbox::new(
+            Store::Iggy(cfg) => {
+                let m = IggyMailbox::connect(*cfg).await?;
+                tracing::info!("iggy mailbox connected and replayed");
+                AnyMailbox::Iggy(m)
+            }
+            Store::Memory => AnyMailbox::Memory(MemoryMailbox::new(
                 self.settings.mailbox.max_per_device,
                 self.settings.mailbox.store_generation,
             )),
@@ -130,9 +192,26 @@ impl Service for Delivery {
             self.metrics,
         ));
         let (stop_tx, stop_rx) = watch::channel(false);
-        let serve = tokio::spawn(server::serve(listener, self.tls, shared, stop_rx));
+        let serve = tokio::spawn(server::serve(listener, self.tls, shared.clone(), stop_rx));
         ctx.health.set_ready(true);
+        // A fenced Iggy writer (another node took the partitions over) makes this node unready.
+        let watch_shared = shared.clone();
+        let health = ctx.health.clone();
+        let watcher = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                tick.tick().await;
+                if let AnyMailbox::Iggy(m) = &watch_shared.mailbox
+                    && !m.is_healthy()
+                {
+                    tracing::error!("mailbox writer fenced; marking not ready");
+                    health.set_ready(false);
+                    return;
+                }
+            }
+        });
         ctx.shutdown().await;
+        watcher.abort();
         let _ = stop_tx.send(true);
         serve.await?;
         Ok(())

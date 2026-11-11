@@ -36,7 +36,9 @@ Implemented in `crates/proto` (shared by server and clients); decisions D-0019, 
 
 Rejection reasons: 1 rate limited, 2 too large, 3 too many recipients, 4 unknown recipient
 (unused since milestone 2: unknown devices are reported in a device mismatch), 5 duplicate
-recipient, 6 store unavailable, 7 idempotency key already used for other recipients, 8 stale
+recipient, 6 store unavailable, 7 idempotency key already used for other recipients (detected
+when the earlier send shares a mailbox partition with this one; a reuse that cannot be detected is
+stored as a new send, never dropped), 8 stale
 MLS epoch (the group moved on; process the winning commit, then retry from the new epoch).
 1 and 6 are retryable after `retry_after_ms`, with the
 same idempotency key. Unknown reason codes are kept (forward compatibility).
@@ -162,8 +164,11 @@ A `Send` carries either one opaque, client-encrypted envelope per recipient devi
 sessions) or, with flag `0x02`, one ciphertext for every listed device (an MLS group or channel
 message), which the server stores once with a small entry per device. The server checks limits,
 rate limits and recipients, stores every envelope in the recipients' mailboxes with each device's
-next `seq` (all or nothing, fsynced), and only then answers `SendResult` accepted (invariant 1)
-and routes the envelopes to connected recipients. A send rejected for any reason stored nothing.
+next `seq` (fsynced), and only then answers `SendResult` accepted (invariant 1) and routes the
+envelopes to connected recipients. A send rejected for a reason other than 6 stored nothing. After
+reason 6 (store unavailable) the send may already be recorded, and if so the server stores it for
+every recipient by itself; retrying with the same idempotency key returns the original result and
+stores nothing twice.
 
 **Device lists.** Every addressed device must exist, and a send that addresses an account must
 address all of that account's devices except the sending device. Otherwise the answer is

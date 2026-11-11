@@ -374,8 +374,10 @@ fn inv6_no_identifiers_in_logs_or_metrics() {
     }
     let buf = Buf::default();
     let writer = buf.clone();
+    // Everything at TRACE, through the production filter (which silences third-party crates
+    // that log addresses, such as the Iggy SDK; our own code is fully captured).
     let sub = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
+        .with_env_filter(songbird_telemetry::log_filter("trace").unwrap())
         .with_writer(move || writer.clone())
         .finish();
     let _g = tracing::subscriber::set_default(sub);

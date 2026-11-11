@@ -35,17 +35,49 @@ aggregate counters only; nothing in them or in the logs identifies a device (inv
 - Impact: sends are rejected as retryable; clients keep their messages and retry with the same
   idempotency key; sockets stay open; delivery of already-stored envelopes resumes when the store
   returns (failed drains retry every second).
-- Logs: `mailbox store request failed` (with the error kind: timeout, connection lost) and
-  `mailbox ack flush failed`. The mailbox reconnects by itself on the next request; ACK flushes
-  that failed are kept and retried every 50 ms.
-- Immediate actions: check SurrealDB (`/health`, its logs, disk space, the data host). Nothing to
-  do on the delivery side: sends wait up to the request timeout (`timeout_ms`, 5 s), are retried by
-  the writer, then rejected as retryable; clients retry with the same idempotency key.
-- Verification: `mailbox_errors_total` and `sends_rejected_total` flat again; the load generator's
-  SurrealDB-pause run (8 s pause, report P02-M2) shows the expected behaviour: sends stall for the
-  pause, nothing is lost.
+- Logs: `mailbox append failed; resending` and `mailbox read failed`, each with Iggy's numeric
+  error code. A writer resends the same batch (same producer sequence, so it is written once)
+  until Iggy confirms; sends wait up to `timeout_ms` (5 s) and are then rejected as retryable;
+  clients retry with the same idempotency key.
+- Immediate actions: check Iggy (`songbird-iggy` container logs, disk space on the data host,
+  `/var/lib/songbird/iggy`). A full disk stops Iggy's affected shards (they refuse to commit and
+  shut the server down rather than lose data): free space, restart the container; the mailbox
+  replays and continues.
+- Verification: `mailbox_errors_total` and `sends_rejected_total` flat again; the load-generator
+  checker passes.
 - Verification: `inv8_store_unavailable_rejects_retryably_and_keeps_sockets`; rejected sends stop
   and the load-generator checker passes afterwards.
+
+## Mailbox writer fenced (node not ready)
+
+- Detection: `/readyz` fails on a delivery node; log `mailbox writer fenced by another writer;
+  stopping` with code 93 (`ProducerEpochFenced`) or 92.
+- Cause: another delivery process started on the same Iggy topic and took the partitions over
+  (one node per topic until M4).
+- Immediate actions: make sure only one delivery node points at the topic; restart the node that
+  should own it (it replays and takes a new producer epoch). Nothing is lost: the fenced writer
+  wrote nothing after the takeover.
+
+## Mailbox log unreadable (delivery does not start)
+
+- Detection: delivery exits at start with `mailbox log unreadable: partition P, offset O, record
+  version V`; `/readyz` never succeeds.
+- Cause: the Iggy topic holds a record this build cannot read: written by an incompatible
+  version (V differs from the build's record version) or corrupted. Replaying past it would lose
+  counters and reuse `seq`s, which clients would drop as duplicates, so delivery refuses to
+  start.
+- Immediate actions: run the build that wrote the log (roll back), or restore the topic from a
+  backup (next section). Never delete the record to get past it: that is the `seq` reuse the
+  check prevents.
+
+## Restoring the mailbox from a backup
+
+- Restore the Iggy data directory, then raise `[delivery.mailbox] store_generation` by one
+  before starting delivery: clients see the new generation in `Hello` and reset their resume
+  points (PROTOCOL §3.6).
+- Upgrading Iggy across a storage-format change (0.9 to 0.10 was one): stop delivery, let devices
+  drain if possible, follow Iggy's upgrade notes; a fresh data directory loses pending envelopes,
+  so treat it as a restore (raise `store_generation`).
 
 ## Authentication failures (close 4000) or timeouts (4102)
 

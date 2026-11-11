@@ -48,6 +48,25 @@ impl TelemetryGuard {
     }
 }
 
+/// Third-party crates whose own logs can carry addresses or names (invariant 6). They are always
+/// off, whatever the configured filter says; our code logs their failures as error codes.
+pub const SILENCED_TARGETS: &[&str] = &["iggy", "iggy_common", "iggy_binary_protocol"];
+
+/// The configured filter with [`SILENCED_TARGETS`] forced off.
+///
+/// # Errors
+/// [`TelemetryError::Filter`] if `spec` does not parse.
+pub fn log_filter(spec: &str) -> Result<EnvFilter, TelemetryError> {
+    let mut filter = EnvFilter::try_new(spec).map_err(|e| TelemetryError::Filter(e.to_string()))?;
+    for target in SILENCED_TARGETS {
+        let directive = format!("{target}=off").parse().map_err(
+            |e: tracing_subscriber::filter::ParseError| TelemetryError::Filter(e.to_string()),
+        )?;
+        filter = filter.add_directive(directive);
+    }
+    Ok(filter)
+}
+
 /// Installs the global tracing subscriber.
 ///
 /// # Errors
@@ -56,8 +75,7 @@ pub fn init_tracing(
     cfg: &LogConfig,
     mode: RedactionMode,
 ) -> Result<TelemetryGuard, TelemetryError> {
-    let filter =
-        EnvFilter::try_new(&cfg.filter).map_err(|e| TelemetryError::Filter(e.to_string()))?;
+    let filter = log_filter(&cfg.filter)?;
     let (writer, worker) = NonBlockingBuilder::default()
         .lossy(true)
         .buffered_lines_limit(cfg.buffered_lines)
@@ -86,4 +104,16 @@ pub fn init_tracing(
         _worker: worker,
         dropped,
     })
+}
+
+#[cfg(test)]
+mod silence_tests {
+    use super::*;
+
+    #[test]
+    fn silenced_targets_stay_off_even_when_asked_for() {
+        let f = log_filter("info,iggy=trace").unwrap().to_string();
+        assert!(f.contains("iggy=off"), "{f}");
+        assert!(!f.contains("iggy=trace"), "{f}");
+    }
 }

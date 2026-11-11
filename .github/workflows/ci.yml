@@ -54,19 +54,23 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: start SurrealDB, valkey-hot, valkey-jobs, Garage, LiveKit and wait for health
+      - name: start SurrealDB, Iggy, valkey-hot, valkey-jobs, Garage, LiveKit and wait for health
         run: cargo xtask compose up
       - run: cargo xtask compose ps
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-nextest@0.9.151
-      - name: invariants, mailbox and RPC client on SurrealDB (no skipping)
+      - name: invariants on Iggy; mailbox on Iggy and SurrealDB; SurrealDB RPC client (no skipping)
         run: |
           set -a; . ./.env; set +a
           export SONGBIRD_TEST_SURREALDB="127.0.0.1:${SB_PORT_SURREALDB:-47800}"
           export SONGBIRD_TEST_SURREALDB_USER="$SURREAL_USER"
           export SONGBIRD_TEST_SURREALDB_PASS="$SURREAL_PASS"
           export SONGBIRD_REQUIRE_SURREALDB=1
+          export SONGBIRD_TEST_IGGY="127.0.0.1:${SB_PORT_IGGY:-47890}"
+          export SONGBIRD_TEST_IGGY_USER="$IGGY_ROOT_USERNAME"
+          export SONGBIRD_TEST_IGGY_PASS="$IGGY_ROOT_PASSWORD"
+          export SONGBIRD_REQUIRE_IGGY=1
           cargo nextest run --locked --profile ci -p songbird-surreal -p songbird-mailbox -p songbird-e2e
       - if: failure()
         run: docker compose -f deploy/compose/compose.yaml --env-file .env logs --no-color

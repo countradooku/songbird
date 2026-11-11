@@ -36,6 +36,36 @@ services:
       retries: 30
       start_period: 5s
 
+  # Mailbox log (D-0029). Topic durability `persisted` is set by the mailbox when it creates the
+  # topic: Iggy fsyncs before it confirms an append (invariant 1). Iggy 0.10 runs on io_uring,
+  # which the default container seccomp profile blocks; iggy-seccomp.json is Docker's default
+  # profile (moby/profiles seccomp/v0.1.0) plus the three io_uring syscalls, nothing else.
+  # It listens on the same port inside and outside the container so the address it advertises is
+  # the one clients dial.
+  iggy:
+    <<: *defaults
+    image: apache/iggy:0.10.0@sha256:176125a0580f526b0fee8b98ccf4ed5f77e243066183243d87282abce4851bf3
+    security_opt: ["seccomp=./iggy-seccomp.json", "no-new-privileges:true"]
+    environment:
+      IGGY_PATH: /data
+      IGGY_TCP_ADDRESS: "0.0.0.0:${SB_PORT_IGGY:-47890}"
+      IGGY_NODE_ADVERTISED_ADDRESS: 127.0.0.1
+      IGGY_HTTP_ENABLED: "false"
+      IGGY_QUIC_ENABLED: "false"
+      IGGY_WEBSOCKET_ENABLED: "false"
+      IGGY_SHARDING_CPU_ALLOCATION: "2"
+      IGGY_MEMORY_POOL_SIZE: "256 MiB"
+      IGGY_ROOT_USERNAME: ${IGGY_ROOT_USERNAME:?run cargo xtask dev-env --force}
+      IGGY_ROOT_PASSWORD: ${IGGY_ROOT_PASSWORD:?run cargo xtask dev-env --force}
+    volumes: [iggy:/data]
+    ports: ["127.0.0.1:${SB_PORT_IGGY:-47890}:${SB_PORT_IGGY:-47890}"]
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/${SB_PORT_IGGY:-47890}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
   # Volatile state: per-device pub/sub, registry, rate limits. No persistence by design.
   valkey-hot:
     <<: *defaults
@@ -116,6 +146,7 @@ networks:
 
 volumes:
   surrealdb: {}
+  iggy: {}
   valkey-jobs: {}
   garage-meta: {}
   garage-data: {}

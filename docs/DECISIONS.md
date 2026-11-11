@@ -33,14 +33,149 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 - GitHub environments `staging` and `production` with required reviewers, and their secrets
   (`SOPS_AGE_KEY`, `DEPLOY_SSH_KEY`), must be created by the owner before `deploy.yml` can run.
 - Prompt 2, milestone 2 (report `docs/reports/P02-M2.md`):
-  - D-0027: SurrealDB 4.0.1 sets the delivery ceiling at about 7,000 end-to-end messages/s per
-    node (store, deliver, ACK delete) and about 3.3 ms per lone send. Accept for the beta (20,000
-    accounts) and pursue parallel writers in M3, or reconsider the store before M3.
-  - D-0025: own minimal SurrealDB client instead of the official SDK (264 crates).
+  - D-0029: the mailbox store is Apache Iggy (owner's decision). Still to confirm: acknowledged
+    ciphertext stays on disk until its segment is deleted, about 14 hours by default (6-hour
+    idempotency window plus 8-hour segment expiry); Iggy is pre-1.0 (storage format changed
+    between 0.9 and 0.10); its container needs io_uring allowed in seccomp.
+  - D-0030: official Iggy SDK (owner's decision) brings 153 crates (exempted, audit backlog) and
+    `ring` as an unused transitive dependency. Proposed wording for the constitution's locked
+    stack: "All TLS and cryptographic operations we perform use rustls with aws-lc-rs. Another
+    crypto library may appear only as a transitive dependency of an owner-approved crate, unused
+    by our TLS or crypto paths, named in DECISIONS." Not written into the constitution until the
+    owner approves it.
+  - D-0025: own minimal SurrealDB client instead of the official SDK (264 crates); SurrealDB no
+    longer holds the mailbox, but keeps accounts and devices from Prompt 3.
   - D-0028: benchmark compio (owner's suggestion) against per-core Tokio in M3; changing the
     runtime touches the locked stack.
 
 ## Decisions
+
+## D-0030 — The official Apache Iggy SDK, and what it brings into the tree
+
+- Date: 2026-11-12
+- Status: accepted (owner: "hope you use official iggy sdk")
+- Decided by: owner
+- Context: the Iggy mailbox (D-0029) needs a client. The agent proposed its own minimal TCP client
+  (as for SurrealDB, D-0025) because the SDK has no optional features: every transport (TCP, QUIC,
+  HTTP, WebSocket) is compiled in, with `quinn`, `reqwest`, `tungstenite`, `ring` and 236 crates in
+  all (154 new to the workspace). The owner chose the official SDK.
+- Decision: `iggy = "=0.12.0"` (pinned with the server image 0.10.0), used over TCP only.
+  - **Crypto and TLS stay on aws-lc-rs.** The SDK's TCP/TLS path installs aws-lc-rs as rustls's
+    provider itself (`links/dial.rs`); our connection code installs it as the process default
+    before the SDK builds any TLS configuration. `ring` is compiled in for QUIC (never enabled)
+    and for request identifiers in the protocol layer; it is not used for our TLS or crypto.
+    Proposed constitution wording in Open owner decisions.
+  - **Logs (invariant 6).** The SDK logs server addresses and names at several levels. The crates
+    `iggy`, `iggy_common` and `iggy_binary_protocol` are forced off in every log filter
+    (`songbird_telemetry::SILENCED_TARGETS`, applied after the configured filter); the mailbox
+    logs every SDK failure itself as a numeric error code. `inv6_no_identifiers_in_logs_or_metrics`
+    captures at TRACE through the production filter.
+  - **Supply chain.** `cargo vet`: 153 crates newly exempted (`supply-chain/config.toml`), four
+    existing exemptions raised from safe-to-run to safe-to-deploy (`borsh`, `borsh-derive`,
+    `fastrand`, `proc-macro-crate`), imports now fully audit 156 crates. Audit first: `iggy`,
+    `iggy_common`, `iggy_binary_protocol`, `ring`, `bytemuck`. `cargo deny`: per-crate licence
+    exceptions for `foldhash` (Zlib) and `webpki-roots`/`webpki-root-certs` (CDLA-Permissive-2.0,
+    the Mozilla root list), both permissive; no global allow changed.
+- Consequences: a large dependency tree for one TCP protocol; the SDK tracks the server, so
+  upgrades move together (the SDK README: mixed versions and rolling upgrades are unsupported).
+  Our own client stays an option once Iggy's protocol is stable (1.0).
+
+## D-0029 — Mailbox on Apache Iggy
+
+- Date: 2026-11-12
+- Status: accepted (owner: "go with iggy, build it for production")
+- Decided by: owner, after the comparison below; design by agent
+- Context: SurrealDB capped a node at about 7,000 end-to-end messages/s (D-0027). The owner asked
+  to compare Apache Iggy with Redis/Valkey and take "the best and fastest".
+- Evidence: same `Mailbox` trait and closed-loop workload for all stores, every write fsynced
+  before the store answers, ACK deletes included, client-style idempotent retries, 8 s per run,
+  two interleaved rounds, a `seq` check after each run (96 runs, all gap-free and duplicate-free).
+  SurrealDB 4.0.1 (SurrealKV `sync=every`), Valkey 9.1.3 (AOF `appendfsync always`; one instance,
+  and four sharded by device), Iggy 0.10.0 (topic `durability = persisted`, 4 shards); servers on
+  CPUs 4–7. On this machine's disk (btrfs, 0.5–3.6 ms per fsync) and on tmpfs (no fsync cost:
+  each store's own ceiling). Sends/s, best of two rounds:
+
+  | Workload | SurrealDB | Valkey ×1 | Valkey ×4 | Iggy | Iggy, tmpfs | Valkey ×4, tmpfs |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | 1 sender | 273 | 1,403 | 1,346 | 368 | 8,868 | 26,313 |
+  | 128 senders | 6,272 | 36,261 | 42,346 | 15,612 | 444,717 | 259,046 |
+  | 1,024 senders | 7,088 | 42,378 | 123,670 | 153,128 | 1,410,584 | 337,594 |
+  | 10-device sends, 128 senders (entries/s) | 7,271 | 93,156 | 81,500 | 163,044 | 1,909,177 | 348,316 |
+  | 100-device groups, 64 senders (entries/s) | 3,458 | 160,031 | 242,598 | 647,467 | 4,766,768 | 548,448 |
+
+  Iggy has the highest ceiling by far and wins whenever batches form; Valkey has the lowest
+  latency for a lone send. On this disk both have poor tails from btrfs fsync stalls: Iggy's
+  p99.9 sits at 0.4–0.7 s from 16 senders up, Valkey's varies from 0.02 to 0.9 s. The reference
+  hardware (Prompt 13) decides the tail. Script and raw output:
+  `bench/stores` (`stores-matrix` runs reproduce it).
+- Decision (production design, `crates/mailbox/src/iggy`):
+  - **Log and partitions.** One topic, `partitions` partitions (default 4); a device belongs to
+    one partition by a hash of its ID. One writer task per partition owns that partition's state:
+    each device's last and acknowledged `seq`, the index of pending entries (log offsets, not
+    ciphertext), idempotency tags (8-byte prefix to offset, about 30 bytes per send, verified
+    against the record on a hit) and MLS epochs. Requests queued during an append form the next
+    batch (natural group commit). Our own record format inside Iggy messages (`record.rs`,
+    bounded decoder, fuzz target `iggy_record`).
+  - **Durability.** Topic `durability = persisted`: Iggy fsyncs before it confirms; a send is
+    acknowledged only after that (invariant 1).
+  - **One writer per partition (fencing).** Each writer is an idempotent Iggy producer with a fixed
+    id and a new epoch at every start, recorded in the log. Iggy refuses older epochs
+    (`ProducerEpochFenced`): a second process cannot corrupt `seq`s; the fenced node reports not
+    ready. A batch whose outcome is unknown is resent with the same producer sequence and written
+    once. One delivery node per topic until M4 adds partition ownership across nodes.
+  - **Multi-partition sends.** A send's home partition is its MLS group's, else the partition
+    holding most of its recipients (so a 1:1 send or a send to one account is usually one
+    append; a first version keyed the home by the idempotency key, which made almost every send
+    two appends and flooded the re-driver after a restart, found by the end-to-end run). The home
+    record holds the home devices' entries and the other partitions' parts; the parts are then
+    stored on their partitions under the same tag (a send without a key gets a random internal
+    tag).
+  - **Idempotency.** Each tag is stored with a fingerprint (SHA-256, 16 bytes) of the send's whole
+    recipient set; a reused key is a retry only when both match, otherwise reason 7. Reuse is
+    detected wherever the new send shares a partition with the earlier one; a reuse for devices
+    on entirely different partitions is stored as a new send (it never suppresses a message). A re-driver completes parts that failed,
+    in the process after 2 s and after a restart from recent home records. A send is refused
+    with nothing stored, or recorded and eventually stored for every recipient, without relying
+    on the client to retry.
+  - **MLS ordering.** The epoch check runs on the group's home partition writer; one commit per
+    epoch wins (`mls_commits_are_ordered_by_epoch`).
+  - **Start-up.** Each partition is replayed from its low-water offset to rebuild the state. A
+    record that does not decode stops the start (`IggyMailboxError::Unreadable`): skipping it
+    would lose counters and reuse `seq`s. Found by the end-to-end run: a first build skipped
+    unreadable records with a warning, the record format then changed without a version bump,
+    684,229 records were skipped, counters restarted and the clients dropped every new message
+    as already seen (the checker reported them lost). The record version is now 2 and bumped
+    on every format change.
+  - **Compaction (every minute), off the write path.** Entries older than 30 days are dropped
+    from the index (invariant 3); a compactor task reads the pending entries older than
+    `relocate_after` (1 h) on its own connection, many records per poll, and the writer copies
+    them forward in batches of about 1 MiB (at most 100,000 entries per pass); a counter snapshot (every
+    device's last and acknowledged `seq`, MLS epochs, the producer epoch) is written, so no `seq`
+    is ever reused although old records go; the low-water offset (an Iggy consumer offset, which
+    also stops Iggy deleting segments past it) moves up to the oldest record still needed (pending
+    entries, the 6-hour idempotency window, incomplete parts). Iggy deletes sealed segments below
+    it after the topic's `message_expiry` (8 h).
+  - **Container.** Iggy 0.10 needs io_uring; `deploy/compose/iggy-seccomp.json` is Docker's
+    default profile (moby/profiles `seccomp/v0.1.0`, Apache-2.0) plus `io_uring_setup`,
+    `io_uring_enter`, `io_uring_register`, nothing else. HTTP, QUIC and WebSocket listeners off;
+    TCP with TLS on the private address (server-authenticated TLS and the root password; Iggy
+    has no client certificates).
+  - SurrealDB keeps its mailbox backend for development and comparison; deployments require Iggy
+    (configuration validation).
+- Evidence (correctness): `crates/mailbox/tests/iggy_live.rs` (10 tests: seq rules, idempotency
+  across partitions, 1,000-device shared body, MLS ordering, 32 concurrent senders gap-free,
+  restart rebuilds state and fences the old writer, compaction keeps counters across a restart,
+  expiry, bulk ACKs, the re-driver in process and after a restart); the 16 end-to-end invariant
+  tests on Iggy; record and state unit tests; fuzzing.
+- Consequences:
+  - **Deletion is not immediate on disk.** An acknowledged envelope leaves the index at once and
+    the disk when its segment is deleted: by default up to about 14 hours (6-hour idempotency
+    window plus 8-hour segment expiry). SurrealDB deleted on ACK. Shorter windows trade against
+    the retry horizon (D-0021); owner to confirm (Open owner decisions).
+  - Iggy is pre-1.0 (an Apache top-level project since August 2026); its storage format changed
+    between 0.9 and 0.10, so upgrades need a migration plan (runbook).
+  - Every pending entry costs about 32 bytes of memory in its writer, every device about 80
+    bytes, every idempotency tag about 30 bytes; record payloads are cached up to `cache_mib`.
 
 ## D-0028 — Milestone 3 runtime candidates: per-core Tokio and compio
 
@@ -62,7 +197,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0027 — SurrealDB mailbox: one writer, cached counters with compare-and-set, bulk statements
 
 - Date: 2026-11-11
-- Status: accepted (ceiling to be confirmed by the owner, see Open owner decisions)
+- Status: superseded for deployments by D-0029 (the SurrealDB backend remains for development)
 - Decided by: agent
 - Context: master prompt §4: per-device `seq` in the same transaction as the write, group commit,
   batched ACK deletes, "measure SurrealDB writes per second early: it sets the ceiling".
@@ -635,6 +770,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (403); LiveKit answers `OK`.
 - Decision: `deploy/compose/compose.yaml`, every image by digest:
   SurrealDB v4.0.1 `sha256:408eb8e5c9436670525e2bc2634b1e50ba74ce1b447eaf0094c35f73b67f9cb6`;
+  Apache Iggy 0.10.0 `sha256:176125a0580f526b0fee8b98ccf4ed5f77e243066183243d87282abce4851bf3`
+  (added 2026-11-12, D-0029);
   Valkey 9.1.3-alpine3.24 `sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b`;
   Garage v2.5.0 `sha256:677e5b758e4425a325b811c425c026bf35a4bf42f7ddbaa773de3f4fd779a5a5`;
   LiveKit v1.13.11 `sha256:25cd902de7cacbd5f1f779f6a6ac1eae20ba8f56b0935934ce6b0ab80d1e3d20`;

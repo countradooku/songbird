@@ -1,6 +1,6 @@
 [package]
 name = "songbird-mailbox"
-description = "Per-device mailboxes: store with per-device seq, fetch_after, ack_up_to, 30-day expiry. In-memory store for M1; SurrealDB in M2."
+description = "Per-device mailboxes: store with per-device seq, fetch_after, ack_up_to, 30-day expiry. In memory, SurrealDB, Apache Iggy."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,9 @@ license.workspace = true
 
 [dependencies]
 songbird-surreal.workspace = true
+iggy.workspace = true
+rustls.workspace = true
+secrecy.workspace = true
 songbird-types.workspace = true
 aws-lc-rs.workspace = true
 getrandom.workspace = true

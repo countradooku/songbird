@@ -22,6 +22,7 @@ bytes.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "io-util", "macros", "time", "sync"] }
 
 [dev-dependencies]
+songbird-telemetry.workspace = true
 futures-core.workspace = true
 futures-sink.workspace = true
 rcgen.workspace = true

@@ -35,6 +35,33 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0016 — cargo-vet: trust publishers that two or more imported organizations trust
+
+- Date: 2026-11-11
+- Status: proposed (owner to accept the remaining exemptions as a risk)
+- Decided by: agent
+- Context: P01 gate item "every pinned dependency verified": `cargo vet` had 38 crates fully
+  audited and 129 exempted. The six imported audit sets were current; `cargo vet prune` removed
+  nothing.
+- Options considered: import the three remaining registry sets (actix, ariel-os, fermyon); trust
+  publishers; audit crates ourselves; leave the exemptions.
+- Evidence: the three extra sets vetted no additional crate, so they are not imported. `cargo vet
+  suggest` showed 70 exempted crates published by people that two or more of Mozilla, ISRG,
+  Bytecode Alliance, Google and Zcash trust outright.
+- Decision: `supply-chain/audits.toml` trusts, for `safe-to-deploy` until 2027-11-11, the crates
+  in our graph published by dtolnay, Kenny Kerr (kennykerr), epage, cuviper, seanmonstar, Amanieu,
+  BurntSushi, rust-lang-owner, sunfishcode, alexcrichton, Darksonn, Thomasdezeeuw and the
+  `taiki-e/pin-project-lite` GitHub team. A trust entry covers only versions that publisher
+  released. Publishers trusted by one organization only (ctz, djc, Manishearth) are not trusted.
+  No audits were certified: an audit entry claims a person read the code.
+  Result: 110 crates vetted, 57 exempted.
+- Consequences: trust entries expire on 2027-11-11 and must be renewed (`cargo vet trust`) or
+  replaced. A new version from a different publisher fails `cargo vet` until audited or exempted.
+  The 57 remaining exemptions include the TLS stack (rustls, rustls-webpki, ring, aws-lc-rs,
+  aws-lc-sys, tokio-rustls, rcgen), the x509/asn1 parsers used by `tools/admin`, tracing, time,
+  libc, getrandom, mimalloc and prometheus-client. Burning them down needs human audits or new
+  imported audit sets; start with the TLS and allocation paths.
+
 ## D-0015 — CodeQL gates on its own SARIF; no code scanning upload
 
 - Date: 2026-11-11
@@ -300,7 +327,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   x509-parser `parse_x509_pem`). `cargo deny` (advisories, licences, bans incl. no OpenSSL,
   sources) and `cargo audit` clean; `cargo vet`: 38 crates fully audited through imported audit
   sets (Mozilla, Google, Bytecode Alliance, ISRG, Zcash, Embark), 129 exempted and listed in
-  `supply-chain/config.toml` (burn-down is an open risk, report P01).
+  `supply-chain/config.toml` (burn-down is an open risk, report P01). Reduced to 57 by D-0016.
 - Decision (version, reason): tokio 1.54.1 (runtime, locked stack); rustls 0.23.46 + aws-lc-rs
   1.19.0 / aws-lc-sys 0.47.0, tokio-rustls 0.26.6, rustls-pki-types 1.16.0 (TLS, locked stack);
   mimalloc 0.1.52 (allocator, locked stack); tracing 0.1.44, tracing-subscriber 0.3.23,

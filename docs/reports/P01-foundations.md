@@ -64,7 +64,7 @@ authorization) and the constitution's working rules, citing the test that proves
 | --- | --- |
 | CI green on an empty service of each kind | **Green locally** with the exact commands CI runs (`cargo xtask ci fast`, smoke covers all 5 services, image build verified for the proxy). **Not yet run on GitHub**: nothing is pushed. The `compose`, `images`, `semgrep`, `iac` and CodeQL jobs and the nightly tier have not executed on a runner yet. |
 | Full environment from scratch with one command; torn down and rebuilt at the second provider in a timed run | **Built, not run.** `deploy/bin/env-up <env> <cloud>` is the one command and records timings; validated offline (mocked plans, lint). The timed drill needs: owner's Hetzner and Scaleway accounts and API tokens, two state buckets, `deploy/bin/secrets-init staging`, the admin source range, and confirmation of the second provider (D-0009). Runbook: `docs/RUNBOOKS/provider-switch.md`. |
-| Every pinned dependency verified and recorded | **Partly.** Recorded: every direct crate (D-0004), image digest (D-0007), action SHA and tool version (D-0008, D-0009); Python packages hash-pinned; OpenTofu providers locked with hashes. Verified: APIs read in the pinned sources; deny/audit clean. **Gap:** `cargo vet` has 38 crates fully audited (imported audit sets) and **129 exempted**. |
+| Every pinned dependency verified and recorded | **Partly.** Recorded: every direct crate (D-0004), image digest (D-0007), action SHA and tool version (D-0008, D-0009); Python packages hash-pinned; OpenTofu providers locked with hashes. Verified: APIs read in the pinned sources; deny/audit clean. **Gap:** `cargo vet` has 110 crates vetted (imported audit sets, plus publishers trusted by two or more imported organizations, D-0016) and **57 exempted**. |
 
 ## Code review fixes (same session)
 
@@ -82,8 +82,8 @@ shared by the proxy and the CA.
 
 ## Open risks and follow-ups
 
-1. **cargo-vet exemptions (129).** Burn down by importing more audit sets and auditing the
-   remaining small crates ourselves, starting with those in the TLS and allocation paths.
+1. **cargo-vet exemptions (57, down from 129 by D-0016).** Burn down with human audits or new
+   imported audit sets, starting with those in the TLS and allocation paths.
 2. **First CI run.** Some steps can only be proven on GitHub runners: `rustup toolchain install`
    from `rust-toolchain.toml`, `attest-build-provenance` with `subject-checksums`, the release
    build inside the builder image, GHCR pushes. Expect a short fix-up round on the first push and

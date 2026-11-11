@@ -83,6 +83,6 @@ One subsection per component. Each threat names its mitigation and the test or p
 - No certificate revocation for internal leaves yet; mitigated by 30-day lifetimes and intermediate
   rotation (runbook `mtls-rotation.md`).
 - SurrealDB has server TLS and password authentication but no client-certificate authentication.
-- cargo-vet: 129 of 167 crates are exempted rather than audited (report P01).
+- cargo-vet: 57 of 167 crates are exempted rather than vetted (report P01, D-0016).
 - Root SSH through the bastion (owner decision open, D-0014).
 - The proxy is identifiable by traffic analysis; it is a reachability tool, not an anonymity tool.

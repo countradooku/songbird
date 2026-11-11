@@ -35,6 +35,23 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0015 — CodeQL gates on its own SARIF; no code scanning upload
+
+- Date: 2026-11-11
+- Status: accepted
+- Decided by: agent
+- Context: both CodeQL jobs failed on PR 17. The job token lacked `actions: read`, which
+  codeql-action needs on a private repository, and code scanning is not enabled on this private
+  repository (the code scanning API answers 403), so an upload could not succeed either.
+- Options considered: enable GitHub Code Security (paid; owner action); drop CodeQL; run CodeQL
+  with `upload: never` and gate on the SARIF.
+- Decision: `codeql.yml` grants `actions: read` and `contents: read` only, runs analysis with
+  `upload: never`, fails the job when the SARIF holds any result (each shown as an annotation), and
+  keeps the SARIF as a 30-day artifact.
+- Consequences: no Security tab alerts or dismissal workflow; a false positive is fixed in code or
+  excluded in the workflow. If code scanning is enabled later, switch back to uploading and grant
+  `security-events: write`.
+
 ## D-0014 — Hosts: containers on host networking, nftables authoritative, bastion-only SSH
 
 - Date: 2026-11-11

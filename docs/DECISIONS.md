@@ -32,10 +32,6 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (D-0014). Alternatives: WireGuard-only access, a non-root deploy user with sudo.
 - GitHub environments `staging` and `production` with required reviewers, and their secrets
   (`SOPS_AGE_KEY`, `DEPLOY_SSH_KEY`), must be created by the owner before `deploy.yml` can run.
-- Prompt 2, milestone 1: the Sockudo *server* baseline (Pusher protocol) is not measured. The
-  driver is ready (`songbird-loadgen pusher`, D-0022); running the container needs the owner's
-  go-ahead (the session's auto-mode classifier refused to run the external image).
-
 ## Decisions
 
 ## D-0024 — Milestone 1 decisions compared with Signal and WhatsApp; changes adopted
@@ -131,7 +127,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   registry source, `TOKIO_WORKER_THREADS=1`) against `songbird-delivery-autobahn` (our upgrade and
   configuration, current-thread runtime), same client, same machine. The Sockudo *server* speaks
   the Pusher protocol (channels, HTTP publish API); a like-for-like driver is milestone 3 work,
-  when `delivery` runs on all cores. Recorded as an open owner decision.
+  when `delivery` runs on all cores. **Owner decision (2026-11-11): the library baseline is
+  accepted for M1.** The Pusher-protocol driver (`songbird-loadgen pusher`) stays for a later
+  comparison against the Sockudo server (5.2.0, `sha256:802c27d7…`) if wanted.
 - Evidence: report P02-M1 (AMD Ryzen 9 7950X, Linux 7.3.1, Rust 1.99.1).
 - Consequences: every later load, chaos and failover run uses the same checker.
 

@@ -443,8 +443,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 - Amendment (2026-11-11, owner-approved during P02 M1): `rust/hard-coded-cryptographic-value`
   flags the fixed nonce of the published device-auth test vector (`crates/proto/tests/vectors.rs`,
   `PROTOCOL.md` §13). The gate skips that one rule for files under a `tests/` directory only;
-  checked against the run's SARIF (the same rule in `src/` still fails the job). Unit tests that do
-  not need a fixed value use random nonces instead.
+  checked against the run's SARIF (the same rule in `src/` still fails the job). Waived results
+  are printed as `::notice` annotations so they stay visible. Unit tests that do not need a fixed
+  value use random nonces instead.
 - Consequences: no Security tab alerts or dismissal workflow; a false positive is fixed in code or
   excluded in the workflow. If code scanning is enabled later, switch back to uploading and grant
   `security-events: write`.

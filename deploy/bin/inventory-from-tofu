@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""Turns `tofu output -json inventory` (stdin) into deploy/ansible/inventory/generated/<env>.yml.
+
+Groups by role; the bastion is reached on its public address, every other host through the
+bastion over the private network. The generated file holds public IPs and is git-ignored.
+"""
+import json
+import os
+import pathlib
+import re
+import sys
+
+ROLES = ["bastion", "edge", "calls", "data", "worker"]
+
+def main() -> None:
+    env = sys.argv[1]
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,20}", env):
+        sys.exit(f"bad environment name {env!r}")
+    inv = json.load(sys.stdin)
+    bastions = [n for n, h in inv.items() if "bastion" in h["roles"]]
+    if len(bastions) != 1:
+        sys.exit("exactly one bastion expected")
+    bastion_ip = inv[bastions[0]]["public_ipv4"]
+    groups = {r: {"hosts": {}} for r in ROLES}
+    for name, h in sorted(inv.items()):
+        hv = {"private_ip": h["private_ip"], "fqdn": h["fqdn"], "ansible_user": "root"}
+        if name == bastions[0]:
+            hv["ansible_host"] = h["public_ipv4"]
+        else:
+            hv["ansible_host"] = h["private_ip"]
+            hv["ansible_ssh_common_args"] = f"-o ProxyJump=root@{bastion_ip}"
+        for r in h["roles"]:
+            groups[r]["hosts"][name] = hv
+    doc = {
+        "all": {
+            "vars": {
+                "songbird_env": env,
+                "songbird_env_kind": "staging" if env == "staging" else "production",
+                "private_cidr": "10.42.0.0/16",
+                # admin_cidrs comes from SOPS at play time (see group_vars/all.yml)
+            },
+            "children": groups,
+        }
+    }
+    out = pathlib.Path(__file__).resolve().parent.parent / "ansible" / "inventory" / "generated"
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / f"{env}.yml"
+    path.write_text(json.dumps(doc, indent=2) + "\n")  # JSON is valid YAML
+    os.chmod(path, 0o600)
+    print(path)
+
+if __name__ == "__main__":
+    main()

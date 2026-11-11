@@ -1,0 +1,102 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/types",
+    "crates/telemetry",
+    "crates/service",
+    "services/delivery",
+    "services/api",
+    "services/push",
+    "services/worker",
+    "services/calls",
+    "services/proxy",
+    "tools/loadgen",
+    "tools/admin",
+    "xtask",
+]
+# Fuzz targets need nightly and libFuzzer; they live outside the workspace (see fuzz/README.md).
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+license = "LicenseRef-Proprietary"
+repository = "https://github.com/countradooku/songbird"
+
+# Every dependency here has a recorded reason in docs/DECISIONS.md (D-0004).
+[workspace.dependencies]
+songbird-types = { path = "crates/types" }
+songbird-telemetry = { path = "crates/telemetry" }
+songbird-service = { path = "crates/service" }
+
+anyhow = "1.0.104"
+bytes = "1.12.1"
+clap = { version = "4.6.7", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+getrandom = "0.4.3"
+hex = "0.4.3"
+http-body-util = "0.1.5"
+hyper = { version = "1.12.0", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
+mimalloc = { version = "0.1.52", default-features = false }
+prometheus-client = "0.26.0"
+rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "pem"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }
+rustls-pki-types = { version = "1.16.0", features = ["std"] }
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+time = { version = "0.3.55", features = ["std"] }
+tokio = { version = "1.54.1", default-features = false }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }
+toml = { version = "1.2.1", default-features = false, features = ["parse", "serde", "std"] }
+tracing = { version = "0.1.44", default-features = false, features = ["std", "attributes"] }
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["std", "fmt", "json", "registry", "env-filter", "ansi"] }
+zeroize = "1.9.1"
+
+# Test-only
+proptest = "1.12.0"
+tempfile = "3.27.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Selected restriction lints (constitution: pedantic plus selected restriction lints).
+allow_attributes_without_reason = "warn"
+as_conversions = "warn"
+dbg_macro = "warn"
+exit = "warn"
+expect_used = "warn"
+get_unwrap = "warn"
+indexing_slicing = "warn"
+mem_forget = "warn"
+panic = "warn"
+print_stderr = "warn"
+print_stdout = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+unimplemented = "warn"
+unwrap_used = "warn"
+# Pedantic lints we do not want.
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+strip = "symbols"
+debug = false
+incremental = false
+
+# Release with debug info for perf/flamegraphs (cargo xtask bench --profile profiling).
+[profile.profiling]
+inherits = "release"
+debug = "full"
+strip = "none"

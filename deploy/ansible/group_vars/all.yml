@@ -1,0 +1,78 @@
+# Shared variables. Image digests match deploy/compose/compose.yaml (docs/DECISIONS.md D-0007).
+songbird_registry: "ghcr.io/countradooku"
+songbird_version: "{{ lookup('ansible.builtin.env', 'SONGBIRD_VERSION') | default('0.1.0', true) }}"
+songbird_secrets_file: "{{ playbook_dir }}/../secrets/{{ songbird_env }}.sops.yaml"
+songbird_pki_dir: "/etc/songbird/tls"
+
+images:
+  surrealdb: "surrealdb/surrealdb:v4.0.1@sha256:408eb8e5c9436670525e2bc2634b1e50ba74ce1b447eaf0094c35f73b67f9cb6"
+  valkey: "valkey/valkey:9.1.3-alpine3.24@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b"
+  garage: "dxflrs/garage:v2.5.0@sha256:677e5b758e4425a325b811c425c026bf35a4bf42f7ddbaa773de3f4fd779a5a5"
+  livekit: "livekit/livekit-server:v1.13.11@sha256:25cd902de7cacbd5f1f779f6a6ac1eae20ba8f56b0935934ce6b0ab80d1e3d20"
+  ghostunnel: "ghostunnel/ghostunnel:v1.11.5@sha256:65c4e34ec0ee0f30ea1f72b7411ec70a91c32fc50f067a8466ad2adb1e7420f2"
+
+# Which Songbird services run on which role, and their private admin ports.
+songbird_services_by_role:
+  edge: [delivery, api]
+  worker: [push, worker]
+  calls: [calls]
+songbird_admin_ports:
+  delivery: 9101
+  api: 9102
+  push: 9103
+  worker: 9104
+  calls: 9105
+
+# Internal (private network only) ports by role, opened in nftables from private_cidr only.
+internal_ports_by_role:
+  data: [8000, 6379, 6380, 3901, 3910, 3913]
+  calls: [7880]
+  edge: [9101, 9102]
+  worker: [9103, 9104]
+  calls_admin: [9105]
+
+# Kernel and system settings (Prompt 2a section 4). Benchmarks may change them; record why.
+sysctls:
+  fs.file-max: 4194304
+  fs.nr_open: 4194304
+  net.core.somaxconn: 65535
+  net.core.netdev_max_backlog: 65535
+  net.ipv4.tcp_max_syn_backlog: 65535
+  net.ipv4.ip_local_port_range: "10240 65535"
+  net.ipv4.tcp_syncookies: 1
+  net.ipv4.conf.all.rp_filter: 1
+  net.ipv4.conf.all.accept_redirects: 0
+  net.ipv4.conf.all.send_redirects: 0
+  net.ipv6.conf.all.accept_redirects: 0
+  vm.overcommit_memory: 1
+  kernel.kptr_restrict: 2
+  kernel.dmesg_restrict: 1
+open_files_limit: 1048576
+
+# Mutual TLS: one leaf certificate per component per host, issued by the internal intermediate CA
+# (tools/admin, `songbird-admin ca`). Files are owned by the uid the component runs as.
+tls_components_by_role:
+  data: [surrealdb, valkey-hot, valkey-jobs, garage]
+  edge: [delivery, api]
+  worker: [push, worker]
+  calls: [calls, livekit]
+tls_owner_uid:
+  surrealdb: 65532
+  valkey-hot: 999
+  valkey-jobs: 999
+  garage: 65532
+  livekit: 0
+  delivery: 65532
+  api: 65532
+  push: 65532
+  worker: 65532
+  calls: 65532
+tls_leaf_days: 30
+tls_renew_within_days: 10
+
+# Storage Garage may use on a data host (single-node layout).
+garage_capacity: 100G
+
+valkey_hot_maxmemory: 2gb
+valkey_jobs_maxmemory: 2gb
+admin_cidrs: "{{ (lookup('community.sops.sops', songbird_secrets_file) | from_yaml).admin_cidrs_json | from_json }}"

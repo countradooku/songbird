@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Offline validation of the infrastructure code (CI job `iac`). No credentials needed.
+#   deploy/bin/validate-iac [tofu|ansible|all]
+source "$(dirname "$0")/lib.sh"
+what=${1:-all}
+if [ "$what" = tofu ] || [ "$what" = all ]; then
+  need tofu
+  tofu -chdir="$TOFU_DIR" fmt -recursive -check
+  tofu -chdir="$TOFU_DIR/modules/topology" init -input=false >/dev/null
+  tofu -chdir="$TOFU_DIR/modules/topology" test
+  for cloud in hetzner scaleway; do
+    tofu -chdir="$TOFU_DIR/envs/$cloud" init -input=false -backend=false -lockfile=readonly >/dev/null
+    tofu -chdir="$TOFU_DIR/envs/$cloud" validate
+    tofu -chdir="$TOFU_DIR/envs/$cloud" test   # plans both topologies against a mocked provider
+  done
+fi
+if [ "$what" = ansible ] || [ "$what" = all ]; then
+  need ansible-playbook ansible-lint
+  cd "$ANSIBLE_DIR"
+  ansible_prepare
+  for p in site.yml rollout.yml rotate-certs.yml; do
+    ansible-playbook -i inventory/example --syntax-check "$p" >/dev/null
+  done
+  ANSIBLE_COLLECTIONS_PATH=.collections ansible-lint -q
+  python3 -m py_compile "$DEPLOY_DIR/bin/inventory-from-tofu"
+fi
+log "iac ($what): ok"

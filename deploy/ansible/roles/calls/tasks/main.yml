@@ -1,0 +1,19 @@
+---
+- name: LiveKit configuration
+  ansible.builtin.template:
+    src: livekit.yaml.j2
+    dest: /etc/songbird/livekit.yaml
+    mode: "0644"
+
+- name: LiveKit SFU
+  community.docker.docker_container:
+    name: songbird-livekit
+    image: "{{ images.livekit }}"
+    network_mode: host
+    restart_policy: unless-stopped
+    command: [--config, /etc/livekit.yaml]
+    env:
+      LIVEKIT_KEYS: "{{ secrets.livekit_api_key }}: {{ secrets.livekit_api_secret }}"
+    volumes: [/etc/songbird/livekit.yaml:/etc/livekit.yaml:ro]
+    security_opts: [no-new-privileges]
+  no_log: true

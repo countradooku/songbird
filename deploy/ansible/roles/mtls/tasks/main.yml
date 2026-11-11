@@ -1,0 +1,30 @@
+---
+# Installs the leaf certificates rotate-certs.yml issued on the controller during this run, into
+# songbird_local_pki/<host>/<component>/ (`songbird-admin ca issue` output: <name>.crt with the
+# chain, <name>.key, ca.crt). Components without a fresh certificate are left untouched.
+- name: TLS directory per component
+  ansible.builtin.file:
+    path: "{{ songbird_pki_dir }}/{{ item }}"
+    state: directory
+    owner: "{{ tls_owner_uid[item] }}"
+    group: "{{ tls_owner_uid[item] }}"
+    mode: "0750"
+  loop: "{{ tls_components }}"
+
+- name: Install chain, key and CA
+  ansible.builtin.copy:
+    src: "{{ songbird_local_pki }}/{{ inventory_hostname }}/{{ item.0 }}/{{ item.1.src | replace('NAME', item.0 ~ '.' ~ fqdn) }}"
+    dest: "{{ songbird_pki_dir }}/{{ item.0 }}/{{ item.1.dest }}"
+    owner: "{{ tls_owner_uid[item.0] }}"
+    group: "{{ tls_owner_uid[item.0] }}"
+    mode: "{{ item.1.mode }}"
+  loop: "{{ tls_components | product(tls_files) | list }}"
+  loop_control:
+    label: "{{ item.0 }}/{{ item.1.dest }}"
+  vars:
+    tls_files:
+      - { src: "NAME.crt", dest: "tls.crt", mode: "0644" }
+      - { src: "NAME.key", dest: "tls.key", mode: "0600" }
+      - { src: "ca.crt", dest: "ca.crt", mode: "0644" }
+  when: (songbird_local_pki ~ '/' ~ inventory_hostname ~ '/' ~ item.0 ~ '/' ~ item.0 ~ '.' ~ fqdn ~ '.crt') is file
+  no_log: true

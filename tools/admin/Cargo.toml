@@ -1,0 +1,24 @@
+[package]
+name = "songbird-admin"
+description = "Songbird operator tool. Today: the internal mutual-TLS certificate authority (init, issue, rotate, inspect)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+songbird-types.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+rcgen = { workspace = true, features = ["x509-parser"] }
+x509-parser = { version = "0.18", default-features = false }
+rustls-pki-types.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+rustls.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

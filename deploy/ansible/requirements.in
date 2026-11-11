@@ -1,0 +1,4 @@
+# Python 3.12 (ubuntu-24.04 runners): ansible-core 2.22 needs 3.13, so 2.21 is the newest usable.
+# Regenerate requirements.txt: uv pip compile requirements.in --generate-hashes --python-version 3.12 -o requirements.txt
+ansible-core==2.21.6
+ansible-lint==26.11.0

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Verifies a release before deploying it: the signed checksums (Sigstore, issued to this
+# repository's release workflow) and the signature of every service image.
+#   deploy/bin/verify-release <version>
+source "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: verify-release <version>"
+version=$1; need gh cosign
+repo=${GITHUB_REPOSITORY:-countradooku/songbird}
+owner=${repo%%/*}
+identity="^https://github.com/${repo}/\\.github/workflows/release\\.yml@refs/tags/v${version//./\\.}\$"
+issuer=https://token.actions.githubusercontent.com
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+gh release download "v$version" -R "$repo" -p SHA256SUMS -p SHA256SUMS.sigstore.json -D "$tmp"
+cosign verify-blob --bundle "$tmp/SHA256SUMS.sigstore.json" \
+  --certificate-identity-regexp "$identity" --certificate-oidc-issuer "$issuer" "$tmp/SHA256SUMS"
+for svc in delivery api push worker calls proxy; do
+  cosign verify --certificate-identity-regexp "$identity" --certificate-oidc-issuer "$issuer" \
+    "ghcr.io/$owner/songbird-$svc:$version" >/dev/null
+done
+log "release v$version: checksums and images verified"

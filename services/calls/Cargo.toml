@@ -1,0 +1,20 @@
+[package]
+name = "songbird-calls"
+description = "Songbird calls service."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "songbird-calls"
+path = "src/main.rs"
+
+[dependencies]
+songbird-service.workspace = true
+mimalloc.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

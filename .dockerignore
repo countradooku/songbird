@@ -1,0 +1,10 @@
+target
+fuzz/target
+fuzz/corpus
+.git
+.env
+.env.*
+**/*.key
+**/*.pem
+deploy/tofu/**/.terraform
+deploy/tofu/**/*.tfstate*

@@ -1,0 +1,19 @@
+[package]
+name = "songbird-service"
+description = "Service bootstrap shared by every Songbird service: config, telemetry, admin endpoint, graceful shutdown."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+songbird-types.workspace = true
+songbird-telemetry.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "signal", "sync", "time", "net"] }
+tracing.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Staged rollout of a released version with automatic rollback (deploy/ansible/rollout.yml).
+#   deploy/bin/rollout <env> <version>
+source "$(dirname "$0")/lib.sh"
+[ $# -eq 2 ] || die "usage: rollout <env> <version>"
+env=$1; version=$2
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || die "bad version: $version"
+check_env "$env"; need sops tofu ansible-playbook ssh-agent python3
+cloud_file="$TOFU_DIR/environments/$env.active-cloud"
+cloud=$(cat "$cloud_file" 2>/dev/null || true)
+[ -n "$cloud" ] || cloud=$(secret "$env" active_cloud)
+check_cloud "$cloud"
+export_cloud_env "$env" "$cloud"
+tofu_init "$env" "$cloud"
+tofu -chdir="$TOFU_DIR/envs/$cloud" output -json inventory | "$DEPLOY_DIR/bin/inventory-from-tofu" "$env" >/dev/null
+start_agent "$env"
+ansible_prepare
+( cd "$ANSIBLE_DIR" && SONGBIRD_VERSION="$version" ansible-playbook -i "inventory/generated/$env.yml" rollout.yml )
+log "[$env] $version rolled out"

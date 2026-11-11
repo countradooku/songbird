@@ -1,0 +1,47 @@
+# Deploy a released version with a staged rollout and automatic rollback.
+# Manual and approval-gated: each GitHub environment (staging, production) has required reviewers.
+# Secrets live in the environment: SOPS_AGE_KEY (decrypts deploy/secrets/<env>), DEPLOY_SSH_KEY,
+# and the provider token for the environment's cloud. See docs/RUNBOOKS/deploy-and-rollback.md.
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [staging, production]
+      version:
+        description: release version without the v, e.g. 0.1.0
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  rollout:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: v${{ inputs.version }}
+          persist-credentials: false
+      - name: tools (pinned, checksum-verified)
+        run: deploy/bin/install-tools
+      - name: ansible
+        run: |
+          python3 -m venv /tmp/ansible && . /tmp/ansible/bin/activate
+          pip install --require-hashes -r deploy/ansible/requirements.txt
+          echo /tmp/ansible/bin >> "$GITHUB_PATH"
+      - name: verify release signature before deploying it
+        run: deploy/bin/verify-release "${{ inputs.version }}"
+      - name: staged rollout (canary, then batches) with automatic rollback
+        env:
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: deploy/bin/rollout "${{ inputs.environment }}" "${{ inputs.version }}"

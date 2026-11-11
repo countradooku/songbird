@@ -1,0 +1,109 @@
+# Deep checks, nightly and on demand: long fuzzing, sanitizers, Miri, full benchmarks.
+# A failure here opens no PR by itself; it fails the run and the owner is notified by GitHub.
+name: nightly
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzz_secs:
+        description: seconds per fuzz target
+        default: "600"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [client_hello, proxy_link, config_toml, id_parse]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install nightly --profile minimal
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-fuzz@0.13.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: fuzz
+      # Inputs go through the environment and are validated, never expanded into the script.
+      - env:
+          FUZZ_SECS: ${{ inputs.fuzz_secs || '600' }}
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: |
+          case "$FUZZ_SECS" in ''|*[!0-9]*) echo "fuzz_secs must be a number" >&2; exit 1 ;; esac
+          cargo xtask fuzz --secs "$FUZZ_SECS" "$FUZZ_TARGET"
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: |
+            fuzz/artifacts/${{ matrix.target }}
+            fuzz/corpus/${{ matrix.target }}
+          if-no-files-found: ignore
+
+  sanitizers:
+    name: sanitizers (ASan, TSan)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install nightly --profile minimal --component rust-src
+      - run: cargo xtask sanitize
+
+  miri:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install nightly --profile minimal --component miri,rust-src
+      - run: cargo xtask miri
+
+  bench:
+    name: benchmarks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Shared runners are noisy: these numbers track trends only. Decisions use the fixed
+      # reference hardware (Prompt 13), recorded in docs/DECISIONS.md.
+      - run: cargo xtask bench
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: criterion
+          path: target/criterion
+          if-no-files-found: ignore
+
+  full-ci:
+    name: fast checks on a clean cache
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-nextest@0.9.151,cargo-deny@0.20.2,cargo-audit@0.22.2,cargo-vet@0.10.2
+      - run: cargo xtask ci fast

@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Builds a complete Songbird environment from scratch with one command, and times it.
+#   deploy/bin/env-up <env> <hetzner|scaleway> [version]
+# 1. OpenTofu: network, firewalls, servers.  2. Inventory from OpenTofu outputs.
+# 3. Ansible site.yml: hardening, host firewall, runtime, mTLS certificates, data services,
+#    LiveKit, Songbird services, health checks.
+# Re-running converges; nothing is destroyed. Record the printed timing in the drill report.
+source "$(dirname "$0")/lib.sh"
+[ $# -ge 2 ] || die "usage: env-up <env> <hetzner|scaleway> [version]"
+env=$1; cloud=$2; version=${3:-${SONGBIRD_VERSION:-}}
+check_env "$env"; check_cloud "$cloud"; need sops tofu ansible-playbook ssh-agent python3 songbird-admin
+start=$(date +%s)
+
+log "[$env@$cloud] secrets"
+export_cloud_env "$env" "$cloud"
+
+log "[$env@$cloud] infrastructure (OpenTofu)"
+tofu_init "$env" "$cloud"
+# shellcheck disable=SC2046
+tofu -chdir="$TOFU_DIR/envs/$cloud" apply -input=false -auto-approve $(tofu_vars "$env" "$cloud")
+t_infra=$(( $(date +%s) - start ))
+
+log "[$env@$cloud] inventory"
+tofu -chdir="$TOFU_DIR/envs/$cloud" output -json inventory \
+  | "$DEPLOY_DIR/bin/inventory-from-tofu" "$env" > /dev/null
+echo "$cloud" > "$TOFU_DIR/environments/$env.active-cloud"
+
+log "[$env@$cloud] configuration (Ansible)"
+start_agent "$env"
+ansible_prepare
+"$DEPLOY_DIR/bin/wait-ssh" "$env"
+( cd "$ANSIBLE_DIR" && SONGBIRD_VERSION="$version" ansible-playbook -i "inventory/generated/$env.yml" site.yml )
+total=$(( $(date +%s) - start ))
+
+log "[$env@$cloud] ready: infrastructure ${t_infra}s, total ${total}s"
+printf '%s\t%s\t%s\tinfra=%ss\ttotal=%ss\n' "$(date -u +%FT%TZ)" "$env" "$cloud" "$t_infra" "$total" \
+  >> "$DEPLOY_DIR/drill-timings.tsv"

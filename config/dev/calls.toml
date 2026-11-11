@@ -1,0 +1,10 @@
+# Development configuration for the calls service. No secrets here, ever: secrets are
+# referenced as { file = "..." } or { env = "..." } (see crates/types/src/secret.rs).
+[common]
+environment = "dev"
+admin_listen = "127.0.0.1:9105"
+shutdown_grace_secs = 5
+
+[common.log]
+format = "pretty"
+filter = "info"

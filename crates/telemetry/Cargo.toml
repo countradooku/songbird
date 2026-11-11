@@ -1,0 +1,27 @@
+[package]
+name = "songbird-telemetry"
+description = "Tracing with a non-blocking writer, Prometheus metrics, and a redaction layer that refuses sensitive field names."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+songbird-types.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util = { workspace = true, features = ["server", "http1"] }
+prometheus-client.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "rt", "macros", "time", "sync"] }
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["net", "rt", "macros", "time", "sync", "io-util"] }
+
+[lints]
+workspace = true

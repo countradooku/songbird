@@ -1,0 +1,6 @@
+profile: production
+exclude_paths:
+  - .collections/
+  - inventory/generated/
+skip_list:
+  - var-naming[no-role-prefix] # shared vars (images, secrets) are deliberately global

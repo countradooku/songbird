@@ -1,0 +1,39 @@
+name: Bug
+description: Something does not work as specified. Security problems go through private vulnerability reporting instead (see SECURITY.md).
+title: "[Bug] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: "**Security vulnerability?** Do not file it here. Use the Security tab → Report a vulnerability."
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should have happened
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: Commands, configuration, test name. No secrets, content, device IDs or IPs.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit or version
+  - type: dropdown
+    id: invariant
+    attributes:
+      label: Does it break a constitution invariant?
+      options:
+        - "No"
+        - "Yes"
+        - Not sure

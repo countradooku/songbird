@@ -1,0 +1,32 @@
+name: Task
+description: A unit of work under an epic.
+title: "[Task] "
+body:
+  - type: input
+    id: epic
+    attributes:
+      label: Epic
+      description: The epic issue this belongs to, e.g. #3
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What done looks like.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Tests, benchmarks or proofs that show it is done.
+      value: |
+        - [ ]
+    validations:
+      required: true
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Invariants and security impact
+      description: Which constitution invariants this touches, and how they stay proven.

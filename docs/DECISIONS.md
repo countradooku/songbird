@@ -38,8 +38,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0016 — cargo-vet: trust publishers that two or more imported organizations trust
 
 - Date: 2026-11-11
-- Status: proposed (owner to accept the remaining exemptions as a risk)
-- Decided by: agent
+- Status: accepted
+- Decided by: agent (with owner approval; the owner accepted the 57 remaining exemptions as
+  a recorded risk for the P01 gate)
 - Context: P01 gate item "every pinned dependency verified": `cargo vet` had 38 crates fully
   audited and 129 exempted. The six imported audit sets were current; `cargo vet prune` removed
   nothing.

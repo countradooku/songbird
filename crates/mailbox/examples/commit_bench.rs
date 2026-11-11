@@ -2,12 +2,14 @@
 //! second measured").
 //!
 //! ```text
-//! SURREAL_ADDR=127.0.0.1:47801 SURREAL_PASS=… cargo run --release -p songbird-mailbox \
-//!     --example commit_bench -- <senders> <secs> <max_batch> <max_wait_us> [recipients] [shared]
+//! SURREAL_ADDR=127.0.0.1:47801 SURREAL_PASS=… BENCH_SENDERS=128 BENCH_SECS=10 \
+//!     BENCH_MAX_BATCH=256 BENCH_MAX_WAIT_US=0 BENCH_RECIPIENTS=1 BENCH_SHARED=0 \
+//!     cargo run --release -p songbird-mailbox --example commit_bench
 //! ```
 //!
-//! `senders` tasks each store one send after another (closed loop), each send to `recipients`
-//! random devices (per-device envelopes of 256 bytes, or one shared body with `shared`). Prints
+//! Settings come from environment variables (all optional except the SurrealDB ones).
+//! `BENCH_SENDERS` tasks each store one send after another (closed loop), each send to `BENCH_RECIPIENTS`
+//! random devices (per-device envelopes of 256 bytes, or one shared body with `BENCH_SHARED=1`). Prints
 //! sends/s, transactions/s, mean sends per transaction and store latency percentiles.
 #![allow(
     clippy::print_stdout,
@@ -30,20 +32,20 @@ use songbird_mailbox::surreal::{SurrealConfig, SurrealMailbox};
 use songbird_mailbox::{Mailbox, NewEnvelope, Payload, StoreRequest};
 use songbird_types::DeviceId;
 
-fn arg(i: usize, default: u64) -> u64 {
-    std::env::args()
-        .nth(i)
+fn setting(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(default)
 }
 
 fn main() {
-    let senders = arg(1, 64);
-    let secs = arg(2, 10);
-    let max_batch = arg(3, 256);
-    let max_wait_us = arg(4, 1000);
-    let recipients = arg(5, 1);
-    let shared = std::env::args().nth(6).is_some_and(|s| s == "shared");
+    let senders = setting("BENCH_SENDERS", 64);
+    let secs = setting("BENCH_SECS", 10);
+    let max_batch = setting("BENCH_MAX_BATCH", 256);
+    let max_wait_us = setting("BENCH_MAX_WAIT_US", 0);
+    let recipients = setting("BENCH_RECIPIENTS", 1);
+    let shared = setting("BENCH_SHARED", 0) == 1;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

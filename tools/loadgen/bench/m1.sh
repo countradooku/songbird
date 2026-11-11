@@ -34,7 +34,7 @@ echo
 echo "== echo baseline: sockudo-ws simple_echo vs songbird delivery WebSocket layer (1 thread each)"
 TOKIO_WORKER_THREADS=1 taskset -c "$SERVER_CPU" "$SOCKUDO_SRC/target/release/examples/simple_echo" >/dev/null 2>&1 &
 pids+=($!); sleep 0.5
-taskset -c "$SERVER_CPU" target/release/songbird-delivery-autobahn 127.0.0.1:9003 >/dev/null 2>&1 &
+AUTOBAHN_LISTEN=127.0.0.1:9003 taskset -c "$SERVER_CPU" target/release/songbird-delivery-autobahn >/dev/null 2>&1 &
 pids+=($!); sleep 0.5
 for spec in "100 1" "1000 4"; do
   set -- $spec

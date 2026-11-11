@@ -755,9 +755,9 @@ fn autobahn_pass(
     );
     std::fs::write(dir.join(format!("{name}.json")), spec).map_err(|e| e.to_string())?;
     let mut server = Command::new("target/release/songbird-delivery-autobahn");
-    server.arg(format!("127.0.0.1:{port}"));
+    server.env("AUTOBAHN_LISTEN", format!("127.0.0.1:{port}"));
     if let Some(m) = max_bytes {
-        server.arg(m.to_string());
+        server.env("AUTOBAHN_MAX_MESSAGE_BYTES", m.to_string());
     }
     let mut child = server
         .stderr(Stdio::null())

@@ -14,6 +14,7 @@ prost.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+getrandom.workspace = true
 proptest.workspace = true
 hex.workspace = true
 

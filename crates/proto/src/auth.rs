@@ -72,70 +72,47 @@ pub fn transcript(
 mod tests {
     use super::*;
 
+    // The fixed-nonce test vector is in `tests/vectors.rs` (published in PROTOCOL.md §13). These
+    // tests do not depend on the nonce's value, so they use a fresh random one.
+    fn nonce() -> [u8; NONCE_LEN] {
+        let mut n = [0u8; NONCE_LEN];
+        getrandom::fill(&mut n).unwrap();
+        n
+    }
+
     #[test]
-    fn test_vector() {
-        let t = transcript(
-            "chat.example",
-            &[0x11; NONCE_LEN],
-            &DeviceId::from_bytes([0x22; ID_LEN]),
-            1,
-        )
-        .unwrap();
-        let expected = format!(
-            "{}{}{}{}{}{}",
-            hex::encode(CONTEXT),
-            "0c",
-            hex::encode("chat.example"),
-            "11".repeat(32),
-            "22".repeat(16),
-            "00000001"
-        );
-        assert_eq!(hex::encode(&t), expected);
-        assert!(t.len() <= MAX_TRANSCRIPT_LEN);
+    fn length_is_bounded() {
+        let t = transcript(&"a".repeat(253), &nonce(), &DeviceId::random().unwrap(), 1).unwrap();
+        assert_eq!(t.len(), MAX_TRANSCRIPT_LEN);
+        assert!(t.starts_with(CONTEXT));
     }
 
     #[test]
     fn rejects_bad_inputs() {
-        let d = DeviceId::from_bytes([0; ID_LEN]);
+        let d = DeviceId::random().unwrap();
+        let n = nonce();
+        assert_eq!(transcript("", &n, &d, 1), Err(TranscriptError::ServerName));
         assert_eq!(
-            transcript("", &[0; NONCE_LEN], &d, 1),
+            transcript(&"a".repeat(254), &n, &d, 1),
             Err(TranscriptError::ServerName)
         );
         assert_eq!(
-            transcript(&"a".repeat(254), &[0; NONCE_LEN], &d, 1),
-            Err(TranscriptError::ServerName)
-        );
-        assert_eq!(
-            transcript("x", &[0; 31], &d, 1),
+            transcript("x", n.get(..31).unwrap(), &d, 1),
             Err(TranscriptError::Nonce)
         );
     }
 
     #[test]
     fn every_field_changes_the_transcript() {
-        let d = DeviceId::from_bytes([1; ID_LEN]);
-        let base = transcript("a.example", &[0; NONCE_LEN], &d, 1).unwrap();
+        let d = DeviceId::random().unwrap();
+        let n = nonce();
+        let base = transcript("a.example", &n, &d, 1).unwrap();
+        assert_ne!(base, transcript("b.example", &n, &d, 1).unwrap());
+        assert_ne!(base, transcript("a.example", &nonce(), &d, 1).unwrap());
         assert_ne!(
             base,
-            transcript("b.example", &[0; NONCE_LEN], &d, 1).unwrap()
+            transcript("a.example", &n, &DeviceId::random().unwrap(), 1).unwrap()
         );
-        assert_ne!(
-            base,
-            transcript("a.example", &[1; NONCE_LEN], &d, 1).unwrap()
-        );
-        assert_ne!(
-            base,
-            transcript(
-                "a.example",
-                &[0; NONCE_LEN],
-                &DeviceId::from_bytes([2; ID_LEN]),
-                1
-            )
-            .unwrap()
-        );
-        assert_ne!(
-            base,
-            transcript("a.example", &[0; NONCE_LEN], &d, 2).unwrap()
-        );
+        assert_ne!(base, transcript("a.example", &n, &d, 2).unwrap());
     }
 }

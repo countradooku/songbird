@@ -5,9 +5,9 @@
 //! The only differences: any path, no subprotocol, and text messages are echoed (the Songbird
 //! protocol itself is binary-only). Not deployed.
 //!
-//! Usage: `songbird-delivery-autobahn [addr] [max_message_bytes]`. The second argument raises
-//! the message limit to check that the WebSocket layer itself handles the suite's 16 MiB cases;
-//! the default is the production limit.
+//! Settings come from the environment: `AUTOBAHN_LISTEN` (default `127.0.0.1:9001`) and
+//! `AUTOBAHN_MAX_MESSAGE_BYTES` (default: the production limit), which raises the message limit
+//! to check that the WebSocket layer itself handles the suite's 16 MiB cases.
 #![forbid(unsafe_code)]
 #![allow(clippy::print_stderr, reason = "a test tool; stderr is its interface")]
 
@@ -21,13 +21,12 @@ use songbird_proto::Limits;
 
 fn main() -> ExitCode {
     sockudo_ws::init_clock();
-    let addr: SocketAddr = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "127.0.0.1:9001".into())
-        .parse()
-        .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 9001)));
-    let max = std::env::args()
-        .nth(2)
+    let addr: SocketAddr = std::env::var("AUTOBAHN_LISTEN")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 9001)));
+    let max = std::env::var("AUTOBAHN_MAX_MESSAGE_BYTES")
+        .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| Limits::DEFAULT.max_message_bytes());
     let Ok(rt) = tokio::runtime::Builder::new_current_thread()

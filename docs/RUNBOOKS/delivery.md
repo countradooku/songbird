@@ -20,9 +20,10 @@ aggregate counters only; nothing in them or in the logs identifies a device (inv
 
 ## Slow consumers (close 4100) and lag
 
-- Detection: `slow_consumers_total` (a socket made no write progress for `write_timeout_ms`);
-  `routes_lagged_total` and `drains_total` (a session's inbox overflowed and it caught up from the
-  mailbox).
+- Detection: `slow_consumers_total` (a socket made no write progress for `write_timeout_ms`,
+  default 30 s); `window_full_total` (a device has `max_unacked`, default 256, envelopes in flight
+  and delivery to it paused until it acknowledges); `routes_lagged_total` and `drains_total` (a
+  session's inbox overflowed and it caught up from the mailbox).
 - Impact: the slow device reconnects and drains its mailbox; nobody else waits (invariant 5).
 - Immediate actions: none for isolated cases. A fleet-wide rise points at the network path or at
   the server's own write capacity: check CPU and `delivered_*` rates.

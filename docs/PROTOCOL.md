@@ -33,7 +33,8 @@ Implemented in `crates/proto` (shared by server and clients); decisions D-0019, 
 | `0x92` | S→C | `Error` | protobuf `Error` (`code u32`, `retry_after_ms u32`), sent before a close when needed |
 
 Rejection reasons: 1 rate limited, 2 too large, 3 too many recipients, 4 unknown recipient,
-5 duplicate recipient, 6 store unavailable. 1 and 6 are retryable after `retry_after_ms`, with the
+5 duplicate recipient, 6 store unavailable, 7 idempotency key already used for other recipients.
+1 and 6 are retryable after `retry_after_ms`, with the
 same idempotency key. Unknown reason codes are kept (forward compatibility).
 
 Decoders reject trailing bytes, so every frame has exactly one encoding.
@@ -110,11 +111,15 @@ Decision D-0018.
 
 ```
 "songbird.v1/device-auth\0" || u8 len(server_name) || server_name || nonce[32]
-  || device_id[16] || protocol_version u32 (big-endian)
+  || device_id[16] || protocol_version u32 (big-endian) || channel_binding[32]
 ```
 
 The client uses the server name from its own configuration, never the one in `Hello`, so a
-signature for one endpoint is useless at another. Test vector: §13.
+signature for one endpoint is useless at another. `channel_binding` is the TLS exporter of the
+connection (RFC 9266 `tls-exporter`: 32 bytes, label `EXPORTER-Channel-Binding`, no context), so
+a signature obtained by relaying the nonce over another TLS session does not verify (D-0024); TLS
+must end at the delivery server. Without TLS (development only) it is 32 zero bytes. The server
+name is the only variable-length field and is length-prefixed. Test vector: §13.
 
 ### 2.3 One connection per device
 
@@ -157,10 +162,12 @@ rejected for any reason stored nothing.
 
 ### 3.2 Idempotency
 
-`idempotency_key` is 16 random bytes per logical message. A retry with the same key (after a
-timeout, a disconnect or a retryable rejection) is stored at most once: the server remembers the
-key and the resulting `seq`s for 24 hours and answers a retry from that record. The key is not
-stored with the sender's identity.
+`idempotency_key` is 16 random bytes per logical message. A retry with the same key and the same
+recipient devices (after a timeout, a disconnect or a retryable rejection) within 6 hours is
+stored at most once: the server answers it from a record of the recipient devices and `seq`s,
+kept under a keyed hash of the key (never the key itself) and not linked to the sender. The same
+key for other recipients is refused with reason 7. A retry after 6 hours may be stored again;
+recipients drop it by the message ID inside the envelope.
 
 ### 3.3 Delivery and ordering
 
@@ -177,6 +184,10 @@ sees each envelope exactly once and in order. A `seq` may be skipped only where 
 and is deleted from the server (invariant 3). Clients acknowledge only what the app stored
 durably, coalescing ACKs for a few milliseconds and flushing them before a clean close. An `Ack`
 beyond the last `seq` sent on the connection closes it with 4003.
+
+At most 256 envelopes (server setting `max_unacked`) are sent on a connection and not yet
+acknowledged; the server pauses delivery at that limit and resumes on the next `Ack`. A socket
+that accepts no data for 30 s is closed with 4100; the device catches up after reconnecting.
 
 ### 3.5 Retention
 
@@ -230,10 +241,11 @@ Frames (hex; from `crates/proto` tests and the fuzz seeds in `fuzz/corpus/proto_
 | `Send{req_id 7, key 11…11, [(22…22, "abc"), (33…33, "z")]}` | `01 00000007 11111111111111111111111111111111 0002 22222222222222222222222222222222 00000003 616263 33333333333333333333333333333333 00000001 7a` |
 
 Authentication transcript for server name `chat.example`, nonce 32 × `11`, device 16 × `22`,
-version 1:
+version 1, channel binding 32 × `33`:
 
 ```
 736f6e67626972642e76312f6465766963652d6175746800 0c 636861742e6578616d706c65
 1111111111111111111111111111111111111111111111111111111111111111
 22222222222222222222222222222222 00000001
+3333333333333333333333333333333333333333333333333333333333333333
 ```

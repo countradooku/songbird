@@ -1357,6 +1357,7 @@ dependencies = [
  "songbird-types",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1366,6 +1367,7 @@ name = "songbird-loadgen"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-lc-rs",
  "bytes",
  "clap",
  "futures-core",
@@ -1384,7 +1386,9 @@ dependencies = [
 name = "songbird-mailbox"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "bytes",
+ "getrandom 0.4.3",
  "proptest",
  "songbird-types",
  "thiserror",

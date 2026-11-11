@@ -133,9 +133,24 @@ async fn connection<M, R>(
     let _ = tcp.set_nodelay(true);
     let timeout = shared.config.session.handshake_timeout();
     match tls {
-        None => upgraded(tcp, shared, drain, refuse).await,
+        None => {
+            let binding = songbird_proto::auth::NO_CHANNEL_BINDING;
+            upgraded(tcp, shared, drain, refuse, binding).await;
+        }
         Some(acceptor) => match tokio::time::timeout(timeout, acceptor.accept(tcp)).await {
-            Ok(Ok(stream)) => upgraded(stream, shared, drain, refuse).await,
+            Ok(Ok(stream)) => {
+                // RFC 9266 tls-exporter: the device signs this, binding its authentication to
+                // this TLS session (D-0018).
+                let Ok(binding) = stream.get_ref().1.export_keying_material(
+                    [0u8; songbird_proto::auth::CHANNEL_BINDING_LEN],
+                    songbird_proto::auth::EXPORTER_LABEL,
+                    None,
+                ) else {
+                    shared.metrics.handshake_failures.inc();
+                    return;
+                };
+                upgraded(stream, shared, drain, refuse, binding).await;
+            }
             _ => {
                 shared.metrics.handshake_failures.inc();
             }
@@ -148,6 +163,7 @@ async fn upgraded<S, M, R>(
     shared: Arc<Shared<M, R>>,
     drain: watch::Receiver<bool>,
     refuse: Option<Duration>,
+    binding: [u8; songbird_proto::auth::CHANNEL_BINDING_LEN],
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
     M: Mailbox,
@@ -177,6 +193,6 @@ async fn upgraded<S, M, R>(
     }
     shared.metrics.connections.inc();
     shared.metrics.connections_open.inc();
-    session::run(ws, Arc::clone(&shared), drain).await;
+    session::run(ws, Arc::clone(&shared), drain, binding).await;
     shared.metrics.connections_open.dec();
 }

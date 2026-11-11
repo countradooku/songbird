@@ -70,8 +70,9 @@ pub struct StoreOutcome {
 /// Longest an undelivered envelope is kept (invariant 3).
 pub const MAX_ENVELOPE_AGE: Duration = Duration::from_secs(30 * 24 * 3600);
 
-/// How long an idempotency key is remembered.
-pub const IDEMPOTENCY_RETENTION: Duration = Duration::from_secs(24 * 3600);
+/// How long an idempotency key is remembered: the client's retry horizon (D-0021). A send retried
+/// later is stored again and the recipient app drops it by the message ID inside the envelope.
+pub const IDEMPOTENCY_RETENTION: Duration = Duration::from_secs(6 * 3600);
 
 /// Mailbox failures. All are retryable from the client's point of view.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -82,6 +83,10 @@ pub enum MailboxError {
     /// The store is unreachable or failed; nothing was stored.
     #[error("mailbox unavailable")]
     Unavailable,
+    /// The idempotency key was already used for a send to other recipient devices; nothing was
+    /// stored. Not retryable: the client must use a fresh key.
+    #[error("idempotency key reused for other recipients")]
+    IdempotencyConflict,
 }
 
 /// A mailbox store. Implementations are shared by every session of a process.
@@ -90,10 +95,12 @@ pub trait Mailbox: Send + Sync + 'static {
     /// input order. All or nothing: on error nothing is stored. Returns only once the write is
     /// as durable as the store gets.
     ///
-    /// A send's `idempotency_key` is remembered with the result for
-    /// [`IDEMPOTENCY_RETENTION`]; a retry with the same key stores nothing and returns the
-    /// original result with `replayed` set. The key is not linked to the sender (minimal
-    /// metadata): it is 128 random bits only the sender and the server ever see.
+    /// A send's `idempotency_key` is remembered, as a keyed hash (HMAC-SHA256 with a server
+    /// secret), with the recipient devices and `seq`s for [`IDEMPOTENCY_RETENTION`]. A retry with
+    /// the same key and the same recipient devices stores nothing and returns the original
+    /// result with `replayed` set; the same key for other recipients is refused with
+    /// [`MailboxError::IdempotencyConflict`]. The record is not linked to the sender (minimal
+    /// metadata).
     fn store_batch(
         &self,
         idempotency_key: Option<[u8; 16]>,

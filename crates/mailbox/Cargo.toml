@@ -9,6 +9,8 @@ license.workspace = true
 
 [dependencies]
 songbird-types.workspace = true
+aws-lc-rs.workspace = true
+getrandom.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
 

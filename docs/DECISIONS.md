@@ -32,19 +32,62 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (D-0014). Alternatives: WireGuard-only access, a non-root deploy user with sudo.
 - GitHub environments `staging` and `production` with required reviewers, and their secrets
   (`SOPS_AGE_KEY`, `DEPLOY_SSH_KEY`), must be created by the owner before `deploy.yml` can run.
-- Prompt 2, milestone 1 (report `docs/reports/P02-M1.md`):
-  - D-0020: a full session inbox marks the session lagged (it drains the mailbox) instead of
-    disconnecting it; the slow-consumer close (4100) is triggered by a socket write that makes no
-    progress. This departs from the master prompt's wording ("when full, disconnect"); approve or
-    ask for the literal rule.
-  - D-0021: idempotency keys (16 random bytes per send, kept 24 h, not linked to the sender) are
-    a new server-held value; add to `THREAT_MODEL.md` §1 or refuse.
-  - D-0018: device authentication keys are Ed25519 keys separate from the libsignal identity key
-    until Prompt 3 decides otherwise.
-  - Baseline against the Sockudo *server* (Pusher protocol) is not in this report; only the
-    sockudo-ws library baseline is. Accept for M1, or ask for it before M2 (D-0022).
+- Prompt 2, milestone 1: the Sockudo *server* baseline (Pusher protocol) is not measured. The
+  driver is ready (`songbird-loadgen pusher`, D-0022); running the container needs the owner's
+  go-ahead (the session's auto-mode classifier refused to run the external image).
 
 ## Decisions
+
+## D-0024 — Milestone 1 decisions compared with Signal and WhatsApp; changes adopted
+
+- Date: 2026-11-11
+- Status: accepted
+- Decided by: agent (the owner delegated D-0018, D-0020 and D-0021: "see how others would do
+  that, like WhatsApp and Signal; if you have better ideas, do them")
+- Context: the M1 gate report asked the owner to rule on three proposals.
+- Evidence (primary sources, read 2026-11-11):
+  - Signal-Server `main`, `websocket/WebSocketConnection.java`: one reactive stream per device
+    from the message store; "new message" events only wake the reader; at most 256 messages sent
+    and not acknowledged (`MESSAGE_SENDER_MAX_CONCURRENCY`); a slow client is never actively
+    disconnected; a device connecting elsewhere is closed with 4409. The previous design
+    (until 2024–2025) used a "new message available" flag plus a re-read of the store, the same as
+    our lag flag. No server-side send idempotency: clients drop duplicates (libsignal
+    `DuplicateMessageException`; Signal-Desktop dedupes by sender and timestamp). Devices
+    authenticate the WebSocket with HTTP Basic and a random per-device token stored as a salted
+    HKDF hash (`auth/SaltedTokenHash.java`): a bearer secret, no channel binding.
+  - WhatsApp Encryption Overview (2026-10-30), "Transport Security": Noise Pipes with Curve25519;
+    the client authenticates with a per-device static key pair and the server stores only the
+    public key; Noise binds that authentication to the session by construction. The document
+    does not say how retries are deduplicated or how slow clients are handled.
+  - RFC 9266 (`tls-exporter` channel binding) is used by XMPP SCRAM-PLUS (XEP-0440); no messenger
+    found using it with TLS, because WhatsApp gets the property from Noise.
+- Decisions:
+  1. **D-0020 accepted, plus a bounded un-acked window.** Keep "store is the truth, notifications
+     are hints, a full inbox means re-read the mailbox" (Signal's earlier design). Add Signal's
+     in-flight bound: at most `max_unacked` (default 256) envelopes sent and not acknowledged per
+     connection; delivery pauses at the limit and resumes with a drain on the next ACK. This
+     bounds memory per session regardless of socket progress. The write-stall close (4100) stays
+     as the last resort, with the timeout raised from 10 s to 30 s for mobile networks (a stalled
+     reader holds nobody else up).
+  2. **D-0021 accepted, hardened.** Signal keeps no server-side idempotency, so our record is
+     extra; it now holds HMAC-SHA256(server secret, key) instead of the key, lives 6 h (the
+     client's retry horizon) instead of 24 h, and is scoped to the recipient devices: the same key
+     for other recipients is refused (`SendResult` reason 7, not retryable) and stores nothing.
+     Apps still drop duplicates by the message ID inside the envelope (as Signal's clients do),
+     which covers retries after 6 h.
+  3. **D-0018 accepted, with TLS channel binding.** A separate per-device Ed25519 key matches
+     WhatsApp's separate static key and is stronger than Signal's bearer token (the server holds
+     only public keys). The signed transcript now ends with the 32-byte RFC 9266 TLS exporter
+     (label `EXPORTER-Channel-Binding`, no context), which gives what Noise gives WhatsApp: a
+     relay that terminates TLS (misissued certificate, interception proxy) cannot reuse the
+     device's signature on its own session to the server. TLS must therefore end at `delivery`
+     itself (no TLS-terminating load balancer in front; `SO_REUSEPORT` spreading is in-process).
+- Evidence for the changes: `tests/e2e` `unacked_window_bounds_in_flight`,
+  `tls_connection_works` (a valid signature without this session's binding is refused with
+  4000); `crates/mailbox` `retried_send_is_stored_once` (keyed hash, recipient scope);
+  `crates/proto/tests/vectors.rs` (new transcript vector).
+- Consequences: protocol v1 changes before any client ships (transcript, reason 7). Revisit
+  the Noise alternative only if TLS termination ever has to move off the delivery host.
 
 ## D-0023 — Autobahn conformance: two passes, image pinned by digest
 
@@ -95,7 +138,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0021 — Milestone 1 stand-ins: in-memory mailbox and in-process router; idempotency keys
 
 - Date: 2026-11-11
-- Status: proposed (the idempotency record needs the owner's approval, see Open owner decisions)
+- Status: accepted (idempotency record hardened by D-0024)
 - Decided by: agent
 - Context: M1 builds the session algorithm "on an in-memory mailbox"; SurrealDB is M2 and Valkey
   routing M4.
@@ -105,7 +148,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   ships `LocalRouter`. Both stand-ins use one `std::sync::Mutex` each: a lock between socket read
   and socket write, which the constitution forbids on the hot path. It is accepted only for these
   stand-ins and disappears with SurrealDB group commit (M2) and the per-core directory (M3).
-  `store_batch` takes the send's idempotency key and stores it with the resulting `seq`s for 24 h;
+  `store_batch` takes the send's idempotency key and stores it with the resulting `seq`s (24 h at
+  first; D-0024: keyed hash, 6 h, scoped to the recipients);
   a retry returns the original result (`replayed`) and is routed again (duplicates are dropped by
   the recipient session). The key is 16 random bytes chosen by the client and is not stored with
   the sender's identity. M2 moves it into the same SurrealDB transaction as the envelopes. The
@@ -119,7 +163,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0020 — Session algorithm and backpressure
 
 - Date: 2026-11-11
-- Status: proposed (departs from the master prompt's wording; owner approval asked)
+- Status: accepted (owner delegated; extended with an un-acked window by D-0024)
 - Decided by: agent
 - Context: master prompt §5 `delivery`: subscribe before drain, deduplicate by `seq`, gaps trigger
   a drain, safety sweep, "bounded per-connection queue; when full, disconnect with a 41xx code".
@@ -169,7 +213,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0018 — Device authentication: Ed25519 challenge signature with aws-lc-rs
 
 - Date: 2026-11-11
-- Status: proposed (Prompt 3 may bind it to the identity key)
+- Status: accepted (owner delegated; TLS channel binding added by D-0024)
 - Decided by: agent
 - Context: master prompt §5 handshake: the device signs a domain-separated string containing the
   nonce and server name.
@@ -270,6 +314,11 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 - Decision: `codeql.yml` grants `actions: read` and `contents: read` only, runs analysis with
   `upload: never`, fails the job when the SARIF holds any result (each shown as an annotation), and
   keeps the SARIF as a 30-day artifact.
+- Amendment (2026-11-11, owner-approved during P02 M1): `rust/hard-coded-cryptographic-value`
+  flags the fixed nonce of the published device-auth test vector (`crates/proto/tests/vectors.rs`,
+  `PROTOCOL.md` §13). The gate skips that one rule for files under a `tests/` directory only;
+  checked against the run's SARIF (the same rule in `src/` still fails the job). Unit tests that do
+  not need a fixed value use random nonces instead.
 - Consequences: no Security tab alerts or dismissal workflow; a false positive is fixed in code or
   excluded in the workflow. If code scanning is enabled later, switch back to uploading and grant
   `security-events: write`.

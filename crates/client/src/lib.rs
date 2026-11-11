@@ -213,6 +213,7 @@ impl Client {
             next_req: 1,
             pending: HashMap::new(),
             buf: BytesMut::with_capacity(1024),
+            channel_binding: songbird_proto::auth::NO_CHANNEL_BINDING,
         };
         tokio::spawn(task.run());
         (
@@ -331,6 +332,8 @@ struct Task {
     next_req: u32,
     pending: HashMap<u32, oneshot::Sender<Result<SendStatus, ClientError>>>,
     buf: BytesMut,
+    /// TLS exporter of the current connection (zeros without TLS).
+    channel_binding: [u8; songbird_proto::auth::CHANNEL_BINDING_LEN],
 }
 
 enum Conn {
@@ -427,6 +430,7 @@ impl Task {
         tcp.set_nodelay(true).map_err(drop)?;
         let client = WebSocketClient::<Http1>::new(self.ws_config());
         let host = self.cfg.server_name.clone();
+        self.channel_binding = songbird_proto::auth::NO_CHANNEL_BINDING;
         let proto = Some(songbird_proto::SUBPROTOCOL);
         if let Some(tls) = &self.cfg.tls {
             let name = rustls_pki_types::ServerName::try_from(host.clone()).map_err(drop)?;
@@ -434,6 +438,16 @@ impl Task {
             let stream = tokio::time::timeout(t, connector.connect(name, tcp))
                 .await
                 .map_err(drop)?
+                .map_err(drop)?;
+            // RFC 9266 tls-exporter, signed during authentication (D-0018).
+            self.channel_binding = stream
+                .get_ref()
+                .1
+                .export_keying_material(
+                    [0u8; songbird_proto::auth::CHANNEL_BINDING_LEN],
+                    songbird_proto::auth::EXPORTER_LABEL,
+                    None,
+                )
                 .map_err(drop)?;
             let (ws, hs) = tokio::time::timeout(
                 t,
@@ -522,6 +536,7 @@ impl Task {
             &hello.nonce,
             &device,
             PROTOCOL_VERSION,
+            &self.channel_binding,
         )
         .map_err(|_| Outcome::Error)?;
         let auth = ClientFrame::Auth(control::Auth {

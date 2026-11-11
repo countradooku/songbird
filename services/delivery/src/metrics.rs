@@ -59,6 +59,8 @@ pub struct DeliveryMetrics {
     pub rate_limited: Counter,
     /// Mailbox operations that failed.
     pub mailbox_errors: Counter,
+    /// Times delivery paused because the un-acked window was full.
+    pub window_full: Counter,
 }
 
 impl DeliveryMetrics {
@@ -73,7 +75,7 @@ impl DeliveryMetrics {
             "WebSocket connections open",
             self.connections_open.clone(),
         )?;
-        let counters: [(&str, &str, &Counter); 24] = [
+        let counters: [(&str, &str, &Counter); 25] = [
             (
                 "delivery_connections",
                 "WebSocket connections accepted",
@@ -184,6 +186,11 @@ impl DeliveryMetrics {
                 "delivery_rate_limited",
                 "Connections closed for exceeding the frame rate",
                 &self.rate_limited,
+            ),
+            (
+                "delivery_window_full",
+                "Times delivery paused on a full un-acked window",
+                &self.window_full,
             ),
             (
                 "delivery_mailbox_errors",

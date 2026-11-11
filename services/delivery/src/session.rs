@@ -17,13 +17,13 @@
 //!   connection with 4100 (invariant 5); the device catches up from the mailbox on reconnect.
 //! - No device ID, IP or content in logs (invariant 6): only codes and counts are logged.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use sockudo_ws::{Message, WebSocketStream};
 use songbird_mailbox::{Mailbox, MailboxError, NewEnvelope};
+use songbird_proto::auth::CHANNEL_BINDING_LEN;
 use songbird_proto::frame::{self, RejectReason, SendFrame, SendStatus};
 use songbird_proto::{ClientFrame, CloseCode, NONCE_LEN, PROTOCOL_VERSION, ServerFrame, control};
 use songbird_router::{InboxSizes, Live, Routed, Router};
@@ -58,12 +58,13 @@ pub async fn run<S, M, R>(
     mut ws: WebSocketStream<S>,
     shared: Arc<Shared<M, R>>,
     drain: watch::Receiver<bool>,
+    channel_binding: [u8; CHANNEL_BINDING_LEN],
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
     M: Mailbox,
     R: Router,
 {
-    let exit = match authenticate(&mut ws, &shared).await {
+    let exit = match authenticate(&mut ws, &shared, &channel_binding).await {
         Err(e) => e,
         Ok((device, last_acked)) => {
             let sizes = InboxSizes {
@@ -94,6 +95,8 @@ pub async fn run<S, M, R>(
                     std::time::Instant::now(),
                 ),
                 needs_drain: false,
+                acked: last_acked,
+                window_full: false,
             };
             let e = s.live(&mut ws, inbox, drain).await;
             shared.router.detach(&device, conn).await;
@@ -149,6 +152,7 @@ where
 async fn authenticate<S, M, R>(
     ws: &mut WebSocketStream<S>,
     shared: &Shared<M, R>,
+    channel_binding: &[u8; CHANNEL_BINDING_LEN],
 ) -> Res<(DeviceId, u64)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -194,9 +198,14 @@ where
         }
         Err(_) => return Err(Exit::Close(CloseCode::ProtocolError, None)),
     };
-    let transcript =
-        songbird_proto::auth::transcript(&cfg.server_name, &nonce, &device, PROTOCOL_VERSION)
-            .map_err(|_| Exit::Close(CloseCode::Unavailable, Some(RETRY_MS)))?;
+    let transcript = songbird_proto::auth::transcript(
+        &cfg.server_name,
+        &nonce,
+        &device,
+        PROTOCOL_VERSION,
+        channel_binding,
+    )
+    .map_err(|_| Exit::Close(CloseCode::Unavailable, Some(RETRY_MS)))?;
     if !shared
         .directory
         .verify(&device, &transcript, &auth.signature)
@@ -235,9 +244,25 @@ struct Session<M, R> {
     ephemerals: Bucket,
     /// A drain failed (store unavailable) and must be retried.
     needs_drain: bool,
+    /// Highest `seq` the device acknowledged on this connection (or at `Auth`).
+    acked: u64,
+    /// Delivery paused because `max_unacked` envelopes are in flight; the next ACK resumes it
+    /// with a drain (everything not sent is in the mailbox).
+    window_full: bool,
 }
 
 impl<M: Mailbox, R: Router> Session<M, R> {
+    /// Envelopes that may still be sent before the un-acked window is full (D-0020: at most
+    /// `max_unacked` sent and not acknowledged, like Signal's 256-message window).
+    fn room(&self) -> u64 {
+        let in_flight = self.cursor.last_sent().saturating_sub(self.acked);
+        self.shared
+            .config
+            .session
+            .max_unacked
+            .saturating_sub(in_flight)
+    }
+
     fn safety_sweep_deadline(&self) -> Instant {
         let base = self.shared.config.session.safety_sweep_secs;
         let base = if self.needs_drain { 1 } else { base };
@@ -260,7 +285,10 @@ impl<M: Mailbox, R: Router> Session<M, R> {
         if let Err(e) = self.drain(ws).await {
             return e;
         }
-        let mut sweep_at = self.safety_sweep_deadline();
+        // One timer for the whole session, re-armed in place (re-creating it on every wake-up
+        // registered a new timer entry each time: 9 % of user CPU in the M1 flamegraph).
+        let sweep = tokio::time::sleep_until(self.safety_sweep_deadline());
+        tokio::pin!(sweep);
         let write_timeout = self.shared.config.session.write_timeout();
         loop {
             let step: Res = tokio::select! {
@@ -311,8 +339,8 @@ impl<M: Mailbox, R: Router> Session<M, R> {
                     let b = self.buf.split().freeze();
                     self.send_now(ws, b, write_timeout).await
                 }
-                () = tokio::time::sleep_until(sweep_at) => {
-                    sweep_at = self.safety_sweep_deadline();
+                () = &mut sweep => {
+                    sweep.as_mut().reset(self.safety_sweep_deadline());
                     self.drain(ws).await
                 }
             };
@@ -320,7 +348,10 @@ impl<M: Mailbox, R: Router> Session<M, R> {
                 return e;
             }
             if self.needs_drain {
-                sweep_at = sweep_at.min(self.safety_sweep_deadline());
+                let soon = self.safety_sweep_deadline();
+                if soon < sweep.deadline() {
+                    sweep.as_mut().reset(soon);
+                }
             }
         }
     }
@@ -340,6 +371,13 @@ impl<M: Mailbox, R: Router> Session<M, R> {
         let mut n = 0;
         let mut next = Some(first);
         while let Some(l) = next {
+            if l.seq > self.cursor.last_sent() && self.room() == 0 {
+                // Window full: stop here; this and the rest are in the mailbox and are drained
+                // when the device acknowledges.
+                self.window_full = true;
+                self.shared.metrics.window_full.inc();
+                break;
+            }
             match self.cursor.on_live(l.seq) {
                 LiveAction::Send => {
                     self.queue_deliver(ws, l.seq, &l.envelope).await?;
@@ -415,13 +453,20 @@ impl<M: Mailbox, R: Router> Session<M, R> {
         S: AsyncRead + AsyncWrite + Unpin,
     {
         self.shared.metrics.drains.inc();
-        let page = self.shared.config.session.drain_page;
+        let page = u64::try_from(self.shared.config.session.drain_page).unwrap_or(u64::MAX);
         let timeout = self.shared.config.session.write_timeout();
         loop {
+            let room = self.room();
+            if room == 0 {
+                self.window_full = true;
+                self.shared.metrics.window_full.inc();
+                return Ok(());
+            }
+            let limit = usize::try_from(page.min(room)).unwrap_or(usize::MAX);
             let Ok(batch) = self
                 .shared
                 .mailbox
-                .fetch_after(&self.device, self.cursor.last_sent(), page)
+                .fetch_after(&self.device, self.cursor.last_sent(), limit)
                 .await
             else {
                 // Keep the socket open; retry on a short timer ("SurrealDB unavailable" row of
@@ -438,7 +483,7 @@ impl<M: Mailbox, R: Router> Session<M, R> {
                 }
             }
             self.flush(ws, timeout).await?;
-            if n < page {
+            if n < limit {
                 self.needs_drain = false;
                 return Ok(());
             }
@@ -473,6 +518,11 @@ impl<M: Mailbox, R: Router> Session<M, R> {
                         // Not fatal: the next ACK or reconnect (Auth.last_acked_seq) repeats it.
                         self.shared.metrics.mailbox_errors.inc();
                     }
+                }
+                self.acked = self.acked.max(up_to_seq);
+                if self.window_full && self.room() > 0 {
+                    self.window_full = false;
+                    return self.drain(ws).await;
                 }
                 Ok(())
             }
@@ -535,8 +585,7 @@ impl<M: Mailbox, R: Router> Session<M, R> {
                 .await;
         }
         // Bounded by max_recipients (checked by the decoder).
-        let mut seen = HashSet::with_capacity(s.recipients.len());
-        if !s.recipients.iter().all(|r| seen.insert(r.device)) {
+        if has_duplicate_device(&s.recipients) {
             return self
                 .reply(ws, s.req_id, reject(RejectReason::DuplicateRecipient, 0))
                 .await;
@@ -557,6 +606,11 @@ impl<M: Mailbox, R: Router> Session<M, R> {
             .await
         {
             Ok(o) => o,
+            Err(MailboxError::IdempotencyConflict) => {
+                return self
+                    .reply(ws, s.req_id, reject(RejectReason::IdempotencyConflict, 0))
+                    .await;
+            }
             Err(MailboxError::Full | MailboxError::Unavailable) => {
                 self.shared.metrics.mailbox_errors.inc();
                 return self
@@ -600,5 +654,50 @@ impl<M: Mailbox, R: Router> Session<M, R> {
             }
         }
         self.flush(ws, t).await
+    }
+}
+
+/// Whether a device appears twice. Pairwise for the common small sends (no allocation; a
+/// per-send `HashSet` was 8 % of user CPU in the M1 flamegraph), sorting above that.
+fn has_duplicate_device(recipients: &[frame::Recipient]) -> bool {
+    const PAIRWISE_MAX: usize = 32;
+    if recipients.len() <= PAIRWISE_MAX {
+        return recipients.iter().enumerate().any(|(i, r)| {
+            recipients
+                .get(i + 1..)
+                .unwrap_or_default()
+                .iter()
+                .any(|o| o.device == r.device)
+        });
+    }
+    // Bounded by max_recipients (checked by the decoder).
+    let mut ids: Vec<&[u8; 16]> = recipients.iter().map(|r| r.device.as_bytes()).collect();
+    ids.sort_unstable();
+    ids.windows(2).any(|w| w.first() == w.get(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use songbird_proto::frame::Recipient;
+
+    fn rs(ids: &[u8]) -> Vec<Recipient> {
+        ids.iter()
+            .map(|b| Recipient {
+                device: DeviceId::from_bytes([*b; 16]),
+                envelope: Bytes::from_static(b"e"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn duplicate_detection_small_and_large() {
+        assert!(!has_duplicate_device(&rs(&[1, 2, 3])));
+        assert!(has_duplicate_device(&rs(&[1, 2, 1])));
+        let many: Vec<u8> = (0..100).collect();
+        assert!(!has_duplicate_device(&rs(&many)));
+        let mut dup = many.clone();
+        dup.push(57);
+        assert!(has_duplicate_device(&rs(&dup)));
     }
 }

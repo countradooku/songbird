@@ -22,6 +22,7 @@
 
 mod checker;
 mod echo;
+mod pusher;
 mod run;
 mod stats;
 
@@ -69,6 +70,8 @@ enum Cmd {
     Run(run::Args),
     /// Raw WebSocket echo round trips (library baselines).
     Echo(echo::Args),
+    /// 1:1 relay through a Pusher-protocol server (the Sockudo server baseline).
+    Pusher(pusher::Args),
 }
 
 fn keys(devices: usize, out: &std::path::Path) -> anyhow::Result<()> {
@@ -106,6 +109,7 @@ fn main() -> ExitCode {
         Cmd::Keys { devices, out } => keys(devices, &out).map(|()| true),
         Cmd::Run(a) => run::main(&a),
         Cmd::Echo(a) => echo::main(&a).map(|()| true),
+        Cmd::Pusher(a) => pusher::main(&a),
     };
     match r {
         Ok(true) => ExitCode::SUCCESS,

@@ -96,7 +96,14 @@ fn auth_frame(
     nonce: &[u8],
     last_acked_seq: u64,
 ) -> Bytes {
-    let t = songbird_proto::auth::transcript(server_name, nonce, &key.device(), 1).unwrap();
+    let t = songbird_proto::auth::transcript(
+        server_name,
+        nonce,
+        &key.device(),
+        1,
+        &songbird_proto::auth::NO_CHANNEL_BINDING,
+    )
+    .unwrap();
     ClientFrame::Auth(control::Auth {
         device_id: key.device().as_bytes().to_vec(),
         signature: key.sign(&t).to_vec(),
@@ -341,9 +348,11 @@ async fn inv5_slow_client_never_slows_anyone_else() {
     // Device 1 reconnects and gets everything that was stored for it, in order.
     let stored = u64::try_from(s.shared.mailbox.pending(&s.device(1))).unwrap();
     assert!(stored > 0);
-    let (_b, mut bev) = s.connect(1).await;
+    let (b, mut bev) = s.connect(1).await;
     for want in 1..=stored {
         assert_eq!(next_delivery(&mut bev).await.0, want);
+        // Acknowledge as an app does; the un-acked window (D-0020) pauses delivery otherwise.
+        b.ack(want).await.unwrap();
     }
     s.stop().await;
 }
@@ -746,7 +755,78 @@ async fn tls_connection_works() {
         .await
         .unwrap();
     assert_eq!(next_delivery(&mut be).await.1.as_ref(), b"over tls");
+
+    // Channel binding (D-0018): a valid signature that does not cover *this* TLS session's
+    // exporter, as a relaying man in the middle would obtain from the device over its own TLS
+    // session, is refused with 4000.
+    let tls = cfg_tls_for_raw(&s, &ca);
+    let tcp = TcpStream::connect(s.addr).await.unwrap();
+    let name = rustls_pki_types::ServerName::try_from(SERVER_NAME).unwrap();
+    let stream = tokio_rustls::TlsConnector::from(tls)
+        .connect(name, tcp)
+        .await
+        .unwrap();
+    let (mut ws, _) = WebSocketClient::<Http1>::new(sockudo_ws::Config::default())
+        .connect_raw(
+            stream,
+            SERVER_NAME,
+            songbird_proto::PATH,
+            Some(songbird_proto::SUBPROTOCOL),
+        )
+        .await
+        .unwrap();
+    let hello = loop {
+        match poll_fn(|cx| Pin::new(&mut ws).poll_next(cx)).await {
+            Some(Ok(Message::Binary(b))) => {
+                if let ServerFrame::Hello(h) = ServerFrame::decode(&b, &Limits::DEFAULT).unwrap() {
+                    break h;
+                }
+            }
+            other => panic!("expected Hello, got {other:?}"),
+        }
+    };
+    let unbound = auth_frame(&s.key(0), SERVER_NAME, &hello.nonce, 0);
+    poll_fn(|cx| Pin::new(&mut ws).poll_ready(cx))
+        .await
+        .unwrap();
+    Pin::new(&mut ws)
+        .start_send(Message::Binary(unbound))
+        .unwrap();
+    poll_fn(|cx| Pin::new(&mut ws).poll_flush(cx))
+        .await
+        .unwrap();
+    let code = loop {
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            poll_fn(|cx| Pin::new(&mut ws).poll_next(cx)),
+        )
+        .await
+        .unwrap()
+        {
+            Some(Ok(Message::Close(r))) => break r.map_or(1005, |r| r.code),
+            Some(Ok(_)) => {}
+            _ => break 1006,
+        }
+    };
+    assert_eq!(code, CloseCode::AuthFailed.code());
     s.stop().await;
+}
+
+fn cfg_tls_for_raw<M: Mailbox>(
+    _s: &songbird_e2e::TestServer<M>,
+    ca: &rcgen::Certificate,
+) -> Arc<rustls::ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(ca.der().clone()).unwrap();
+    Arc::new(
+        rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth(),
+    )
 }
 
 /// After a restore (store generation grew), the client resumes from `seq` 0 instead of its old
@@ -783,5 +863,44 @@ async fn store_generation_change_resets_resume_point() {
         }
     }
     assert!(changed);
+    s.stop().await;
+}
+
+/// D-0020: at most `max_unacked` envelopes are in flight per connection; delivery pauses at the
+/// limit and resumes, in order, when the device acknowledges.
+#[tokio::test]
+async fn unacked_window_bounds_in_flight() {
+    let s = start(2, |c| {
+        c.session.max_unacked = 8;
+        c.session.sends_per_sec = 1_000;
+        c.session.send_burst = 1_000;
+    })
+    .await;
+    let (alice, _a) = s.connect(0).await;
+    let (bob, mut bev) = s.connect(1).await;
+    for i in 0..20 {
+        alice
+            .send(key(), vec![to(s.device(1), format!("m{i}"))])
+            .await
+            .unwrap();
+    }
+    for want in 1..=8 {
+        assert_eq!(next_delivery(&mut bev).await.0, want);
+    }
+    // Nothing more while nothing is acknowledged.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), bev.recv())
+            .await
+            .is_err()
+    );
+    assert!(s.shared.metrics.window_full.get() >= 1);
+    bob.ack(8).await.unwrap();
+    for want in 9..=16 {
+        assert_eq!(next_delivery(&mut bev).await.0, want);
+    }
+    bob.ack(16).await.unwrap();
+    for want in 17..=20 {
+        assert_eq!(next_delivery(&mut bev).await.0, want);
+    }
     s.stop().await;
 }

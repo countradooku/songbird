@@ -12,6 +12,7 @@ use std::future::{Future, ready};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use aws_lc_rs::hmac;
 use songbird_types::DeviceId;
 
 use crate::{IDEMPOTENCY_RETENTION, Mailbox, MailboxError, NewEnvelope, StoreOutcome, Stored};
@@ -25,11 +26,29 @@ struct DeviceBox {
 }
 
 /// An in-memory [`Mailbox`].
-#[derive(Debug)]
 pub struct MemoryMailbox {
     inner: Mutex<Inner>,
     max_per_device: usize,
     store_generation: u64,
+    /// Keys idempotency records, so the store never holds a client's key itself. Random per
+    /// process here (records do not outlive it); the SurrealDB store takes it from the secrets.
+    idempotency_hmac: hmac::Key,
+}
+
+impl std::fmt::Debug for MemoryMailbox {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryMailbox")
+            .field("inner", &self.inner)
+            .field("max_per_device", &self.max_per_device)
+            .field("store_generation", &self.store_generation)
+            .finish_non_exhaustive()
+    }
+}
+
+/// An idempotency record: when, and which (device, seq) the send stored.
+struct Record {
+    at: Instant,
+    stored: Vec<(DeviceId, u64)>,
 }
 
 #[derive(Default)]
@@ -37,7 +56,7 @@ struct Inner {
     // std `HashMap` uses a randomly seeded SipHash (`RandomState`): device IDs are random, but
     // the constitution asks for random seeds on every attacker-influenced key anyway.
     boxes: HashMap<DeviceId, DeviceBox>,
-    idempotency: HashMap<[u8; 16], (Instant, Vec<u64>)>,
+    idempotency: HashMap<[u8; 32], Record>,
 }
 
 impl std::fmt::Debug for Inner {
@@ -53,11 +72,25 @@ impl MemoryMailbox {
     /// A mailbox holding at most `max_per_device` unacknowledged envelopes per device.
     #[must_use]
     pub fn new(max_per_device: usize, store_generation: u64) -> Self {
+        let mut secret = [0u8; 32];
+        // A failing OS random source leaves a zero key: records still work, only less private
+        // against someone who can read this process's memory, who could read them anyway.
+        let _ = getrandom::fill(&mut secret);
         Self {
             inner: Mutex::new(Inner::default()),
             max_per_device,
             store_generation,
+            idempotency_hmac: hmac::Key::new(hmac::HMAC_SHA256, &secret),
         }
+    }
+
+    fn record_id(&self, key: &[u8; 16]) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        let tag = hmac::sign(&self.idempotency_hmac, key);
+        if let Some(t) = tag.as_ref().get(..32) {
+            out.copy_from_slice(t);
+        }
+        out
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -95,21 +128,35 @@ impl MemoryMailbox {
         items: &[NewEnvelope],
         now: Instant,
     ) -> Result<StoreOutcome, MailboxError> {
+        let record_id = key.map(|k| self.record_id(&k));
         let mut inner = self.lock();
-        if let Some((_, seqs)) = key.and_then(|k| inner.idempotency.get(&k)) {
+        if let Some(r) = record_id.and_then(|id| inner.idempotency.get(&id)) {
+            // Scoped to the recipients: a replay must name the same devices, in order.
+            let same = r.stored.len() == items.len()
+                && r.stored
+                    .iter()
+                    .zip(items)
+                    .all(|((d, _), it)| *d == it.device);
+            if !same {
+                return Err(MailboxError::IdempotencyConflict);
+            }
             return Ok(StoreOutcome {
-                seqs: seqs.clone(),
+                seqs: r.stored.iter().map(|(_, s)| *s).collect(),
                 replayed: true,
             });
         }
-        // Check capacity for the whole batch first, so a failure stores nothing.
-        let mut adds: HashMap<DeviceId, usize> = HashMap::new();
-        for it in items {
-            *adds.entry(it.device).or_default() += 1;
-        }
-        for (device, n) in &adds {
-            let have = inner.boxes.get(device).map_or(0, |b| b.entries.len());
-            if have.saturating_add(*n) > self.max_per_device {
+        // Check capacity for the whole batch first, so a failure stores nothing. Counting
+        // repeats pairwise avoids a per-send map (sends name each device once in practice).
+        for (i, it) in items.iter().enumerate() {
+            let n = items
+                .get(..i)
+                .unwrap_or_default()
+                .iter()
+                .filter(|o| o.device == it.device)
+                .count()
+                + 1;
+            let have = inner.boxes.get(&it.device).map_or(0, |b| b.entries.len());
+            if have.saturating_add(n) > self.max_per_device {
                 return Err(MailboxError::Full);
             }
         }
@@ -120,8 +167,13 @@ impl MemoryMailbox {
             b.entries.push_back((b.last_seq, now, it.envelope.clone()));
             seqs.push(b.last_seq);
         }
-        if let Some(k) = key {
-            inner.idempotency.insert(k, (now, seqs.clone()));
+        if let Some(id) = record_id {
+            let stored = items
+                .iter()
+                .map(|it| it.device)
+                .zip(seqs.iter().copied())
+                .collect();
+            inner.idempotency.insert(id, Record { at: now, stored });
         }
         Ok(StoreOutcome {
             seqs,
@@ -144,7 +196,7 @@ impl MemoryMailbox {
         }
         inner
             .idempotency
-            .retain(|_, (at, _)| now.saturating_duration_since(*at) <= IDEMPOTENCY_RETENTION);
+            .retain(|_, r| now.saturating_duration_since(r.at) <= IDEMPOTENCY_RETENTION);
         removed
     }
 }
@@ -281,6 +333,15 @@ mod tests {
         // A different key is a different message.
         let other = m.store_batch(Some([8; 16]), &batch).await.unwrap();
         assert_eq!(other.seqs, vec![2, 2]);
+        // The same key for other recipients is refused and stores nothing.
+        let elsewhere = [env(d(3), "c")];
+        assert_eq!(
+            m.store_batch(Some([7; 16]), &elsewhere).await,
+            Err(MailboxError::IdempotencyConflict)
+        );
+        assert_eq!(m.pending(&d(3)), 0);
+        // Records hold a keyed hash, never the key itself.
+        assert!(!m.lock().idempotency.keys().any(|k| k.starts_with(&[7; 16])));
     }
 
     #[test]

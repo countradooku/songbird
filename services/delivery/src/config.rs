@@ -235,6 +235,9 @@ pub struct SessionConfig {
     pub idle_timeout_secs: u32,
     /// A socket write that makes no progress for this long marks a slow consumer (close 4100).
     pub write_timeout_ms: u64,
+    /// Most envelopes sent on a connection and not yet acknowledged; delivery pauses at the
+    /// limit and resumes on the next ACK (D-0020).
+    pub max_unacked: u64,
     /// Stored-envelope notifications queued per session before it is marked lagged.
     pub live_inbox: usize,
     /// Ephemeral events queued per session before they are dropped.
@@ -273,7 +276,10 @@ impl Default for SessionConfig {
             auth_timeout_ms: 5_000,
             ping_interval_secs: 25,
             idle_timeout_secs: 60,
-            write_timeout_ms: 10_000,
+            // Mobile networks stall for tens of seconds; a stalled reader holds no one else up
+            // (bounded window, non-blocking routing), so the close can be patient.
+            write_timeout_ms: 30_000,
+            max_unacked: 256,
             live_inbox: 256,
             ephemeral_inbox: 32,
             drain_page: 256,
@@ -347,6 +353,11 @@ impl Validate for SessionConfig {
             (100..=120_000).contains(&self.write_timeout_ms),
             "write_timeout_ms",
             "must be in 100..=120000",
+        );
+        range(
+            (1..=65_536).contains(&self.max_unacked),
+            "max_unacked",
+            "must be in 1..=65536",
         );
         range(
             (1..=65_536).contains(&self.live_inbox),

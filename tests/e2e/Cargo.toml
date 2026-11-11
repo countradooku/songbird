@@ -26,6 +26,7 @@ futures-sink.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
+tokio-rustls.workspace = true
 sockudo-ws.workspace = true
 tempfile.workspace = true
 tracing.workspace = true

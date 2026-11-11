@@ -214,6 +214,8 @@ pub enum RejectReason {
     DuplicateRecipient,
     /// The store is unavailable; retry after the hint.
     Unavailable,
+    /// The idempotency key was already used for other recipients; use a fresh key.
+    IdempotencyConflict,
     /// A code this version does not know (forward compatibility).
     Other(u16),
 }
@@ -229,6 +231,7 @@ impl RejectReason {
             Self::UnknownRecipient => 4,
             Self::DuplicateRecipient => 5,
             Self::Unavailable => 6,
+            Self::IdempotencyConflict => 7,
             Self::Other(c) => c,
         }
     }
@@ -243,6 +246,7 @@ impl RejectReason {
             4 => Self::UnknownRecipient,
             5 => Self::DuplicateRecipient,
             6 => Self::Unavailable,
+            7 => Self::IdempotencyConflict,
             c => Self::Other(c),
         }
     }

@@ -89,11 +89,14 @@ fn server_frames() {
 
 #[test]
 fn auth_transcript() {
-    let t = songbird_proto::auth::transcript("chat.example", &[0x11; 32], &dev(0x22), 1).unwrap();
+    let t =
+        songbird_proto::auth::transcript("chat.example", &[0x11; 32], &dev(0x22), 1, &[0x33; 32])
+            .unwrap();
     let want = unhex(
         "736f6e67626972642e76312f6465766963652d6175746800 0c 636861742e6578616d706c65 \
          1111111111111111111111111111111111111111111111111111111111111111 \
-         22222222222222222222222222222222 00000001",
+         22222222222222222222222222222222 00000001 \
+         3333333333333333333333333333333333333333333333333333333333333333",
     );
     assert_eq!(Bytes::from(t), want);
 }

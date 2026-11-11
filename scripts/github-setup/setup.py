@@ -255,6 +255,30 @@ def project():
                      value:{singleSelectOptionId:$o}}){ clientMutationId } }""",
                 p=pid, i=item, f=fs[fn]["id"], o=oid[fn][val])
     print(f"ok    project items set ({len(targets)})")
+
+    # Views. The API can create views and pick visible fields, but cannot set group-by or sort;
+    # those two settings are made once in the web UI (see the report).
+    allf = gql("""query($p:ID!){ node(id:$p){ ... on ProjectV2 {
+                 fields(first:50){ nodes{ ... on ProjectV2FieldCommon { id name } } }
+                 views(first:20){ nodes{ id name layout } } } } }""", p=pid)["node"]
+    fid = {f["name"]: f["id"] for f in allf["fields"]["nodes"] if f}
+    views = {v["name"]: v for v in allf["views"]["nodes"]}
+    wanted = [("Table by issue number", "TABLE_LAYOUT", ["Title", "Status", "Phase", "Area", "Milestone", "Labels"]),
+              ("Board by phase", "BOARD_LAYOUT", ["Title", "Status", "Phase", "Area", "Labels"])]
+    if "View 1" in views and "Table by issue number" not in views:  # reuse the default view
+        gql("""mutation($v:ID!,$n:String!){ updateProjectV2View(input:{viewId:$v,name:$n,layout:TABLE_LAYOUT}){ clientMutationId } }""",
+            v=views["View 1"]["id"], n="Table by issue number")
+        views["Table by issue number"] = views.pop("View 1")
+    for vname, layout, vis in wanted:
+        cfg = {"visibleFieldIds": [fid[f] for f in vis]}
+        if vname in views:
+            gql("""mutation($v:ID!,$c:ProjectV2ViewConfigurationInput){ updateProjectV2View(input:{viewId:$v,configuration:$c}){ clientMutationId } }""",
+                v=views[vname]["id"], c=cfg)
+        else:
+            gql("""mutation($p:ID!,$n:String!,$l:ProjectV2ViewLayout!,$c:ProjectV2ViewConfigurationInput){
+                     createProjectV2View(input:{projectId:$p,name:$n,layout:$l,configuration:$c}){ clientMutationId } }""",
+                p=pid, n=vname, l=layout, c=cfg)
+    print("ok    project views")
     return proj
 
 

@@ -189,5 +189,9 @@ async fn non_tls_probes_get_nothing() {
         .await
         .unwrap();
     // rustls answers garbage with at most a TLS alert; never HTTP or upstream data.
-    assert!(!buf.starts_with(b"HTTP"), "{buf:?}");
+    assert!(
+        !buf.starts_with(b"HTTP"),
+        "proxy answered a non-TLS probe with HTTP ({} bytes)",
+        buf.len()
+    );
 }

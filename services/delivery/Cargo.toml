@@ -1,20 +1,51 @@
 [package]
 name = "songbird-delivery"
-description = "Songbird delivery service."
+description = "Songbird delivery service: the WebSocket server that authenticates devices, stores envelopes, routes them and streams them in order."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "songbird-delivery"
 path = "src/main.rs"
 
+# WebSocket echo server with the delivery service's exact WebSocket configuration, for the
+# Autobahn conformance suite (`cargo xtask autobahn`). Not deployed.
+[[bin]]
+name = "songbird-delivery-autobahn"
+path = "src/bin/autobahn.rs"
+
 [dependencies]
 songbird-service.workspace = true
+songbird-proto.workspace = true
+songbird-mailbox.workspace = true
+songbird-router.workspace = true
+songbird-types.workspace = true
+aws-lc-rs.workspace = true
+bytes.workspace = true
+futures-core.workspace = true
+futures-sink.workspace = true
+getrandom.workspace = true
+hex.workspace = true
 mimalloc.workspace = true
+prometheus-client.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+serde.workspace = true
+sockudo-ws.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "io-util", "macros", "time", "sync"] }
+tokio-rustls.workspace = true
+toml.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
 
 [lints]
 workspace = true

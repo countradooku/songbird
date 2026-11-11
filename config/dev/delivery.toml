@@ -8,3 +8,8 @@ shutdown_grace_secs = 5
 [common.log]
 format = "pretty"
 filter = "info"
+
+[delivery]
+listen = "127.0.0.1:9201"
+server_name = "localhost"
+# No [delivery.directory] file: no device can authenticate. `songbird-loadgen keys` writes one.

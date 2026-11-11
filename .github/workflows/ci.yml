@@ -62,6 +62,26 @@ jobs:
       - if: always()
         run: cargo xtask compose down
 
+  autobahn:
+    name: WebSocket conformance (Autobahn)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Autobahn fuzzingclient against the delivery WebSocket layer (image pinned by digest)
+        run: cargo xtask autobahn
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: autobahn-reports
+          path: target/autobahn
+          if-no-files-found: ignore
+          retention-days: 30
+
   images:
     name: container image (${{ matrix.bin }})
     runs-on: ubuntu-24.04

@@ -38,6 +38,8 @@ cargo xtask <command>
                         fails unless every binary is bit-identical
   dev-env [--force]     write .env with fresh random secrets for docker compose (local only)
   compose up|down|ps    docker compose for local development and CI integration tests
+  autobahn              Autobahn WebSocket conformance suite against the delivery service's
+                          WebSocket layer (docker or podman); fails on any unexpected result
 ";
 
 const SERVICES: &[(&str, u16)] = &[
@@ -78,6 +80,7 @@ fn main() -> ExitCode {
         "release" => release(rest),
         "dev-env" => dev_env(rest.iter().any(|a| a == "--force")),
         "compose" => compose(rest),
+        "autobahn" => autobahn(),
         "help" | "--help" | "-h" => {
             print!("{HELP}");
             Ok(())
@@ -680,4 +683,176 @@ fn garage_layout(file: &str) -> Result {
     garage(&["layout", "apply", "--version", "1"])?;
     eprintln!("garage: single-node layout applied");
     Ok(())
+}
+
+// ---------------------------------------------------------------- autobahn
+
+/// `crossbario/autobahn-testsuite` (wstest 0.8.2), pinned by digest.
+const AUTOBAHN_IMAGE: &str = "docker.io/crossbario/autobahn-testsuite@sha256:519915fb568b04c9383f70a1c405ae3ff44ab9e35835b085239c258b6fac3074";
+
+/// Cases whose messages (4–16 MiB) exceed the production limit (1 MiB, invariant 7): refused by
+/// design in the production pass, and run in the second pass with the limit raised to 16 MiB.
+const AUTOBAHN_OVERSIZE: &[&str] = &[
+    "9.1.4", "9.1.5", "9.1.6", "9.2.4", "9.2.5", "9.2.6", "9.3.*", "9.4.*",
+];
+
+fn container_runtime() -> Result<&'static str> {
+    for rt in ["docker", "podman"] {
+        if Command::new(rt)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            return Ok(rt);
+        }
+    }
+    Err("autobahn needs docker or podman".into())
+}
+
+/// Parses wstest's `index.json` into (case, behavior) pairs without a JSON dependency: the file
+/// is machine-written with one `"<case>": {` per case followed by its `"behavior": "<value>"`.
+fn autobahn_results(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("\": {") {
+        let head = &rest[..i];
+        let case = head.rsplit('"').next().unwrap_or_default().to_owned();
+        rest = &rest[i + 4..];
+        let is_case = !case.is_empty() && case.split('.').all(|p| p.parse::<u32>().is_ok());
+        if !is_case {
+            continue;
+        }
+        if let Some(j) = rest.find("\"behavior\": \"") {
+            let v = &rest[j + 13..];
+            let behavior = v.split('"').next().unwrap_or_default().to_owned();
+            out.push((case, behavior));
+        }
+    }
+    out
+}
+
+fn autobahn_pass(
+    rt: &str,
+    dir: &Path,
+    name: &str,
+    port: u16,
+    max_bytes: Option<usize>,
+    cases: &[&str],
+    exclude: &[&str],
+) -> Result<Vec<(String, String)>> {
+    let quote = |v: &[&str]| {
+        v.iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let spec = format!(
+        "{{\"outdir\": \"/ab/{name}\", \"servers\": [{{\"agent\": \"{name}\", \"url\": \"ws://127.0.0.1:{port}\"}}], \"cases\": [{}], \"exclude-cases\": [{}], \"exclude-agent-cases\": {{}}}}",
+        quote(cases),
+        quote(exclude)
+    );
+    std::fs::write(dir.join(format!("{name}.json")), spec).map_err(|e| e.to_string())?;
+    let mut server = Command::new("target/release/songbird-delivery-autobahn");
+    server.arg(format!("127.0.0.1:{port}"));
+    if let Some(m) = max_bytes {
+        server.arg(m.to_string());
+    }
+    let mut child = server
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("start echo server: {e}"))?;
+    std::thread::sleep(Duration::from_millis(300));
+    let abs = std::fs::canonicalize(dir).map_err(|e| e.to_string())?;
+    let r = run(Command::new(rt).args([
+        "run",
+        "--rm",
+        "--network",
+        "host",
+        "-v",
+        &format!("{}:/ab:Z", abs.display()),
+        AUTOBAHN_IMAGE,
+        "wstest",
+        "-m",
+        "fuzzingclient",
+        "-s",
+        &format!("/ab/{name}.json"),
+    ]));
+    let _ = child.kill();
+    let _ = child.wait();
+    r?;
+    let index = std::fs::read_to_string(dir.join(name).join("index.json"))
+        .map_err(|e| format!("{name}/index.json: {e}"))?;
+    Ok(autobahn_results(&index))
+}
+
+fn autobahn() -> Result {
+    let rt = container_runtime()?;
+    run(cargo().args([
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "songbird-delivery",
+        "--bin",
+        "songbird-delivery-autobahn",
+    ]))?;
+    let dir = PathBuf::from("target/autobahn");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut failures = Vec::new();
+    let mut tally: BTreeMap<String, usize> = BTreeMap::new();
+
+    step("autobahn: production configuration (1 MiB messages), all cases");
+    for (case, behavior) in autobahn_pass(
+        rt,
+        &dir,
+        "production",
+        9001,
+        None,
+        &["*"],
+        AUTOBAHN_OVERSIZE,
+    )? {
+        *tally.entry(format!("production {behavior}")).or_default() += 1;
+        let group = case.split('.').next().unwrap_or_default();
+        let ok = match behavior.as_str() {
+            "OK" | "INFORMATIONAL" => true,
+            // permessage-deflate is deliberately not offered (ciphertext does not compress).
+            "UNIMPLEMENTED" => group == "12" || group == "13",
+            _ => false,
+        };
+        if !ok {
+            failures.push(format!("production {case}: {behavior}"));
+        }
+    }
+
+    step("autobahn: limit raised to 16 MiB, group 9 (large messages)");
+    for (case, behavior) in autobahn_pass(
+        rt,
+        &dir,
+        "large",
+        9002,
+        Some(16 * 1024 * 1024),
+        &["9.*"],
+        &[],
+    )? {
+        *tally.entry(format!("large {behavior}")).or_default() += 1;
+        if behavior != "OK" {
+            failures.push(format!("large {case}: {behavior}"));
+        }
+    }
+    for (k, n) in &tally {
+        eprintln!("  {k}: {n}");
+    }
+    eprintln!("  reports: target/autobahn/{{production,large}}/index.html");
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "autobahn: {} unexpected results:\n{}",
+            failures.len(),
+            failures.join("\n")
+        ))
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "songbird-loadgen"
-description = "Songbird distributed load generator (built in Prompt 2)."
+description = "Songbird load generator with the delivery checker (no loss, no duplicates, strict order). Drives the real client crate."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,19 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
+songbird-client.workspace = true
+songbird-proto.workspace = true
+songbird-types.workspace = true
+anyhow.workspace = true
+bytes.workspace = true
+clap.workspace = true
+futures-core.workspace = true
+futures-sink.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+mimalloc.workspace = true
+sockudo-ws.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "io-util", "macros", "time", "sync"] }
 
 [lints]
 workspace = true

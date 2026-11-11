@@ -4,6 +4,10 @@ members = [
     "crates/types",
     "crates/telemetry",
     "crates/service",
+    "crates/proto",
+    "crates/mailbox",
+    "crates/router",
+    "crates/client",
     "services/delivery",
     "services/api",
     "services/push",
@@ -12,6 +16,7 @@ members = [
     "services/proxy",
     "tools/loadgen",
     "tools/admin",
+    "tests/e2e",
     "xtask",
 ]
 # Fuzz targets need nightly and libFuzzer; they live outside the workspace (see fuzz/README.md).
@@ -30,8 +35,18 @@ repository = "https://github.com/countradooku/songbird"
 songbird-types = { path = "crates/types" }
 songbird-telemetry = { path = "crates/telemetry" }
 songbird-service = { path = "crates/service" }
+songbird-proto = { path = "crates/proto" }
+songbird-mailbox = { path = "crates/mailbox" }
+songbird-router = { path = "crates/router" }
+songbird-client = { path = "crates/client" }
+songbird-delivery = { path = "services/delivery" }
 
 anyhow = "1.0.104"
+aws-lc-rs = { version = "1.19.0", default-features = false, features = ["aws-lc-sys"] }
+futures-core = "0.3.34"
+futures-sink = "0.3.34"
+prost = { version = "0.14.5", default-features = false, features = ["derive", "std"] }
+sockudo-ws = { version = "3.1.1", default-features = false, features = ["tokio-runtime"] }
 bytes = "1.12.1"
 clap = { version = "4.6.7", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
 getrandom = "0.4.3"

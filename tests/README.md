@@ -9,5 +9,5 @@
 - WebSocket conformance: `cargo xtask autobahn`.
 
 Suites against the docker compose environment (`cargo xtask compose up`: SurrealDB, Valkey,
-Garage) arrive with the SurrealDB mailbox (milestone 2) and Valkey routing (milestone 4).
+RustFS) arrive with the SurrealDB mailbox (milestone 2) and Valkey routing (milestone 4).
 Unit, property and per-crate integration tests live next to the code they test.

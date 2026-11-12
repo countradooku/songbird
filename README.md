@@ -24,7 +24,7 @@ and metrics, and drain; Prompt 2 builds the realtime delivery core.
 
 ```bash
 cargo xtask ci            # the full fast quality bar, as CI runs it
-cargo xtask compose up    # SurrealDB, valkey-hot, valkey-jobs, Garage, LiveKit on localhost
+cargo xtask compose up    # SurrealDB, valkey-hot, valkey-jobs, RustFS, LiveKit on localhost
 cargo xtask smoke         # start every service, check health and metrics, stop cleanly
 cargo xtask help          # everything else (fuzz, bench, release, sanitize, miri)
 ```

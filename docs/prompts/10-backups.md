@@ -18,11 +18,11 @@
 - iCloud Drive has no server-side API, so it is a native iOS adapter for the app phase; define the interface it must satisfy now.
 - Local file export and a device-to-device transfer protocol over the local network (QR pairing, encrypted channel), specified with a reference implementation.
 
-**Build the Songbird vault service** (in `api`, storage in Garage):
+**Build the Songbird vault service** (in `api`, storage in RustFS):
 
 - Vault location and access credentials are derived from the recovery key, so a brand-new device holding only the recovery key can find and open its vault; the server stores only a hash of the access secret.
 - Atomic manifest replacement by version; per-plan quotas (Prompt 11); rate limits; vault deletion on account deletion. The server cannot read manifests, so clients remove unreferenced chunks, and quotas bound what they leave behind.
 
-**Tests:** one conformance suite run against every adapter, using local emulators (Garage or MinIO for S3, a WebDAV container, mock servers for Drive, OneDrive and Dropbox); restore across simulated platforms; corruption and truncation tests (a damaged chunk must fail loudly, never restore silently wrong data); fuzzing of manifest and chunk decoders.
+**Tests:** one conformance suite run against every adapter, using local emulators (RustFS or MinIO for S3, a WebDAV container, mock servers for Drive, OneDrive and Dropbox); restore across simulated platforms; corruption and truncation tests (a damaged chunk must fail loudly, never restore silently wrong data); fuzzing of manifest and chunk decoders.
 
 **Gate:** all adapters pass the conformance suite; cross-platform restore and corruption tests pass; incremental backup cost measured for a large simulated history.

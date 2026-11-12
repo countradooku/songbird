@@ -315,6 +315,10 @@ pub struct IggySettings {
     /// A new key window is opened this often, in seconds.
     #[serde(default = "default_key_window_secs")]
     pub key_window_secs: u64,
+    /// The key store is written this often when it changed, in milliseconds: an acknowledged
+    /// message's key leaves the disk within about this long.
+    #[serde(default = "default_key_interval_ms")]
+    pub key_interval_ms: u64,
     /// Most sends per append.
     #[serde(default = "default_max_batch")]
     pub max_batch: usize,
@@ -360,6 +364,9 @@ const fn default_cache_mib() -> usize {
 }
 const fn default_key_window_secs() -> u64 {
     600
+}
+const fn default_key_interval_ms() -> u64 {
+    1_000
 }
 
 impl Validate for IggySettings {
@@ -417,6 +424,11 @@ impl Validate for IggySettings {
             self.key_dir.is_absolute(),
             "key_dir",
             "must be an absolute path",
+        );
+        v.check(
+            (50..=10_000).contains(&self.key_interval_ms),
+            "key_interval_ms",
+            "must be in 50..=10000",
         );
         v.check(
             (60..=3_600).contains(&self.key_window_secs),

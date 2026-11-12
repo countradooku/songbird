@@ -107,9 +107,6 @@ const REDRIVE_AFTER: Duration = Duration::from_secs(2);
 const READ_SPAN: u64 = 512;
 /// Most entries one compaction pass copies forward (the rest wait for the next pass).
 const RELOCATE_PER_PASS: usize = 100_000;
-/// Idempotency entries are written to their topic this often. Until then their store records
-/// hold the low-water offset back, so a crash loses none (replay rebuilds them from the log).
-const IDEM_FLUSH: Duration = Duration::from_secs(1);
 /// The idempotency topic keeps its records this long (the idempotency window and a margin).
 const IDEM_EXPIRY: Duration = Duration::from_hours(7);
 
@@ -300,6 +297,8 @@ struct Shared {
     partition: u32,
     state: Mutex<State>,
     keys: Arc<KeyFile>,
+    /// Serialises key-store writes.
+    persist_lock: tokio::sync::Mutex<()>,
     /// Sealed record payloads by offset (recently written or read), bounded by `cache_bytes`.
     cache: Mutex<(BTreeMap<u64, Bytes>, usize)>,
     cache_bytes: usize,
@@ -474,44 +473,42 @@ impl Shared {
         }
     }
 
-    /// Writes the key file if anything changed (punctures, windows). Blocking I/O off the
-    /// async threads.
+    /// Writes the key store if anything changed (windows, punctures, new pending keys): the
+    /// pages that changed and the head. One write at a time, in order, so an older change set
+    /// never lands after a newer one. Blocking I/O off the async threads.
     async fn persist_keys(&self) -> Result<(), MailboxError> {
-        let sealed = {
+        let _serial = self.persist_lock.lock().await;
+        let changes = {
             let mut st = self.lock();
             // Slots written since the last write get individual keys and leave the tree, so the
-            // file stays proportional to the pending entries.
+            // store stays proportional to the pending entries.
             if st.ring.advance().is_err() {
                 return Err(MailboxError::Unavailable);
             }
-            if !st.ring.dirty {
-                return Ok(());
+            match st.ring.take_changes(self.keys.epoch()) {
+                Some(c) => c,
+                None => return Ok(()),
             }
-            st.ring.dirty = false;
-            self.keys.seal(&st.ring)
         };
-        let ok = match sealed {
-            Ok(bytes) => {
-                let file = self.keys.clone();
-                match tokio::task::spawn_blocking(move || file.write(&bytes)).await {
-                    Ok(Ok(())) => true,
-                    Ok(Err(keys::KeyError::Fenced)) => {
-                        tracing::error!("mailbox key file owned by a newer writer; stopping");
-                        self.healthy.store(false, Ordering::Relaxed);
-                        false
-                    }
-                    _ => false,
+        let manifest = changes.manifest.clone();
+        let taken = changes.taken.clone();
+        let file = self.keys.clone();
+        match tokio::task::spawn_blocking(move || file.write(changes)).await {
+            Ok(Ok(())) => {
+                self.lock().ring.committed(manifest);
+                self.stats.key_writes.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            other => {
+                self.lock().ring.failed(taken);
+                if matches!(other, Ok(Err(keys::KeyError::Fenced))) {
+                    tracing::error!("mailbox key store owned by a newer writer; stopping");
+                    self.healthy.store(false, Ordering::Relaxed);
+                } else {
+                    tracing::warn!("mailbox key store write failed");
                 }
+                Err(MailboxError::Unavailable)
             }
-            Err(_) => false,
-        };
-        if ok {
-            self.stats.key_writes.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        } else {
-            self.lock().ring.dirty = true;
-            tracing::warn!("mailbox key file write failed");
-            Err(MailboxError::Unavailable)
         }
     }
 }
@@ -715,6 +712,7 @@ impl IggyMailbox {
                 partition: p,
                 state: Mutex::new(State::with_ring(ring)),
                 keys,
+                persist_lock: tokio::sync::Mutex::new(()),
                 cache: Mutex::new((BTreeMap::new(), 0)),
                 cache_bytes: cfg.cache_bytes,
                 reader: cfg.connection.client().await?,
@@ -730,21 +728,17 @@ impl IggyMailbox {
             });
             replay_idem(&shared).await?;
             let homes = replay(&shared).await?;
-            shared
-                .persist_keys()
-                .await
-                .map_err(|_| IggyMailboxError::Keys { partition: p })?;
             let writer_client = cfg.connection.client().await?;
             let (tx, rx) = mpsc::channel(cfg.queue);
             let mut w = Writer::new(shared.clone(), writer_client, &cfg, senders.clone());
             w.start_epoch().await?;
             incomplete.push(homes);
             tokio::spawn(w.run(rx));
-            tokio::spawn(key_persister(shared.clone(), cfg.ack_interval));
+            tokio::spawn(key_persister(shared.clone(), cfg.key_interval));
             tokio::spawn(idem_flusher(
                 shared.clone(),
                 cfg.connection.client().await?,
-                IDEM_FLUSH,
+                cfg.idem_flush,
             ));
             parts.push(Part { tx, shared });
         }
@@ -1191,8 +1185,15 @@ impl Writer {
             .ok_or(IggyError::InvalidCommand)?;
         let p = BatchProducer::new(self.producer_id, epoch, 0).ok_or(IggyError::InvalidCommand)?;
         self.producer = Some(p);
+        // The key store is written with the new epoch first: from then on an older writer can no
+        // longer write it, and what replay changed (punctures from ACKs whose key-store write a
+        // crash interrupted) is on disk before anything new is appended.
         self.shared.keys.set_epoch(epoch);
         self.shared.lock().ring.dirty = true;
+        self.shared
+            .persist_keys()
+            .await
+            .map_err(|_| IggyMailboxError::Keys { partition })?;
         let window = self
             .window(0)
             .await

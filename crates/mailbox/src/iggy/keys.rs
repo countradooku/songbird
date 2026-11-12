@@ -21,7 +21,7 @@
 //! directory). A window is in the file before any record sealed with it is appended; punctures are
 //! written with the ACK checkpoint that caused them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -33,7 +33,7 @@ pub(crate) const DEPTH: u8 = 24;
 /// Slots per window.
 pub(crate) const SLOTS: u32 = 1 << DEPTH;
 
-const FILE_VERSION: u8 = 2;
+const FILE_VERSION: u8 = 3;
 const FILE_AAD: &[u8] = b"songbird-mailbox-keys-v1";
 
 /// A 32-byte key, wiped on drop.
@@ -264,12 +264,61 @@ pub(crate) struct Window {
     pub(crate) opened_ms: u64,
 }
 
+/// Slots per key page. A window's individual keys are written in pages of this many slots, and a
+/// write replaces only the pages that changed (at most `PAGE_SLOTS` keys, 36 KiB, each).
+pub(crate) const PAGE_SLOTS: u32 = 1024;
+
+fn page_of(slot: u32) -> u32 {
+    slot / PAGE_SLOTS
+}
+
+fn page_slots(page: u32) -> std::ops::Range<u32> {
+    page.saturating_mul(PAGE_SLOTS)..page.saturating_add(1).saturating_mul(PAGE_SLOTS)
+}
+
+/// A page as the head lists it: the generation of its file and how many keys it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PageRef {
+    epoch: u16,
+    generation: u64,
+    count: u32,
+}
+
 /// All live windows of one partition.
 #[derive(Debug, Default)]
 pub(crate) struct KeyRing {
     pub(crate) windows: BTreeMap<u64, Window>,
-    /// Punctures not yet written to the key file.
+    /// The head (windows, trees, marks) changed since the last write.
     pub(crate) dirty: bool,
+    /// Pages whose keys changed since the last write.
+    dirty_pages: BTreeSet<(u64, u32)>,
+    /// Pages on disk, as the last head written lists them: (window, page) -> file.
+    pages: BTreeMap<(u64, u32), PageRef>,
+    /// Generation of the last write attempted (file names are never reused).
+    generation: u64,
+}
+
+/// What one write puts on disk (plaintext until [`KeyFile::write`] seals it).
+pub(crate) struct Changes {
+    epoch: u16,
+    generation: u64,
+    head: Vec<u8>,
+    pages: Vec<((u64, u32), Vec<u8>)>,
+    /// Files the new head no longer lists (deleted once it is on disk).
+    obsolete: Vec<((u64, u32), PageRef)>,
+    /// The page list once written ([`KeyRing::committed`]).
+    pub(crate) manifest: BTreeMap<(u64, u32), PageRef>,
+    /// The pages taken (marked dirty again if the write fails, [`KeyRing::failed`]).
+    pub(crate) taken: Vec<(u64, u32)>,
+}
+
+impl Drop for Changes {
+    fn drop(&mut self) {
+        self.head.fill(0);
+        for (_, p) in &mut self.pages {
+            p.fill(0);
+        }
+    }
 }
 
 impl KeyRing {
@@ -346,12 +395,11 @@ impl KeyRing {
         let Some(w) = self.windows.get_mut(&id) else {
             return Ok(());
         };
-        let hit = if slot < w.mark {
-            w.explicit.remove(&slot).is_some()
-        } else {
-            w.tree.puncture(slot)?
-        };
-        if hit {
+        if slot < w.mark {
+            if w.explicit.remove(&slot).is_some() {
+                self.dirty_pages.insert((id, page_of(slot)));
+            }
+        } else if w.tree.puncture(slot)? {
             self.dirty = true;
         }
         Ok(())
@@ -362,12 +410,13 @@ impl KeyRing {
     /// nothing below the mark. Keeps the key state proportional to the pending entries,
     /// whatever order they are acknowledged in. Called before every key-file write.
     pub(crate) fn advance(&mut self) -> Result<(), KeyError> {
-        for w in self.windows.values_mut() {
+        for (id, w) in &mut self.windows {
             if w.next_slot <= w.mark {
                 continue;
             }
             for (s, k) in w.tree.range(w.mark, w.next_slot)? {
                 w.explicit.insert(s, k);
+                self.dirty_pages.insert((*id, page_of(s)));
             }
             w.tree.drop_below(w.next_slot)?;
             w.mark = w.next_slot;
@@ -380,51 +429,137 @@ impl KeyRing {
     pub(crate) fn destroy(&mut self, id: u64) {
         if self.windows.remove(&id).is_some() {
             self.dirty = true;
+            for (w, p) in self.pages.keys() {
+                if *w == id {
+                    self.dirty_pages.insert((*w, *p));
+                }
+            }
         }
     }
 
-    fn encode(&self) -> Vec<u8> {
+    /// Whether anything needs writing.
+    pub(crate) fn needs_write(&self) -> bool {
+        self.dirty || !self.dirty_pages.is_empty()
+    }
+
+    /// Takes what changed since the last write: the new head and the changed pages, as
+    /// plaintext (cheap; done under the state lock). `None` when nothing changed.
+    pub(crate) fn take_changes(&mut self, epoch: u16) -> Option<Changes> {
+        if !self.needs_write() {
+            return None;
+        }
+        self.generation += 1;
+        let generation = self.generation;
+        self.dirty = false;
+        let taken: Vec<(u64, u32)> = std::mem::take(&mut self.dirty_pages).into_iter().collect();
+        let mut manifest = self.pages.clone();
+        let mut pages = Vec::new();
+        let mut obsolete = Vec::new();
+        // Pages of destroyed windows (also one destroyed while a write was in flight).
+        let windows = &self.windows;
+        manifest.retain(|(w, p), r| {
+            let keep = windows.contains_key(w);
+            if !keep {
+                obsolete.push(((*w, *p), *r));
+            }
+            keep
+        });
+        for &(w, p) in &taken {
+            if let Some(old) = manifest.remove(&(w, p)) {
+                obsolete.push(((w, p), old));
+            }
+            let keys: Vec<(u32, &Key)> = self
+                .windows
+                .get(&w)
+                .map(|win| {
+                    win.explicit
+                        .range(page_slots(p))
+                        .map(|(s, k)| (*s, k))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if keys.is_empty() {
+                continue;
+            }
+            let count = u32::try_from(keys.len()).unwrap_or(u32::MAX);
+            let mut b = Vec::with_capacity(17 + 36 * keys.len() + 16);
+            b.push(FILE_VERSION);
+            b.extend_from_slice(&w.to_be_bytes());
+            b.extend_from_slice(&p.to_be_bytes());
+            b.extend_from_slice(&count.to_be_bytes());
+            for (s, k) in keys {
+                b.extend_from_slice(&s.to_be_bytes());
+                b.extend_from_slice(&k.0);
+            }
+            pages.push(((w, p), b));
+            manifest.insert(
+                (w, p),
+                PageRef {
+                    epoch,
+                    generation,
+                    count,
+                },
+            );
+        }
+        let head = self.encode_head(generation, &manifest);
+        Some(Changes {
+            epoch,
+            generation,
+            head,
+            pages,
+            obsolete,
+            manifest,
+            taken,
+        })
+    }
+
+    /// Records a successful write.
+    pub(crate) fn committed(&mut self, manifest: BTreeMap<(u64, u32), PageRef>) {
+        self.pages = manifest;
+    }
+
+    /// Records a failed write: everything it carried is written again next time.
+    pub(crate) fn failed(&mut self, taken: Vec<(u64, u32)>) {
+        self.dirty = true;
+        self.dirty_pages.extend(taken);
+    }
+
+    fn encode_head(&self, generation: u64, manifest: &BTreeMap<(u64, u32), PageRef>) -> Vec<u8> {
         let mut out = vec![FILE_VERSION];
-        out.extend_from_slice(
-            &u32::try_from(self.windows.len())
-                .unwrap_or(u32::MAX)
-                .to_be_bytes(),
-        );
+        out.extend_from_slice(&generation.to_be_bytes());
+        out.extend_from_slice(&len32(self.windows.len()).to_be_bytes());
         for (id, w) in &self.windows {
             out.extend_from_slice(&id.to_be_bytes());
             out.extend_from_slice(&w.opened_ms.to_be_bytes());
             out.extend_from_slice(&w.next_slot.to_be_bytes());
             out.extend_from_slice(&w.mark.to_be_bytes());
             out.extend_from_slice(&w.meta.0);
-            out.extend_from_slice(
-                &u32::try_from(w.explicit.len())
-                    .unwrap_or(u32::MAX)
-                    .to_be_bytes(),
-            );
-            for (slot, k) in &w.explicit {
-                out.extend_from_slice(&slot.to_be_bytes());
-                out.extend_from_slice(&k.0);
-            }
-            out.extend_from_slice(
-                &u32::try_from(w.tree.frontier.len())
-                    .unwrap_or(u32::MAX)
-                    .to_be_bytes(),
-            );
+            out.extend_from_slice(&len32(w.tree.frontier.len()).to_be_bytes());
             for ((d, p), k) in &w.tree.frontier {
                 out.push(*d);
                 out.extend_from_slice(&p.to_be_bytes());
                 out.extend_from_slice(&k.0);
             }
         }
+        out.extend_from_slice(&len32(manifest.len()).to_be_bytes());
+        for ((w, p), r) in manifest {
+            out.extend_from_slice(&w.to_be_bytes());
+            out.extend_from_slice(&p.to_be_bytes());
+            out.extend_from_slice(&r.epoch.to_be_bytes());
+            out.extend_from_slice(&r.generation.to_be_bytes());
+            out.extend_from_slice(&r.count.to_be_bytes());
+        }
         out
     }
 
+    /// Decodes a head: the windows (without their individual keys) and the page list.
     #[allow(clippy::many_single_char_names, reason = "a flat decoder")]
-    fn decode(b: &[u8]) -> Result<Self, KeyError> {
+    fn decode_head(b: &[u8]) -> Result<Self, KeyError> {
         let mut r = Rd { b, pos: 0 };
         if r.u8()? != FILE_VERSION {
             return Err(KeyError::File);
         }
+        let generation = r.u64()?;
         let n = r.u32()?;
         let mut windows = BTreeMap::new();
         for _ in 0..n {
@@ -433,32 +568,13 @@ impl KeyRing {
             let next_slot = r.u32()?;
             let mark = r.u32()?;
             let meta = Key(r.arr()?);
-            let e = r.u32()?;
-            if usize::try_from(e)
-                .map_err(|_| KeyError::File)?
-                .saturating_mul(36)
-                > b.len()
-            {
-                return Err(KeyError::File);
-            }
-            let mut explicit = BTreeMap::new();
-            for _ in 0..e {
-                let slot = r.u32()?;
-                explicit.insert(slot, Key(r.arr()?));
-            }
             let m = r.u32()?;
-            if usize::try_from(m)
-                .map_err(|_| KeyError::File)?
-                .saturating_mul(37)
-                > b.len()
-            {
-                return Err(KeyError::File);
-            }
+            r.fits(m, 37)?;
             let mut frontier = BTreeMap::new();
             for _ in 0..m {
                 let d = r.u8()?;
                 let p = r.u32()?;
-                if d > DEPTH {
+                if d > DEPTH || mark > next_slot || next_slot > SLOTS {
                     return Err(KeyError::File);
                 }
                 frontier.insert((d, p), Key(r.arr()?));
@@ -469,9 +585,30 @@ impl KeyRing {
                     meta,
                     tree: Tree { frontier },
                     mark,
-                    explicit,
+                    explicit: BTreeMap::new(),
                     next_slot,
                     opened_ms,
+                },
+            );
+        }
+        let n = r.u32()?;
+        r.fits(n, 26)?;
+        let mut pages = BTreeMap::new();
+        for _ in 0..n {
+            let w = r.u64()?;
+            let p = r.u32()?;
+            let epoch = r.u16()?;
+            let generation = r.u64()?;
+            let count = r.u32()?;
+            if !windows.contains_key(&w) || count == 0 || count > PAGE_SLOTS {
+                return Err(KeyError::File);
+            }
+            pages.insert(
+                (w, p),
+                PageRef {
+                    epoch,
+                    generation,
+                    count,
                 },
             );
         }
@@ -481,8 +618,38 @@ impl KeyRing {
         Ok(Self {
             windows,
             dirty: false,
+            dirty_pages: BTreeSet::new(),
+            pages,
+            generation,
         })
     }
+
+    /// Adds a page's keys (checked against what the head says about it).
+    #[allow(clippy::many_single_char_names, reason = "a flat decoder")]
+    fn add_page(&mut self, w: u64, p: u32, b: &[u8]) -> Result<(), KeyError> {
+        let mut r = Rd { b, pos: 0 };
+        let want = self.pages.get(&(w, p)).copied().ok_or(KeyError::File)?;
+        if r.u8()? != FILE_VERSION || r.u64()? != w || r.u32()? != p || r.u32()? != want.count {
+            return Err(KeyError::File);
+        }
+        let win = self.windows.get_mut(&w).ok_or(KeyError::File)?;
+        let range = page_slots(p);
+        for _ in 0..want.count {
+            let s = r.u32()?;
+            if !range.contains(&s) || s >= win.mark {
+                return Err(KeyError::File);
+            }
+            win.explicit.insert(s, Key(r.arr()?));
+        }
+        if r.pos != b.len() {
+            return Err(KeyError::File);
+        }
+        Ok(())
+    }
+}
+
+fn len32(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
 }
 
 struct Rd<'a> {
@@ -505,27 +672,50 @@ impl Rd<'_> {
     fn u8(&mut self) -> Result<u8, KeyError> {
         Ok(self.arr::<1>()?[0])
     }
+    fn u16(&mut self) -> Result<u16, KeyError> {
+        Ok(u16::from_be_bytes(self.arr()?))
+    }
     fn u32(&mut self) -> Result<u32, KeyError> {
         Ok(u32::from_be_bytes(self.arr()?))
     }
     fn u64(&mut self) -> Result<u64, KeyError> {
         Ok(u64::from_be_bytes(self.arr()?))
     }
+    /// Refuses a count of `size`-byte items longer than what is left.
+    fn fits(&self, n: u32, size: usize) -> Result<(), KeyError> {
+        let n = usize::try_from(n).map_err(|_| KeyError::File)?;
+        if n.saturating_mul(size) > self.b.len().saturating_sub(self.pos) {
+            return Err(KeyError::File);
+        }
+        Ok(())
+    }
 }
 
-/// The key file of one partition, sealed with the master key.
+/// The key store of one partition: a directory holding a **head** (the windows, their trees and
+/// the list of pages) and **pages** of individual keys, every file sealed with the master key.
+///
+/// A write is copy-on-write: changed pages go to new files (named by the write's generation),
+/// then the head that lists them replaces the old head atomically, then the files it no longer
+/// lists are deleted. A crash at any point leaves a consistent store (the old head and its pages,
+/// or the new ones); loading checks every listed page (present, sealed for its place and
+/// generation, the expected number of keys) and refuses the store otherwise, so a lost page can
+/// never pass for acknowledged messages.
 #[derive(Debug)]
 pub(crate) struct KeyFile {
-    path: PathBuf,
+    dir: PathBuf,
     master: Key,
-    /// Binds the file to its stream, topic and partition.
+    /// Binds every file to its stream, topic and partition.
     aad: Vec<u8>,
-    /// Producer epoch of this process's writer: a file written by a newer epoch is never
+    /// Producer epoch of this process's writer: a store written by a newer epoch is never
     /// overwritten (the older writer is fenced, as Iggy fences its appends).
     epoch: std::sync::atomic::AtomicU16,
+    /// Files to delete after the next successful write (left by a failed one).
+    leftover: std::sync::Mutex<Vec<PathBuf>>,
 }
 
 impl KeyFile {
+    /// The store of one partition, in a directory of `dir` named after the partition and a hash
+    /// of its stream and topic.
     pub(crate) fn new(
         dir: &Path,
         stream: &str,
@@ -539,14 +729,25 @@ impl KeyFile {
             topic.as_bytes(),
             &partition.to_be_bytes(),
         ] {
-            aad.extend_from_slice(&u32::try_from(part.len()).unwrap_or(0).to_be_bytes());
+            aad.extend_from_slice(&len32(part.len()).to_be_bytes());
             aad.extend_from_slice(part);
         }
+        let hash = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &aad);
+        let tag = hash
+            .as_ref()
+            .iter()
+            .take(8)
+            .fold(String::new(), |mut t, b| {
+                use std::fmt::Write as _;
+                let _ = write!(t, "{b:02x}");
+                t
+            });
         Self {
-            path: dir.join(format!("{stream}.{topic}.{partition}.keys")),
+            dir: dir.join(format!("p{partition}-{tag}")),
             master: Key(master),
             aad,
             epoch: std::sync::atomic::AtomicU16::new(0),
+            leftover: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -561,100 +762,264 @@ impl KeyFile {
             .store(epoch, std::sync::atomic::Ordering::Release);
     }
 
-    fn aad_for(&self, epoch: u16) -> Vec<u8> {
+    /// The producer epoch this process writes with.
+    pub(crate) fn epoch(&self) -> u16 {
+        self.epoch.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn head_path(&self) -> PathBuf {
+        self.dir.join("head")
+    }
+
+    /// A page file: named by its window, page, writer epoch and write generation, so two
+    /// writers (an old one being fenced) never write the same name.
+    fn page_path(&self, w: u64, p: u32, r: PageRef) -> PathBuf {
+        self.dir
+            .join(format!("w{w}.p{p}.e{}.g{}", r.epoch, r.generation))
+    }
+
+    fn head_aad(&self, epoch: u16) -> Vec<u8> {
         let mut a = self.aad.clone();
+        a.extend_from_slice(b"head");
         a.extend_from_slice(&epoch.to_be_bytes());
         a
     }
 
-    /// Loads the ring; a missing file is an empty ring (a new partition).
-    pub(crate) fn load(&self) -> Result<KeyRing, KeyError> {
-        let data = match std::fs::read(&self.path) {
-            Ok(d) => d,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(KeyRing::default()),
-            Err(_) => return Err(KeyError::File),
-        };
+    fn page_aad(&self, w: u64, p: u32, generation: u64, epoch: u16) -> Vec<u8> {
+        let mut a = self.aad.clone();
+        a.extend_from_slice(b"page");
+        a.extend_from_slice(&w.to_be_bytes());
+        a.extend_from_slice(&p.to_be_bytes());
+        a.extend_from_slice(&generation.to_be_bytes());
+        a.extend_from_slice(&epoch.to_be_bytes());
+        a
+    }
+
+    /// `epoch | nonce | ciphertext` -> plaintext (written by `want`, if given).
+    fn open_file(
+        &self,
+        data: &[u8],
+        want: Option<u16>,
+        aad: impl Fn(u16) -> Vec<u8>,
+    ) -> Result<Vec<u8>, KeyError> {
         let (epoch, rest) = data.split_at_checked(2).ok_or(KeyError::File)?;
         let epoch = u16::from_be_bytes(epoch.try_into().map_err(|_| KeyError::File)?);
+        if want.is_some_and(|w| w != epoch) {
+            return Err(KeyError::File);
+        }
         let (nonce, ct) = rest.split_at_checked(NONCE_LEN).ok_or(KeyError::File)?;
         let nonce = Nonce::try_assume_unique_for_key(nonce).map_err(|_| KeyError::File)?;
         let mut buf = ct.to_vec();
-        let plain = self
+        let n = self
             .sealing_key()?
-            .open_in_place(nonce, Aad::from(self.aad_for(epoch).as_slice()), &mut buf)
-            .map_err(|_| KeyError::File)?;
-        let ring = KeyRing::decode(plain);
-        buf.fill(0);
-        ring
+            .open_in_place(nonce, Aad::from(aad(epoch).as_slice()), &mut buf)
+            .map_err(|_| KeyError::File)?
+            .len();
+        buf.truncate(n);
+        Ok(buf)
     }
 
-    /// The ring sealed for the file (cheap; done under the state lock).
-    pub(crate) fn seal(&self, ring: &KeyRing) -> Result<Vec<u8>, KeyError> {
-        let epoch = self.epoch.load(std::sync::atomic::Ordering::Acquire);
+    /// plaintext -> `epoch | nonce | ciphertext` (the plaintext buffer is sealed in place).
+    fn seal_file(&self, epoch: u16, aad: &[u8], plain: &mut Vec<u8>) -> Result<Vec<u8>, KeyError> {
         let mut nonce = [0u8; NONCE_LEN];
         aws_lc_rs::rand::fill(&mut nonce).map_err(|_| KeyError::Crypto)?;
-        let mut buf = ring.encode();
+        plain.reserve(AES_256_GCM.tag_len());
         self.sealing_key()?
-            .seal_in_place_append_tag(
-                Nonce::assume_unique_for_key(nonce),
-                Aad::from(self.aad_for(epoch).as_slice()),
-                &mut buf,
-            )
+            .seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce), Aad::from(aad), plain)
             .map_err(|_| KeyError::Crypto)?;
-        let mut out = epoch.to_be_bytes().to_vec();
+        let mut out = Vec::with_capacity(2 + NONCE_LEN + plain.len());
+        out.extend_from_slice(&epoch.to_be_bytes());
         out.extend_from_slice(&nonce);
-        out.extend_from_slice(&buf);
+        out.extend_from_slice(plain);
         Ok(out)
     }
 
-    /// Replaces the file atomically (write, fsync, rename, fsync of the directory). Blocking.
-    pub(crate) fn write(&self, sealed: &[u8]) -> Result<(), KeyError> {
-        let tmp = self.path.with_extension("keys.tmp");
-        // One writer at a time, and never over a newer epoch's file.
+    /// Loads the ring; no head is an empty ring (a new partition). Every page the head lists
+    /// must be there and intact; files it does not list are deleted.
+    pub(crate) fn load(&self) -> Result<KeyRing, KeyError> {
+        // Not while another process writes (its new pages are not listed yet).
+        let _lock = match std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.dir.join("lock"))
+        {
+            Ok(f) => {
+                f.lock().map_err(|_| KeyError::File)?;
+                Some(f)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return Err(KeyError::File),
+        };
+        let data = match std::fs::read(self.head_path()) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.remove_unlisted(&BTreeMap::new());
+                return Ok(KeyRing::default());
+            }
+            Err(_) => return Err(KeyError::File),
+        };
+        let mut plain = self.open_file(&data, None, |e| self.head_aad(e))?;
+        let ring = KeyRing::decode_head(&plain);
+        plain.fill(0);
+        let mut ring = ring?;
+        let listed: Vec<((u64, u32), PageRef)> = ring.pages.iter().map(|(k, v)| (*k, *v)).collect();
+        for ((w, p), r) in listed {
+            let data = std::fs::read(self.page_path(w, p, r)).map_err(|_| KeyError::File)?;
+            let mut plain = self.open_file(&data, Some(r.epoch), |e| {
+                self.page_aad(w, p, r.generation, e)
+            })?;
+            let added = ring.add_page(w, p, &plain);
+            plain.fill(0);
+            added?;
+        }
+        self.remove_unlisted(&ring.pages);
+        Ok(ring)
+    }
+
+    /// Deletes page and temporary files the head does not list (left by an interrupted write).
+    fn remove_unlisted(&self, pages: &BTreeMap<(u64, u32), PageRef>) {
+        let keep: std::collections::HashSet<PathBuf> = pages
+            .iter()
+            .map(|((w, p), r)| self.page_path(*w, *p, *r))
+            .collect();
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let path = e.path();
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            let ours = name.starts_with('w') || name.ends_with(".tmp");
+            if ours && !keep.contains(&path) {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+
+    /// Seals and writes a change set (blocking): new pages, then the head, then deletes the
+    /// files it replaced.
+    pub(crate) fn write(&self, mut changes: Changes) -> Result<(), KeyError> {
+        let epoch = changes.epoch;
+        let generation = changes.generation;
+        let mut pages = Vec::with_capacity(changes.pages.len());
+        for ((w, p), plain) in &mut changes.pages {
+            let aad = self.page_aad(*w, *p, generation, epoch);
+            let at = changes
+                .manifest
+                .get(&(*w, *p))
+                .copied()
+                .ok_or(KeyError::Crypto)?;
+            pages.push((
+                self.page_path(*w, *p, at),
+                self.seal_file(epoch, &aad, plain)?,
+            ));
+        }
+        let head = self.seal_file(epoch, &self.head_aad(epoch), &mut changes.head)?;
+        std::fs::create_dir_all(&self.dir).map_err(|_| KeyError::Write)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700));
+        }
+        // One writer at a time, and never over a newer epoch's store.
         let lock = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(self.path.with_extension("keys.lock"))
+            .open(self.dir.join("lock"))
             .map_err(|_| KeyError::Write)?;
         lock.lock().map_err(|_| KeyError::Write)?;
-        let mine = sealed
-            .get(..2)
-            .and_then(|e| e.try_into().ok())
-            .map_or(0, u16::from_be_bytes);
-        if let Ok(current) = std::fs::read(&self.path)
+        if let Ok(current) = std::fs::read(self.head_path())
             && let Some(e) = current.get(..2).and_then(|e| e.try_into().ok())
-            && u16::from_be_bytes(e) > mine
+            && u16::from_be_bytes(e) > epoch
         {
             return Err(KeyError::Fenced);
         }
-        let write = || -> std::io::Result<()> {
-            let mut f = std::fs::OpenOptions::new();
-            f.write(true).create(true).truncate(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt as _;
-                f.mode(0o600);
+        let commit = || -> std::io::Result<()> {
+            for (path, bytes) in &pages {
+                write_file(path, bytes)?;
             }
-            let mut file = f.open(&tmp)?;
-            file.write_all(sealed)?;
-            file.sync_all()?;
-            std::fs::rename(&tmp, &self.path)?;
-            if let Some(dir) = self.path.parent() {
-                std::fs::File::open(dir)?.sync_all()?;
-            }
-            Ok(())
+            sync_dir(&self.dir)?;
+            write_file(&self.head_path(), &head)?;
+            sync_dir(&self.dir)
         };
-        let result = write().map_err(|_| KeyError::Write);
+        let mut leftover = self
+            .leftover
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if commit().is_err() {
+            // The new pages may be on disk: delete them once a later head (which will not list
+            // them) is written.
+            leftover.extend(pages.into_iter().map(|(p, _)| p));
+            return Err(KeyError::Write);
+        }
+        let mut gone: Vec<PathBuf> = changes
+            .obsolete
+            .iter()
+            .map(|((w, p), r)| self.page_path(*w, *p, *r))
+            .collect();
+        gone.append(&mut leftover);
+        for path in gone {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => leftover.push(path),
+            }
+        }
+        let _ = sync_dir(&self.dir);
         drop(lock);
-        result
+        Ok(())
     }
 
-    /// Seals and writes (tests).
+    /// Advances, writes and commits (tests).
     #[cfg(test)]
-    pub(crate) fn store(&self, ring: &KeyRing) -> Result<(), KeyError> {
-        self.write(&self.seal(ring)?)
+    pub(crate) fn store(&self, ring: &mut KeyRing) -> Result<(), KeyError> {
+        ring.dirty = true;
+        let Some(c) = ring.take_changes(self.epoch()) else {
+            return Ok(());
+        };
+        let manifest = c.manifest.clone();
+        self.write(c)?;
+        ring.committed(manifest);
+        Ok(())
     }
+
+    /// Files in the store (tests).
+    #[cfg(test)]
+    fn files(&self) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(&self.dir)
+            .map(|d| {
+                d.flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort();
+        v
+    }
+}
+
+/// Writes a file atomically: temporary file, fsync, rename (the caller syncs the directory).
+fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    let mut f = std::fs::OpenOptions::new();
+    f.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        f.mode(0o600);
+    }
+    let mut file = f.open(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, path)
+}
+
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
 }
 
 fn idx(n: u32) -> usize {
@@ -821,45 +1186,166 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ring_file_round_trips_and_binds_its_partition() {
-        let dir = std::env::temp_dir().join(format!("sb-keys-{}", std::process::id()));
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sb-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A ring with one window of `n` pending slots, written once.
+    fn stored(file: &KeyFile, n: u32) -> (KeyRing, u64) {
+        let mut ring = KeyRing::default();
+        let w = ring.open_window(1000).unwrap();
+        ring.reserve(w, n).unwrap();
+        ring.advance().unwrap();
+        file.store(&mut ring).unwrap();
+        (ring, w)
+    }
+
+    #[test]
+    fn store_round_trips_and_binds_its_partition() {
+        let dir = temp_dir("keys");
         let file = KeyFile::new(&dir, "s", "t", 0, [9; 32]);
         let mut ring = KeyRing::default();
         let w = ring.open_window(1000).unwrap();
-        let first = ring.reserve(w, 10).unwrap();
-        let leaf3 = ring.leaf(w, first + 3).unwrap().unwrap();
-        ring.puncture(w, first + 2).unwrap();
+        ring.reserve(w, 3000).unwrap();
+        let leaf3 = ring.leaf(w, 3).unwrap().unwrap();
+        let leaf2500 = ring.leaf(w, 2500).unwrap().unwrap();
+        ring.puncture(w, 2).unwrap();
         ring.advance().unwrap();
-        file.store(&ring).unwrap();
+        // More slots above the mark stay in the tree (the head).
+        ring.reserve(w, 10).unwrap();
+        let leaf3005 = ring.leaf(w, 3005).unwrap().unwrap();
+        file.store(&mut ring).unwrap();
         let back = file.load().unwrap();
-        assert_eq!(back.leaf(w, first + 3).unwrap(), Some(leaf3));
-        assert_eq!(back.leaf(w, first + 2).unwrap(), None);
-        assert_eq!(back.windows[&w].next_slot, 10);
-        // Another partition's file name and binding, or another master key, do not open it.
+        assert_eq!(back.leaf(w, 3).unwrap(), Some(leaf3));
+        assert_eq!(back.leaf(w, 2500).unwrap(), Some(leaf2500));
+        assert_eq!(back.leaf(w, 3005).unwrap(), Some(leaf3005));
+        assert_eq!(back.leaf(w, 2).unwrap(), None);
+        assert_eq!(back.windows[&w].next_slot, 3010);
+        assert_eq!(
+            file.files(),
+            vec!["head", "lock", "w1.p0.e0.g1", "w1.p1.e0.g1", "w1.p2.e0.g1"]
+        );
+        // Another master key does not open it.
         let other = KeyFile::new(&dir, "s", "t", 0, [8; 32]);
         assert_eq!(other.load().unwrap_err(), KeyError::File);
-        std::fs::rename(dir.join("s.t.0.keys"), dir.join("s.t.1.keys")).unwrap();
+        // Nor does another partition, given this one's files.
+        let p1 = KeyFile::new(&dir, "s", "t", 1, [9; 32]);
+        std::fs::create_dir_all(&p1.dir).unwrap();
+        for f in ["head", "w1.p0.e0.g1", "w1.p1.e0.g1", "w1.p2.e0.g1"] {
+            std::fs::copy(file.dir.join(f), p1.dir.join(f)).unwrap();
+        }
+        assert_eq!(p1.load().unwrap_err(), KeyError::File);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_write_replaces_only_the_pages_that_changed() {
+        let dir = temp_dir("pages");
+        let file = KeyFile::new(&dir, "s", "t", 0, [9; 32]);
+        let (mut ring, w) = stored(&file, 3000);
+        let keep = ring.leaf(w, 1501).unwrap().unwrap();
+        ring.puncture(w, 1500).unwrap();
+        file.store(&mut ring).unwrap();
+        // Page 1 rewritten (generation 2), its old file deleted; pages 0 and 2 untouched.
         assert_eq!(
-            KeyFile::new(&dir, "s", "t", 1, [9; 32]).load().unwrap_err(),
-            KeyError::File
+            file.files(),
+            vec!["head", "lock", "w1.p0.e0.g1", "w1.p1.e0.g2", "w1.p2.e0.g1"]
+        );
+        // Emptying a page deletes its file.
+        for s in 2048..3000 {
+            ring.puncture(w, s).unwrap();
+        }
+        file.store(&mut ring).unwrap();
+        assert_eq!(
+            file.files(),
+            vec!["head", "lock", "w1.p0.e0.g1", "w1.p1.e0.g2"]
+        );
+        let back = file.load().unwrap();
+        assert_eq!(back.leaf(w, 1500).unwrap(), None);
+        assert_eq!(back.leaf(w, 1501).unwrap(), Some(keep));
+        assert_eq!(back.leaf(w, 2500).unwrap(), None);
+        assert_eq!(back.windows[&w].explicit.len(), 2047);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_missing_or_misplaced_page_refuses_the_store() {
+        let dir = temp_dir("lost");
+        let file = KeyFile::new(&dir, "s", "t", 0, [9; 32]);
+        let (_ring, _w) = stored(&file, 3000);
+        let page = file.dir.join("w1.p1.e0.g1");
+        let saved = std::fs::read(&page).unwrap();
+        // Lost: pending keys would pass for acknowledged messages, so the store is refused.
+        std::fs::remove_file(&page).unwrap();
+        assert_eq!(file.load().unwrap_err(), KeyError::File);
+        // Another page's file in its place does not open either.
+        std::fs::copy(file.dir.join("w1.p2.e0.g1"), &page).unwrap();
+        assert_eq!(file.load().unwrap_err(), KeyError::File);
+        std::fs::write(&page, saved).unwrap();
+        assert!(file.load().is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_interrupted_write_leaves_the_previous_store() {
+        let dir = temp_dir("crash");
+        let file = KeyFile::new(&dir, "s", "t", 0, [9; 32]);
+        let (mut ring, w) = stored(&file, 3000);
+        let before = ring.leaf(w, 1500).unwrap().unwrap();
+        // A write that stopped after its pages, before its head: new page files exist, the head
+        // still lists the old ones.
+        ring.puncture(w, 1500).unwrap();
+        let c = ring.take_changes(0).unwrap();
+        for ((pw, pp), plain) in &c.pages {
+            let mut plain = plain.clone();
+            let aad = file.page_aad(*pw, *pp, c.generation, 0);
+            let bytes = file.seal_file(0, &aad, &mut plain).unwrap();
+            write_file(&file.page_path(*pw, *pp, c.manifest[&(*pw, *pp)]), &bytes).unwrap();
+        }
+        std::fs::write(file.dir.join("head.tmp"), b"partial").unwrap();
+        let back = file.load().unwrap();
+        // The previous store, whole (the log's ACK record punctures again on replay); the
+        // unlisted files are gone.
+        assert_eq!(back.leaf(w, 1500).unwrap(), Some(before));
+        assert_eq!(
+            file.files(),
+            vec!["head", "lock", "w1.p0.e0.g1", "w1.p1.e0.g1", "w1.p2.e0.g1"]
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
+    fn destroying_a_window_deletes_its_pages() {
+        let dir = temp_dir("destroy");
+        let file = KeyFile::new(&dir, "s", "t", 0, [9; 32]);
+        let (mut ring, w1) = stored(&file, 1500);
+        let w2 = ring.open_window(2000).unwrap();
+        ring.reserve(w2, 10).unwrap();
+        ring.advance().unwrap();
+        file.store(&mut ring).unwrap();
+        ring.destroy(w1);
+        file.store(&mut ring).unwrap();
+        assert_eq!(file.files(), vec!["head", "lock", "w2.p0.e0.g2"]);
+        let back = file.load().unwrap();
+        assert!(!back.windows.contains_key(&w1));
+        assert_eq!(back.windows[&w2].explicit.len(), 10);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn an_older_writer_cannot_overwrite_a_newer_one() {
-        let dir = std::env::temp_dir().join(format!("sb-keys-fence-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = temp_dir("fence");
         let old = KeyFile::new(&dir, "s", "t", 0, [9; 32]);
         let new = KeyFile::new(&dir, "s", "t", 0, [9; 32]);
         old.set_epoch(1);
         new.set_epoch(2);
-        let ring = KeyRing::default();
-        old.store(&ring).unwrap();
-        new.store(&ring).unwrap();
-        assert_eq!(old.store(&ring).unwrap_err(), KeyError::Fenced);
+        let mut ring = KeyRing::default();
+        old.store(&mut ring).unwrap();
+        new.store(&mut ring).unwrap();
+        assert_eq!(old.store(&mut ring).unwrap_err(), KeyError::Fenced);
         assert!(new.load().is_ok());
         std::fs::remove_dir_all(&dir).unwrap();
     }

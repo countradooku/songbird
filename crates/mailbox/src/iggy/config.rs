@@ -108,6 +108,12 @@ pub struct IggyConfig {
     pub master_key: [u8; 32],
     /// A new key window is opened this often.
     pub key_window: Duration,
+    /// The key store is written this often (when it changed): an acknowledged message's key
+    /// leaves the disk within about this long.
+    pub key_interval: Duration,
+    /// Idempotency entries are written to the idempotency topic this often (off the write path);
+    /// until then they hold the low-water offset back.
+    pub idem_flush: Duration,
     /// Fault injection for tests: stop a multi-partition send after its home record, as a crash
     /// would (the re-driver must complete it).
     #[doc(hidden)]
@@ -153,6 +159,8 @@ impl IggyConfig {
             key_dir,
             master_key,
             key_window: Duration::from_mins(10),
+            key_interval: Duration::from_secs(1),
+            idem_flush: Duration::from_secs(1),
             fault_skip_remote_parts: false,
         }
     }

@@ -76,6 +76,7 @@ fn iggy_config(
         idempotency_secret(&s.master_key).map_err(|_| "master_key must be 64 hex characters")?,
     );
     cfg.key_window = Duration::from_secs(s.key_window_secs);
+    cfg.key_interval = Duration::from_millis(s.key_interval_ms);
     cfg.stream.clone_from(&s.stream);
     cfg.topic.clone_from(&s.topic);
     cfg.partitions = s.partitions;

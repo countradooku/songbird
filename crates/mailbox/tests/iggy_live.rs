@@ -49,6 +49,8 @@ fn config(name: &str) -> Option<IggyConfig> {
     let mut cfg = IggyConfig::new(connection, [7; 32], key_dir, master);
     cfg.stream = stream;
     cfg.ack_interval = Duration::from_millis(20);
+    cfg.key_interval = Duration::from_millis(50);
+    cfg.idem_flush = Duration::from_millis(20);
     cfg.timeout = Duration::from_secs(10);
     cfg.compaction_interval = Duration::from_hours(1);
     Some(cfg)
@@ -442,6 +444,35 @@ async fn start_up_refuses_an_unreadable_log() {
             ..
         }) => {}
         other => panic!("expected Unreadable, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn start_up_refuses_a_lost_key_page() {
+    use songbird_mailbox::iggy::IggyMailboxError;
+    let Some(cfg) = config("lostpage") else {
+        return;
+    };
+    let m = IggyMailbox::connect(cfg.clone()).await.unwrap();
+    for i in 0..20u8 {
+        m.store(per(&[(d(i), "pending")])).await.unwrap();
+    }
+    // The pending keys reach their pages.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let mut lost = 0;
+    for dir in std::fs::read_dir(&cfg.key_dir).unwrap().flatten() {
+        for f in std::fs::read_dir(dir.path()).unwrap().flatten() {
+            if f.file_name().to_string_lossy().starts_with('w') {
+                std::fs::remove_file(f.path()).unwrap();
+                lost += 1;
+            }
+        }
+    }
+    assert!(lost > 0, "no key pages written");
+    // Pending messages would otherwise look acknowledged and vanish: the mailbox does not start.
+    match IggyMailbox::connect(cfg).await {
+        Err(IggyMailboxError::Keys { .. }) => {}
+        other => panic!("expected Keys, got {:?}", other.map(|_| ())),
     }
 }
 

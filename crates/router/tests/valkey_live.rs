@@ -38,6 +38,7 @@ async fn node(url: &str, secret: [u8; 32], id: u64) -> ValkeyRouter {
     ValkeyRouter::connect(ValkeyRouterConfig {
         url: url.to_owned(),
         tls_ca_pem: None,
+        tls_client: None,
         cluster_secret: secret,
         subscribers: 2,
         node_id: id,

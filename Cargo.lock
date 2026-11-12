@@ -3052,6 +3052,7 @@ dependencies = [
  "rustls-pki-types",
  "serde",
  "sockudo-ws",
+ "songbird-link",
  "songbird-mailbox",
  "songbird-proto",
  "songbird-router",

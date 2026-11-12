@@ -57,9 +57,12 @@ impl Validate for DeliveryConfig {
             );
             v.check(
                 d.router.backend == RouterBackend::Local
-                    || d.router.valkey.as_ref().is_some_and(|s| s.tls_ca.is_some()),
+                    || d.router
+                        .valkey
+                        .as_ref()
+                        .is_some_and(|s| s.tls_ca.is_some() && s.tls_cert.is_some()),
                 "delivery.router.valkey.tls_ca",
-                "is required in staging and production",
+                "and tls_cert are required in staging and production",
             );
         }
         v.check(
@@ -99,6 +102,52 @@ pub struct DeliverySettings {
     /// Routing between nodes.
     #[serde(default)]
     pub router: RouterConfig,
+    /// Several nodes sharing the mailbox (D-0034); absent: this node runs every partition.
+    #[serde(default)]
+    pub cluster: Option<ClusterSettings>,
+}
+
+/// `[delivery.cluster]`: this node in a cluster of delivery nodes sharing the Iggy topic. Leases
+/// and membership live in the router's Valkey; nodes talk over node links with mutual TLS.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterSettings {
+    /// This node's name, the one its certificate is for (`delivery.<host>.songbird.internal`).
+    pub node_name: String,
+    /// Where the node link listener binds (private address).
+    pub link_listen: SocketAddr,
+    /// The address other nodes reach it at.
+    pub link_advertise: SocketAddr,
+    /// PEM certificate chain (internal CA), leaf first.
+    pub cert_chain: PathBuf,
+    /// PEM private key.
+    pub key: SecretRef,
+    /// PEM root of the internal CA.
+    pub ca: PathBuf,
+    /// Partition lease length in milliseconds (renewed every third of it; a dead owner's
+    /// partitions move after about this long).
+    #[serde(default = "default_lease_ttl_ms")]
+    pub lease_ttl_ms: u64,
+}
+
+const fn default_lease_ttl_ms() -> u64 {
+    10_000
+}
+
+impl Validate for ClusterSettings {
+    fn validate(&self, v: &mut Validator) {
+        v.check(
+            self.node_name.starts_with("delivery.")
+                && self.node_name.ends_with(".songbird.internal"),
+            "node_name",
+            "must be delivery.<host>.songbird.internal",
+        );
+        v.check(
+            (1_000..=60_000).contains(&self.lease_ttl_ms),
+            "lease_ttl_ms",
+            "must be in 1000..=60000",
+        );
+    }
 }
 
 /// Router backend.
@@ -140,6 +189,12 @@ pub struct ValkeyRouterSettings {
     pub user: Option<String>,
     /// Password.
     pub pass: SecretRef,
+    /// PEM client certificate chain (Valkey requires client certificates in deployments).
+    #[serde(default)]
+    pub tls_cert: Option<PathBuf>,
+    /// PEM client key.
+    #[serde(default)]
+    pub tls_key: Option<SecretRef>,
     /// 64 hex characters, the same on every node: channel names and payload keys derive from it.
     pub cluster_secret: SecretRef,
     /// Subscriber connections.
@@ -169,6 +224,11 @@ impl Validate for RouterConfig {
                 s.tls_ca.is_none() || s.tls_domain.is_some(),
                 "valkey.tls_domain",
                 "is required with tls_ca",
+            );
+            v.check(
+                s.tls_cert.is_some() == s.tls_key.is_some(),
+                "valkey.tls_key",
+                "and tls_cert go together",
             );
         }
     }
@@ -256,6 +316,19 @@ impl Validate for DeliverySettings {
         v.section("mailbox", &self.mailbox);
         v.section("runtime", &self.runtime);
         v.section("router", &self.router);
+        if let Some(c) = &self.cluster {
+            v.section("cluster", c);
+            v.check(
+                self.mailbox.backend == MailboxBackend::Iggy,
+                "cluster",
+                "needs the iggy mailbox",
+            );
+            v.check(
+                self.router.backend == RouterBackend::Valkey,
+                "cluster",
+                "needs the valkey router (leases live there)",
+            );
+        }
     }
 }
 

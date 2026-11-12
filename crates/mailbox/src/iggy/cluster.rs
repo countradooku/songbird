@@ -45,6 +45,8 @@ pub struct ClusterConfig {
     pub valkey_url: String,
     /// PEM root of the internal CA, for `rediss://`.
     pub valkey_tls_ca_pem: Option<Vec<u8>>,
+    /// PEM client certificate chain and key for Valkey (D-0012).
+    pub valkey_tls_client: Option<(Vec<u8>, Vec<u8>)>,
     /// Lease length; renewed every third of it.
     pub lease_ttl: Duration,
 }
@@ -301,7 +303,12 @@ impl Prepared {
             Some(ca) => redis::Client::build_with_tls(
                 self.cfg.valkey_url.as_str(),
                 redis::TlsCertificates {
-                    client_tls: None,
+                    client_tls: self.cfg.valkey_tls_client.as_ref().map(|(cert, key)| {
+                        redis::ClientTlsConfig {
+                            client_cert: cert.clone(),
+                            client_key: key.clone(),
+                        }
+                    }),
                     root_cert: Some(ca.clone()),
                 },
             ),

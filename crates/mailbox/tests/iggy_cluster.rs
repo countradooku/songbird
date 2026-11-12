@@ -118,6 +118,7 @@ async fn node(e: &Env, n: &str) -> IggyMailbox {
         link_tls: tls,
         valkey_url: e.valkey.clone(),
         valkey_tls_ca_pem: None,
+        valkey_tls_client: None,
         lease_ttl: Duration::from_millis(900),
     });
     IggyMailbox::connect(cfg).await.unwrap()

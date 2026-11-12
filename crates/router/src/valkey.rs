@@ -63,6 +63,8 @@ pub struct ValkeyRouterConfig {
     pub url: String,
     /// PEM root certificate for `rediss://` (the internal CA).
     pub tls_ca_pem: Option<Vec<u8>>,
+    /// PEM client certificate chain and key, when Valkey requires client certificates (D-0012).
+    pub tls_client: Option<(Vec<u8>, Vec<u8>)>,
     /// Cluster secret: channel names and payload sealing keys derive from it (every node the
     /// same).
     pub cluster_secret: [u8; 32],
@@ -215,7 +217,13 @@ fn client(cfg: &ValkeyRouterConfig) -> Result<redis::Client, ValkeyRouterError> 
         Some(ca) => redis::Client::build_with_tls(
             cfg.url.as_str(),
             redis::TlsCertificates {
-                client_tls: None,
+                client_tls: cfg
+                    .tls_client
+                    .as_ref()
+                    .map(|(cert, key)| redis::ClientTlsConfig {
+                        client_cert: cert.clone(),
+                        client_key: key.clone(),
+                    }),
                 root_cert: Some(ca.clone()),
             },
         ),

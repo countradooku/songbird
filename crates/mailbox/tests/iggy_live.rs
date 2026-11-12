@@ -448,6 +448,35 @@ async fn start_up_refuses_an_unreadable_log() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_never_reuses_key_slots() {
+    let Some(mut cfg) = config("slots") else {
+        return;
+    };
+    // The key store is written only when a window opens: records appended after that are on
+    // the log but not in the key store's slot count, as after a crash.
+    cfg.key_interval = Duration::from_hours(1);
+    let x = d(0x51);
+    let first = IggyMailbox::connect(cfg.clone()).await.unwrap();
+    for _ in 0..5 {
+        first.store(per(&[(x, "before")])).await.unwrap();
+    }
+    let again = IggyMailbox::connect(cfg.clone()).await.unwrap();
+    for _ in 0..5 {
+        again.store(per(&[(x, "after")])).await.unwrap();
+    }
+    // Acknowledging the messages from before the restart must not touch the ones after it.
+    again.ack_up_to(&x, 5).await.unwrap();
+    wait_pending(&again, &x, 5).await;
+    let got = again.fetch_after(&x, 5, 10).await.unwrap();
+    assert_eq!(
+        got.iter().map(|s| s.seq).collect::<Vec<_>>(),
+        vec![6, 7, 8, 9, 10]
+    );
+    assert!(got.iter().all(|s| s.envelope.as_ref() == b"after"));
+    drop(first);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn start_up_refuses_a_lost_key_page() {
     use songbird_mailbox::iggy::IggyMailboxError;
     let Some(cfg) = config("lostpage") else {

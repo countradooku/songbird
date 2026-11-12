@@ -307,10 +307,10 @@ pub struct IggySettings {
     pub partitions: u32,
     /// 64 hex characters keying idempotency records; the same on every node.
     pub idempotency_secret: SecretRef,
-    /// Directory of the mailbox key files (one per partition) on this host's persistent disk;
+    /// Directory of the mailbox key stores (a directory per partition) on this host's persistent disk;
     /// losing it loses the pending messages (D-0031).
     pub key_dir: PathBuf,
-    /// 64 hex characters: the master key sealing the key files.
+    /// 64 hex characters: the master key sealing the key stores.
     pub master_key: SecretRef,
     /// A new key window is opened this often, in seconds.
     #[serde(default = "default_key_window_secs")]

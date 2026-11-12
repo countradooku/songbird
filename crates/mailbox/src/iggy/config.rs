@@ -102,9 +102,9 @@ pub struct IggyConfig {
     pub idempotency_secret: [u8; 32],
     /// Store generation (increment after restoring Iggy from a backup).
     pub store_generation: u64,
-    /// Directory of the key files (one per partition), on this host's persistent disk (D-0031).
+    /// Directory of the key stores (a directory per partition), on this host's persistent disk (D-0031).
     pub key_dir: PathBuf,
-    /// Master key sealing the key files (from a secret; the same on a replacement host).
+    /// Master key sealing the key stores (from a secret; the same on a replacement host).
     pub master_key: [u8; 32],
     /// A new key window is opened this often.
     pub key_window: Duration,

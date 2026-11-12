@@ -7,13 +7,13 @@
 //!   (where their sealed slots are, not ciphertext), idempotency tags, MLS epochs and the key
 //!   ring. It batches the requests that queue while it commits (natural group commit).
 //! - **Durability.** The topic's `durability` is `persisted`: Iggy fsyncs before it confirms, and
-//!   a send is acknowledged only after that (invariant 1). A key window is in the key file before
+//!   a send is acknowledged only after that (invariant 1). A key window is in the key store before
 //!   any record sealed with it is appended.
 //! - **Deletion on acknowledgement.** Each entry (envelope, device, `seq`) is sealed under its own
-//!   leaf key of a puncturable key tree; an ACK punctures the leaf, and the punctured key state is
-//!   written with the ACK checkpoint: the entry cannot be decrypted again, from the log or from any
-//!   later key state ([`keys`]). A window's metadata key is destroyed once all its records are below
-//!   the low-water offset.
+//!   leaf key of a puncturable key tree; an ACK punctures the leaf once the ACK record is durable,
+//!   and the key store on disk follows within `key_interval` (1 s): the entry cannot be decrypted
+//!   again, from the log or from any later key state ([`keys`]). A window's metadata key is
+//!   destroyed once all its records are below the low-water offset.
 //! - **One writer per partition.** Each writer is an idempotent Iggy producer with a fixed id and a
 //!   new epoch at every start (recorded in the log). Iggy refuses batches of an older epoch
 //!   (`ProducerEpochFenced`); a batch whose outcome is unknown is resent with the same sequence.
@@ -24,8 +24,9 @@
 //! - **Idempotency.** A tag is stored with a fingerprint of the send's whole recipient set; a
 //!   reused key is a retry only when both match, else it is refused. A retry after delivery gets
 //!   `seq` 0 for entries already acknowledged (nothing left to route).
-//! - **Start-up.** The key file is loaded and each partition replayed from its low-water offset; a
-//!   record that does not open stops the start.
+//! - **Start-up.** The key store is loaded (a missing or altered page stops the start) and each
+//!   partition replayed from its low-water offset (a record that does not open stops the start);
+//!   the new writer then writes the key store with its epoch before it appends anything.
 //! - **Compaction** (off the write path): expired entries are acknowledged, pending entries older
 //!   than `relocate_after` are re-sealed forward, a counter snapshot is written, the low-water
 //!   offset (an Iggy consumer offset) moves up and windows below it are destroyed. Iggy deletes
@@ -84,8 +85,8 @@ pub enum IggyMailboxError {
         /// Its version byte (this build writes and reads [`RECORD_VERSION`]).
         version: u8,
     },
-    /// A key file is unreadable (wrong master key, corruption) or cannot be written.
-    #[error("mailbox key file of partition {partition} unusable")]
+    /// A key store is unreadable (wrong master key, corruption, a lost page) or cannot be written.
+    #[error("mailbox key store of partition {partition} unusable")]
     Keys {
         /// Partition.
         partition: u32,
@@ -546,6 +547,7 @@ pub fn fuzz_record(data: &[u8]) {
     let _ = sealed::decode_entry(data, false);
     let _ = sealed::decode_relocated(data);
     let _ = sealed::decode_remote(data, 0);
+    keys::fuzz_decode(data);
     if let Ok(rec) = Record::decode(&src) {
         let again = rec.encode();
         assert_eq!(
@@ -558,12 +560,12 @@ pub fn fuzz_record(data: &[u8]) {
 }
 
 /// What an attacker holding the Iggy data, the key directory and the master key could read:
-/// every record still in the log of every partition is opened with the key files as they are on
+/// every record still in the log of every partition is opened with the key stores as they are on
 /// disk now. Returns (records whose raw bytes contain `marker`, opened plaintexts containing
 /// `marker`). Tests only; not part of the API.
 ///
 /// # Errors
-/// Iggy or a key file failed.
+/// Iggy or a key store failed.
 #[doc(hidden)]
 pub async fn forensic_scan(
     cfg: &IggyConfig,
@@ -622,12 +624,12 @@ pub async fn forensic_scan(
 type Home = (u64, [u8; 32], Vec<(u32, u32)>);
 
 impl IggyMailbox {
-    /// Connects, creates the stream and topic if missing, loads the key files, replays every
+    /// Connects, creates the stream and topic if missing, loads the key stores, replays every
     /// partition, starts the writers and completes remote parts left incomplete before the last
     /// stop.
     ///
     /// # Errors
-    /// The connection, the topic set-up, a key file or the replay failed, or another writer
+    /// The connection, the topic set-up, a key store or the replay failed, or another writer
     /// holds a newer producer epoch.
     pub async fn connect(cfg: IggyConfig) -> Result<Self, IggyMailboxError> {
         // Set-up is retried while Iggy answers that it is busy (start-up under load).
@@ -1060,6 +1062,12 @@ async fn replay(shared: &Shared) -> Result<Vec<Home>, IggyMailboxError> {
                 version: m.payload.first().copied().unwrap_or(0),
             };
             let s = Sealed::parse(&m.payload).map_err(|_| unreadable())?;
+            // Its slots are used, whatever the key store last recorded: a new record must never
+            // get the same leaf keys (the key store may lag the log by up to `key_interval`).
+            shared
+                .lock()
+                .ring
+                .note_used(s.window, s.first_leaf.saturating_add(s.slots()));
             let (fact, home) = open_fact(shared, &s, o, window, now).map_err(|_| unreadable())?;
             if let Some(h) = home {
                 homes.push(h);
@@ -1187,17 +1195,20 @@ impl Writer {
         self.producer = Some(p);
         // The key store is written with the new epoch first: from then on an older writer can no
         // longer write it, and what replay changed (punctures from ACKs whose key-store write a
-        // crash interrupted) is on disk before anything new is appended.
+        // crash interrupted) is on disk before anything new is appended. A new writer always
+        // seals in a fresh window (random keys): nothing it writes can share a key with what an
+        // earlier writer wrote, even records it never replayed.
         self.shared.keys.set_epoch(epoch);
-        self.shared.lock().ring.dirty = true;
+        let window = self
+            .shared
+            .lock()
+            .ring
+            .open_window(now_ms())
+            .map_err(|_| IggyMailboxError::Keys { partition })?;
         self.shared
             .persist_keys()
             .await
             .map_err(|_| IggyMailboxError::Keys { partition })?;
-        let window = self
-            .window(0)
-            .await
-            .ok_or(IggyMailboxError::Keys { partition })?;
         let (payloads, _) = self
             .seal_all(&[Record::Owner { epoch }], window)
             .ok_or(IggyMailboxError::Keys { partition })?;
@@ -1813,7 +1824,7 @@ impl Writer {
     }
 }
 
-/// Writes the key file when punctures or windows changed it, off the writer's path. The
+/// Writes the key store when punctures or windows changed it, off the writer's path. The
 /// deletion guarantee holds: an acknowledged entry's key leaves the disk within one interval.
 async fn key_persister(shared: Arc<Shared>, every: Duration) {
     let mut tick = tokio::time::interval(every);

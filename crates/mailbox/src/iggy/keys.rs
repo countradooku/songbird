@@ -16,10 +16,13 @@
 //! ECB on blocks 0..3): a node's key expands into its two children's keys. Leaf keys seal exactly
 //! one plaintext each, so their AES-256-GCM nonce is constant.
 //!
-//! The key state lives in memory and in a key file per partition, sealed with the node's master
-//! key (AES-256-GCM, random nonce) and replaced atomically (write, fsync, rename, fsync of the
-//! directory). A window is in the file before any record sealed with it is appended; punctures are
-//! written with the ACK checkpoint that caused them.
+//! The key state lives in memory and in a key store per partition ([`KeyFile`]): a head (windows,
+//! trees, marks, the list of pages) and pages of individual keys ([`PAGE_SLOTS`] slots each),
+//! every file sealed with the node's master key (AES-256-GCM, random nonce). Writes are
+//! copy-on-write and replace only the pages that changed, so their cost follows the changes, not
+//! the number of pending messages. A window is in the store before any record sealed with it is
+//! appended; punctures reach it within the key interval (the log's ACK records are the authority:
+//! replay punctures again after a crash).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
@@ -57,17 +60,17 @@ impl std::fmt::Debug for Key {
 /// Key-state errors. Carry no key material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum KeyError {
-    /// The key file is missing, unreadable or not sealed by this master key.
-    #[error("mailbox key file unreadable")]
+    /// The key store (its head or a page it lists) is missing, unreadable or not sealed by this master key.
+    #[error("mailbox key store unreadable")]
     File,
-    /// Writing the key file failed.
-    #[error("mailbox key file write failed")]
+    /// Writing the key store failed.
+    #[error("mailbox key store write failed")]
     Write,
     /// Randomness or a cipher failed.
     #[error("mailbox key operation failed")]
     Crypto,
-    /// A writer with a newer producer epoch owns the key file: this one is fenced.
-    #[error("mailbox key file owned by a newer writer")]
+    /// A writer with a newer producer epoch owns the key store: this one is fenced.
+    #[error("mailbox key store owned by a newer writer")]
     Fenced,
 }
 
@@ -355,6 +358,17 @@ impl KeyRing {
         let first = w.next_slot;
         w.next_slot = first.checked_add(n).filter(|e| *e <= SLOTS)?;
         Some(first)
+    }
+
+    /// Records that slots below `end` of window `id` are used (a record replayed from the log):
+    /// slots are never handed out twice, even when the key store was last written before them.
+    pub(crate) fn note_used(&mut self, id: u64, end: u32) {
+        if let Some(w) = self.windows.get_mut(&id)
+            && end > w.next_slot
+        {
+            w.next_slot = end.min(SLOTS);
+            self.dirty = true;
+        }
     }
 
     pub(crate) fn meta(&self, id: u64) -> Option<&Key> {
@@ -646,6 +660,49 @@ impl KeyRing {
         }
         Ok(())
     }
+}
+
+/// Runs the key-store decoders on arbitrary bytes (the `iggy_record` fuzz target): they never
+/// panic and stay bounded. Their input is authenticated in production; this is defence in depth.
+pub(crate) fn fuzz_decode(data: &[u8]) {
+    if let Ok(mut ring) = KeyRing::decode_head(data) {
+        let pages: Vec<(u64, u32)> = ring.pages.keys().copied().collect();
+        for (w, p) in pages {
+            let _ = ring.add_page(w, p, data);
+        }
+    }
+    // A page against a head that expects whatever count the page claims.
+    let claimed = data
+        .get(13..17)
+        .and_then(|b| b.try_into().ok())
+        .map_or(0, u32::from_be_bytes);
+    let page = data
+        .get(9..13)
+        .and_then(|b| b.try_into().ok())
+        .map_or(0, u32::from_be_bytes);
+    let mut ring = KeyRing::default();
+    ring.windows.insert(
+        1,
+        Window {
+            meta: Key([0; 32]),
+            tree: Tree {
+                frontier: BTreeMap::new(),
+            },
+            mark: SLOTS,
+            explicit: BTreeMap::new(),
+            next_slot: SLOTS,
+            opened_ms: 0,
+        },
+    );
+    ring.pages.insert(
+        (1, page),
+        PageRef {
+            epoch: 0,
+            generation: 1,
+            count: claimed.min(PAGE_SLOTS),
+        },
+    );
+    let _ = ring.add_page(1, page, data);
 }
 
 fn len32(n: usize) -> u32 {
@@ -1348,6 +1405,16 @@ mod tests {
         assert_eq!(old.store(&mut ring).unwrap_err(), KeyError::Fenced);
         assert!(new.load().is_ok());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn replayed_records_move_the_next_slot() {
+        let mut ring = KeyRing::default();
+        let w = ring.open_window(0).unwrap();
+        ring.reserve(w, 10).unwrap();
+        ring.note_used(w, 25);
+        ring.note_used(w, 5);
+        assert_eq!(ring.reserve(w, 1), Some(25));
     }
 
     #[test]

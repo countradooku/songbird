@@ -1,5 +1,6 @@
-//! The mailbox's Iggy log records (read back on every start and every drain): the decoder never
-//! panics, stays bounded, and what it accepts re-encodes canonically.
+//! The mailbox's Iggy log records (read back on every start and every drain) and its key-store
+//! files: the decoders never panic, stay bounded, and what the record decoder accepts re-encodes
+//! canonically.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

@@ -44,7 +44,7 @@ pub(crate) enum OpenError {
     /// Not a well-formed sealed record of this version.
     #[error("sealed record malformed or of another version")]
     Malformed,
-    /// Its window's keys are gone (destroyed, or a lost key file).
+    /// Its window's keys are gone (destroyed, or a lost key store).
     #[error("sealed record's window keys are gone")]
     NoWindow,
     /// Authentication failed (wrong keys or tampering).

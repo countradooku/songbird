@@ -52,6 +52,41 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0034 — Milestone 4: Valkey routing that sees nothing, owned partitions over node links, replicated key stores
+
+- Date: 2026-11-12
+- Status: accepted (design); built and measured in M4
+- Decided by: agent under the owner's delegation ("choose the best variant for maximum speed and
+  security; think like someone from Proton"; the owner dropped the Valkey-against-Iggy routing
+  comparison)
+- Context: M4 runs several delivery nodes. The master prompt's cross-node design assumed a shared
+  SurrealDB mailbox; with Iggy (D-0029) every partition has exactly one writer, and with D-0031
+  its key store is on that writer's disk.
+- Options considered for the key store across nodes: (A) local disk only: a dead node's partitions
+  wait for it and are lost with its disk; (B) the key store in persistent, replicated Valkey: fast
+  takeover, but sealed keys in a networked store and deleted keys in its append-only file until a
+  rewrite; (C) the owner replicates its key store to a standby node over a mutual-TLS link: fast
+  takeover, keys never leave our nodes.
+- Decision:
+  - **Routing: Valkey pub/sub** (master prompt default), one channel per device, the
+    subscriptions being the presence registry (`PUBLISH` returns 0: offline; a new connection
+    publishes `close` before subscribing). Valkey learns nothing: channel names are keyed hashes of
+    the device ID (HMAC-SHA256, cluster secret), payloads (envelope notifications, close) are
+    sealed with a cluster key (AES-256-GCM, from the secrets store, rotatable), connections use TLS
+    with the internal CA (D-0012). Re-subscribe in batches after a Valkey restart or failover.
+  - **Mailbox partitions: one owner node each**, a lease in Valkey (renewed; expiry hands the
+    partition over), Iggy producer epochs fencing any stale owner (D-0029). Sends, fetches and
+    ACKs for a partition owned elsewhere go to the owner over **node links**: per-core framed TCP
+    with mutual TLS (internal CA), so envelopes never pass through a third-party store.
+  - **Key stores: option C.** The owner replicates every key-store write to a standby node over
+    the node link before it is used (windows) or within the key interval (punctures); the standby
+    applies punctures too, so an acknowledged message is unopenable on both copies within about a
+    second. On the owner's death the standby takes the lease and the partitions.
+- Consequences: no node is a single point of loss for pending messages (one standby per
+  partition); Valkey sees opaque channels and blobs only; the node link is new code with its own
+  tests and fuzz target. DirectLinks for live routing stays an alternative to measure only if the
+  Valkey hop shows in the cross-node p99.
+
 ## D-0033 — Unsafe exception: a test-only counting allocator
 
 - Date: 2026-11-12

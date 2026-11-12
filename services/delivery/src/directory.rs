@@ -212,24 +212,25 @@ impl Directory {
     pub fn check_devices(
         &self,
         sender: &DeviceId,
-        recipients: &[&DeviceId],
+        recipients: &[DeviceId],
     ) -> Result<(), Mismatch> {
         let mut m = Mismatch::default();
-        let mut accounts: Vec<AccountId> = Vec::new();
+        // Accounts addressed: a send addresses one or a few, kept inline (no allocation per send,
+        // M3); a large group spills to a vector.
+        let mut accounts = SmallAccounts::default();
         for r in recipients {
-            match self.devices.get(*r) {
-                None => m.extra.push(**r),
-                Some(d) if !accounts.contains(&d.account) => accounts.push(d.account),
-                Some(_) => {}
+            match self.devices.get(r) {
+                None => m.extra.push(*r),
+                Some(d) => accounts.insert(d.account),
             }
         }
         let set: Option<HashSet<&DeviceId>> =
-            (recipients.len() > LINEAR_MAX).then(|| recipients.iter().copied().collect());
+            (recipients.len() > LINEAR_MAX).then(|| recipients.iter().collect());
         let addressed = |d: &DeviceId| match &set {
             Some(s) => s.contains(d),
-            None => recipients.contains(&d),
+            None => recipients.contains(d),
         };
-        for a in &accounts {
+        for a in accounts.iter() {
             for d in self.accounts.get(a).map(Vec::as_slice).unwrap_or_default() {
                 if d != sender && !addressed(d) {
                     m.missing.push(*d);
@@ -241,6 +242,31 @@ impl Directory {
         } else {
             Err(m)
         }
+    }
+}
+
+/// A set of accounts, inline up to [`SmallAccounts::INLINE`] (no allocation for an ordinary send).
+#[derive(Default)]
+struct SmallAccounts {
+    inline: [Option<AccountId>; SmallAccounts::INLINE],
+    spill: Vec<AccountId>,
+}
+
+impl SmallAccounts {
+    const INLINE: usize = 8;
+
+    fn insert(&mut self, a: AccountId) {
+        if self.iter().any(|x| *x == a) {
+            return;
+        }
+        match self.inline.iter_mut().find(|s| s.is_none()) {
+            Some(slot) => *slot = Some(a),
+            None => self.spill.push(a),
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &AccountId> {
+        self.inline.iter().flatten().chain(self.spill.iter())
     }
 }
 
@@ -309,21 +335,19 @@ mod tests {
         ]);
         // Alice's device 1 to Bob (both devices) and her own other device: complete.
         assert_eq!(
-            dir.check_devices(&dev(1), &[&dev(3), &dev(4), &dev(2)]),
+            dir.check_devices(&dev(1), &[dev(3), dev(4), dev(2)]),
             Ok(())
         );
         // Not syncing to her own devices is allowed (her account is not addressed).
-        assert_eq!(dir.check_devices(&dev(1), &[&dev(3), &dev(4)]), Ok(()));
+        assert_eq!(dir.check_devices(&dev(1), &[dev(3), dev(4)]), Ok(()));
         // Bob's device 4 left out, an unknown device added.
-        let m = dir.check_devices(&dev(1), &[&dev(3), &dev(9)]).unwrap_err();
+        let m = dir.check_devices(&dev(1), &[dev(3), dev(9)]).unwrap_err();
         assert_eq!(m.missing, vec![dev(4)]);
         assert_eq!(m.extra, vec![dev(9)]);
         // Large sends use sets and give the same answer.
-        let many: Vec<DeviceId> = (100..200).map(dev).collect();
-        let three = dev(3);
-        let mut refs: Vec<&DeviceId> = many.iter().collect();
-        refs.push(&three);
-        let m = dir.check_devices(&dev(1), &refs).unwrap_err();
+        let mut many: Vec<DeviceId> = (100..200).map(dev).collect();
+        many.push(dev(3));
+        let m = dir.check_devices(&dev(1), &many).unwrap_err();
         assert_eq!(m.missing, vec![dev(4)]);
         assert_eq!(m.extra.len(), 100);
     }

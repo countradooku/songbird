@@ -1,0 +1,38 @@
+[package]
+name = "songbird-alloc-count"
+description = "Test-only counting global allocator: heap allocations per thread, for the zero-allocation checks (M3). Never linked into a service. The one unsafe exception in the workspace (D-0033)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+# Its own lint table: the workspace's, except that `unsafe_code` is denied (allowed on the one
+# allocator impl) instead of forbidden (D-0033).
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Selected restriction lints (constitution: pedantic plus selected restriction lints).
+allow_attributes_without_reason = "warn"
+as_conversions = "warn"
+dbg_macro = "warn"
+exit = "warn"
+expect_used = "warn"
+get_unwrap = "warn"
+indexing_slicing = "warn"
+mem_forget = "warn"
+panic = "warn"
+print_stderr = "warn"
+print_stdout = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+unimplemented = "warn"
+unwrap_used = "warn"
+# Pedantic lints we do not want.
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"

@@ -8,6 +8,7 @@ members = [
     "crates/mailbox",
     "crates/router",
     "crates/runtime",
+    "crates/alloc-count",
     "crates/client",
     "crates/surreal",
     "services/delivery",
@@ -41,6 +42,7 @@ songbird-proto = { path = "crates/proto" }
 songbird-mailbox = { path = "crates/mailbox" }
 songbird-router = { path = "crates/router" }
 songbird-runtime = { path = "crates/runtime" }
+songbird-alloc-count = { path = "crates/alloc-count" }
 songbird-client = { path = "crates/client" }
 songbird-surreal = { path = "crates/surreal" }
 songbird-delivery = { path = "services/delivery" }

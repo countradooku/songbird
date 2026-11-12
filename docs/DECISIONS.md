@@ -53,6 +53,11 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (Valkey routing, owned partitions over node links, replicated key stores) decided by the agent
   under the owner's delegation; the owner may revisit it. New dependency `redis` (with `arcstr`,
   `async-lock`, `xxhash-rust` under BSL-1.0), exempted pending audits.
+- Prompt 2, milestone 5 (report `docs/reports/P02-M5.md`): approve the gate; approve two threat-model
+  rows added beyond the two approved (the sealed job queue and the hashed request nonces, both
+  forms of data already listed); D-0036 decided by the agent under the owner's standing
+  instruction. Real APNs, FCM and UnifiedPush credentials are needed to test against the real
+  providers (mocks only so far).
 - D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
   tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
   `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment
@@ -125,13 +130,53 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     directory reload) and writes the outbox row in one transaction. The worker then, each step
     idempotent: asks delivery, over a mutual-TLS internal link that accepts only `worker.`
     certificates and only these operations, to close the devices' sessions and **forget** their
-    mailboxes (pending entries acknowledged, so their keys are punctured, and counters dropped;
-    a short tombstone makes a racing send skip the device); deletes push tokens, pending upload
+    mailboxes (pending entries acknowledged, so their keys are punctured, and counters dropped);
+    deletes push tokens, pending upload
     grants and their partial objects, device and account rows; repeats the mailbox step after
     the directory has propagated; and verifies every store holds nothing (SurrealDB rows, mailbox
     state on the owner, push tokens, RustFS objects of pending grants). Attachments already sent
     are not linked to the account by design; they go when fetched or after 30 days. Backups are
     M6's.
+- Implementation (refinements while building):
+  - **No tombstones.** The design had a short tombstone so a send racing the deletion would skip
+    the device; built instead: the worker forgets the mailboxes again once every node has
+    reloaded its directory (`propagation_ms`, default 3 s), then verifies. Simpler (no new
+    state in the writer, nothing that expires) and the verification proves the result.
+  - **Mailbox `Forget` record** (sealed format 4; format 3 still read): acknowledges the
+    devices' pending entries (keys punctured) and drops their counters; replay applies it, so a
+    restart or a standby's takeover keeps nothing. Routed to the partition owner over node
+    links (`Forget`, `Known`). `Mailbox::forget` and `Mailbox::knows` on every backend.
+  - **Directory** swapped whole with `arc-swap` 1.9.5 (constitution: hot-reloaded state;
+    readers take no lock; one new crate plus `rustversion`, a proc-macro).
+    `Router::close_everywhere` closes a deleted device's session on every node.
+  - **API**: `hyper` 1.12.0 directly; the `api` crate is a library so tests run it in process;
+    a signed client (`songbird_api::client`) for tests and tools. A download counts its fetch
+    when its last byte is handed to hyper (hyper stops polling a body at `Content-Length`, so
+    end-of-stream never comes; found by the live test).
+  - **Push service** (`services/push`, built on `crates/push-providers`): debounce keyed by the
+    push-row hash (no device IDs in memory), first attempts only; an unregistered token's row
+    is deleted only if it still holds the token that failed (a re-registration in between is
+    kept); a VoIP token reported unregistered deletes the whole APNs row (the app re-registers).
+  - `crates/valkey` holds the self-healing connection (moved from the router) and shared
+    settings; `crates/accounts` the registry and push-token sealing; `crates/link::devices` the
+    worker's request format.
+- Evidence (Apple M5 Pro, 18 cores, 48 GiB, macOS 27.2.1; Docker 6.1.4 Linux VM; compose images
+  as pinned; release build; loopback; [P02-M5 report](reports/P02-M5.md)):
+  - Gate: `tests/e2e/tests/gate_m5.rs` `an_offline_device_receives_a_push_end_to_end` and
+    `account_deletion_is_verified_across_every_store` pass (3 of 3 runs) on SurrealDB (registry
+    and mailbox), valkey-hot, valkey-jobs and RustFS. Iggy cannot run on this machine (the Docker
+    VM's kernel refuses io_uring even unconfined); the Iggy forget test
+    (`forgotten_devices_leave_nothing_readable_and_no_counters`) and the gate on Iggy run in the
+    Linux compose CI job.
+  - Job queue: 74,800 enqueues/s (pipelined batches of 256), 166,600 consumed, acknowledged and
+    deleted per second (`m5_numbers`).
+  - Attachments through `api` to RustFS: 1 MiB upload p50 11.1 ms / p99 12.1 ms (90 MiB/s),
+    download p50 3.2 ms / p99 3.7 ms; 16 MiB upload p50 114 ms / p99 120 ms (141 MiB/s),
+    download p50 13.4 ms / p99 14.4 ms (1.2 GiB/s).
+  - Live tests: `crates/jobs` (5), `crates/accounts` (3), `crates/s3` (5), `services/api` (3),
+    `services/push` (1 covering bursts, calls, unregistered, retry, no identifiers); unit tests
+    for sealing, signing, record and wire formats (Forget, Known), push-token sealing and every
+    provider (RFC 8291 vector, SigV4 vectors).
 - Consequences: Valkey still learns nothing (routing D-0034; jobs sealed); new metadata limited
   to the two rows the owner approved; the static directory is no longer the only source of
   devices, so `delivery` becomes deployable once Prompt 3 adds registration.

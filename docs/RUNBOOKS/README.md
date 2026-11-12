@@ -11,6 +11,7 @@ Every degraded mode is explicit, tested and has a runbook (constitution, invaria
 | Secret exposure, rotation, people changes | [secrets-rotation.md](secrets-rotation.md) | not yet |
 | Provider loss, rebuild at the second provider | [provider-switch.md](provider-switch.md) | not yet (Prompt 1 gate drill) |
 | Delivery: overload, slow consumers, store unavailable, auth failures, deploy drain | [delivery.md](delivery.md) | load-generator runs and e2e tests (P02-M1) |
+| Jobs, push, attachments, account deletion | [jobs-push-api-worker.md](jobs-push-api-worker.md) | live tests and M5 gate tests only |
 
 ## Runbook template
 

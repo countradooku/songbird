@@ -82,6 +82,15 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     the node link before it is used (windows) or within the key interval (punctures); the standby
     applies punctures too, so an acknowledged message is unopenable on both copies within about a
     second. On the owner's death the standby takes the lease and the partitions.
+- From Sockudo's Redis Cluster work (sockudo/sockudo#510 and its sharded pub/sub transport),
+  adopted: subscriber connections are pinged and replaced when silent (half-open connections
+  otherwise miss messages); no single hot channel (our per-device names are keyed hashes, so they
+  spread evenly over hash slots; any future node-wide channel is bucketed across slots); changes of
+  channel layout (rotating the cluster secret, moving from `PUBLISH` to sharded `SPUBLISH` when
+  Valkey becomes a cluster) roll out in adjacent-compatible phases (publish both, subscribe both,
+  drop the old), duplicates during the overlap being dropped by `seq`; for the cluster, a
+  slot-aware subscriber with one connection per shard primary (`redis-rs` exposes no sharded
+  subscribe on its cluster client); no replica connections (the router never reads).
 - Consequences: no node is a single point of loss for pending messages (one standby per
   partition); Valkey sees opaque channels and blobs only; the node link is new code with its own
   tests and fuzz target. DirectLinks for live routing stays an alternative to measure only if the

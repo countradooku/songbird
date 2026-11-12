@@ -17,6 +17,8 @@
 //! (one channel per device) behind the same trait.
 #![forbid(unsafe_code)]
 
+pub mod valkey;
+
 use std::future::{Future, ready};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -164,6 +166,32 @@ impl LocalRouter {
     #[must_use]
     pub fn attached(&self) -> usize {
         self.sessions.len()
+    }
+
+    /// Whether a session holds `device` here.
+    #[must_use]
+    pub fn holds(&self, device: &DeviceId) -> bool {
+        self.sessions.pin().contains_key(device)
+    }
+
+    /// Drops this node's session for `device` (a newer one connected on another node): it is
+    /// signalled to close as replaced (invariant 4). Returns whether one was held.
+    pub fn evict(&self, device: &DeviceId) -> bool {
+        match self.sessions.pin().remove(device) {
+            Some(h) => {
+                h.signals.replace();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Marks every session lagged so each drains its mailbox (after routing may have lost
+    /// notifications, e.g. a Valkey reconnect).
+    pub fn lag_all(&self) {
+        for (_, h) in &self.sessions.pin() {
+            h.signals.lag();
+        }
     }
 
     fn attach_now(&self, device: DeviceId, sizes: InboxSizes) -> Inbox {

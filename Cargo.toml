@@ -50,6 +50,7 @@ songbird-delivery = { path = "services/delivery" }
 anyhow = "1.0.104"
 aws-lc-rs = { version = "1.19.0", default-features = false, features = ["aws-lc-sys"] }
 futures-core = "0.3.34"
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 futures-sink = "0.3.34"
 prost = { version = "0.14.5", default-features = false, features = ["derive", "std"] }
 sockudo-ws = { version = "3.1.1", default-features = false, features = ["tokio-runtime"] }
@@ -77,6 +78,9 @@ rustix = { version = "1.1.6", default-features = false, features = ["std", "thre
 # Device directory (D-0032: fastest and best p99 of papaya, scc, dashmap); already in the graph
 # through the Iggy SDK.
 papaya = "=0.2.5"
+# Valkey client for cross-node routing (D-0034); TLS through rustls with the process's aws-lc-rs
+# provider; default features (scripting, streams, geo, bignum, ACL helpers) off.
+redis = { version = "=1.8.1", default-features = false, features = ["tokio-comp", "tokio-rustls-comp"] }
 time = { version = "0.3.55", features = ["std"] }
 tokio = { version = "1.54.1", default-features = false }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }

@@ -12,7 +12,7 @@
 
 - A gateway translating between Songbird envelopes and Meta's interop protocol. Encryption stays end-to-end between the Songbird app and the WhatsApp app (libsignal on both sides); the gateway never holds message keys or plaintext.
 - Identity mapping between a Songbird account and its WhatsApp-facing identifier: opt-in, revocable, deleted with the account. An identity provider for Meta's token-based identity verification.
-- Prekey bundle and device-list bridging; encrypted media relayed between Garage and Meta's media servers without decryption.
+- Prekey bundle and device-list bridging; encrypted media relayed between RustFS and Meta's media servers without decryption.
 - **Hardened XML handling:** a streaming parser with strict size and depth limits and no DTDs or external entities (blocking XML entity attacks), fuzzed continuously.
 - Separate rate limits, spam controls and reporting for interop traffic; a separate section in the threat model.
 

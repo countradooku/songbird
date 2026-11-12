@@ -22,6 +22,11 @@ server in plaintext. Adding to this list requires the owner's approval.
 | Shared group/channel bodies (ciphertext) | Store a group message once per partition | As envelope ciphertext | Prompt 2 (M2) |
 | Snapshots of every device's last and acknowledged `seq` and every MLS group's epoch, in the Iggy log (sealed with the window's metadata key) | Never reuse a `seq` after old records are deleted | Rewritten by every compaction; old copies unopenable once their window is destroyed and deleted with their segments | Prompt 2 (M2), D-0029, D-0031 |
 | MLS group ID (16 opaque client-chosen bytes) and its current epoch | Order commits (one winner per epoch) | Life of the group | Prompt 2 (M2); group membership is Prompt 5 |
+| Push registration (APNs, FCM or Web Push token / endpoint), **sealed to the push service's X25519 key** and stored under a keyed hash (HMAC-SHA256, push-index secret) of the device ID; `api` and `worker` hold only the public key | Wake an offline device | Until replaced, reported unregistered by the provider, or the device is deleted | Prompt 2 (M5), D-0036; **approved by the owner 2026-11-12** |
+| Attachment record: random 32-byte object ID, padded size, expiry, fetches still due; **no link to the uploading account** once uploaded. Before upload, a grant names the uploading device (at most 1 h) | Accept exactly the granted upload; delete after the last fetch or 30 days | Until the last fetch or 30 days; grant at most 1 h | Prompt 2 (M5), D-0036; **approved by the owner 2026-11-12** |
+| Attachment ciphertext in RustFS (client-encrypted, opaque), named by the object ID | Relay to recipients | As the attachment record | Prompt 2 (M5); the ciphertext the approved attachment row describes |
+| Jobs in `valkey-jobs` (push wake-ups, deletions, cleanups): IDs only, **sealed** (AES-256-GCM-SIV, bound to their stream); the outbox row (account ID) in SurrealDB until relayed | Run background work exactly when needed | Until done (deleted at once); dead letters capped at 100,000 | Prompt 2 (M5), D-0036; sealed form of rows above, **awaiting owner approval** |
+| Hash of a request's (device, nonce) in `valkey-hot` | Refuse replayed `api` requests | 2 minutes | Prompt 2 (M5), D-0036; hashed form of the device ID, **awaiting owner approval** |
 
 Prompt 1 adds two operational views, neither of which is user data on the server:
 
@@ -63,7 +68,8 @@ One subsection per component. Each threat names its mitigation and the test or p
 | Stolen OpenTofu state reveals infrastructure secrets | I | Provider, network | Client-side state and plan encryption; state stored at the other provider | `envs/*/main.tf` `encryption` block (enforced) |
 | Exposed internal service | I, T, E | Network | Two firewall layers (provider + nftables default drop); internal ports only from the private range; host networking keeps nftables authoritative | `modules/topology/tests/topology.tftest.hcl`; `nft -c` validation at deploy |
 | SSH brute force or key theft | S, E | Network | SSH only on the bastion, only from admin ranges (never 0.0.0.0/0, enforced by validation); keys only, no passwords | topology tests; cloud-init `sshd_config` |
-| Lateral movement between services | S, E | Compromised host or component | Mutual TLS with per-component leaves from a name-constrained intermediate; Valkey requires client certificates; Garage behind mTLS tunnels; containers non-root, read-only, no capabilities | `tools/admin/tests/mtls.rs`; D-0012 |
+| Lateral movement between services | S, E | Compromised host or component | Mutual TLS with per-component leaves from a name-constrained intermediate; Valkey requires client certificates; RustFS behind an mTLS tunnel (D-0035); containers non-root, read-only, no capabilities | `tools/admin/tests/mtls.rs`; D-0012 |
+| Authorization flaw in the object store (RustFS has had 43 published advisories, several in IAM, bucket policy and presigned uploads) | I, T, E | Anyone who reaches the S3 API | Objects are client-side ciphertext; the S3 API listens on loopback only, behind a mutual-TLS tunnel; console, FTP, FTPS, SFTP, WebDAV and the update check disabled; image pinned; advisories tracked and patched | D-0035; `deploy/ansible/roles/data/tasks/main.yml` |
 | CA key theft | S | Insider, compromised CI | Root key owner-only and offline; intermediate in deploy secrets, decrypted only into a temporary directory during rotation; leaves ≤ 30 days | `deploy/ansible/rotate-certs.yml`; runbook `mtls-rotation.md` |
 
 ### 3.3 Service runtime common to every service (Prompt 1)
@@ -122,6 +128,23 @@ One subsection per component. Each threat names its mitigation and the test or p
 | Malformed SurrealDB responses | T, D | Compromised database, network | Bounded CBOR decoder (depth, lengths before allocation), fuzzed; TLS with the internal CA outside development | `cbor.rs` tests; `surreal_cbor` fuzz target |
 | A compromised database reads metadata | I | Insider, attacker on the data host | Holds only ciphertext and the metadata listed in §1; idempotency keys only as keyed hashes; no sender stored with envelopes | §1; D-0024 |
 
+### 3.6 Jobs, push, api, worker (Prompt 2, milestone 5)
+
+| Threat | STRIDE | Attacker | Mitigation | Test or proof |
+| --- | --- | --- | --- | --- |
+| The persistent job queue records who was messaged when | I | Insider, attacker on the Valkey host, its AOF or backups | Jobs carry IDs only and are sealed (AES-256-GCM-SIV under the jobs secret, bound to the stream); done jobs are `XDEL`eted | `sealed_jobs_reveal_no_ids_and_open_only_on_their_stream_and_key`; `jobs_are_sealed_delivered_once_and_deleted_when_done`; gate `account_deletion_is_verified_across_every_store` (raw dump of both Valkeys) |
+| Forged or moved jobs | T | Attacker with Valkey access | AEAD: a tampered job, or one moved to another stream, does not open and is dead-lettered unrun | `garbage_in_a_stream_is_dead_lettered_not_run` |
+| A poison job crashing every consumer | D | Bug, malformed data | Delivery count from `XPENDING`; dead-lettered after `max_deliveries`; capped dead-letter stream counted for alerting | `a_dead_consumers_jobs_are_reclaimed_and_poison_jobs_dead_lettered` |
+| Push tokens leaking from the database, `api` or `worker` | I | Insider, database theft, compromised `api` | Sealed to the push service's X25519 key (`api`, `worker` hold only the public key); keyed-hash row IDs; a token sealed for one row does not open on another | `only_the_push_key_opens_and_only_on_its_row`; `push_registration_is_sealed_and_requests_are_authenticated` |
+| Apple, Google or a distributor learning who talks to whom | I | Push provider, legal compulsion of a provider | Every push identical: constant alert text (APNs `mutable-content`), empty FCM data, constant encrypted Web Push body; constant collapse IDs; no identifiers, counts or content; one wake-up per burst | `an_offline_device_receives_a_push_end_to_end` (no ID in path, headers or body); push-providers tests |
+| SSRF through a Web Push endpoint | E, I | Malicious client | https, port 443, no private, loopback, link-local or embedded-IPv4 addresses (checked after resolution), no redirects | push-providers `webpush` tests |
+| Push credentials outside the push service | I | Compromise of another service | APNs, FCM and VAPID keys exist only in `push`'s configuration and process | config structs (`api`, `worker`, `delivery` have no such fields); D-0036 |
+| Replaying or forging `api` requests | S, T | Network, malicious client, log reader | No bearer tokens: each request signed (Ed25519, device key) over server name, method, path, time, nonce and body digest; ±60 s; nonces single-use; unknown, disabled and forged requests fail alike | `signatures_bind_every_field`; `push_registration_is_sealed_and_requests_are_authenticated` (replay, wrong path, swapped body, stranger) |
+| Storage exhaustion or overwrite through uploads | D, T | Malicious client | Grants fix an exact size (bounded) and are single-use and device-bound; the upload must match the length exactly; object names random | `attachments_upload_exactly_and_go_after_the_last_fetch` |
+| An attachment outliving its purpose | I | Insider, later compromise | Deleted after the last recipient fetch (counted when the last byte is sent) or 30 days; expired grants and their partial objects swept | `attachments_upload_exactly_and_go_after_the_last_fetch`; worker sweep |
+| A deleted account surviving in some store | I | Insider, legal request, the user's own GDPR right | Outbox job written with the deletion; worker forgets mailboxes (keys punctured, counters dropped, `Forget` record replayed on restart), closes sessions everywhere, deletes push tokens, grants and objects, repeats after directory propagation, then verifies mailbox, object store and registry before finishing (else retried, then dead-lettered) | gate `account_deletion_is_verified_across_every_store`; `forgotten_devices_leave_nothing_readable_and_no_counters` (Iggy) |
+| A compromised internal service deleting other users' data | E | Compromised `api`, `push` | The device link accepts only `worker.` certificates and only Forget/Known; `api` deletes only the authenticated device's own account | `songbird_link` identity tests; `services/delivery/src/internal.rs` |
+
 ## 4. Server-enforced settings
 
 ## 5. Compliance notes (GDPR, age of digital consent per EU country)
@@ -147,9 +170,14 @@ One subsection per component. Each threat names its mitigation and the test or p
 - cargo-vet: 57 of 167 crates are exempted rather than vetted; accepted by the owner (report P01, D-0016).
 - Root SSH through the bastion (owner decision open, D-0014).
 - The proxy is identifiable by traffic analysis; it is a reachability tool, not an anonymity tool.
-- Delivery reads device keys and accounts from a static file (refused outside development and CI)
-  until the identity service (Prompt 3) replaces it, so it is not deployable yet. Mailboxes are in
-  Apache Iggy since M2 (D-0029).
+- Delivery reads devices from the account registry in SurrealDB (M5, reloaded within a second of a
+  change); accounts are created only through `api`'s admin link until Prompt 3 adds registration.
+  A deleted device can authenticate for up to the registry poll interval (1 s) if SurrealDB is
+  unreachable during that window (its sessions are closed by the deletion itself).
+- Attachments already sent stay (opaque, unlinked to the account) until fetched or 30 days after
+  their sender's account is deleted; backups are M6's.
+- Every service uses one RustFS credential in development; per-service least-privilege users
+  and bucket policies are configured at deployment (Prompt 13), not yet automated.
 - The delivery service connects to Iggy as the root user; a least-privilege user is Prompt 12's.
 - One delivery node per Iggy topic until M4 (a second one is fenced and goes unready).
 - sockudo-ws (parses every client byte, contains `unsafe` SIMD code) and quanta are exempted in

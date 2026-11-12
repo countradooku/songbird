@@ -1,0 +1,25 @@
+[package]
+name = "songbird-jobs"
+description = "Background jobs on Valkey Streams (D-0036): sealed job payloads carrying IDs only, consumer groups, retries with backoff, stuck-job reclaim, a dead-letter stream, and the outbox relay."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+songbird-types.workspace = true
+songbird-valkey.workspace = true
+aws-lc-rs.workspace = true
+hex.workspace = true
+redis.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "macros", "rt"] }
+
+[dev-dependencies]
+proptest.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true

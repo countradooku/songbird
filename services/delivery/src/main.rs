@@ -12,7 +12,7 @@ use songbird_delivery::config::{
     ValkeyRouterSettings,
 };
 use songbird_delivery::{
-    DeliveryConfig, DeliveryMetrics, DeliverySettings, Directory, Shared, server,
+    DeliveryConfig, DeliveryMetrics, DeliverySettings, Directory, Pusher, Shared, server,
 };
 use songbird_link::LinkTls;
 use songbird_mailbox::AnyMailbox;
@@ -35,6 +35,12 @@ struct Delivery {
     tls: Option<tokio_rustls::TlsAcceptor>,
     store: Store,
     route: Option<ValkeyRouterConfig>,
+    /// The account registry and its poll interval (D-0036).
+    registry: Option<(songbird_surreal::Config, Duration)>,
+    /// The job queue for push wake-ups: client, jobs secret, debounce.
+    jobs: Option<(redis::Client, [u8; 32], Duration)>,
+    /// The worker's device link: TLS and listener.
+    internal: Option<(LinkTls, std::net::SocketAddr)>,
 }
 
 /// Valkey connection settings resolved at startup: URL with credentials, CA, client identity.
@@ -253,6 +259,33 @@ impl Service for Delivery {
                     .ok_or("router.valkey is required")?,
             )?),
         };
+        let registry = d
+            .registry
+            .as_ref()
+            .map(|r| Ok::<_, BoxError>((r.surrealdb.config()?, Duration::from_millis(r.poll_ms))))
+            .transpose()?;
+        let jobs = d
+            .jobs
+            .as_ref()
+            .map(|j| {
+                Ok::<_, BoxError>((
+                    j.valkey.client()?,
+                    *j.secret.resolve_key32()?,
+                    Duration::from_millis(j.push_debounce_ms),
+                ))
+            })
+            .transpose()?;
+        let internal = d
+            .internal
+            .as_ref()
+            .map(|i| {
+                let chain = std::fs::read(&i.cert_chain)?;
+                let key = i.key.resolve()?;
+                let ca = std::fs::read(&i.ca)?;
+                let tls = LinkTls::from_pem(&chain, key.expose().as_bytes(), &ca, &i.node_name)?;
+                Ok::<_, BoxError>((tls, i.listen))
+            })
+            .transpose()?;
         let m = DeliveryMetrics::default();
         m.register(metrics)?;
         Ok(Self {
@@ -262,9 +295,16 @@ impl Service for Delivery {
             tls,
             store,
             route,
+            registry,
+            jobs,
+            internal,
         })
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the start-up and shutdown sequence, in order"
+    )]
     async fn run(self, mut ctx: Ctx) -> Result<(), BoxError> {
         let runtime = self.settings.runtime;
         // The mailbox runs on its own multi-thread runtime (D-0032): each Iggy partition's writer
@@ -302,14 +342,35 @@ impl Service for Delivery {
         let listeners: Arc<std::sync::Mutex<Vec<Option<std::net::TcpListener>>>> = Arc::new(
             std::sync::Mutex::new(listeners.into_iter().map(Some).collect()),
         );
-        let shared = Arc::new(Shared::new(
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let (directory, follow) = load_directory(self.registry, self.directory).await?;
+        let mut shared = Shared::new(
             self.settings,
-            self.directory,
+            directory,
             mailbox,
             router,
-            self.metrics,
-        ));
-        let (stop_tx, stop_rx) = watch::channel(false);
+            self.metrics.clone(),
+        );
+        let mut pusher_task = None;
+        if let Some(jobs) = self.jobs {
+            let (pusher, task) = start_pusher(jobs, &self.metrics, stop_rx.clone()).await?;
+            shared = shared.with_push(pusher);
+            pusher_task = Some(task);
+        }
+        let shared = Arc::new(shared);
+        let follower = follow.map(|(registry, version, every)| {
+            tokio::spawn(songbird_delivery::directory::follow_registry(
+                registry,
+                Arc::clone(&shared.directory),
+                version,
+                every,
+                stop_rx.clone(),
+            ))
+        });
+        let internal = match self.internal {
+            Some(i) => Some(start_internal(i, Arc::clone(&shared), stop_rx.clone()).await?),
+            None => None,
+        };
         // The mailbox's tasks stay on this (main) thread's runtime; the cores reach them through
         // channels.
         let tls = self.tls;
@@ -360,6 +421,9 @@ impl Service for Delivery {
         watcher.abort();
         let _ = stop_tx.send(true);
         let panicked = serve.await?;
+        for t in [pusher_task, follower, internal].into_iter().flatten() {
+            let _ = t.await;
+        }
         // Cluster mode: key stores written and replicated, leases released, so the standbys take
         // over at once instead of after a lease period.
         if let AnyMailbox::Iggy(m) = &shared.mailbox {
@@ -372,6 +436,75 @@ impl Service for Delivery {
         }
         Ok(())
     }
+}
+
+type Follow = (Arc<songbird_accounts::Registry>, i64, Duration);
+
+/// The directory: from the registry when configured (D-0036), else the static file.
+async fn load_directory(
+    registry: Option<(songbird_surreal::Config, Duration)>,
+    fallback: Directory,
+) -> Result<(Directory, Option<Follow>), BoxError> {
+    let Some((cfg, every)) = registry else {
+        return Ok((fallback, None));
+    };
+    let db = songbird_accounts::Db::connect(cfg).await?;
+    let registry = Arc::new(songbird_accounts::Registry::connect(db).await?);
+    let version = registry.directory_version().await?;
+    let directory = Directory::from_accounts(
+        registry
+            .load_directory()
+            .await?
+            .into_iter()
+            .map(|(d, a, k)| (d, k, a)),
+    );
+    tracing::info!(
+        devices = directory.len(),
+        "device directory loaded from the registry"
+    );
+    Ok((directory, Some((registry, version, every))))
+}
+
+/// Push jobs for offline devices (D-0036).
+async fn start_pusher(
+    (client, secret, debounce): (redis::Client, [u8; 32], Duration),
+    metrics: &DeliveryMetrics,
+    stop: watch::Receiver<bool>,
+) -> Result<(Pusher, tokio::task::JoinHandle<()>), BoxError> {
+    let queue = songbird_jobs::Queue::connect(
+        client,
+        &secret,
+        songbird_jobs::QueueConfig::new("delivery".into()),
+    )
+    .await?;
+    let (pusher, rx) = Pusher::new(metrics.clone());
+    let task = tokio::spawn(songbird_delivery::push::run(
+        Arc::new(queue),
+        rx,
+        debounce,
+        metrics.clone(),
+        stop,
+    ));
+    tracing::info!("push jobs enabled");
+    Ok((pusher, task))
+}
+
+/// The worker's device link (D-0036).
+async fn start_internal(
+    (tls, listen): (LinkTls, std::net::SocketAddr),
+    shared: Arc<Shared<AnyMailbox, AnyRouter>>,
+    stop: watch::Receiver<bool>,
+) -> Result<tokio::task::JoinHandle<()>, BoxError> {
+    let listener = tokio::net::TcpListener::bind(listen).await?;
+    tracing::info!("worker device link listening");
+    Ok(tokio::spawn(songbird_link::serve(
+        listener,
+        tls,
+        "worker.".into(),
+        songbird_delivery::internal::handler(shared),
+        Arc::new(songbird_link::LinkStats::default()),
+        stop,
+    )))
 }
 
 /// Connects the configured mailbox (on the storage runtime: its tasks stay there).

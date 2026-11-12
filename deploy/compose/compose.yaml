@@ -1,7 +1,6 @@
 # Local development and CI integration environment.
 #
-#   cargo xtask compose up     # generates .env (random local secrets), starts, waits for health,
-#                              # applies the single-node Garage layout
+#   cargo xtask compose up     # generates .env (random local secrets), starts, waits for health
 #   cargo xtask compose down   # stops and deletes volumes
 #
 # Every image is pinned by digest; versions and digests are recorded in docs/DECISIONS.md (D-0007).
@@ -103,21 +102,30 @@ services:
       timeout: 3s
       retries: 30
 
-  # S3-compatible object storage for encrypted attachments and backup vaults.
-  garage:
+  # S3-compatible object storage for encrypted attachments and backup vaults (D-0035): RustFS,
+  # single node, single disk. Only the S3 API listens (the admin API shares its port); the web
+  # console, FTP, FTPS, SFTP and WebDAV are off, and so is the update check that calls
+  # version.rustfs.com. Logs go to stdout.
+  rustfs:
     <<: *defaults
-    image: dxflrs/garage:v2.5.0@sha256:677e5b758e4425a325b811c425c026bf35a4bf42f7ddbaa773de3f4fd779a5a5
+    image: rustfs/rustfs:1.0.5 # digest pending, see D-0035
     environment:
-      GARAGE_RPC_SECRET: ${GARAGE_RPC_SECRET:?run cargo xtask dev-env}
-      GARAGE_ADMIN_TOKEN: ${GARAGE_ADMIN_TOKEN:?run cargo xtask dev-env}
-      GARAGE_METRICS_TOKEN: ${GARAGE_METRICS_TOKEN:?run cargo xtask dev-env}
-    volumes:
-      - ./garage.toml:/etc/garage.toml:ro
-      - garage-meta:/var/lib/garage/meta
-      - garage-data:/var/lib/garage/data
-    ports: ["127.0.0.1:${SB_PORT_GARAGE_S3:-47900}:3900", "127.0.0.1:${SB_PORT_GARAGE_ADMIN:-47903}:3903"]
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?run cargo xtask dev-env}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?run cargo xtask dev-env}
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ENABLE: "false"
+      RUSTFS_FTP_ENABLE: "false"
+      RUSTFS_FTPS_ENABLE: "false"
+      RUSTFS_SFTP_ENABLE: "false"
+      RUSTFS_WEBDAV_ENABLE: "false"
+      RUSTFS_CHECK_UPDATE: "false"
+      RUSTFS_OBS_LOG_DIRECTORY: ""
+    volumes: [rustfs:/data]
+    ports: ["127.0.0.1:${SB_PORT_RUSTFS:-47900}:9000"]
+    security_opt: ["no-new-privileges:true"]
     healthcheck:
-      test: ["CMD", "/garage", "status"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/health/ready"]
       interval: 2s
       timeout: 5s
       retries: 30
@@ -148,5 +156,4 @@ volumes:
   surrealdb: {}
   iggy: {}
   valkey-jobs: {}
-  garage-meta: {}
-  garage-data: {}
+  rustfs: {}

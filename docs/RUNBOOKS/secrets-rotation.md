@@ -13,7 +13,7 @@ hosts that need them. Nothing secret is in config files, logs or images.
 
 1. `sops edit deploy/secrets/<env>.sops.yaml`, replace the value (`python3 -c 'import secrets; print(secrets.token_hex(32))'`).
 2. Apply it:
-   - Valkey, SurrealDB, Garage, LiveKit credentials: a `site.yml` run (converges; recreates only
+   - Valkey, SurrealDB, RustFS, LiveKit credentials: a `site.yml` run (converges; recreates only
      containers whose settings changed). SurrealDB's root password is set
      only when the database is created: change it with `DEFINE USER … PASSWORD` first, then update SOPS.
    - Provider tokens, state bucket keys: revoke the old one in the provider console after the new one works.

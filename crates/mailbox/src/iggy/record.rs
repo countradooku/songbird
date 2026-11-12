@@ -11,6 +11,7 @@
 //! | 3 `Relocate` | (`device`, `seq`, `at_ms`, envelope)*: pending entries copied forward by compaction |
 //! | 4 `Owner` | the writer's producer epoch, written when a writer starts |
 //! | 5 `Snapshot` | producer epoch, (`device`, last `seq`, acknowledged `seq`)*, (`group`, epoch)*: counters, so compaction may drop old records |
+//! | 6 `Forget` | `device`*: deleted devices; their pending entries are acknowledged and their counters dropped (D-0036) |
 
 use bytes::{BufMut, Bytes, BytesMut};
 use songbird_types::DeviceId;
@@ -24,6 +25,7 @@ const KIND_ACK: u8 = 2;
 const KIND_RELOCATE: u8 = 3;
 const KIND_OWNER: u8 = 4;
 const KIND_SNAPSHOT: u8 = 5;
+const KIND_FORGET: u8 = 6;
 
 const FLAG_TAG: u8 = 0x01;
 const FLAG_MLS: u8 = 0x02;
@@ -130,6 +132,8 @@ pub(crate) enum Record {
         /// MLS groups.
         groups: Vec<([u8; 16], u64)>,
     },
+    /// Deleted devices: everything pending acknowledged, counters dropped (D-0036).
+    Forget(Vec<DeviceId>),
 }
 
 impl std::fmt::Debug for Record {
@@ -150,6 +154,7 @@ impl std::fmt::Debug for Record {
                 .field("devices", &devices.len())
                 .field("groups", &groups.len())
                 .finish(),
+            Self::Forget(d) => f.debug_tuple("Forget").field(&d.len()).finish(),
         }
     }
 }
@@ -276,6 +281,13 @@ impl Record {
                     buf.put_u64(*e);
                 }
             }
+            Self::Forget(devices) => {
+                buf.put_u8(KIND_FORGET);
+                put_len(&mut buf, devices.len());
+                for d in devices {
+                    buf.put_slice(d.as_bytes());
+                }
+            }
         }
         buf.freeze()
     }
@@ -302,6 +314,7 @@ impl Record {
             Self::Snapshot {
                 devices, groups, ..
             } => 14 + devices.len() * 32 + groups.len() * 24,
+            Self::Forget(d) => 6 + d.len() * 16,
         }
     }
 
@@ -419,6 +432,14 @@ impl Record {
                     groups,
                 }
             }
+            KIND_FORGET => {
+                let n = r.count(16)?;
+                let mut devices = Vec::with_capacity(n);
+                for _ in 0..n {
+                    devices.push(r.device()?);
+                }
+                Self::Forget(devices)
+            }
             _ => return Err(RecordError::Unknown),
         };
         if r.pos != input.len() {
@@ -535,6 +556,8 @@ mod tests {
                 devices: vec![(d(1), 9, 4)],
                 groups: vec![([2; 16], 5)],
             },
+            Record::Forget(vec![d(1), d(2)]),
+            Record::Forget(vec![]),
         ]
     }
 

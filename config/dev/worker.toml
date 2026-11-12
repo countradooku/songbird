@@ -8,3 +8,33 @@ shutdown_grace_secs = 5
 [common.log]
 format = "pretty"
 filter = "info"
+
+# Without [worker] the service idles (development smoke test). To run jobs against the docker
+# compose stores, uncomment, create the files (mode 0600) and an internal-CA certificate for
+# worker.<host>.songbird.internal (cargo xtask dev-env makes the CA):
+#
+# [worker]
+# push_index_secret = { file = "/path/to/push-index-secret.hex" }
+# propagation_ms = 3000   # at least delivery's registry poll interval, with a margin
+# sweep_secs = 60
+# [worker.surrealdb]
+# addr = "127.0.0.1:47800"
+# host = "localhost"
+# user = "root"
+# pass = { env = "SURREAL_PASS" }
+# [worker.jobs]
+# secret = { file = "/path/to/jobs-secret.hex" }
+# [worker.jobs.valkey]
+# addr = "127.0.0.1:47380"
+# pass = { env = "VALKEY_JOBS_PASSWORD" }
+# [worker.s3]
+# addr = "127.0.0.1:47900"
+# bucket = "songbird-attachments"
+# access_key = { env = "RUSTFS_ACCESS_KEY" }
+# secret_key = { env = "RUSTFS_SECRET_KEY" }
+# [worker.delivery]
+# node_name = "worker.dev.songbird.internal"
+# cert_chain = "/path/to/worker.pem"
+# key = { file = "/path/to/worker.key" }
+# ca = "/path/to/ca.pem"
+# nodes = [{ addr = "127.0.0.1:47950", name = "delivery.dev.songbird.internal" }]

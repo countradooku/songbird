@@ -313,17 +313,30 @@ impl ValkeyRouter {
     }
 }
 
+impl ValkeyRouter {
+    /// Tells every other node to close its session for `device` (a `close` message carrying
+    /// this node's ID, which this node's own subscriber ignores).
+    async fn publish_close(&self, channel: &str) {
+        let mut body = Vec::with_capacity(16);
+        body.extend_from_slice(&self.node_id.to_be_bytes());
+        body.extend_from_slice(&now_ms().to_be_bytes());
+        if let Some(p) = self.seal.seal(channel, KIND_CLOSE, &body) {
+            let _ = self.publish(channel, p).await;
+        }
+    }
+}
+
 impl Router for ValkeyRouter {
+    async fn close_everywhere(&self, device: &DeviceId) {
+        self.publish_close(&self.seal.channel(device)).await;
+        self.local.evict(device);
+    }
+
     async fn attach(&self, device: DeviceId, sizes: InboxSizes) -> Inbox {
         {
             let channel = self.seal.channel(&device);
             // 1. Any older connection on another node closes (invariant 4).
-            let mut body = Vec::with_capacity(16);
-            body.extend_from_slice(&self.node_id.to_be_bytes());
-            body.extend_from_slice(&now_ms().to_be_bytes());
-            if let Some(p) = self.seal.seal(&channel, KIND_CLOSE, &body) {
-                let _ = self.publish(&channel, p).await;
-            }
+            self.publish_close(&channel).await;
             // 2. Held here (a local older session is replaced by the local router).
             let inbox = self.local.attach(device, sizes).await;
             // 3. Subscribed (confirmed) before the session drains its mailbox, so an envelope

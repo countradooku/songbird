@@ -8,3 +8,33 @@ shutdown_grace_secs = 5
 [common.log]
 format = "pretty"
 filter = "info"
+
+# Without [push] the service idles (development smoke test). To consume jobs from the docker
+# compose stores, uncomment and point the secrets at files you create (mode 0600):
+#
+# [push]
+# push_key = { file = "/path/to/push-key.hex" }                   # X25519 private key, 64 hex chars
+# push_index_secret = { file = "/path/to/push-index-secret.hex" } # 64 hex chars, shared with api and worker
+# concurrency = 64
+# debounce_ms = 1000
+# [push.surrealdb]
+# addr = "127.0.0.1:47800"
+# host = "localhost"
+# user = "root"
+# pass = { env = "SURREAL_PASS" }
+# [push.jobs]
+# secret = { file = "/path/to/jobs-secret.hex" }                  # 64 hex chars, shared with delivery and worker
+# [push.jobs.valkey]
+# addr = "127.0.0.1:47380"
+# pass = { env = "VALKEY_JOBS_PASSWORD" }
+# [push.apns]
+# team_id = "ABCDE12345"
+# key_id = "KEY1234567"
+# bundle_id = "eu.songbird.app"
+# key = { file = "/path/to/AuthKey.p8" }
+# sandbox = true
+# [push.fcm]
+# service_account = { file = "/path/to/service-account.json" }
+# [push.webpush]
+# vapid_subject = "mailto:push@example.org"
+# vapid_key = { file = "/path/to/vapid.pem" }                      # P-256 PKCS#8 PEM

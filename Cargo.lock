@@ -129,6 +129,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "arc-swap"
+version = "1.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84a22b5d51209f6de83d37a0b33d320acb8da88823e42a94c075140708f032a5"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "arcstr"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1150,6 +1159,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "h2"
+version = "0.4.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d29020232d6aa3fb1daca64c1127cf662cf97f254ae16c18c05b8ab635fc118"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "fnv",
+ "futures-core",
+ "futures-sink",
+ "http",
+ "indexmap 2.14.2",
+ "slab",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1247,7 +1275,9 @@ checksum = "2c3e324da4c95177d6291d4c8730197c0d1822f8a9766814a4a44fa5ab797c9c"
 dependencies = [
  "atomic-waker",
  "bytes",
+ "futures-channel",
  "futures-core",
+ "h2",
  "http",
  "http-body",
  "httparse",
@@ -2980,6 +3010,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "songbird-accounts"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "bytes",
+ "proptest",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "songbird-jobs",
+ "songbird-surreal",
+ "songbird-types",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "songbird-admin"
 version = "0.1.0"
 dependencies = [
@@ -3002,8 +3050,29 @@ version = "0.1.0"
 name = "songbird-api"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
+ "bytes",
+ "futures-core",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "mimalloc",
+ "redis",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "songbird-accounts",
+ "songbird-jobs",
+ "songbird-link",
+ "songbird-s3",
  "songbird-service",
+ "songbird-surreal",
+ "songbird-types",
+ "songbird-valkey",
+ "tokio",
+ "tokio-rustls",
  "tracing",
 ]
 
@@ -3039,6 +3108,7 @@ dependencies = [
 name = "songbird-delivery"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "aws-lc-rs",
  "bytes",
  "futures-core",
@@ -3048,10 +3118,13 @@ dependencies = [
  "mimalloc",
  "prometheus-client",
  "proptest",
+ "redis",
  "rustls",
  "rustls-pki-types",
  "serde",
  "sockudo-ws",
+ "songbird-accounts",
+ "songbird-jobs",
  "songbird-link",
  "songbird-mailbox",
  "songbird-proto",
@@ -3060,6 +3133,7 @@ dependencies = [
  "songbird-service",
  "songbird-surreal",
  "songbird-types",
+ "songbird-valkey",
  "thiserror",
  "tokio",
  "tokio-rustls",
@@ -3071,28 +3145,55 @@ dependencies = [
 name = "songbird-e2e"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "bytes",
  "futures-core",
  "futures-sink",
+ "hex",
  "rcgen",
+ "redis",
  "rustls",
  "rustls-pki-types",
+ "serde_json",
  "sockudo-ws",
+ "songbird-accounts",
  "songbird-alloc-count",
+ "songbird-api",
  "songbird-client",
  "songbird-delivery",
+ "songbird-jobs",
  "songbird-mailbox",
  "songbird-proto",
+ "songbird-push",
+ "songbird-push-providers",
  "songbird-router",
+ "songbird-s3",
  "songbird-service",
  "songbird-surreal",
  "songbird-telemetry",
  "songbird-types",
+ "songbird-valkey",
+ "songbird-worker",
  "tempfile",
  "tokio",
  "tokio-rustls",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "songbird-jobs"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "hex",
+ "proptest",
+ "redis",
+ "songbird-types",
+ "songbird-valkey",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3104,6 +3205,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rustls-webpki",
+ "songbird-types",
  "thiserror",
  "tokio",
  "tokio-rustls",
@@ -3188,9 +3290,46 @@ dependencies = [
 name = "songbird-push"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
+ "hex",
  "mimalloc",
+ "prometheus-client",
+ "redis",
+ "serde",
+ "songbird-accounts",
+ "songbird-jobs",
+ "songbird-push-providers",
  "songbird-service",
+ "songbird-surreal",
+ "songbird-types",
+ "songbird-valkey",
+ "tokio",
  "tracing",
+ "zeroize",
+]
+
+[[package]]
+name = "songbird-push-providers"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "bytes",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "songbird-push-providers",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "webpki-roots 1.0.12",
+ "zeroize",
 ]
 
 [[package]]
@@ -3204,6 +3343,7 @@ dependencies = [
  "papaya",
  "redis",
  "songbird-types",
+ "songbird-valkey",
  "thiserror",
  "tokio",
  "tracing",
@@ -3218,6 +3358,26 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "songbird-s3"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "bytes",
+ "futures-core",
+ "hex",
+ "hyper",
+ "hyper-util",
+ "proptest",
+ "rustls",
+ "rustls-pki-types",
+ "songbird-types",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "zeroize",
 ]
 
 [[package]]
@@ -3282,11 +3442,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "songbird-valkey"
+version = "0.1.0"
+dependencies = [
+ "redis",
+ "serde",
+ "songbird-types",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "songbird-worker"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "mimalloc",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "songbird-accounts",
+ "songbird-jobs",
+ "songbird-link",
+ "songbird-s3",
  "songbird-service",
+ "songbird-types",
+ "songbird-valkey",
+ "tokio",
  "tracing",
 ]
 

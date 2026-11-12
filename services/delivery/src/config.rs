@@ -43,6 +43,21 @@ impl Validate for DeliveryConfig {
                 "a static device directory is for development and CI only",
             );
             v.check(
+                d.registry.is_some(),
+                "delivery.registry",
+                "is required in staging and production",
+            );
+            v.check(
+                d.jobs.is_some(),
+                "delivery.jobs",
+                "is required in staging and production (push wake-ups)",
+            );
+            v.check(
+                d.internal.is_some(),
+                "delivery.internal",
+                "is required in staging and production (account deletion)",
+            );
+            v.check(
                 d.mailbox.backend == MailboxBackend::Iggy,
                 "delivery.mailbox.backend",
                 "must be iggy in staging and production",
@@ -105,6 +120,103 @@ pub struct DeliverySettings {
     /// Several nodes sharing the mailbox (D-0034); absent: this node runs every partition.
     #[serde(default)]
     pub cluster: Option<ClusterSettings>,
+    /// The account registry the directory is loaded from (D-0036); absent: the static file.
+    #[serde(default)]
+    pub registry: Option<RegistrySettings>,
+    /// The job queue push wake-ups go to (D-0036); absent: no push jobs.
+    #[serde(default)]
+    pub jobs: Option<JobsSettings>,
+    /// The link `worker` deletes devices through (D-0036); absent: account deletion cannot reach
+    /// this node.
+    #[serde(default)]
+    pub internal: Option<InternalSettings>,
+}
+
+/// `[delivery.registry]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistrySettings {
+    /// Where the registry lives.
+    pub surrealdb: songbird_accounts::SurrealSettings,
+    /// How often the directory version is polled, in milliseconds (a deleted device can
+    /// authenticate for about this long).
+    #[serde(default = "default_poll_ms")]
+    pub poll_ms: u64,
+}
+
+const fn default_poll_ms() -> u64 {
+    1_000
+}
+
+impl Validate for RegistrySettings {
+    fn validate(&self, v: &mut Validator) {
+        v.section("surrealdb", &self.surrealdb);
+        v.check(
+            (100..=10_000).contains(&self.poll_ms),
+            "poll_ms",
+            "must be in 100..=10000",
+        );
+    }
+}
+
+/// `[delivery.jobs]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobsSettings {
+    /// `valkey-jobs`.
+    pub valkey: songbird_valkey::ValkeySettings,
+    /// 64 hex characters sealing jobs (shared with `push` and `worker`).
+    pub secret: SecretRef,
+    /// At most one wake-up per device per this many milliseconds.
+    #[serde(default = "default_debounce_ms")]
+    pub push_debounce_ms: u64,
+}
+
+const fn default_debounce_ms() -> u64 {
+    2_000
+}
+
+impl Validate for JobsSettings {
+    fn validate(&self, v: &mut Validator) {
+        v.section("valkey", &self.valkey);
+        v.check(
+            (100..=60_000).contains(&self.push_debounce_ms),
+            "push_debounce_ms",
+            "must be in 100..=60000",
+        );
+    }
+}
+
+/// `[delivery.internal]`: mutual TLS from the internal CA; only `worker.` certificates.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InternalSettings {
+    /// Listener (private address).
+    pub listen: SocketAddr,
+    /// This node's name (its certificate's, `delivery.<host>.songbird.internal`).
+    pub node_name: String,
+    /// PEM certificate chain, leaf first.
+    pub cert_chain: PathBuf,
+    /// PEM private key.
+    pub key: SecretRef,
+    /// PEM root of the internal CA.
+    pub ca: PathBuf,
+}
+
+impl Validate for InternalSettings {
+    fn validate(&self, v: &mut Validator) {
+        v.check(
+            self.node_name.starts_with("delivery.")
+                && self.node_name.ends_with(".songbird.internal"),
+            "node_name",
+            "must be delivery.<host>.songbird.internal",
+        );
+        v.check(
+            songbird_types::config::is_internal_ip(self.listen.ip()),
+            "listen",
+            "must be a private or loopback address",
+        );
+    }
 }
 
 /// `[delivery.cluster]`: this node in a cluster of delivery nodes sharing the Iggy topic. Leases
@@ -330,6 +442,20 @@ impl Validate for DeliverySettings {
         v.section("mailbox", &self.mailbox);
         v.section("runtime", &self.runtime);
         v.section("router", &self.router);
+        if let Some(r) = &self.registry {
+            v.section("registry", r);
+            v.check(
+                self.directory.file.is_none(),
+                "directory.file",
+                "and registry are exclusive",
+            );
+        }
+        if let Some(j) = &self.jobs {
+            v.section("jobs", j);
+        }
+        if let Some(i) = &self.internal {
+            v.section("internal", i);
+        }
         if let Some(c) = &self.cluster {
             v.section("cluster", c);
             v.check(

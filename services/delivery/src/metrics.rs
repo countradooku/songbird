@@ -60,6 +60,11 @@ pub struct DeliveryMetrics {
     pub mailbox_errors: Counter,
     /// Times delivery paused because the un-acked window was full.
     pub window_full: Counter,
+    /// Push jobs enqueued for offline devices (after debouncing).
+    pub push_jobs: Counter,
+    /// Push wake-ups dropped (buffer full or job queue unreachable; the message is safe in the
+    /// mailbox).
+    pub push_dropped: Counter,
 }
 
 impl DeliveryMetrics {
@@ -74,7 +79,7 @@ impl DeliveryMetrics {
             "WebSocket connections open",
             self.connections_open.clone(),
         )?;
-        let counters: [(&str, &str, &Counter); 25] = [
+        let counters: [(&str, &str, &Counter); 27] = [
             (
                 "delivery_connections",
                 "WebSocket connections accepted",
@@ -195,6 +200,16 @@ impl DeliveryMetrics {
                 "delivery_mailbox_errors",
                 "Failed mailbox operations",
                 &self.mailbox_errors,
+            ),
+            (
+                "delivery_push_jobs",
+                "Push jobs enqueued for offline devices",
+                &self.push_jobs,
+            ),
+            (
+                "delivery_push_dropped",
+                "Push wake-ups dropped (the message stays in the mailbox)",
+                &self.push_dropped,
             ),
         ];
         for (name, help, c) in counters {

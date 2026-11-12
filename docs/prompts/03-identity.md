@@ -11,7 +11,7 @@
 - **Account credentials.** Each device authenticates with its own key (challenge signature, Prompt 2). Account recovery when every device is lost works only through the recovery key from the backup system (Prompt 10); there is no email or SMS reset.
 - **Devices.** A primary device links new devices with a QR-based provisioning flow: the new device shows an ephemeral public key, the primary sends it an encrypted provisioning message through a short-lived provisioning channel on the server. A signed, versioned device list per account (signed by the account identity key); device limits per plan; device removal triggers MLS removal in every group (Prompt 5).
 - **Key directory.** Per device: identity key, signed prekey, last-resort post-quantum (Kyber/ML-KEM) prekey, one-time EC and post-quantum prekeys, as required by libsignal's PQXDH. One-time prekeys are claimed atomically and never handed out twice; refill signals; signature validation with libsignal's own crates. Same pattern for MLS KeyPackages (single use, plus a last-resort package).
-- **Encrypted profiles.** Profile name, avatar pointer, about and status line are one encrypted, versioned blob under a profile key the user shares with contacts. Encrypted avatars live in Garage.
+- **Encrypted profiles.** Profile name, avatar pointer, about and status line are one encrypted, versioned blob under a profile key the user shares with contacts. Encrypted avatars live in RustFS.
 - **Sealed sender.** Short-lived server-signed sender certificates and unidentified-access keys derived from the profile key, so the server can authorize a send without learning who sent it. Ship behind a flag; Prompt 12 verifies it.
 - **Key transparency.** An append-only, auditable log mapping account and username hash to identity keys, with inclusion and consistency proofs served by `api`. Evaluate Meta's `akd` crate.
 - **GDPR.** Export of everything the server holds about an account; full deletion through the outbox job (every store, every backup within its retention); optional deletion after long inactivity (period decided by the owner).
@@ -24,6 +24,12 @@
 - **Multiple accounts on one device.** Device auth, keys and mailboxes are per account. Document that one push token shared by several accounts links them on the server, and offer per-account push registrations where the platform allows.
 - **Profile links** (website, social handles) as another field of the encrypted profile.
 - **Security notifications.** When a contact's identity key changes, every client is told through the device-list and key-transparency paths so the app can warn the user.
+- **Invite-only launch** *(amended 2026-11-13, D-0038)*:
+  - A server-side invite-only registration mode, switchable off later without a migration.
+  - Invite codes: random, stored only as hashes, single- or multi-use, with expiry; checks are rate-limited so codes cannot be guessed.
+  - Quotas: a per-user invite allowance (configurable, for example five) and admin-generated batches for early testers.
+  - Who invited whom is social-graph metadata: by default store only per-user counts. Storing the link for abuse handling is an owner decision recorded in docs/DECISIONS.md and the threat model.
+  - Tests: valid, expired, reused and guessed codes; quota limits; mode switched off.
 
 **Security:** prekey exhaustion protection (rate limits on fetches per requester and per target), constant-time comparisons for secrets, no enumeration through error messages or timing.
 

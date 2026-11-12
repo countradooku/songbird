@@ -17,7 +17,7 @@ deploy/bin/env-up <env> scaleway [version]
 
 It decrypts the environment secrets, creates network, firewalls and servers, generates the
 inventory, waits for SSH, then runs `site.yml`: hardening, nftables, Docker, certificates,
-SurrealDB, Valkey, Garage, LiveKit and the Songbird services, ending with health checks. Timings
+SurrealDB, Valkey, RustFS, LiveKit and the Songbird services, ending with health checks. Timings
 are appended to `deploy/drill-timings.tsv`.
 
 Then: restore data (Prompt 10 runbook), switch DNS to the new edge addresses, and set

@@ -10,9 +10,7 @@
     - { path: surrealdb, uid: 65532 }
     - { path: iggy, uid: 0 }
     - { path: valkey-jobs, uid: 999 }
-    - { path: garage, uid: 65532 }
-    - { path: garage/meta, uid: 65532 }
-    - { path: garage/data, uid: 65532 }
+    - { path: rustfs, uid: 10001 }
 
 - name: SurrealDB (private address, TLS)
   community.docker.docker_container:
@@ -111,75 +109,47 @@
     label: "{{ item.name }}"
   no_log: true
 
-- name: Garage configuration
-  ansible.builtin.template:
-    src: garage.toml.j2
-    dest: /etc/songbird/garage.toml
-    mode: "0644"
-
-- name: Garage (S3 and admin APIs on loopback; reached through the mTLS tunnel below)
+# RustFS (D-0035): single node, single disk; the S3 API (which also carries the admin API) on
+# loopback only, reached through the mTLS tunnel below. The web console, FTP, FTPS, SFTP, WebDAV
+# and the update check (it calls version.rustfs.com) are off; logs go to stdout.
+- name: RustFS (S3 API on loopback; reached through the mTLS tunnel below)
   community.docker.docker_container:
-    name: songbird-garage
-    image: "{{ images.garage }}"
+    name: songbird-rustfs
+    image: "{{ images.rustfs }}"
     network_mode: host
     restart_policy: unless-stopped
-    user: "65532:65532"
+    user: "10001:10001"
     env:
-      GARAGE_RPC_SECRET: "{{ secrets.garage_rpc_secret }}"
-      GARAGE_ADMIN_TOKEN: "{{ secrets.garage_admin_token }}"
-      GARAGE_METRICS_TOKEN: "{{ secrets.garage_metrics_token }}"
+      RUSTFS_ACCESS_KEY: "{{ secrets.rustfs_access_key }}"
+      RUSTFS_SECRET_KEY: "{{ secrets.rustfs_secret_key }}"
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 127.0.0.1:9000
+      RUSTFS_CONSOLE_ENABLE: "false"
+      RUSTFS_FTP_ENABLE: "false"
+      RUSTFS_FTPS_ENABLE: "false"
+      RUSTFS_SFTP_ENABLE: "false"
+      RUSTFS_WEBDAV_ENABLE: "false"
+      RUSTFS_CHECK_UPDATE: "false"
+      RUSTFS_OBS_LOG_DIRECTORY: ""
     volumes:
-      - /etc/songbird/garage.toml:/etc/garage.toml:ro
-      - /var/lib/songbird/garage/meta:/var/lib/garage/meta
-      - /var/lib/songbird/garage/data:/var/lib/garage/data
+      - /var/lib/songbird/rustfs:/data
     security_opts: [no-new-privileges]
     cap_drop: [ALL]
   no_log: true
 
-- name: Wait until Garage answers on RPC
+- name: Wait until RustFS is ready
   community.docker.docker_container_exec:
-    container: songbird-garage
-    argv: [/garage, status]
-  register: garage_status
-  until: garage_status.rc == 0
+    container: songbird-rustfs
+    argv: [curl, -fsS, "http://127.0.0.1:9000/health/ready"]
+  register: rustfs_ready
+  until: rustfs_ready.rc == 0
   retries: 30
   delay: 2
   changed_when: false
 
-- name: Current Garage layout
-  community.docker.docker_container_exec:
-    container: songbird-garage
-    argv: [/garage, layout, show]
-  register: garage_layout
-  changed_when: false
-
-# A fresh single-node Garage has no layout and serves nothing until one is applied
-# (the compose equivalent is `cargo xtask compose up`). Idempotent: skipped once version >= 1.
-- name: Assign and apply the single-node layout
-  when: "'Current cluster layout version: 0' in garage_layout.stdout"
-  block:
-    - name: Garage node ID
-      community.docker.docker_container_exec:
-        container: songbird-garage
-        argv: [/garage, node, id, -q]
-      register: garage_node
-      changed_when: false
-
-    - name: Assign this node
-      community.docker.docker_container_exec:
-        container: songbird-garage
-        argv: [/garage, layout, assign, -z, "{{ songbird_env }}", -c, "{{ garage_capacity }}", "{{ garage_node.stdout | trim | split('@') | first }}"]
-      changed_when: true
-
-    - name: Apply layout version 1
-      community.docker.docker_container_exec:
-        container: songbird-garage
-        argv: [/garage, layout, apply, --version, "1"]
-      changed_when: true
-
-- name: Mutual-TLS tunnels in front of Garage (any client certificate from the internal CA)
+- name: Mutual-TLS tunnel in front of RustFS (any client certificate from the internal CA)
   community.docker.docker_container:
-    name: "songbird-garage-tls-{{ item.name }}"
+    name: "songbird-rustfs-tls-{{ item.name }}"
     image: "{{ images.ghostunnel }}"
     network_mode: host
     restart_policy: unless-stopped
@@ -193,11 +163,10 @@
       - --cacert=/tls/ca.crt
       - --allow-all
       - --timed-reload=1h
-    volumes: ["{{ songbird_pki_dir }}/garage:/tls:ro"]
+    volumes: ["{{ songbird_pki_dir }}/rustfs:/tls:ro"]
     security_opts: [no-new-privileges]
     cap_drop: [ALL]
   loop:
-    - { name: s3, listen: 3910, target: 3900 }
-    - { name: admin, listen: 3913, target: 3903 }
+    - { name: s3, listen: 9010, target: 9000 }
   loop_control:
     label: "{{ item.name }}"

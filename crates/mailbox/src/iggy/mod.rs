@@ -294,6 +294,8 @@ enum Job {
     PartDone([u8; 32], u32),
     /// A part slot of a home record to puncture (its part is stored).
     Puncture(u64, u32),
+    /// Deleted devices to forget (D-0036); answers whether the record is durable.
+    Forget(Vec<DeviceId>, oneshot::Sender<bool>),
     /// Entries read by the compactor, to copy forward; `last` ends the pass.
     Relocated {
         items: Vec<(DeviceId, u64, u64, Bytes)>,
@@ -1054,6 +1056,7 @@ fn fact_of_plain(rec: Record) -> Fact {
     match rec {
         Record::Ack(items) => Fact::Ack(items),
         Record::Owner { epoch } => Fact::Owner(epoch),
+        Record::Forget(devices) => Fact::Forget(devices),
         Record::Snapshot {
             owner,
             devices,
@@ -1497,6 +1500,17 @@ impl Writer {
                 }
             }
             Job::Puncture(offset, slot) => self.puncture_slot(offset, slot).await,
+            Job::Forget(devices, reply) => {
+                // A queued ACK for a forgotten device must not bring its counters back.
+                for d in &devices {
+                    self.pending_acks.remove(d);
+                }
+                let ok = self
+                    .write_records(vec![Record::Forget(devices)])
+                    .await
+                    .is_some();
+                let _ = reply.send(ok);
+            }
         }
     }
 
@@ -2282,5 +2296,22 @@ impl Mailbox for IggyMailbox {
 
     async fn count_pending(&self, device: &DeviceId) -> Result<u64, MailboxError> {
         self.parts.pending(self.partition(device), *device).await
+    }
+
+    /// One forget record per partition, written by the partition's owner (here or over a node
+    /// link).
+    async fn forget(&self, devices: &[DeviceId]) -> Result<(), MailboxError> {
+        let mut by_part: HashMap<u32, Vec<DeviceId>> = HashMap::new();
+        for d in devices {
+            by_part.entry(self.partition(d)).or_default().push(*d);
+        }
+        for (p, ds) in by_part {
+            self.parts.forget(p, ds).await?;
+        }
+        Ok(())
+    }
+
+    async fn knows(&self, device: &DeviceId) -> Result<bool, MailboxError> {
+        self.parts.known(self.partition(device), *device).await
     }
 }

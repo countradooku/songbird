@@ -209,6 +209,7 @@ where
     .map_err(|_| Exit::Close(CloseCode::Unavailable, Some(RETRY_MS)))?;
     if !shared
         .directory
+        .load()
         .verify(&device, &transcript, &auth.signature)
     {
         return Err(Exit::Close(CloseCode::AuthFailed, None));
@@ -602,6 +603,7 @@ impl<M: Mailbox, R: Router> Session<M, R> {
         } else {
             self.shared
                 .directory
+                .load()
                 .check_devices(&self.device, &devices)
                 .err()
         };
@@ -680,9 +682,10 @@ impl<M: Mailbox, R: Router> Session<M, R> {
                 Routed::Lagged => {
                     m.routes_lagged.inc();
                 }
-                // Milestone 5 queues a push job here.
+                // A wake-up for the device (debounced, never blocking this session).
                 Routed::Offline => {
                     m.routes_offline.inc();
+                    self.shared.push.offline(device);
                 }
             }
         }

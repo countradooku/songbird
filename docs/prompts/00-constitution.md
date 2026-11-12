@@ -27,7 +27,7 @@ At the start of every task, list the skills, plugins and tools available in your
 
 ## Locked stack
 
-Rust stable (1.88+), monorepo with Cargo workspace; `sockudo-ws` for WebSockets; per-core single-threaded Tokio runtimes (thread-per-core, `SO_REUSEPORT`); `redis-rs` for Valkey; SurrealDB (single node now, TiKV later); Garage (S3) for objects; LiveKit (self-hosted) for calls; libsignal and OpenMLS protocols (clients encrypt; the server validates what it must); rustls with aws-lc-rs; `mimalloc`; EU hosting only. Sockudo is a reference implementation to learn from, not a dependency. Change nothing here without the owner.
+Rust stable (1.88+), monorepo with Cargo workspace; `sockudo-ws` for WebSockets; per-core single-threaded Tokio runtimes (thread-per-core, `SO_REUSEPORT`); `redis-rs` for Valkey; SurrealDB (single node now, TiKV later); RustFS (S3) for objects; LiveKit (self-hosted) for calls; libsignal and OpenMLS protocols (clients encrypt; the server validates what it must); rustls with aws-lc-rs; `mimalloc`; EU hosting only. Sockudo is a reference implementation to learn from, not a dependency. Change nothing here without the owner.
 
 ## Performance doctrine
 

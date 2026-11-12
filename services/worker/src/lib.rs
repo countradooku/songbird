@@ -1,0 +1,332 @@
+//! Songbird `worker`: background jobs (D-0036).
+//!
+//! - **Account deletion** (`j:deletion`, written through the outbox when `api` accepts the
+//!   request), every step idempotent, so a crash or a retry repeats it safely:
+//!   1. the account's devices (disabled by `api` already, so no new session authenticates);
+//!   2. `delivery` closes their sessions on every node and forgets their mailboxes (pending
+//!      envelopes acknowledged, so their keys are punctured; counters dropped);
+//!   3. their push registrations, pending upload grants and the grants' partial objects go;
+//!   4. after the directory has propagated to every delivery node, the mailboxes are forgotten
+//!      again (a send that raced the deletion stored nothing that survives);
+//!   5. verification: the mailbox knows none of the devices and no object of a grant is left;
+//!      then the device and account rows go, and the registry is checked to hold nothing of
+//!      them. Anything left fails the job, which is retried, then dead-lettered (alert).
+//!
+//!   Attachments already sent are not linked to the account (the threat model's attachment row);
+//!   they go when fetched or after 30 days. Backups are M6's.
+//! - **Attachment cleanup** (`j:cleanup`): an object fetched by every recipient is deleted with
+//!   its record.
+//! - **Sweeps** (every minute): attachments past 30 days or fully fetched, expired upload grants
+//!   with their partial objects, and the outbox relay.
+//!
+//! Nothing here logs identifiers or object names (invariant 6).
+#![forbid(unsafe_code)]
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use bytes::Bytes;
+use songbird_accounts::{Registry, push_index};
+use songbird_jobs::{Job, ObjectKey, Outcome, Queue, Work};
+use songbird_link::devices::{DeviceRequest, decode_response};
+use songbird_link::{Handler, LinkClient};
+use songbird_service::telemetry::sharded::ShardedCounter as Counter;
+use songbird_types::{AccountId, DeviceId};
+
+/// How long one delivery request may take.
+const LINK_TIMEOUT: Duration = Duration::from_secs(10);
+/// Items handled per sweep pass.
+const SWEEP_BATCH: usize = 500;
+
+/// How `worker` reaches `delivery`'s device link.
+pub enum DeliveryLink {
+    /// Node links (mutual TLS); any node forwards to the partition owners, so the first that
+    /// answers is enough.
+    Nodes(Vec<LinkClient>),
+    /// In process (tests).
+    Direct(Handler),
+}
+
+impl std::fmt::Debug for DeliveryLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Nodes(n) => f.debug_tuple("Nodes").field(&n.len()).finish(),
+            Self::Direct(_) => f.write_str("Direct"),
+        }
+    }
+}
+
+impl DeliveryLink {
+    async fn call(&self, req: &DeviceRequest, n: usize) -> Result<Vec<bool>, ()> {
+        let payload = req.encode();
+        match self {
+            Self::Direct(h) => {
+                let r = h(Bytes::from(payload)).await;
+                decode_response(&r, n).unwrap_or(Err(()))
+            }
+            Self::Nodes(nodes) => {
+                for node in nodes {
+                    if let Ok(r) = node.call(&payload, LINK_TIMEOUT).await
+                        && let Some(Ok(v)) = decode_response(&r, n)
+                    {
+                        return Ok(v);
+                    }
+                }
+                Err(())
+            }
+        }
+    }
+
+    /// Closes the devices' sessions and forgets their mailboxes.
+    ///
+    /// # Errors
+    /// No delivery node did it.
+    pub async fn forget(&self, devices: &[DeviceId]) -> Result<(), Left> {
+        if devices.is_empty() {
+            return Ok(());
+        }
+        self.call(&DeviceRequest::Forget(devices.to_vec()), 0)
+            .await
+            .map(|_| ())
+            .map_err(|()| Left::Unavailable)
+    }
+
+    /// Whether the mailbox still holds anything of any of the devices.
+    ///
+    /// # Errors
+    /// No delivery node answered.
+    pub async fn any_known(&self, devices: &[DeviceId]) -> Result<bool, Left> {
+        if devices.is_empty() {
+            return Ok(false);
+        }
+        let known = self
+            .call(&DeviceRequest::Known(devices.to_vec()), devices.len())
+            .await
+            .map_err(|()| Left::Unavailable)?;
+        Ok(known.iter().any(|k| *k))
+    }
+}
+
+/// Counters (aggregate only).
+#[derive(Debug, Clone, Default)]
+pub struct WorkerMetrics {
+    /// Accounts deleted and verified gone from every store.
+    pub deletions_verified: Counter,
+    /// Deletion attempts that found something left or a store unreachable (retried).
+    pub deletion_retries: Counter,
+    /// Attachment objects deleted.
+    pub objects_deleted: Counter,
+    /// Expired upload grants removed.
+    pub grants_expired: Counter,
+}
+
+impl WorkerMetrics {
+    /// Registers every metric.
+    ///
+    /// # Errors
+    /// A refused name.
+    pub fn register(
+        &self,
+        m: &mut songbird_service::telemetry::Metrics,
+    ) -> Result<(), songbird_service::telemetry::TelemetryError> {
+        for (name, help, c) in [
+            (
+                "worker_deletions_verified",
+                "Accounts deleted and verified gone from every store",
+                &self.deletions_verified,
+            ),
+            (
+                "worker_deletion_retries",
+                "Account deletion attempts retried",
+                &self.deletion_retries,
+            ),
+            (
+                "worker_objects_deleted",
+                "Attachment objects deleted",
+                &self.objects_deleted,
+            ),
+            (
+                "worker_grants_expired",
+                "Expired upload grants removed",
+                &self.grants_expired,
+            ),
+        ] {
+            m.register(name, help, c.clone())?;
+        }
+        Ok(())
+    }
+}
+
+/// Everything the jobs need.
+#[derive(Debug)]
+pub struct Worker {
+    /// Account registry.
+    pub registry: Arc<Registry>,
+    /// Attachment store (the worker's own credential).
+    pub s3: songbird_s3::Client,
+    /// Job queue.
+    pub queue: Arc<Queue>,
+    /// Delivery's device link.
+    pub delivery: DeliveryLink,
+    /// Push-token row key.
+    pub push_index_secret: [u8; 32],
+    /// How long every delivery node takes to drop a disabled device (its directory poll
+    /// interval with a margin).
+    pub propagation: Duration,
+    /// Metrics.
+    pub metrics: WorkerMetrics,
+}
+
+/// What a deletion step found wrong (never an identifier).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Left {
+    /// A store was unreachable.
+    Unavailable,
+    /// The mailbox still knows a device.
+    Mailbox,
+    /// An upload object is still stored.
+    Objects,
+    /// Registry rows remain.
+    Rows,
+}
+
+/// An attachment's object name (as `api` writes it).
+fn object_name(o: &ObjectKey) -> String {
+    let mut name = String::with_capacity(66);
+    name.push_str("a/");
+    name.push_str(&o.to_hex_unredacted());
+    name
+}
+
+impl Worker {
+    /// Runs one job.
+    pub async fn handle(&self, job: Job) -> Outcome {
+        match job.work {
+            Work::DeleteAccount { account } => match self.delete_account(&account).await {
+                Ok(()) => {
+                    self.metrics.deletions_verified.inc();
+                    Outcome::Done
+                }
+                Err(left) => {
+                    self.metrics.deletion_retries.inc();
+                    tracing::warn!(?left, "account deletion incomplete; retrying");
+                    Outcome::Retry(None)
+                }
+            },
+            Work::DeleteObject { object } => match self.delete_object(&object).await {
+                Ok(()) => Outcome::Done,
+                Err(_) => Outcome::Retry(None),
+            },
+            // Not this service's stream.
+            Work::Push { .. } => Outcome::Dead,
+        }
+    }
+
+    /// Deletes an account from every store and verifies it (see the module documentation).
+    ///
+    /// # Errors
+    /// [`Left`]: what is still there; the job is retried.
+    pub async fn delete_account(&self, account: &AccountId) -> Result<(), Left> {
+        let unavailable = |_| Left::Unavailable;
+        let devices = self
+            .registry
+            .account_devices(account)
+            .await
+            .map_err(unavailable)?;
+        let index: Vec<[u8; 32]> = devices
+            .iter()
+            .map(|d| push_index(&self.push_index_secret, d))
+            .collect();
+        self.delivery.forget(&devices).await?;
+        self.registry
+            .delete_push_tokens(&index)
+            .await
+            .map_err(unavailable)?;
+        let grants = self
+            .registry
+            .grants_of(&devices)
+            .await
+            .map_err(unavailable)?;
+        for g in &grants {
+            self.s3
+                .delete_object(&object_name(g))
+                .await
+                .map_err(|_| Left::Unavailable)?;
+            self.registry.delete_grant(g).await.map_err(unavailable)?;
+        }
+        // Every delivery node has dropped the devices: forget again what a racing send stored.
+        tokio::time::sleep(self.propagation).await;
+        self.delivery.forget(&devices).await?;
+        if self.delivery.any_known(&devices).await? {
+            return Err(Left::Mailbox);
+        }
+        for g in &grants {
+            if self
+                .s3
+                .head_object(&object_name(g))
+                .await
+                .map_err(|_| Left::Unavailable)?
+                .is_some()
+            {
+                return Err(Left::Objects);
+            }
+        }
+        self.registry
+            .delete_account_rows(account)
+            .await
+            .map_err(unavailable)?;
+        let r = self
+            .registry
+            .remnants(account, &devices, &index)
+            .await
+            .map_err(unavailable)?;
+        if !r.is_empty() {
+            return Err(Left::Rows);
+        }
+        Ok(())
+    }
+
+    /// Deletes an attachment object, then its record (idempotent).
+    ///
+    /// # Errors
+    /// The store or the registry failed.
+    pub async fn delete_object(&self, object: &ObjectKey) -> Result<(), Left> {
+        self.s3
+            .delete_object(&object_name(object))
+            .await
+            .map_err(|_| Left::Unavailable)?;
+        self.registry
+            .delete_attachment(object)
+            .await
+            .map_err(|_| Left::Unavailable)?;
+        self.metrics.objects_deleted.inc();
+        Ok(())
+    }
+
+    /// One sweep: attachments past 30 days or fully fetched, expired grants, the outbox.
+    pub async fn sweep(&self) {
+        match self.registry.expired_attachments(SWEEP_BATCH).await {
+            Ok(objects) => {
+                for o in objects {
+                    let _ = self.delete_object(&o).await;
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "attachment sweep failed"),
+        }
+        match self.registry.expired_grants(SWEEP_BATCH).await {
+            Ok(grants) => {
+                for g in grants {
+                    if self.s3.delete_object(&object_name(&g)).await.is_ok()
+                        && self.registry.delete_grant(&g).await.is_ok()
+                    {
+                        self.metrics.grants_expired.inc();
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "grant sweep failed"),
+        }
+        if let Err(e) = songbird_jobs::relay(self.registry.as_ref(), &self.queue).await {
+            tracing::warn!(error = %e, "outbox relay failed");
+        }
+    }
+}

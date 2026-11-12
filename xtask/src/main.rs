@@ -591,9 +591,8 @@ fn dev_env(force: bool) -> Result {
          SURREAL_PASS={}\n\
          VALKEY_HOT_PASSWORD={}\n\
          VALKEY_JOBS_PASSWORD={}\n\
-         GARAGE_RPC_SECRET={}\n\
-         GARAGE_ADMIN_TOKEN={}\n\
-         GARAGE_METRICS_TOKEN={}\n\
+         RUSTFS_ACCESS_KEY=dev{}\n\
+         RUSTFS_SECRET_KEY={}\n\
          LIVEKIT_API_KEY=dev{}\n\
          LIVEKIT_API_SECRET={}\n\
          IGGY_ROOT_USERNAME=iggy\n\
@@ -601,8 +600,7 @@ fn dev_env(force: bool) -> Result {
         random_hex(16)?,
         random_hex(32)?,
         random_hex(32)?,
-        random_hex(32)?,
-        random_hex(32)?,
+        random_hex(8)?,
         random_hex(32)?,
         random_hex(4)?,
         random_hex(32)?,
@@ -638,8 +636,7 @@ fn compose(args: &[String]) -> Result {
                 "--wait",
                 "--wait-timeout",
                 "180",
-            ]))?;
-            garage_layout(file)
+            ]))
         }
         Some("down") => run(Command::new("docker").args([
             "compose",
@@ -655,39 +652,6 @@ fn compose(args: &[String]) -> Result {
         }
         _ => Err("usage: cargo xtask compose up|down|ps".into()),
     }
-}
-
-/// A fresh single-node Garage has no layout; assign the node and apply version 1 (idempotent).
-fn garage_layout(file: &str) -> Result {
-    let garage = |args: &[&str]| {
-        output(
-            Command::new("docker")
-                .args([
-                    "compose",
-                    "-f",
-                    file,
-                    "--env-file",
-                    ".env",
-                    "exec",
-                    "-T",
-                    "garage",
-                    "/garage",
-                ])
-                .args(args),
-        )
-    };
-    if !garage(&["layout", "show"])?.contains("Current cluster layout version: 0") {
-        return Ok(());
-    }
-    let id = garage(&["node", "id", "-q"])?;
-    let id = id.trim().split('@').next().unwrap_or_default().to_owned();
-    if id.is_empty() {
-        return Err("garage node id is empty".into());
-    }
-    garage(&["layout", "assign", "-z", "dev", "-c", "1G", &id])?;
-    garage(&["layout", "apply", "--version", "1"])?;
-    eprintln!("garage: single-node layout applied");
-    Ok(())
 }
 
 // ---------------------------------------------------------------- autobahn

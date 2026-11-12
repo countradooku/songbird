@@ -8,7 +8,7 @@
 
 - Cargo workspace with the layout `crates/` (shared libraries), `services/` (`delivery`, `api`, `push`, `worker`, `calls`), `tools/` (`loadgen`, `admin`), `deploy/`, `docs/`, `tests/`, plus an `xtask` crate for repeatable commands (`cargo xtask ci`, `bench`, `fuzz`, `release`).
 - `crates/types` (IDs as 16-byte random values, errors, configuration loading with validation) and `crates/telemetry` (tracing with a non-blocking writer, Prometheus metrics, a redaction layer that refuses known sensitive field names).
-- Docker compose for local and CI: SurrealDB, `valkey-hot`, `valkey-jobs`, Garage, LiveKit, with health checks.
+- Docker compose for local and CI: SurrealDB, `valkey-hot`, `valkey-jobs`, RustFS, LiveKit, with health checks.
 - CI running the full quality bar from the constitution, split into fast checks (every push) and deep checks (nightly: sanitizers, long fuzz runs, full benchmarks).
 - Infrastructure as code in `deploy/` (OpenTofu plus NixOS or Ansible) able to build a complete environment at Hetzner and, unchanged apart from provider variables, at a second EU provider.
 - Secrets with SOPS and age (or OpenBao), never in plain files; documented rotation.

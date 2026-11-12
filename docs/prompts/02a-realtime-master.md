@@ -38,7 +38,7 @@ These were decided by the project owner. Do not change them; if one blocks you, 
 | Valkey client | `redis-rs` with `tokio-comp`, `connection-manager`, `cluster-async`, `tokio-rustls-comp` | Runs inside per-core Tokio runtimes. Standalone async connections support `PUBLISH`/`SUBSCRIBE`; sharded `SSUBSCRIBE` is only on the cluster connection (`cluster-async`) |
 | Database (mailbox, accounts, keys) | SurrealDB, single node now, TiKV cluster later | The only durable source of truth |
 | Volatile state | Valkey | Per-device pub/sub channels, rate limits, job queue. Two instances: `valkey-hot` (no persistence) and `valkey-jobs` (AOF `everysec`, `noeviction`) |
-| Object storage | Garage (S3 API) | Encrypted attachments (30-day max), encrypted backup vaults |
+| Object storage | RustFS (S3 API) | Encrypted attachments (30-day max), encrypted backup vaults |
 | Routing between nodes | Valkey pub/sub, one channel per device (default; the Sockudo model) | Behind a `Router` trait. Plain PUBLISH/SUBSCRIBE on the single beta Valkey; sharded SPUBLISH/SSUBSCRIBE once Valkey is clustered. Direct node-to-node links and Apache Iggy are alternatives to benchmark later, not defaults |
 | Push | Separate `push` service | Fed by the job queue; APNs, FCM, UnifiedPush |
 | Jobs | Valkey Streams (consumer groups) | Learn from Sockudo's queue-driver code; jobs carry IDs only |
@@ -79,7 +79,7 @@ songbird/
     mailbox/      SurrealDB: store, seq allocation, fetch_after, batched ACK delete
     registry/     Valkey: per-device channels, takeover, re-subscribe
     router/       Router trait, Valkey pub/sub (default), direct links, Iggy (feature-gated)
-    send/         send-path validation shared by delivery and api
+    send/         the send path as a library (validate, store, route), linked by delivery, api, calls and worker (D-0037)
     jobs/         Valkey Streams queue, outbox relay, retry/backoff
     telemetry/    metrics, tracing, no-PII guards
     client/       Rust delivery client (used by app-core and loadgen)
@@ -195,7 +195,7 @@ Connection state machine (connecting, connected, unavailable, failed), jittered 
 
 ### Principles
 
-- Only SurrealDB (accounts, devices, keys, groups, mailbox) and Garage backup vaults hold state that cannot be rebuilt. Everything else — Valkey, routing, sessions, caches — must rebuild itself automatically.
+- Only SurrealDB (accounts, devices, keys, groups, mailbox) and RustFS backup vaults hold state that cannot be rebuilt. Everything else — Valkey, routing, sessions, caches — must rebuild itself automatically.
 - The whole environment can be recreated from `deploy/` plus backups, at a second EU provider, with one documented command.
 - A backup that has not been restored automatically in the last 24 hours is treated as broken.
 
@@ -205,7 +205,7 @@ Connection state machine (connecting, connected, unavailable, failed), jittered 
 | --- | --- | --- |
 | Accounts, devices, keys, groups | RPO ≤ 5 min, RTO ≤ 2 h | RPO ≈ 0 (replicated), RTO ≤ 15 min |
 | Undelivered envelopes | May be lost on total server loss; recovered by clients (store generation, below) | RPO ≈ 0 (replicated) |
-| User backup vaults (Garage) | RPO ≤ 24 h, off-site copy | Replication factor 3 across zones |
+| User backup vaults (RustFS) | RPO ≤ 24 h, off-site copy | Three copies across zones |
 
 ### Store generation: surviving message loss on restore
 
@@ -226,7 +226,7 @@ Implement detection and the automatic response for every row, and write a runboo
 | `valkey-jobs` lost | Outbox relay re-creates critical jobs; push jobs are lossy by design | Restart from AOF; verify dead-letter stream |
 | SurrealDB unavailable | Reject sends with a retryable error; keep sockets open; clients queue locally | Restart or fail over |
 | SurrealDB data loss or corruption | Stop writes | Restore latest good backup, increment `store_generation`, run consistency checks |
-| Garage lost | Attachment uploads fail retryably; text keeps working | Restore vaults from off-site copy |
+| RustFS lost | Attachment uploads fail retryably; text keeps working | Restore vaults from off-site copy |
 | APNs or FCM outage | Circuit breaker; messages stay in mailboxes | Automatic when provider returns |
 | Whole server or provider lost | — | Rebuild at the second provider from `deploy/` and the off-site backup, within RTO |
 | Bad deploy | Health checks fail the rollout; automatic rollback | Post-incident note |
@@ -272,7 +272,7 @@ Build a checker into `loadgen`: every simulated device records every message ID 
 
 - **Unit and property tests** (`proptest`) for frame codecs and the session ordering algorithm (random interleavings of live frames, duplicates, gaps and drains).
 - **`loom` tests** for any custom concurrency primitive.
-- **Integration tests** with docker compose (SurrealDB, `valkey-hot`, `valkey-jobs`, Garage): one named test per invariant in section 1.
+- **Integration tests** with docker compose (SurrealDB, `valkey-hot`, `valkey-jobs`, RustFS): one named test per invariant in section 1.
 - **WebSocket compliance:** run the Autobahn test suite against `delivery` itself, with our configuration.
 - **Chaos tests:** `kill -9` delivery nodes under load, restart Valkey, pause SurrealDB, inject latency and packet loss between nodes (`tc netem` or toxiproxy). Verify recovery time and pass the checker.
 - **Restore test:** take a backup under load, destroy the database, restore, increment `store_generation`; clients must resend and the checker must pass.
@@ -310,7 +310,7 @@ Stop at every gate, write `docs/reports/M<n>.md` (what was built, tests, numbers
 | M2 | SurrealDB `mailbox` with group commit and per-device `seq`; `send` path (device lists, idempotency, MLS ordering); batched ACK deletes | Every invariant has a passing named test; SurrealDB commits per second measured |
 | M3 | Thread-per-core `runtime`; `SO_REUSEPORT`; per-core resources; cross-core inboxes; lock-free device directory (benchmarked choices) | Throughput scales across cores (curve in report); zero allocation per message |
 | M4 | Valkey pub/sub router (one channel per device, re-subscribe on reconnect); cross-node takeover; `DirectLinks` and `Iggy` routers behind features, benchmarked against it | Cross-node p99 reported; chaos kill tests pass the checker |
-| M5 | `jobs` with outbox; `push` service; `worker`; `api` incl. Garage attachment uploads | Offline device receives a push end to end; account deletion verified across every store |
+| M5 | `jobs` with outbox; `push` service; `worker`; `api` incl. RustFS attachment uploads | Offline device receives a push end to end; account deletion verified across every store |
 | M6 | Backups, encryption, off-site immutable copies, daily restore verification, `store_generation` with client resend, runbooks, rebuild from `deploy/` at a second provider | Timed restore drill within RTO; restore test passes the checker |
 | M7 | io\_uring versus epoll, allocator and TLS tuning, reconnect-storm protection, full load suite, 24-hour soak, threat model | Targets met, or gaps documented and accepted by the owner |
 

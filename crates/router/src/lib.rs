@@ -17,7 +17,10 @@
 //! (one channel per device) behind the same trait.
 #![forbid(unsafe_code)]
 
-pub mod conn;
+pub mod conn {
+    //! The self-healing Valkey connection, now shared from `songbird-valkey`.
+    pub use songbird_valkey::conn::ValkeyConn;
+}
 pub mod valkey;
 
 use std::future::{Future, ready};
@@ -141,6 +144,9 @@ pub trait Router: Send + Sync + 'static {
         device: &DeviceId,
         payload: Bytes,
     ) -> impl Future<Output = Routed> + Send;
+
+    /// Closes the device's session wherever it is (the device was deleted, D-0036).
+    fn close_everywhere(&self, device: &DeviceId) -> impl Future<Output = ()> + Send;
 }
 
 /// Routes within one process, across all its cores.
@@ -264,6 +270,11 @@ impl Router for LocalRouter {
         };
         ready(r)
     }
+
+    fn close_everywhere(&self, device: &DeviceId) -> impl Future<Output = ()> + Send {
+        self.evict(device);
+        ready(())
+    }
 }
 
 /// The router chosen at start-up from configuration.
@@ -287,6 +298,13 @@ impl Router for AnyRouter {
         match self {
             Self::Local(r) => r.detach(device, conn).await,
             Self::Valkey(r) => r.detach(device, conn).await,
+        }
+    }
+
+    async fn close_everywhere(&self, device: &DeviceId) {
+        match self {
+            Self::Local(r) => r.close_everywhere(device).await,
+            Self::Valkey(r) => r.close_everywhere(device).await,
         }
     }
 

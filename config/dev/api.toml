@@ -8,3 +8,30 @@ shutdown_grace_secs = 5
 [common.log]
 format = "pretty"
 filter = "info"
+
+# Without [api] the service idles (development smoke test). To serve against the docker compose
+# stores, uncomment and point the secrets at files you create (mode 0600):
+#
+# [api]
+# listen = "127.0.0.1:8443"
+# server_name = "api.localhost"
+# push_public_key = "<64 hex: the push service's X25519 public key>"
+# push_index_secret = { file = "/path/to/push-index-secret.hex" } # shared with push and worker
+# [api.surrealdb]
+# addr = "127.0.0.1:47800"
+# host = "localhost"
+# user = "root"
+# pass = { env = "SURREAL_PASS" }
+# [api.valkey_hot]
+# addr = "127.0.0.1:47379"
+# pass = { env = "VALKEY_HOT_PASSWORD" }
+# [api.jobs]
+# secret = { file = "/path/to/jobs-secret.hex" }                  # shared with delivery, push, worker
+# [api.jobs.valkey]
+# addr = "127.0.0.1:47380"
+# pass = { env = "VALKEY_JOBS_PASSWORD" }
+# [api.s3]
+# addr = "127.0.0.1:47900"
+# bucket = "songbird-attachments"
+# access_key = { env = "RUSTFS_ACCESS_KEY" }
+# secret_key = { env = "RUSTFS_SECRET_KEY" }

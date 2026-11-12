@@ -5,7 +5,7 @@ text: they are in `secrets/*.sops.yaml` (SOPS + age).
 
 | Path | What |
 | --- | --- |
-| `compose/` | Local development and CI: SurrealDB, valkey-hot, valkey-jobs, Garage, LiveKit (`cargo xtask compose up`) |
+| `compose/` | Local development and CI: SurrealDB, valkey-hot, valkey-jobs, RustFS, LiveKit (`cargo xtask compose up`) |
 | `docker/` | Service images: from source (`Dockerfile`) and from verified release binaries (`runtime.Dockerfile`) |
 | `tofu/` | OpenTofu: `modules/topology` (provider-independent), `modules/{hetzner,scaleway}`, roots in `envs/`, shared `environments/*.tfvars`, `providers/*.tfvars` |
 | `ansible/` | Host configuration: hardening, nftables, Docker, mTLS certificates, data services, LiveKit, Songbird services; `rollout.yml`, `rotate-certs.yml` |

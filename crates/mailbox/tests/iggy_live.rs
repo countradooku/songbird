@@ -646,3 +646,46 @@ async fn compaction_destroys_old_windows() {
         "{r:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forgotten_devices_leave_nothing_readable_and_no_counters() {
+    let Some(cfg) = config("forget") else {
+        return;
+    };
+    let m = IggyMailbox::connect(cfg.clone()).await.unwrap();
+    let (gone, kept, peer) = (d(0x41), d(0x42), d(0x43));
+    m.store(per(&[(gone, "MARK-gone-00001")])).await.unwrap();
+    m.store(per(&[(gone, "MARK-gone-00002"), (kept, "MARK-kept-00001")]))
+        .await
+        .unwrap();
+    m.store(StoreRequest {
+        idempotency_key: None,
+        mls: None,
+        payload: Payload::Shared {
+            devices: vec![gone, peer],
+            body: Bytes::from_static(b"MARK-shared-body"),
+        },
+    })
+    .await
+    .unwrap();
+    wait_openable(&cfg, b"MARK-gone", 2).await;
+    assert!(m.knows(&gone).await.unwrap());
+
+    m.forget(&[gone]).await.unwrap();
+    assert!(!m.knows(&gone).await.unwrap());
+    assert_eq!(m.count_pending(&gone).await.unwrap(), 0);
+    // Unreadable with every key on disk; the others untouched (the shared body stays for its
+    // other recipient).
+    wait_openable(&cfg, b"MARK-gone", 0).await;
+    wait_openable(&cfg, b"MARK-kept", 1).await;
+    wait_openable(&cfg, b"MARK-shared-body", usize::MAX).await;
+    assert_eq!(m.count_pending(&peer).await.unwrap(), 1);
+
+    // A restart replays the forget: still nothing of the device.
+    let again = IggyMailbox::connect(cfg).await.unwrap();
+    assert!(!again.knows(&gone).await.unwrap());
+    assert_eq!(again.count_pending(&kept).await.unwrap(), 1);
+    assert_eq!(again.count_pending(&peer).await.unwrap(), 1);
+    // Forgetting is idempotent, also for devices never seen.
+    again.forget(&[gone, d(0x44)]).await.unwrap();
+}

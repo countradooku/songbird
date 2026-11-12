@@ -49,12 +49,274 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     runtime touches the locked stack. Decided: per-core Tokio stays (owner, after D-0032's
     measurement: compio +2–4 %); io_uring is measured again in M7.
 - Prompt 2, milestone 3 (report `docs/reports/P02-M3.md`): gate approved by the owner on 2026-11-12.
-- Prompt 2, milestone 4 (report `docs/reports/P02-M4.md`): gate waiting for the owner. D-0034
+- Prompt 2, milestone 4 (report `docs/reports/P02-M4.md`): gate approved by the owner on 2026-11-12. D-0034
   (Valkey routing, owned partitions over node links, replicated key stores) decided by the agent
   under the owner's delegation; the owner may revisit it. New dependency `redis` (with `arcstr`,
   `async-lock`, `xxhash-rust` under BSL-1.0), exempted pending audits.
+- Prompt 2, milestone 5 (report `docs/reports/P02-M5.md`): approve the gate; approve two threat-model
+  rows added beyond the two approved (the sealed job queue and the hashed request nonces, both
+  forms of data already listed); D-0036 decided by the agent under the owner's standing
+  instruction. Real APNs, FCM and UnifiedPush credentials are needed to test against the real
+  providers (mocks only so far).
+- D-0038: whether to store who invited whom for abuse handling (default: no, only per-user counts).
+- D-0037: when the `send` crate is extracted, `api` (and `calls`, `worker`) must reach Iggy partition
+  owners; admitting `api.` certificates to node links, or another route, is to be decided then.
+- D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
+  tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
+  `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment
+  (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0038 — Prompt 3 amendment: invite-only registration
+
+- Date: 2026-11-13
+- Status: accepted (prompt amended; built in Prompt 3)
+- Decided by: owner (prompt amendment)
+- Context: the launch is invite-only. Registration abuse controls in Prompt 3 (proof of work,
+  per-IP throttles) do not limit who joins, and an invite system is the usual place where a
+  messenger quietly records its social graph.
+- Decision: `docs/prompts/03-identity.md` gains an **Invite-only launch** item under "Also build":
+  - a server-side invite-only mode, switchable off without a migration;
+  - random invite codes stored only as hashes, single- or multi-use, with expiry, and
+    rate-limited checks so codes cannot be guessed;
+  - a per-user invite allowance (configurable, for example five) and admin-generated batches;
+  - **who invited whom is not stored by default**: only per-user counts. Storing the link for
+    abuse handling would need the owner's decision here and a threat-model row.
+  - Tests: valid, expired, reused and guessed codes; quota limits; mode switched off.
+- Consequences: Prompt 3 has not started, so nothing is built yet; its issue gains the item in
+  Build and its tests in Gate. Open owner decision: whether to store inviter links for abuse
+  handling (default no).
+
+## D-0037 — Prompt 2 amendment: no internal network Send API; a `send` library and `PUT /v1/messages`
+
+- Date: 2026-11-13
+- Status: accepted (prompt amended; to build)
+- Decided by: owner (prompt amendment)
+- Context: Prompt 2 asked for an internal, mutual-TLS "Send API" so `api`, `calls` and `worker`
+  could send through the store-then-route path. A network hop adds latency, a second protocol to
+  secure, and a second path that can drift from the WebSocket's.
+- Decision: `docs/prompts/02-realtime.md` replaces that item:
+  - the **`send` crate** (validate, store, publish on the device's Valkey channel) is a library
+    that `delivery`, `api`, `calls` and `worker` link directly, so every send takes the same
+    tested path with no extra hop;
+  - server-originated notices (for example "your device list changed") are server-signed
+    system frames, never user messages;
+  - for clients with no open WebSocket (notification quick-reply, share extension, failed
+    socket), `api` exposes **`PUT /v1/messages`**, which takes the same encrypted envelopes as
+    the WebSocket `Send` frame and calls the same crate.
+  - The amended text says "store in SurrealDB"; the store is the mailbox, which is Apache Iggy
+    since D-0029 (SurrealDB holds the registry), so the crate stores through the `Mailbox` trait.
+- Evidence: no internal Send API exists in the code (searched 2026-11-13), so there is nothing
+  to refactor. The worker's device link (D-0036, `[delivery.internal]`) is not a send interface:
+  it accepts only `worker.` certificates and only Forget and Known.
+- Consequences: still to build in Prompt 2, before its final gate:
+  - extract the send path from `services/delivery/src/session.rs` (device-list check,
+    idempotency, store, route, push on offline) into `crates/send`;
+  - `api`'s `PUT /v1/messages` on it, signed like every `api` request, with the same limits as the
+    `Send` frame; server-signed system frames in `crates/proto`;
+  - `api`, `calls` and `worker` then need the mailbox and router connections `delivery` has.
+    With Iggy partitions owned by delivery nodes (D-0034), a send from `api` reaches a
+    partition's owner over node links like a non-owning delivery node does, which needs `api`
+    nodes admitted to those links (today `delivery.` certificates only); to decide when built.
+
+## D-0036 — Milestone 5: sealed jobs, push that leaks nothing, a minimal account registry, uploads through `api`, deletion proven across every store
+
+- Date: 2026-11-12
+- Status: accepted (design); built and measured in M5
+- Decided by: owner for scope (a minimal account and device registry in SurrealDB now; push
+  tokens and attachment records added to the threat model's list); design by agent under the
+  owner's standing instruction ("think like a Proton founder or a top-tier engineer").
+- Context: M5 builds `jobs` with an outbox, `push`, `worker` and `api` with RustFS uploads. Gate:
+  an offline device receives a push end to end; account deletion verified across every store.
+  No account store existed (delivery read a static file); the mailbox is Iggy (D-0029), owned
+  per partition by delivery nodes (D-0034); RustFS listens on loopback behind an mTLS tunnel
+  (D-0035), so clients can never reach it directly.
+- Decision:
+  - **Account registry (`crates/accounts`, SurrealDB).** Tables `account` and `device` (IDs,
+    the Ed25519 auth key, a `disabled` flag), `directory:version` bumped by every change. Delivery
+    loads its directory from SurrealDB and reloads it when the version changes (polled every
+    second; the static file stays for development). Registration proper (usernames, keys, proof
+    of work) is Prompt 3; until then accounts are created through an internal mutual-TLS endpoint
+    of `api`.
+  - **Jobs (`crates/jobs`, Valkey Streams on `valkey-jobs`).** One stream per kind (`push`,
+    `cleanup`, `deletion`; `backup` arrives with M6), one consumer group each. Jobs carry IDs
+    only, and **every job is sealed** (AES-256-GCM-SIV under a key derived from the jobs secret,
+    bound to the stream and the job ID): `valkey-jobs` persists to disk, and a plaintext queue of
+    device IDs would be a record of who was messaged when. Per-job `XACK` plus `XDEL` (an
+    acknowledged job leaves memory and the AOF rewrite). Stuck jobs: `XPENDING … IDLE` then
+    `XCLAIM` (instead of `XAUTOCLAIM`, because `XPENDING` also returns the delivery count, which
+    bounds retries of a job that crashes its consumer). Failures: exponential backoff with full
+    jitter through a delayed sorted set promoted by a Lua script; after the last attempt a
+    dead-letter stream (capped) with a metric to alert on. Every handler is idempotent.
+  - **Outbox.** A SurrealDB `outbox` table written in the same transaction as the change that
+    needs a job (account deletion); a relay in `api` and `worker` moves rows to the stream and
+    deletes them. A crash between the two repeats a job, which handlers tolerate.
+  - **Delivery → push.** `Routed::Offline` enqueues a push job without touching the hot path:
+    a per-core debounce (one job per device per window) and a bounded buffer flushed as one
+    pipelined `XADD` batch; when Valkey is down the buffer drops and counts (the message is safe
+    in the mailbox; the device fetches it at its next connection; runbook).
+  - **Push tokens.** Registered through `api`, **sealed to the push service's X25519 public key**
+    (ephemeral X25519, HKDF-SHA256, AES-256-GCM; `api` and `worker` hold only the public key, so
+    only `push` can ever read a token), stored under a keyed hash of the device ID (HMAC-SHA256,
+    push-index secret) so the table alone does not link a token to a device. Deleted at once when
+    the provider reports the token unregistered, and with the device.
+  - **Push service.** APNs (HTTP/2, ES256 provider token, `mutable-content: 1`, one generic alert
+    text, constant `apns-collapse-id`), FCM HTTP v1 (OAuth 2 service-account token, high-priority
+    data message with no data, constant `collapse_key`), UnifiedPush (Web Push, RFC 8291
+    `aes128gcm` and RFC 8292 VAPID, constant body). Every push looks identical whatever caused
+    it. Per-device debounce, a circuit breaker per provider, retries through the job queue.
+    Provider credentials exist only in this service's configuration. All crypto through
+    aws-lc-rs; HTTP/2 through `hyper`'s client connection API (adds `h2`).
+  - **API without a framework.** `hyper` server directly (already in the tree), not Axum: a
+    handful of endpoints, bodies bounded before reading, fewer crates to audit. Device requests
+    are signed with the device's Ed25519 key over a domain-separated transcript (method, path,
+    server name, timestamp, nonce, body digest); timestamps within 60 s and nonces single-use
+    (keyed hash in `valkey-hot`, expiring). Account creation and test hooks are on a separate
+    mutual-TLS listener.
+  - **Attachments.** Uploads stream through `api` to RustFS (RustFS is never exposed): a grant
+    fixes an exact padded size and how many recipient fetches are due; the upload must match the
+    size exactly; object names are 32 random bytes (no identifiers). After upload the record holds
+    no link to the uploader. Each download decrements the count; at zero a cleanup job deletes
+    the object, and the worker deletes everything older than 30 days. Our own S3 client (SigV4
+    with aws-lc-rs over `hyper`), instead of the AWS SDK and its dependency tree. Each service
+    gets its own least-privilege RustFS credential (D-0035).
+  - **Account deletion.** `api` disables the account's devices (sessions refused within a
+    directory reload) and writes the outbox row in one transaction. The worker then, each step
+    idempotent: asks delivery, over a mutual-TLS internal link that accepts only `worker.`
+    certificates and only these operations, to close the devices' sessions and **forget** their
+    mailboxes (pending entries acknowledged, so their keys are punctured, and counters dropped);
+    deletes push tokens, pending upload
+    grants and their partial objects, device and account rows; repeats the mailbox step after
+    the directory has propagated; and verifies every store holds nothing (SurrealDB rows, mailbox
+    state on the owner, push tokens, RustFS objects of pending grants). Attachments already sent
+    are not linked to the account by design; they go when fetched or after 30 days. Backups are
+    M6's.
+- Implementation (refinements while building):
+  - **No tombstones.** The design had a short tombstone so a send racing the deletion would skip
+    the device; built instead: the worker forgets the mailboxes again once every node has
+    reloaded its directory (`propagation_ms`, default 3 s), then verifies. Simpler (no new
+    state in the writer, nothing that expires) and the verification proves the result.
+  - **Mailbox `Forget` record** (sealed format 4; format 3 still read): acknowledges the
+    devices' pending entries (keys punctured) and drops their counters; replay applies it, so a
+    restart or a standby's takeover keeps nothing. Routed to the partition owner over node
+    links (`Forget`, `Known`). `Mailbox::forget` and `Mailbox::knows` on every backend.
+  - **Directory** swapped whole with `arc-swap` 1.9.5 (constitution: hot-reloaded state;
+    readers take no lock; one new crate plus `rustversion`, a proc-macro). `arc-swap` is exempted
+    in `cargo vet` pending an audit (its publisher is not trusted by two imported sets, D-0016),
+    like the other client libraries; `h2`'s publisher record is in `supply-chain/imports.lock`.
+    `Router::close_everywhere` closes a deleted device's session on every node.
+  - **API**: `hyper` 1.12.0 directly; the `api` crate is a library so tests run it in process;
+    a signed client (`songbird_api::client`) for tests and tools. A download counts its fetch
+    when its last byte is handed to hyper (hyper stops polling a body at `Content-Length`, so
+    end-of-stream never comes; found by the live test).
+  - **Push service** (`services/push`, built on `crates/push-providers`): debounce keyed by the
+    push-row hash (no device IDs in memory), first attempts only; an unregistered token's row
+    is deleted only if it still holds the token that failed (a re-registration in between is
+    kept); a VoIP token reported unregistered deletes the whole APNs row (the app re-registers).
+  - `crates/valkey` holds the self-healing connection (moved from the router) and shared
+    settings; `crates/accounts` the registry and push-token sealing; `crates/link::devices` the
+    worker's request format.
+- Evidence (Apple M5 Pro, 18 cores, 48 GiB, macOS 27.2.1; Docker 6.1.4 Linux VM; compose images
+  as pinned; release build; loopback; [P02-M5 report](reports/P02-M5.md)):
+  - Gate: `tests/e2e/tests/gate_m5.rs` `an_offline_device_receives_a_push_end_to_end` and
+    `account_deletion_is_verified_across_every_store` pass (3 of 3 runs) on SurrealDB (registry
+    and mailbox), valkey-hot, valkey-jobs and RustFS. Iggy cannot run on this machine (the Docker
+    VM's kernel refuses io_uring even unconfined); the Iggy forget test
+    (`forgotten_devices_leave_nothing_readable_and_no_counters`) and the gate on Iggy run in the
+    Linux compose CI job.
+  - Job queue: 74,800 enqueues/s (pipelined batches of 256), 166,600 consumed, acknowledged and
+    deleted per second (`m5_numbers`).
+  - Attachments through `api` to RustFS: 1 MiB upload p50 11.1 ms / p99 12.1 ms (90 MiB/s),
+    download p50 3.2 ms / p99 3.7 ms; 16 MiB upload p50 114 ms / p99 120 ms (141 MiB/s),
+    download p50 13.4 ms / p99 14.4 ms (1.2 GiB/s).
+  - Live tests: `crates/jobs` (5), `crates/accounts` (3), `crates/s3` (5), `services/api` (3),
+    `services/push` (1 covering bursts, calls, unregistered, retry, no identifiers); unit tests
+    for sealing, signing, record and wire formats (Forget, Known), push-token sealing and every
+    provider (RFC 8291 vector, SigV4 vectors).
+- Consequences: Valkey still learns nothing (routing D-0034; jobs sealed); new metadata limited
+  to the two rows the owner approved; the static directory is no longer the only source of
+  devices, so `delivery` becomes deployable once Prompt 3 adds registration.
+- Dependencies (s3): `crates/s3` (`songbird-s3`) adds no crate to `Cargo.lock`. It enables
+  hyper 1.12.0's `client` feature in its own manifest (the workspace keeps `http1` and `server`);
+  that feature's dependencies `want`, `pin-project-lite` and `smallvec` were already locked.
+  Everything else (aws-lc-rs for HMAC-SHA256 and SHA-256, hyper-util 0.1.21's `TokioIo`,
+  tokio-rustls, rustls, bytes, futures-core, hex, zeroize, thiserror) was already a workspace
+  dependency. APIs read in the pinned sources first: hyper `client::conn::http1::{Builder,
+  SendRequest::{ready, try_send_request, is_closed}}`, `TrySendError::take_message` and the h1
+  dispatcher's body loop (it stops polling a body at `Content-Length`, so the upload body holds
+  the completing chunk back until the source confirms its end); http-body 1.1.0 `Body`,
+  `Frame`, `SizeHint`; aws-lc-rs 1.19.0 `hmac::{Key, sign, HMAC_SHA256}`, `digest::digest`;
+  tokio-rustls 0.26.6 `TlsConnector::connect`. SigV4 is checked against AWS's published vectors
+  (`get-vanilla`, `get-vanilla-query-order-key-case`, `get-vanilla-empty-query-key`, and the S3
+  GET object, PUT object, GET lifecycle and list examples); `crates/s3/tests/rustfs_live.rs` runs
+  against RustFS 1.0.5 in the compose job.
+- Dependencies (push providers, `crates/push-providers`): one crate new to `Cargo.lock`, **`h2`
+  0.4.20**, brought by enabling `hyper`'s `client` and `http2` features (HTTP/2 to APNs and FCM
+  through `hyper::client::conn::http2`; Apple requires HTTP/2). Published by Sean McArthur like
+  `hyper`, so covered in `cargo vet` by a `trusted.h2` entry under D-0016's rule; MIT. Its own
+  dependencies were all in the tree already. Direct dependencies already in the tree, now in
+  `[workspace.dependencies]`: `serde_json` 1.0.154 (service-account file, OAuth and provider error
+  bodies, JWT claims; off the hot path, response bodies capped at 16 KiB before parsing) and
+  `webpki-roots` 1.0.12 (Mozilla's roots compiled in, so the push service does not depend on the
+  container's CA bundle; CDLA-Permissive-2.0, exception already in `deny.toml`). Not taken:
+  `jsonwebtoken`, `p256`, `ring`, `base64` (JWTs, VAPID and RFC 8291 use our own 60-line
+  unpadded base64url, tested against RFC 4648), `url` (endpoints parsed with `http::Uri` plus
+  explicit checks). All signing, ECDH, HKDF and AES-GCM through aws-lc-rs 1.19.0; APIs read in the
+  pinned sources (hyper 1.12.0 `client::conn::{http1,http2}`, `server::conn::{http1,http2}`;
+  hyper-util 0.1.21 `rt::{TokioExecutor, TokioIo, TokioTimer}`; aws-lc-rs `agreement::{PrivateKey,
+  agree}`, `signature::{EcdsaKeyPair, RsaKeyPair}`, `hkdf`, `aead::LessSafeKey`; http-body-util
+  0.1.5 `Limited`; rcgen 0.14.10 for the mocks' test CA, behind the `test-support` feature).
+
+## D-0035 — Object storage: RustFS replaces Garage
+
+- Date: 2026-11-12
+- Status: accepted
+- Decided by: owner ("replace garage with rustfs"); a change to the constitution's locked stack.
+- Context: Garage v2.5.0 (D-0007) was the S3 store for encrypted attachments and backup vaults.
+  No Songbird crate talks to S3 yet (attachment uploads arrive in P02-M5), so the change touches
+  only docker compose, CI, Ansible, secrets generation and the documentation.
+- Options considered: keep Garage v2.5.0; RustFS 1.0.5 (Apache-2.0, written in Rust). No benchmark
+  between the two was run; the owner chose RustFS directly. Upload throughput and p99 are measured
+  on RustFS in P02-M5.
+- Evidence (read from the RustFS 1.0.5 source and its GitHub releases and advisories, 2026-11-12):
+  - Releases: 1.0.0 GA on 2026-09-16; 1.0.5 on 2026-11-10 (five patch releases in eight weeks).
+  - 43 published GitHub security advisories since December 2025, mostly authorization flaws (IAM,
+    bucket policies, presigned uploads, service accounts). Eight affect 1.0.0 or 1.0.1 and are
+    fixed in 1.0.2, three of them high: Object Lock COMPLIANCE bypassed by force-deleting a bucket;
+    the FTP, SFTP and WebDAV listeners bypass bucket policies; SSE-C objects expose the plaintext
+    MD5 as their ETag. None is published against 1.0.5.
+  - Defaults that matter here: the web console is on (`RUSTFS_CONSOLE_ENABLE`, default true); an
+    update check calls `https://version.rustfs.com/latest.json` (`RUSTFS_CHECK_UPDATE`, default
+    true); FTP, FTPS, SFTP and WebDAV are off by default; the "Connect" heartbeat runs only when
+    `RUSTFS_CONNECT_*` is configured. The admin API is served on the S3 port. Root credentials come
+    from `RUSTFS_ACCESS_KEY` and `RUSTFS_SECRET_KEY` (access key at least 3 characters, secret at
+    least 8); the image entrypoint warns on the default `rustfsadmin` pair. Health: `/health/ready`.
+    The image runs as uid 10001. A single data path skips the distinct-disk check, so single node,
+    single disk needs no unsafe override.
+- Decision: RustFS 1.0.5, single node and single disk (like Garage with replication factor 1), in
+  compose and on the data host:
+  - only the S3 API listens: `127.0.0.1:9000` on the data host, reached from the private network
+    through one ghostunnel mutual-TLS tunnel on port 9010 (Garage needed three ports: RPC 3901,
+    S3 3910 and admin 3913);
+  - console, FTP, FTPS, SFTP, WebDAV and the update check set off explicitly; logs to stdout;
+  - container without capabilities, `no-new-privileges`, data in `/var/lib/songbird/rustfs`
+    owned by uid 10001;
+  - secrets `rustfs_access_key` and `rustfs_secret_key` (generated by `deploy/bin/secrets-init`
+    and `cargo xtask dev-env`) replace Garage's RPC secret, admin token and metrics token. No
+    layout step: `cargo xtask compose up` and the data role no longer apply one.
+- Consequences:
+  - Objects stay client-side ciphertext, so an authorization flaw in RustFS exposes ciphertext,
+    sizes and object names, not content. Keep it that way: object names carry no identifiers.
+  - Watch RustFS advisories and upgrade promptly; the image digest is still to be pinned (see Open
+    owner decisions).
+  - P02-M5: give each service its own least-privilege RustFS credential instead of the root pair;
+    prefer uploads through `api` or presigned PUT with an exact length (presigned POST and
+    presigned uploads have had three advisories); do not enable SSE-C (plaintext-MD5 ETag
+    advisory) or Object Lock until their fixes have aged.
+  - Multi-node later (vault RPO, three copies across zones) needs RustFS distributed mode or site
+    replication and `RUSTFS_RPC_SECRET`; decided when Prompt 10 arrives.
+  - Developers with an existing `.env` run `cargo xtask dev-env --force`.
 
 ## D-0034 — Milestone 4: Valkey routing that sees nothing, owned partitions over node links, replicated key stores
 
@@ -954,7 +1216,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   `force_rotate=true`) and restarts the affected components; site.yml runs it on every build.
   Valkey uses native TLS with required client certificates (TLS 1.3 only); Garage (single-node
   layout applied idempotently by the data role) has its S3 and admin
-  APIs sit behind ghostunnel 1.11.5 mTLS tunnels; SurrealDB gets server TLS with password auth (it
+  APIs sit behind ghostunnel 1.11.5 mTLS tunnels (Garage replaced by RustFS behind one tunnel,
+  D-0035); SurrealDB gets server TLS with password auth (it
   has no client-certificate authentication); Songbird services load their certificates when their
   internal listeners arrive (Prompt 2+).
 - Consequences: no online CA to attack or keep available. Revisit if certificate volume grows
@@ -1074,7 +1337,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   Apache Iggy 0.10.0 `sha256:176125a0580f526b0fee8b98ccf4ed5f77e243066183243d87282abce4851bf3`
   (added 2026-11-12, D-0029);
   Valkey 9.1.3-alpine3.24 `sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b`;
-  Garage v2.5.0 `sha256:677e5b758e4425a325b811c425c026bf35a4bf42f7ddbaa773de3f4fd779a5a5`;
+  Garage v2.5.0 `sha256:677e5b758e4425a325b811c425c026bf35a4bf42f7ddbaa773de3f4fd779a5a5`
+  (replaced by RustFS 1.0.5 on 2026-11-12, D-0035);
   LiveKit v1.13.11 `sha256:25cd902de7cacbd5f1f779f6a6ac1eae20ba8f56b0935934ce6b0ab80d1e3d20`;
   ghostunnel v1.11.5 `sha256:65c4e34ec0ee0f30ea1f72b7411ec70a91c32fc50f067a8466ad2adb1e7420f2`
   (deployments). Both Valkeys use `noeviction`: silently evicting registry or rate-limit keys

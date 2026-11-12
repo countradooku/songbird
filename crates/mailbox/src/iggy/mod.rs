@@ -107,6 +107,9 @@ const REDRIVE_AFTER: Duration = Duration::from_secs(2);
 const READ_SPAN: u64 = 512;
 /// Most entries one compaction pass copies forward (the rest wait for the next pass).
 const RELOCATE_PER_PASS: usize = 100_000;
+/// Idempotency entries are written to their topic this often. Until then their store records
+/// hold the low-water offset back, so a crash loses none (replay rebuilds them from the log).
+const IDEM_FLUSH: Duration = Duration::from_secs(1);
 /// The idempotency topic keeps its records this long (the idempotency window and a margin).
 const IDEM_EXPIRY: Duration = Duration::from_hours(7);
 
@@ -741,7 +744,7 @@ impl IggyMailbox {
             tokio::spawn(idem_flusher(
                 shared.clone(),
                 cfg.connection.client().await?,
-                cfg.ack_interval,
+                IDEM_FLUSH,
             ));
             parts.push(Part { tx, shared });
         }

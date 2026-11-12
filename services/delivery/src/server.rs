@@ -72,18 +72,46 @@ pub fn tls_acceptor(t: &TlsSettings) -> Result<TlsAcceptor, TlsError> {
 }
 
 /// Serves `listener` until `shutdown` turns true, then drains: stops accepting, tells every
-/// session to close with 4200 within the drain window, and waits for them.
+/// session to close with 4200 within the drain window, and waits for them. One core's share of
+/// the node (see [`serve_core`]); this is the single-core form.
 pub async fn serve<M, R>(
     listener: TcpListener,
     tls: Option<TlsAcceptor>,
     shared: Arc<Shared<M, R>>,
+    shutdown: watch::Receiver<bool>,
+) where
+    M: Mailbox,
+    R: Router,
+{
+    let core = songbird_runtime::Core {
+        index: 0,
+        count: 1,
+        cpu: None,
+    };
+    serve_core(listener, tls, shared, shutdown, core).await;
+}
+
+/// [`serve`] on one core of a thread-per-core node: this core's own `SO_REUSEPORT` listener, its
+/// share of the accept-rate limit (the node's rate divided by the cores), and the node-wide
+/// connection cap. The hourly expiry sweep runs on core 0 only.
+pub async fn serve_core<M, R>(
+    listener: TcpListener,
+    tls: Option<TlsAcceptor>,
+    shared: Arc<Shared<M, R>>,
     mut shutdown: watch::Receiver<bool>,
+    core: songbird_runtime::Core,
 ) where
     M: Mailbox,
     R: Router,
 {
     let s = &shared.config.session;
-    let mut accepts = Bucket::new(s.accepts_per_sec, s.accept_burst, std::time::Instant::now());
+    let cores = u32::try_from(core.count.max(1)).unwrap_or(u32::MAX);
+    let mut accepts = Bucket::new(
+        s.accepts_per_sec.div_ceil(cores),
+        s.accept_burst.div_ceil(cores),
+        std::time::Instant::now(),
+    );
+    let sweeps = core.index == 0;
     let (drain_tx, drain_rx) = watch::channel(false);
     let mut tasks = JoinSet::new();
     // Hourly expiry sweep: nothing undelivered outlives MAX_ENVELOPE_AGE (invariant 3). The
@@ -92,7 +120,7 @@ pub async fn serve<M, R>(
     expiry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            _ = expiry.tick() => {
+            _ = expiry.tick(), if sweeps => {
                 if shared.mailbox.expire_older_than(songbird_mailbox::MAX_ENVELOPE_AGE).await.is_err() {
                     shared.metrics.mailbox_errors.inc();
                 }

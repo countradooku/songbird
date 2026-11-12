@@ -2948,6 +2948,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "songbird-alloc-count"
+version = "0.1.0"
+
+[[package]]
 name = "songbird-api"
 version = "0.1.0"
 dependencies = [
@@ -3004,6 +3008,7 @@ dependencies = [
  "songbird-mailbox",
  "songbird-proto",
  "songbird-router",
+ "songbird-runtime",
  "songbird-service",
  "songbird-surreal",
  "songbird-types",
@@ -3025,6 +3030,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "sockudo-ws",
+ "songbird-alloc-count",
  "songbird-client",
  "songbird-delivery",
  "songbird-mailbox",
@@ -3123,8 +3129,20 @@ name = "songbird-router"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "papaya",
  "songbird-types",
  "tokio",
+]
+
+[[package]]
+name = "songbird-runtime"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+ "socket2",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

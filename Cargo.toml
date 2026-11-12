@@ -7,6 +7,8 @@ members = [
     "crates/proto",
     "crates/mailbox",
     "crates/router",
+    "crates/runtime",
+    "crates/alloc-count",
     "crates/client",
     "crates/surreal",
     "services/delivery",
@@ -39,6 +41,8 @@ songbird-service = { path = "crates/service" }
 songbird-proto = { path = "crates/proto" }
 songbird-mailbox = { path = "crates/mailbox" }
 songbird-router = { path = "crates/router" }
+songbird-runtime = { path = "crates/runtime" }
+songbird-alloc-count = { path = "crates/alloc-count" }
 songbird-client = { path = "crates/client" }
 songbird-surreal = { path = "crates/surreal" }
 songbird-delivery = { path = "services/delivery" }
@@ -66,6 +70,13 @@ thiserror = "2.0.21"
 # Apache Iggy client SDK (owner decision D-0030); pinned with the server image (0.10.0).
 iggy = "=0.12.0"
 secrecy = "0.10"
+# Thread-per-core runtime (D-0032): SO_REUSEPORT listeners and CPU pinning, both already in the
+# dependency graph (no new crates).
+socket2 = { version = "0.6.5", features = ["all"] }
+rustix = { version = "1.1.6", default-features = false, features = ["std", "thread"] }
+# Device directory (D-0032: fastest and best p99 of papaya, scc, dashmap); already in the graph
+# through the Iggy SDK.
+papaya = "=0.2.5"
 time = { version = "0.3.55", features = ["std"] }
 tokio = { version = "1.54.1", default-features = false }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }

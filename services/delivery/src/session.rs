@@ -97,6 +97,7 @@ pub async fn run<S, M, R>(
                 needs_drain: false,
                 acked: last_acked,
                 window_full: false,
+                scratch: Vec::new(),
             };
             let e = s.live(&mut ws, inbox, drain).await;
             shared.router.detach(&device, conn).await;
@@ -122,8 +123,8 @@ fn count_close<M: Mailbox, R: Router>(shared: &Shared<M, R>, code: CloseCode) {
         CloseCode::SlowConsumer => m.slow_consumers.inc(),
         CloseCode::ProtocolError | CloseCode::UnsupportedVersion => m.protocol_errors.inc(),
         CloseCode::RateLimited => m.rate_limited.inc(),
-        _ => 0,
-    };
+        _ => {}
+    }
 }
 
 fn now_ms() -> u64 {
@@ -249,6 +250,8 @@ struct Session<M, R> {
     /// Delivery paused because `max_unacked` envelopes are in flight; the next ACK resumes it
     /// with a drain (everything not sent is in the mailbox).
     window_full: bool,
+    /// Reused list of a send's recipient devices (no allocation per send).
+    scratch: Vec<DeviceId>,
 }
 
 impl<M: Mailbox, R: Router> Session<M, R> {
@@ -289,11 +292,19 @@ impl<M: Mailbox, R: Router> Session<M, R> {
         // registered a new timer entry each time: 9 % of user CPU in the M1 flamegraph).
         let sweep = tokio::time::sleep_until(self.safety_sweep_deadline());
         tokio::pin!(sweep);
+        // The shutdown and router-signal waits live across iterations too: re-creating them on
+        // every wake-up registered and dropped a waiter each time (M3 profile: about 4 % of user
+        // CPU at 580,000 messages/s).
+        let draining = async { drain.wait_for(|d| *d).await.is_ok() };
+        tokio::pin!(draining);
+        let signals = Arc::clone(&inbox.signals);
+        let notified = signals.notified();
+        tokio::pin!(notified);
         let write_timeout = self.shared.config.session.write_timeout();
         loop {
             let step: Res = tokio::select! {
                 biased;
-                draining = async { drain.wait_for(|d| *d).await.is_ok() } => {
+                draining = &mut draining => {
                     // Deploy drain: close at a random point in the window so clients do not
                     // reconnect all at once.
                     if draining {
@@ -303,11 +314,12 @@ impl<M: Mailbox, R: Router> Session<M, R> {
                     }
                     return Exit::Close(CloseCode::Draining, None);
                 }
-                () = inbox.signals.notified() => {
-                    if inbox.signals.is_replaced() {
+                () = &mut notified => {
+                    notified.set(signals.notified());
+                    if signals.is_replaced() {
                         return Exit::Close(CloseCode::Replaced, None);
                     }
-                    if inbox.signals.take_lagged() {
+                    if signals.take_lagged() {
                         self.shared.metrics.routes_lagged.inc();
                         self.drain(ws).await
                     } else {
@@ -578,16 +590,28 @@ impl<M: Mailbox, R: Router> Session<M, R> {
                 .reply(ws, s.req_id, reject(RejectReason::RateLimited, ms))
                 .await;
         }
-        let devices: Vec<&DeviceId> = s.payload.devices().collect();
         // Bounded by max_recipients (checked by the decoder).
-        if has_duplicate_device(&devices) {
+        let mut devices = std::mem::take(&mut self.scratch);
+        devices.clear();
+        devices.extend(s.payload.devices().copied());
+        let duplicate = has_duplicate_device(&devices);
+        // Device lists (master prompt §5, `send`): every device of each addressed account, no
+        // device that does not exist. The client re-encrypts for the corrected list.
+        let mismatch = if duplicate {
+            None
+        } else {
+            self.shared
+                .directory
+                .check_devices(&self.device, &devices)
+                .err()
+        };
+        self.scratch = devices;
+        if duplicate {
             return self
                 .reply(ws, s.req_id, reject(RejectReason::DuplicateRecipient, 0))
                 .await;
         }
-        // Device lists (master prompt §5, `send`): every device of each addressed account, no
-        // device that does not exist. The client re-encrypts for the corrected list.
-        if let Err(mm) = self.shared.directory.check_devices(&self.device, &devices) {
+        if let Some(mm) = mismatch {
             let ids = |v: Vec<DeviceId>| v.iter().map(|d| d.as_bytes().to_vec()).collect();
             let status = SendStatus::DeviceMismatch(control::DeviceMismatch {
                 missing: ids(mm.missing),
@@ -596,7 +620,6 @@ impl<M: Mailbox, R: Router> Session<M, R> {
             });
             return self.reply(ws, s.req_id, status).await;
         }
-        drop(devices);
         let req = store_request(&s);
         let recipients = req.payload.len();
         // Invariant 1: store first; only then acknowledge and route.
@@ -695,7 +718,7 @@ fn store_request(s: &SendFrame) -> StoreRequest {
 
 /// Whether a device appears twice. Pairwise for the common small sends (no allocation; a
 /// per-send `HashSet` was 8 % of user CPU in the M1 flamegraph), sorting above that.
-fn has_duplicate_device(devices: &[&DeviceId]) -> bool {
+fn has_duplicate_device(devices: &[DeviceId]) -> bool {
     const PAIRWISE_MAX: usize = 32;
     if devices.len() <= PAIRWISE_MAX {
         return devices.iter().enumerate().any(|(i, d)| {
@@ -707,7 +730,7 @@ fn has_duplicate_device(devices: &[&DeviceId]) -> bool {
         });
     }
     // Bounded by max_recipients (checked by the decoder).
-    let mut ids: Vec<&[u8; 16]> = devices.iter().map(|d| d.as_bytes()).collect();
+    let mut ids: Vec<&[u8; 16]> = devices.iter().map(DeviceId::as_bytes).collect();
     ids.sort_unstable();
     ids.windows(2).any(|w| w.first() == w.get(1))
 }
@@ -718,8 +741,7 @@ mod tests {
 
     fn check(ids: &[u8]) -> bool {
         let devices: Vec<DeviceId> = ids.iter().map(|b| DeviceId::from_bytes([*b; 16])).collect();
-        let refs: Vec<&DeviceId> = devices.iter().collect();
-        has_duplicate_device(&refs)
+        has_duplicate_device(&devices)
     }
 
     #[test]

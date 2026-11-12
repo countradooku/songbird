@@ -174,24 +174,40 @@ impl Service for Delivery {
     }
 
     async fn run(self, mut ctx: Ctx) -> Result<(), BoxError> {
-        let mailbox = match self.store {
-            Store::Surreal(cfg) => {
-                let m = SurrealMailbox::connect(*cfg).await?;
-                tracing::info!("surrealdb mailbox connected");
-                AnyMailbox::Surreal(m)
-            }
-            Store::Iggy(cfg) => {
-                let m = IggyMailbox::connect(*cfg).await?;
-                tracing::info!("iggy mailbox connected and replayed");
-                AnyMailbox::Iggy(m)
-            }
-            Store::Memory => AnyMailbox::Memory(MemoryMailbox::new(
-                self.settings.mailbox.max_per_device,
-                self.settings.mailbox.store_generation,
-            )),
-        };
-        let listener = tokio::net::TcpListener::bind(self.settings.listen).await?;
-        tracing::info!(tls = self.tls.is_some(), "websocket listener bound");
+        let runtime = self.settings.runtime;
+        // The mailbox runs on its own multi-thread runtime (D-0032): each Iggy partition's writer
+        // gets a thread, apart from the delivery cores and from this control thread.
+        let storage_threads = runtime.storage_thread_count(&self.settings.mailbox);
+        let storage = StorageRuntime(Some(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(storage_threads)
+                .thread_name("storage")
+                .enable_all()
+                .build()?,
+        ));
+        let (max_per_device, generation) = (
+            self.settings.mailbox.max_per_device,
+            self.settings.mailbox.store_generation,
+        );
+        let store = self.store;
+        let mailbox = storage
+            .handle()
+            .spawn(open_mailbox(store, max_per_device, generation))
+            .await??;
+        tracing::info!(storage_threads, "mailbox runtime started");
+        let cores = runtime.worker_count();
+        // One listener per core on the same address: the kernel spreads connections (D-0032).
+        let listeners =
+            songbird_runtime::reuseport_listeners(self.settings.listen, cores, runtime.backlog)?;
+        tracing::info!(
+            tls = self.tls.is_some(),
+            cores,
+            pinned = runtime.pin,
+            "websocket listeners bound"
+        );
+        let listeners: Arc<std::sync::Mutex<Vec<Option<std::net::TcpListener>>>> = Arc::new(
+            std::sync::Mutex::new(listeners.into_iter().map(Some).collect()),
+        );
         let shared = Arc::new(Shared::new(
             self.settings,
             self.directory,
@@ -200,7 +216,35 @@ impl Service for Delivery {
             self.metrics,
         ));
         let (stop_tx, stop_rx) = watch::channel(false);
-        let serve = tokio::spawn(server::serve(listener, self.tls, shared.clone(), stop_rx));
+        // The mailbox's tasks stay on this (main) thread's runtime; the cores reach them through
+        // channels.
+        let tls = self.tls;
+        let worker_shared = shared.clone();
+        let workers = songbird_runtime::start(
+            songbird_runtime::Config {
+                workers: cores,
+                pin: runtime.pin,
+            },
+            move |core| {
+                let listener = listeners
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get_mut(core.index)
+                    .and_then(Option::take);
+                let (tls, shared, stop) = (tls.clone(), worker_shared.clone(), stop_rx.clone());
+                async move {
+                    songbird_service::telemetry::sharded::set_core_shard(core.index);
+                    let Some(listener) = listener else { return };
+                    match tokio::net::TcpListener::from_std(listener) {
+                        Ok(l) => server::serve_core(l, tls, shared, stop, core).await,
+                        Err(e) => {
+                            tracing::error!(core = core.index, error = %e, "cannot use listener");
+                        }
+                    }
+                }
+            },
+        )?;
+        let serve = tokio::task::spawn_blocking(move || workers.join());
         ctx.health.set_ready(true);
         // A fenced Iggy writer (another node took the partitions over) makes this node unready.
         let watch_shared = shared.clone();
@@ -221,8 +265,55 @@ impl Service for Delivery {
         ctx.shutdown().await;
         watcher.abort();
         let _ = stop_tx.send(true);
-        serve.await?;
+        let panicked = serve.await?;
+        drop(shared);
+        drop(storage);
+        if panicked > 0 {
+            return Err(format!("{panicked} delivery cores panicked").into());
+        }
         Ok(())
+    }
+}
+
+/// Connects the configured mailbox (on the storage runtime: its tasks stay there).
+async fn open_mailbox(
+    store: Store,
+    max_per_device: usize,
+    generation: u64,
+) -> Result<AnyMailbox, BoxError> {
+    Ok(match store {
+        Store::Surreal(cfg) => {
+            let m = SurrealMailbox::connect(*cfg).await?;
+            tracing::info!("surrealdb mailbox connected");
+            AnyMailbox::Surreal(m)
+        }
+        Store::Iggy(cfg) => {
+            let m = IggyMailbox::connect(*cfg).await?;
+            tracing::info!("iggy mailbox connected and replayed");
+            AnyMailbox::Iggy(m)
+        }
+        Store::Memory => AnyMailbox::Memory(MemoryMailbox::new(max_per_device, generation)),
+    })
+}
+
+/// The mailbox's runtime, shut down in the background when dropped, on every path out of `run`
+/// (dropping a runtime in place inside another runtime's context panics).
+struct StorageRuntime(Option<tokio::runtime::Runtime>);
+
+impl StorageRuntime {
+    fn handle(&self) -> tokio::runtime::Handle {
+        match &self.0 {
+            Some(rt) => rt.handle().clone(),
+            None => tokio::runtime::Handle::current(),
+        }
+    }
+}
+
+impl Drop for StorageRuntime {
+    fn drop(&mut self) {
+        if let Some(rt) = self.0.take() {
+            rt.shutdown_background();
+        }
     }
 }
 

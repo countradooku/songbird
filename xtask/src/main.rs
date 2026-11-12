@@ -260,7 +260,9 @@ fn miri() -> Result {
     run(cargo_nightly()
         .args(["miri", "test", "-p", "songbird-types"])
         .env("MIRIFLAGS", "-Zmiri-disable-isolation")
-        .env("PROPTEST_CASES", "4"))
+        .env("PROPTEST_CASES", "4"))?;
+    // The one `unsafe` exception (D-0033): the test-only counting allocator.
+    run(cargo_nightly().args(["miri", "test", "-p", "songbird-alloc-count"]))
 }
 
 // ---------------------------------------------------------------- smoke

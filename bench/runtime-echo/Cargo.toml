@@ -1,0 +1,17 @@
+[package]
+name = "songbird-bench-runtime-echo"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "D-0028: WebSocket echo on per-core Tokio (epoll) against per-core compio (io_uring), same sockudo-ws, same machine. Not part of the workspace."
+
+# Standalone: its own lockfile, so compio does not enter the workspace's vet and deny graph.
+[workspace]
+
+[dependencies]
+songbird-runtime = { path = "../../crates/runtime" }
+sockudo-ws = { version = "=3.1.1", default-features = false, features = ["simd", "tokio-runtime", "compio-runtime"] }
+tokio = { version = "1", features = ["rt", "net", "time", "macros"] }
+compio = { version = "0.19", features = ["net", "runtime", "macros", "io-uring"] }
+mimalloc = { version = "0.1", default-features = false }
+futures-util = "0.3"

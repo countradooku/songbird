@@ -38,3 +38,12 @@ server_name = "localhost"
 # user = "root"
 # pass = { env = "SURREAL_PASS" }
 # idempotency_secret = { file = "/path/to/idempotency-secret.hex" }   # 64 hex chars, mode 0600
+
+# Thread-per-core runtime (D-0032): one pinned worker per core, each with its own listener
+# (SO_REUSEPORT); the mailbox runs on its own threads. On a single server, confine delivery
+# (taskset or a cgroup cpuset) so the stores keep cores of their own.
+# [delivery.runtime]
+# workers = 0            # 0: every CPU the process may use
+# pin = true
+# backlog = 4096
+# storage_threads = 0    # 0: one per Iggy partition

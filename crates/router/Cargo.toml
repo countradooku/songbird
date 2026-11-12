@@ -10,6 +10,7 @@ license.workspace = true
 [dependencies]
 songbird-types.workspace = true
 bytes.workspace = true
+papaya.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]

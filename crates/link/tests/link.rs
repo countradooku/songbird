@@ -162,12 +162,17 @@ async fn the_client_refuses_a_server_with_another_name() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stopping_the_listener_keeps_open_connections_served() {
+async fn a_stopped_server_serves_nothing_more_even_on_open_connections() {
     let ca = ca();
     let (addr, _, stop) = server(leaf(&ca, &ca, B, B)).await;
     let c = LinkClient::new(addr, B, leaf(&ca, &ca, A, A));
     assert!(c.call(b"ab", Duration::from_secs(2)).await.is_ok());
-    // Stop accepting new connections: the open one stays served (a drain).
+    // A stopped node (shut down, or crashed in tests) must not keep acknowledging work, such as
+    // a key-store copy its owner would then count on.
     let _ = stop.send(true);
-    assert!(c.call(b"cd", Duration::from_secs(2)).await.is_ok());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // And the caller learns it at once, not when its timeout runs out.
+    let t = std::time::Instant::now();
+    assert!(c.call(b"cd", Duration::from_secs(5)).await.is_err());
+    assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
 }

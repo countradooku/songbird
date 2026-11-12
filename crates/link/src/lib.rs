@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -169,8 +169,8 @@ fn frame(kind: u8, id: u64, payload: &[u8]) -> Option<Bytes> {
     Some(b.freeze())
 }
 
-/// Serves requests on `listener` until `shutdown` turns true. Peers must present a certificate
-/// from the CA valid for a name starting with `allowed_prefix`.
+/// Serves requests on `listener` until `shutdown` turns true (then open connections close too).
+/// Peers must present a certificate from the CA valid for a name starting with `allowed_prefix`.
 pub async fn serve(
     listener: TcpListener,
     tls: LinkTls,
@@ -190,10 +190,15 @@ pub async fn serve(
                     continue;
                 };
                 let _ = tcp.set_nodelay(true);
-                let (acceptor, prefix, handler, stats) =
-                    (acceptor.clone(), Arc::clone(&prefix), Arc::clone(&handler), Arc::clone(&stats));
+                let (acceptor, prefix, handler, stats, stop) = (
+                    acceptor.clone(),
+                    Arc::clone(&prefix),
+                    Arc::clone(&handler),
+                    Arc::clone(&stats),
+                    shutdown.clone(),
+                );
                 tokio::spawn(async move {
-                    if !serve_conn(tcp, acceptor, &prefix, handler, &stats).await {
+                    if !serve_conn(tcp, acceptor, &prefix, handler, &stats, stop).await {
                         stats.refused.fetch_add(1, Ordering::Relaxed);
                     }
                 });
@@ -209,6 +214,7 @@ async fn serve_conn(
     prefix: &str,
     handler: Handler,
     stats: &Arc<LinkStats>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> bool {
     let Ok(Ok(tls)) = tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await
     else {
@@ -232,7 +238,15 @@ async fn serve_conn(
     }
     let (out_tx, out_rx) = mpsc::channel::<Bytes>(1024);
     let writer = tokio::spawn(write_loop(wr, out_rx));
-    while let Some((kind, id, payload)) = read_frame(&mut rd).await {
+    loop {
+        let next = tokio::select! {
+            f = read_frame(&mut rd) => f,
+            // A stopped node serves nothing more, not even on connections opened before.
+            _ = async { shutdown.wait_for(|s| *s).await.is_ok() } => None,
+        };
+        let Some((kind, id, payload)) = next else {
+            break;
+        };
         if kind != KIND_REQUEST {
             break;
         }
@@ -272,6 +286,8 @@ type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Bytes>>>>;
 struct Conn {
     out: mpsc::Sender<Bytes>,
     pending: Pending,
+    /// The peer closed the connection (its reader ended): nothing sent on it is answered.
+    closed: Arc<AtomicBool>,
 }
 
 /// A client link to one peer node; connects on first use and again after a failure.
@@ -323,7 +339,8 @@ impl LinkClient {
         let (out, out_rx) = mpsc::channel::<Bytes>(1024);
         tokio::spawn(write_loop(wr, out_rx));
         let pending: Pending = Arc::default();
-        let p = Arc::clone(&pending);
+        let closed = Arc::new(AtomicBool::new(false));
+        let (p, gone) = (Arc::clone(&pending), Arc::clone(&closed));
         tokio::spawn(async move {
             while let Some((kind, id, payload)) = read_frame(&mut rd).await {
                 if kind != KIND_RESPONSE {
@@ -337,18 +354,24 @@ impl LinkClient {
                     let _ = w.send(payload);
                 }
             }
-            // Closed: every waiter learns it (their senders drop).
+            // Closed: every waiter learns it (their senders drop), and nobody waits on it again.
+            gone.store(true, Ordering::Release);
             p.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clear();
         });
-        Ok(Arc::new(Conn { out, pending }))
+        Ok(Arc::new(Conn {
+            out,
+            pending,
+            closed,
+        }))
     }
 
     async fn current(&self) -> Result<Arc<Conn>, LinkError> {
         let mut c = self.conn.lock().await;
         if let Some(conn) = c.as_ref()
             && !conn.out.is_closed()
+            && !conn.closed.load(Ordering::Acquire)
         {
             return Ok(Arc::clone(conn));
         }
@@ -370,6 +393,15 @@ impl LinkClient {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(id, tx);
+        // Closed after `current` looked (the reader may have cleared the waiters already).
+        if conn.closed.load(Ordering::Acquire) {
+            conn.pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&id);
+            *self.conn.lock().await = None;
+            return Err(LinkError::Closed);
+        }
         if conn.out.send(f).await.is_err() {
             *self.conn.lock().await = None;
             return Err(LinkError::Closed);

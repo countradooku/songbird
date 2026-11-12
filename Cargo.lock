@@ -2980,6 +2980,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "songbird-accounts"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "bytes",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "songbird-jobs",
+ "songbird-surreal",
+ "songbird-types",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "songbird-admin"
 version = "0.1.0"
 dependencies = [
@@ -3096,6 +3113,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "songbird-jobs"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "hex",
+ "proptest",
+ "redis",
+ "songbird-types",
+ "songbird-valkey",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "songbird-link"
 version = "0.1.0"
 dependencies = [
@@ -3204,6 +3236,7 @@ dependencies = [
  "papaya",
  "redis",
  "songbird-types",
+ "songbird-valkey",
  "thiserror",
  "tokio",
  "tracing",
@@ -3279,6 +3312,17 @@ dependencies = [
  "thiserror",
  "toml",
  "zeroize",
+]
+
+[[package]]
+name = "songbird-valkey"
+version = "0.1.0"
+dependencies = [
+ "redis",
+ "serde",
+ "songbird-types",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

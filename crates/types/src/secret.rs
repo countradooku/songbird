@@ -42,6 +42,25 @@ impl fmt::Debug for SecretRef {
 }
 
 impl SecretRef {
+    /// Reads a 32-byte key written as 64 hex characters (cluster, jobs and index secrets).
+    ///
+    /// # Errors
+    /// As [`SecretRef::resolve`], and [`ConfigError::Secret`] if it is not 64 hex characters.
+    pub fn resolve_key32(&self) -> Result<Zeroizing<[u8; 32]>, ConfigError> {
+        let s = self.resolve()?;
+        let mut out = Zeroizing::new([0u8; 32]);
+        hex::decode_to_slice(s.expose().trim(), out.as_mut_slice()).map_err(|_| {
+            ConfigError::Secret {
+                name: match self {
+                    Self::File(p) => p.display().to_string(),
+                    Self::Env(n) => n.clone(),
+                },
+                problem: "must be 64 hex characters".into(),
+            }
+        })?;
+        Ok(out)
+    }
+
     /// Reads the secret. A single trailing newline is stripped.
     ///
     /// # Errors

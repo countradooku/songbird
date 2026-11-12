@@ -149,6 +149,13 @@ define_id!(
     "DeviceId"
 );
 
+define_id!(
+    /// A background job (D-0036): lets handlers recognise a job they already ran.
+    JobId,
+    JobKind,
+    "JobId"
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

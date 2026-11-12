@@ -1,0 +1,27 @@
+[package]
+name = "songbird-accounts"
+description = "The account registry in SurrealDB (D-0036): accounts and devices, the directory version, push tokens (sealed, under keyed hashes), upload grants, attachment records and the jobs outbox."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+songbird-types.workspace = true
+songbird-surreal.workspace = true
+songbird-jobs.workspace = true
+aws-lc-rs.workspace = true
+bytes.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["sync", "time", "macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true

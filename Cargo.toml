@@ -12,6 +12,9 @@ members = [
     "crates/link",
     "crates/client",
     "crates/surreal",
+    "crates/valkey",
+    "crates/jobs",
+    "crates/accounts",
     "services/delivery",
     "services/api",
     "services/push",
@@ -47,6 +50,9 @@ songbird-alloc-count = { path = "crates/alloc-count" }
 songbird-link = { path = "crates/link" }
 songbird-client = { path = "crates/client" }
 songbird-surreal = { path = "crates/surreal" }
+songbird-valkey = { path = "crates/valkey" }
+songbird-jobs = { path = "crates/jobs" }
+songbird-accounts = { path = "crates/accounts" }
 songbird-delivery = { path = "services/delivery" }
 
 anyhow = "1.0.104"

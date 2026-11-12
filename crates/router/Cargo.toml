@@ -9,6 +9,7 @@ license.workspace = true
 
 [dependencies]
 songbird-types.workspace = true
+songbird-valkey.workspace = true
 bytes.workspace = true
 papaya.workspace = true
 redis.workspace = true

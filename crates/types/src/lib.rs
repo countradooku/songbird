@@ -15,5 +15,5 @@ pub mod id;
 pub mod secret;
 
 pub use error::{ConfigError, IdError};
-pub use id::{AccountId, DeviceId, Id, IdKind};
+pub use id::{AccountId, DeviceId, Id, IdKind, JobId};
 pub use secret::{Secret, SecretRef};

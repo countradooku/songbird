@@ -1,0 +1,18 @@
+[package]
+name = "songbird-valkey"
+description = "Shared Valkey plumbing: a self-healing command connection and the validated connection settings every service uses."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+songbird-types.workspace = true
+redis.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+
+[lints]
+workspace = true

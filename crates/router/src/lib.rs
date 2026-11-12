@@ -17,7 +17,10 @@
 //! (one channel per device) behind the same trait.
 #![forbid(unsafe_code)]
 
-pub mod conn;
+pub mod conn {
+    //! The self-healing Valkey connection, now shared from `songbird-valkey`.
+    pub use songbird_valkey::conn::ValkeyConn;
+}
 pub mod valkey;
 
 use std::future::{Future, ready};

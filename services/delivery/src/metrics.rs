@@ -1,9 +1,8 @@
 //! Delivery metrics: aggregate counters only, no per-device or per-connection labels
-//! (invariant 6). Atomic counters for now; per-core counters summed at scrape time arrive with
-//! the thread-per-core runtime (milestone 3).
+//! (invariant 6). Per-core shards summed at scrape time (M3): cores counting the same event never
+//! contend for a cache line.
 
-use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::gauge::Gauge;
+use songbird_service::telemetry::sharded::{ShardedCounter as Counter, ShardedGauge as Gauge};
 use songbird_service::telemetry::{Metrics, TelemetryError};
 
 /// Every delivery metric.

@@ -9,6 +9,7 @@
 pub mod admin;
 pub mod metrics;
 pub mod redaction;
+pub mod sharded;
 
 use songbird_types::config::{LogConfig, LogFormat};
 use tracing_appender::non_blocking::{ErrorCounter, NonBlockingBuilder, WorkerGuard};

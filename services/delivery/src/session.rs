@@ -123,8 +123,8 @@ fn count_close<M: Mailbox, R: Router>(shared: &Shared<M, R>, code: CloseCode) {
         CloseCode::SlowConsumer => m.slow_consumers.inc(),
         CloseCode::ProtocolError | CloseCode::UnsupportedVersion => m.protocol_errors.inc(),
         CloseCode::RateLimited => m.rate_limited.inc(),
-        _ => 0,
-    };
+        _ => {}
+    }
 }
 
 fn now_ms() -> u64 {
@@ -292,11 +292,19 @@ impl<M: Mailbox, R: Router> Session<M, R> {
         // registered a new timer entry each time: 9 % of user CPU in the M1 flamegraph).
         let sweep = tokio::time::sleep_until(self.safety_sweep_deadline());
         tokio::pin!(sweep);
+        // The shutdown and router-signal waits live across iterations too: re-creating them on
+        // every wake-up registered and dropped a waiter each time (M3 profile: about 4 % of user
+        // CPU at 580,000 messages/s).
+        let draining = async { drain.wait_for(|d| *d).await.is_ok() };
+        tokio::pin!(draining);
+        let signals = Arc::clone(&inbox.signals);
+        let notified = signals.notified();
+        tokio::pin!(notified);
         let write_timeout = self.shared.config.session.write_timeout();
         loop {
             let step: Res = tokio::select! {
                 biased;
-                draining = async { drain.wait_for(|d| *d).await.is_ok() } => {
+                draining = &mut draining => {
                     // Deploy drain: close at a random point in the window so clients do not
                     // reconnect all at once.
                     if draining {
@@ -306,11 +314,12 @@ impl<M: Mailbox, R: Router> Session<M, R> {
                     }
                     return Exit::Close(CloseCode::Draining, None);
                 }
-                () = inbox.signals.notified() => {
-                    if inbox.signals.is_replaced() {
+                () = &mut notified => {
+                    notified.set(signals.notified());
+                    if signals.is_replaced() {
                         return Exit::Close(CloseCode::Replaced, None);
                     }
-                    if inbox.signals.take_lagged() {
+                    if signals.take_lagged() {
                         self.shared.metrics.routes_lagged.inc();
                         self.drain(ws).await
                     } else {

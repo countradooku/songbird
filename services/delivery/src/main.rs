@@ -229,6 +229,7 @@ impl Service for Delivery {
                     .and_then(Option::take);
                 let (tls, shared, stop) = (tls.clone(), worker_shared.clone(), stop_rx.clone());
                 async move {
+                    songbird_service::telemetry::sharded::set_core_shard(core.index);
                     let Some(listener) = listener else { return };
                     match tokio::net::TcpListener::from_std(listener) {
                         Ok(l) => server::serve_core(l, tls, shared, stop, core).await,

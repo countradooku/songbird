@@ -236,7 +236,7 @@ const RELEASE: &str = "if redis.call('get', KEYS[1]) == ARGV[1] then \
 pub(crate) struct Cluster {
     peers: Arc<Peers>,
     ctx: Arc<Ctx>,
-    conn: redis::aio::MultiplexedConnection,
+    conn: songbird_router::conn::ValkeyConn,
     prefix: String,
     ttl: Duration,
     /// Partitions being started here (lease held, writer not up yet).
@@ -315,8 +315,7 @@ impl Prepared {
             None => redis::Client::open(self.cfg.valkey_url.as_str()),
         }
         .map_err(|_| MailboxError::Unavailable)?;
-        let conn = client
-            .get_multiplexed_async_connection()
+        let conn = songbird_router::conn::ValkeyConn::connect(client)
             .await
             .map_err(|_| MailboxError::Unavailable)?;
         let listener = tokio::net::TcpListener::bind(self.cfg.link_listen)
@@ -418,6 +417,12 @@ impl Cluster {
         format!("{}:lease:{p}", self.prefix)
     }
 
+    /// Set for a lease period when an owner hands a partition back on purpose (graceful
+    /// shutdown): others take it at once instead of waiting out a lease period.
+    fn released_key(&self, p: u32) -> String {
+        format!("{}:released:{p}", self.prefix)
+    }
+
     fn members_key(&self) -> String {
         format!("{}:members", self.prefix)
     }
@@ -434,25 +439,27 @@ impl Cluster {
 
     /// One round: heartbeat, then every partition's lease.
     async fn round(self: &Arc<Self>) {
-        let mut conn = self.conn.clone();
         let now = Self::now_ms();
         let me = self.peers.me.encode();
-        let members: Result<Vec<String>, _> = redis::pipe()
-            .cmd("ZADD")
-            .arg(self.members_key())
-            .arg(now + self.ttl_ms())
-            .arg(&me)
-            .ignore()
-            .cmd("ZREMRANGEBYSCORE")
-            .arg(self.members_key())
-            .arg("-inf")
-            .arg(now)
-            .ignore()
-            .cmd("ZRANGEBYSCORE")
-            .arg(self.members_key())
-            .arg(now)
-            .arg("+inf")
-            .query_async::<(Vec<String>,)>(&mut conn)
+        let members: Result<Vec<String>, _> = self
+            .conn
+            .query_pipe::<(Vec<String>,)>(
+                redis::pipe()
+                    .cmd("ZADD")
+                    .arg(self.members_key())
+                    .arg(now + self.ttl_ms())
+                    .arg(&me)
+                    .ignore()
+                    .cmd("ZREMRANGEBYSCORE")
+                    .arg(self.members_key())
+                    .arg("-inf")
+                    .arg(now)
+                    .ignore()
+                    .cmd("ZRANGEBYSCORE")
+                    .arg(self.members_key())
+                    .arg(now)
+                    .arg("+inf"),
+            )
             .await
             .map(|(m,)| m);
         let Ok(members) = members else {
@@ -467,7 +474,7 @@ impl Cluster {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone_from(&members);
         for p in 0..self.ctx.parts.count() {
-            self.lease_round(&mut conn, &members, p, &me).await;
+            self.lease_round(&self.conn, &members, p, &me).await;
             // A partition whose standby changed is copied to it now, not at its next write.
             if let Some(part) = self.ctx.parts.local(p) {
                 let synced = self.peers.standby(p).is_none_or(|s| {
@@ -491,49 +498,44 @@ impl Cluster {
 
     async fn lease_round(
         self: &Arc<Self>,
-        conn: &mut redis::aio::MultiplexedConnection,
+        conn: &songbird_router::conn::ValkeyConn,
         members: &[Member],
         p: u32,
         me: &str,
     ) {
         let key = self.lease_key(p);
-        let holder: Option<String> = redis::cmd("GET")
-            .arg(&key)
-            .query_async(conn)
-            .await
-            .ok()
-            .flatten();
+        let holder: Option<String> = conn.query(redis::cmd("GET").arg(&key)).await.ok().flatten();
         match holder {
             Some(h) if h == me => {
-                let renewed: i64 = redis::cmd("EVAL")
-                    .arg(RENEW)
-                    .arg(1)
-                    .arg(&key)
-                    .arg(me)
-                    .arg(self.ttl_ms())
-                    .query_async(conn)
+                let renewed: i64 = conn
+                    .query(
+                        redis::cmd("EVAL")
+                            .arg(RENEW)
+                            .arg(1)
+                            .arg(&key)
+                            .arg(me)
+                            .arg(self.ttl_ms()),
+                    )
                     .await
                     .unwrap_or(1);
                 if renewed == 0 {
                     // Gone or taken. Gone (Valkey lost it): take it back and keep running. Taken
                     // by another node: stop (Iggy fences this writer anyway).
-                    let retaken: Option<String> = redis::cmd("SET")
-                        .arg(&key)
-                        .arg(me)
-                        .arg("NX")
-                        .arg("PX")
-                        .arg(self.ttl_ms())
-                        .query_async(conn)
+                    let retaken: Option<String> = conn
+                        .query(
+                            redis::cmd("SET")
+                                .arg(&key)
+                                .arg(me)
+                                .arg("NX")
+                                .arg("PX")
+                                .arg(self.ttl_ms()),
+                        )
                         .await
                         .ok()
                         .flatten();
                     if retaken.is_none() {
-                        let now: Option<String> = redis::cmd("GET")
-                            .arg(&key)
-                            .query_async(conn)
-                            .await
-                            .ok()
-                            .flatten();
+                        let now: Option<String> =
+                            conn.query(redis::cmd("GET").arg(&key)).await.ok().flatten();
                         if now.as_deref().is_some_and(|h| h != me) {
                             self.give_up(p);
                         }
@@ -554,44 +556,71 @@ impl Cluster {
                 // Running here but the lease is gone (Valkey restarted without persistence):
                 // take it back without restarting anything; if another node got it first, the
                 // next round sees its holder and stops this writer (Iggy fences it anyway).
-                let _: Option<String> = redis::cmd("SET")
-                    .arg(&key)
-                    .arg(me)
-                    .arg("NX")
-                    .arg("PX")
-                    .arg(self.ttl_ms())
-                    .query_async(conn)
+                let _: Option<String> = conn
+                    .query(
+                        redis::cmd("SET")
+                            .arg(&key)
+                            .arg(me)
+                            .arg("NX")
+                            .arg("PX")
+                            .arg(self.ttl_ms()),
+                    )
                     .await
                     .ok()
                     .flatten();
             }
-            None => {
-                let first_free = *self
-                    .free_since
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .entry(p)
-                    .or_insert_with(Instant::now);
-                let preferred = ranked(members, p)
-                    .first()
-                    .is_none_or(|m| m.id == self.peers.me.id);
-                if !preferred && first_free.elapsed() < self.ttl {
-                    return;
-                }
-                let took: Option<String> = redis::cmd("SET")
+            None => self.take_free(conn, members, p, key, me).await,
+        }
+    }
+
+    /// Partition `p` has no lease: take it if this node should.
+    async fn take_free(
+        self: &Arc<Self>,
+        conn: &songbird_router::conn::ValkeyConn,
+        members: &[Member],
+        p: u32,
+        key: String,
+        me: &str,
+    ) {
+        let first_free = *self
+            .free_since
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(p)
+            .or_insert_with(Instant::now);
+        let preferred = ranked(members, p)
+            .first()
+            .is_none_or(|m| m.id == self.peers.me.id);
+        // A partition with a known owner that suddenly looks free (Valkey lost the
+        // lease) waits a lease period: its owner takes it back first, instead of a
+        // needless handover.
+        let had_owner = self
+            .remote_of
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&p);
+        let released = had_owner
+            && conn
+                .query::<bool>(redis::cmd("EXISTS").arg(self.released_key(p)))
+                .await
+                .unwrap_or(false);
+        if (!preferred || (had_owner && !released)) && first_free.elapsed() < self.ttl {
+            return;
+        }
+        let took: Option<String> = conn
+            .query(
+                redis::cmd("SET")
                     .arg(&key)
                     .arg(me)
                     .arg("NX")
                     .arg("PX")
-                    .arg(self.ttl_ms())
-                    .query_async(conn)
-                    .await
-                    .ok()
-                    .flatten();
-                if took.is_some() {
-                    self.take(p, key, me.to_owned());
-                }
-            }
+                    .arg(self.ttl_ms()),
+            )
+            .await
+            .ok()
+            .flatten();
+        if took.is_some() {
+            self.take(p, key, me.to_owned());
         }
     }
 
@@ -644,13 +673,9 @@ impl Cluster {
                 }
                 Err(e) => {
                     tracing::error!(partition = p, error = %e, "mailbox partition could not start");
-                    let mut conn = c.conn.clone();
-                    let _: Result<i64, _> = redis::cmd("EVAL")
-                        .arg(RELEASE)
-                        .arg(1)
-                        .arg(&key)
-                        .arg(&me)
-                        .query_async(&mut conn)
+                    let _: Result<i64, _> = c
+                        .conn
+                        .query(redis::cmd("EVAL").arg(RELEASE).arg(1).arg(&key).arg(&me))
                         .await;
                 }
             }
@@ -664,26 +689,37 @@ impl Cluster {
     /// Graceful shutdown: every owned partition's key store is written (and replicated), its
     /// writer stopped and its lease released, so the standby takes over at once.
     pub(crate) async fn shutdown(&self) {
-        let mut conn = self.conn.clone();
         let me = self.peers.me.encode();
         for p in 0..self.ctx.parts.count() {
             if let Some(part) = self.ctx.parts.local(p) {
                 let _ = part.shared.persist_keys().await;
                 part.stop();
                 self.ctx.parts.set(p, Slot::Unknown);
-                let _: Result<i64, _> = redis::cmd("EVAL")
-                    .arg(RELEASE)
-                    .arg(1)
-                    .arg(self.lease_key(p))
-                    .arg(&me)
-                    .query_async(&mut conn)
+                let _: Result<(), _> = self
+                    .conn
+                    .query(
+                        redis::cmd("SET")
+                            .arg(self.released_key(p))
+                            .arg(1)
+                            .arg("PX")
+                            .arg(self.ttl_ms()),
+                    )
+                    .await;
+                let _: Result<i64, _> = self
+                    .conn
+                    .query(
+                        redis::cmd("EVAL")
+                            .arg(RELEASE)
+                            .arg(1)
+                            .arg(self.lease_key(p))
+                            .arg(&me),
+                    )
                     .await;
             }
         }
-        let _: Result<i64, _> = redis::cmd("ZREM")
-            .arg(self.members_key())
-            .arg(&me)
-            .query_async(&mut conn)
+        let _: Result<i64, _> = self
+            .conn
+            .query(redis::cmd("ZREM").arg(self.members_key()).arg(&me))
             .await;
         let _ = self.stop.send(true);
     }
@@ -697,6 +733,29 @@ impl Cluster {
                 self.ctx.parts.set(p, Slot::Unknown);
             }
         }
+    }
+
+    /// Live members this node sees (itself included).
+    pub(crate) fn members(&self) -> usize {
+        self.peers.members().len()
+    }
+
+    /// Whether every partition this node owns has its key store on its current standby (true
+    /// when there is no other node).
+    pub(crate) fn standbys_synced(&self) -> bool {
+        let synced = self
+            .peers
+            .synced
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        (0..self.ctx.parts.count())
+            .filter(|p| self.ctx.parts.local(*p).is_some())
+            .all(|p| {
+                self.peers
+                    .standby(p)
+                    .is_none_or(|s| synced.get(&p) == Some(&s.id))
+            })
     }
 
     /// Key-store writes that did not reach a standby.

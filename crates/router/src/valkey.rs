@@ -198,7 +198,7 @@ enum Cmd {
 pub struct ValkeyRouter {
     local: Arc<LocalRouter>,
     seal: Arc<Seal>,
-    publisher: redis::aio::MultiplexedConnection,
+    publisher: crate::conn::ValkeyConn,
     shards: Vec<mpsc::UnboundedSender<Cmd>>,
     node_id: u64,
     stats: Arc<ValkeyRouterStats>,
@@ -241,8 +241,7 @@ impl ValkeyRouter {
     pub async fn connect(cfg: ValkeyRouterConfig) -> Result<Self, ValkeyRouterError> {
         let seal = Arc::new(Seal::new(&cfg.cluster_secret)?);
         let client = client(&cfg)?;
-        let publisher = client
-            .get_multiplexed_async_connection()
+        let publisher = crate::conn::ValkeyConn::connect(client.clone())
             .await
             .map_err(|e| ValkeyRouterError::Valkey(format!("{:?}", e.kind())))?;
         let local = Arc::new(LocalRouter::new());
@@ -288,11 +287,9 @@ impl ValkeyRouter {
     }
 
     async fn publish(&self, channel: &str, payload: Vec<u8>) -> Option<i64> {
-        let mut c = self.publisher.clone();
-        if let Ok(n) = redis::cmd("PUBLISH")
-            .arg(channel)
-            .arg(payload)
-            .query_async::<i64>(&mut c)
+        if let Ok(n) = self
+            .publisher
+            .query::<i64>(redis::cmd("PUBLISH").arg(channel).arg(payload))
             .await
         {
             self.stats.published.fetch_add(1, Ordering::Relaxed);

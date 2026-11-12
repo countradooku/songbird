@@ -229,3 +229,36 @@ async fn another_cluster_secret_cannot_reach_or_read_devices() {
     // Another secret, another channel name: nobody listens there.
     assert_eq!(a.route(&dev, live(1, b"x")).await, Routed::Offline);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publishing_heals_after_valkey_drops_every_connection() {
+    let Some(url) = url() else { return };
+    let _one = SERIAL.lock().await;
+    let s = secret();
+    let (a, b) = (node(&url, s, 51).await, node(&url, s, 52).await);
+    let dev = DeviceId::random().unwrap();
+    let mut inbox = b.attach(dev, SIZES).await;
+    assert_eq!(a.route(&dev, live(1, b"before")).await, Routed::Queued);
+    let _ = inbox.live.recv().await;
+    // A Valkey restart drops every connection: commands and subscriptions alike.
+    let admin = redis::Client::open(url.as_str()).unwrap();
+    let mut conn = admin.get_multiplexed_async_connection().await.unwrap();
+    for kind in ["normal", "pubsub"] {
+        let _: redis::RedisResult<i64> = redis::cmd("CLIENT")
+            .arg("KILL")
+            .arg("TYPE")
+            .arg(kind)
+            .query_async(&mut conn)
+            .await;
+    }
+    // Publishing works again without anyone reconnecting by hand.
+    let mut routed = Routed::Offline;
+    for _ in 0..100 {
+        routed = a.route(&dev, live(2, b"after")).await;
+        if routed == Routed::Queued {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(routed, Routed::Queued);
+}

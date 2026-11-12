@@ -24,6 +24,9 @@ use songbird_mailbox::iggy::{ClusterConfig, IggyConfig, IggyConnection, IggyMail
 use songbird_mailbox::{Mailbox, NewEnvelope, Payload, StoreRequest};
 use songbird_types::DeviceId;
 
+/// The test that drops every Valkey connection runs alone (write); the others share (read).
+static VALKEY: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+
 struct Env {
     iggy: IggyConnection,
     valkey: String,
@@ -34,6 +37,12 @@ struct Env {
 }
 
 fn env(name: &str) -> Option<Env> {
+    if std::env::var("SONGBIRD_TEST_LOG").is_ok() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("songbird_mailbox=debug")
+            .with_test_writer()
+            .try_init();
+    }
     let (Ok(addr), Ok(valkey)) = (
         std::env::var("SONGBIRD_TEST_IGGY"),
         std::env::var("SONGBIRD_TEST_VALKEY"),
@@ -143,6 +152,22 @@ async fn eventually(what: &str, f: impl Fn() -> bool) {
     }
 }
 
+/// Waits until `m` owns every partition; on failure says what it owns.
+async fn takes_all(m: &IggyMailbox) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while m.owned_partitions().len() != 4 {
+        assert!(
+            Instant::now() < deadline,
+            "never took every partition over: owns {:?}, partition starts {}",
+            m.owned_partitions(),
+            m.stats()
+                .partition_starts
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 async fn fetch_ok(m: &IggyMailbox, d: &DeviceId, want: usize) -> Vec<(u64, Bytes)> {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -162,6 +187,7 @@ async fn fetch_ok(m: &IggyMailbox, d: &DeviceId, want: usize) -> Vec<(u64, Bytes
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_node_reaches_partitions_owned_by_another() {
     let Some(e) = env("remote") else { return };
+    let _shared = VALKEY.read().await;
     let a = node(&e, "a").await;
     eventually("A owns every partition", || a.owned_partitions().len() == 4).await;
     let b = node(&e, "b").await;
@@ -209,6 +235,7 @@ async fn a_node_reaches_partitions_owned_by_another() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_standby_takes_over_without_losing_anything() {
     let Some(e) = env("failover") else { return };
+    let _shared = VALKEY.read().await;
     let a = node(&e, "a").await;
     eventually("A owns every partition", || a.owned_partitions().len() == 4).await;
     let b = node(&e, "b").await;
@@ -216,14 +243,14 @@ async fn the_standby_takes_over_without_losing_anything() {
     for d in &devs {
         b.store(to(*d, "before-crash")).await.unwrap();
     }
-    // Every key store reaches B before A dies (the next key interval).
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    // A dies without writing or releasing anything.
-    a.crash();
-    eventually("B takes every partition over", || {
-        b.owned_partitions().len() == 4
+    // A's key stores are on B (its standby) before A dies.
+    eventually("A's key stores reach B", || {
+        a.cluster_members() == 2 && a.standbys_synced()
     })
     .await;
+    // A dies without writing or releasing anything.
+    a.crash();
+    takes_all(&b).await;
     for d in &devs {
         let got = fetch_ok(&b, d, 1).await;
         assert_eq!(got[0], (1, Bytes::from_static(b"before-crash")));
@@ -237,18 +264,19 @@ async fn the_standby_takes_over_without_losing_anything() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_graceful_shutdown_hands_partitions_over_at_once() {
     let Some(e) = env("handover") else { return };
+    let _shared = VALKEY.read().await;
     let a = node(&e, "a").await;
     eventually("A owns every partition", || a.owned_partitions().len() == 4).await;
     let b = node(&e, "b").await;
     let d = DeviceId::random().unwrap();
     a.store(to(d, "pending")).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let t = Instant::now();
-    a.shutdown().await;
-    eventually("B takes every partition over", || {
-        b.owned_partitions().len() == 4
+    eventually("A's key stores reach B", || {
+        a.cluster_members() == 2 && a.standbys_synced()
     })
     .await;
+    let t = Instant::now();
+    a.shutdown().await;
+    takes_all(&b).await;
     // Released leases: no waiting for them to expire.
     assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
     assert_eq!(fetch_ok(&b, &d, 1).await[0].1.as_ref(), b"pending");
@@ -258,6 +286,7 @@ async fn a_graceful_shutdown_hands_partitions_over_at_once() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn leases_lost_with_valkey_are_taken_back_without_restarting() {
     let Some(e) = env("relet") else { return };
+    let _shared = VALKEY.read().await;
     let a = node(&e, "a").await;
     eventually("A owns every partition", || a.owned_partitions().len() == 4).await;
     let d = DeviceId::random().unwrap();
@@ -305,4 +334,40 @@ async fn leases_lost_with_valkey_are_taken_back_without_restarting() {
     );
     assert_eq!(a.store(to(d, "second")).await.unwrap().seqs, vec![2]);
     a.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn leases_keep_renewing_after_valkey_drops_every_connection() {
+    let Some(e) = env("reconnect") else { return };
+    let _alone = VALKEY.write().await;
+    let a = node(&e, "a").await;
+    eventually("A owns every partition", || a.owned_partitions().len() == 4).await;
+    let b = node(&e, "b").await;
+    let starts = a
+        .stats()
+        .partition_starts
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let client = redis::Client::open(e.valkey.as_str()).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let _: redis::RedisResult<i64> = redis::cmd("CLIENT")
+        .arg("KILL")
+        .arg("TYPE")
+        .arg("normal")
+        .query_async(&mut conn)
+        .await;
+    // Three lease periods later A still holds every lease (it reconnected and renewed), so B
+    // took nothing over.
+    tokio::time::sleep(Duration::from_millis(2_700)).await;
+    assert_eq!(a.owned_partitions().len(), 4);
+    assert_eq!(b.owned_partitions(), Vec::<u32>::new());
+    assert_eq!(
+        a.stats()
+            .partition_starts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        starts
+    );
+    let d = DeviceId::random().unwrap();
+    assert_eq!(b.store(to(d, "x")).await.unwrap().seqs, vec![1]);
+    a.shutdown().await;
+    b.shutdown().await;
 }

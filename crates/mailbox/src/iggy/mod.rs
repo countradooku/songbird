@@ -858,6 +858,19 @@ impl IggyMailbox {
         }
     }
 
+    /// Live cluster members this node sees, itself included (1 on a single node).
+    #[must_use]
+    pub fn cluster_members(&self) -> usize {
+        self.cluster.as_ref().map_or(1, |c| c.members())
+    }
+
+    /// Whether every partition this node owns has its key store on its current standby, so
+    /// this node's death would lose nothing (cluster mode; always true on a single node).
+    #[must_use]
+    pub fn standbys_synced(&self) -> bool {
+        self.cluster.as_ref().is_none_or(|c| c.standbys_synced())
+    }
+
     /// Key-store writes that did not reach a standby (cluster mode).
     #[must_use]
     pub fn replica_failures(&self) -> u64 {

@@ -401,7 +401,7 @@ async fn open_router(cfg: Option<ValkeyRouterConfig>) -> Result<AnyRouter, BoxEr
         Some(cfg) => {
             let r = ValkeyRouter::connect(cfg).await?;
             tracing::info!("valkey router connected");
-            AnyRouter::Valkey(r)
+            AnyRouter::Valkey(Box::new(r))
         }
     })
 }

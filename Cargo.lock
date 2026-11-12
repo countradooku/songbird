@@ -3145,11 +3145,13 @@ dependencies = [
  "rustls",
  "secrecy",
  "songbird-link",
+ "songbird-router",
  "songbird-surreal",
  "songbird-types",
  "thiserror",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

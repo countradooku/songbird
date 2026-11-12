@@ -17,6 +17,7 @@
 //! (one channel per device) behind the same trait.
 #![forbid(unsafe_code)]
 
+pub mod conn;
 pub mod valkey;
 
 use std::future::{Future, ready};
@@ -270,8 +271,8 @@ impl Router for LocalRouter {
 pub enum AnyRouter {
     /// One node (development, tests, a single server).
     Local(LocalRouter),
-    /// Several nodes over Valkey (D-0034).
-    Valkey(valkey::ValkeyRouter),
+    /// Several nodes over Valkey (D-0034); boxed, it is much larger than the local router.
+    Valkey(Box<valkey::ValkeyRouter>),
 }
 
 impl Router for AnyRouter {

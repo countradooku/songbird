@@ -26,7 +26,7 @@ admin_listen = "127.0.0.1:919$i"
 shutdown_grace_secs = 15
 [common.log]
 format = "pretty"
-filter = "warn"
+filter = "warn,songbird_mailbox=info"
 [delivery]
 listen = "127.0.0.1:929$i"
 server_name = "localhost"
@@ -95,9 +95,11 @@ echo "== Valkey restarted at 6 s (no persistence: leases and subscriptions lost)
 load 20 10000 > "$W/phase.txt" & L=$!
 sleep 6; podman restart -t 0 "${VALKEY_CONTAINER:-songbird-valkey-m4}" > /dev/null; echo "valkey restarted at $(date +%T)" >> "$OUT"
 wait $L; cat "$W/phase.txt" >> "$OUT"
-echo "== node c stopped gracefully (SIGTERM) at 6 s, 20 s at 10000/s" >> "$OUT"
-load 20 10000 > "$W/phase.txt" & L=$!
+echo "== node c stopped gracefully (SIGTERM) at 6 s, restarted at 14 s, 25 s at 10000/s" >> "$OUT"
+load 25 10000 > "$W/phase.txt" & L=$!
 sleep 6; kill -TERM "${PID[c]}"; echo "stopped c at $(date +%T)" >> "$OUT"
+# Its devices reconnect when it is back (a load balancer would send them elsewhere at once).
+sleep 8; wait "${PID[c]}" 2>/dev/null; start c; echo "restarted c at $(date +%T)" >> "$OUT"
 wait $L; cat "$W/phase.txt" >> "$OUT"
 for n in $NODES; do kill "${PID[$n]}" 2>/dev/null; done; wait 2>/dev/null
 echo DONE >> "$OUT"

@@ -49,7 +49,16 @@ pub(crate) enum Request {
         tag: [u8; 32],
         part: u32,
     },
+    /// A key-store write of partition `p`, for its standby (D-0034).
+    KeyStore {
+        p: u32,
+        files: Vec<(String, Bytes)>,
+        remove: Vec<String>,
+    },
 }
+
+/// Longest file name in a key-store write.
+const MAX_NAME: usize = 96;
 
 /// The owner's answer.
 #[derive(Clone, PartialEq, Eq)]
@@ -72,6 +81,7 @@ impl std::fmt::Debug for Request {
             Self::Count { .. } => "Count",
             Self::Expire { .. } => "Expire",
             Self::PartDone { .. } => "PartDone",
+            Self::KeyStore { .. } => "KeyStore",
         };
         f.debug_struct("Request")
             .field("kind", &kind)
@@ -230,6 +240,19 @@ impl Request {
                 b.put_slice(tag);
                 b.put_u32(*part);
             }
+            Self::KeyStore { p, files, remove } => {
+                b.put_u8(7);
+                b.put_u32(*p);
+                b.put_u32(u32::try_from(files.len()).unwrap_or(u32::MAX));
+                for (n, f) in files {
+                    put_bytes(&mut b, n.as_bytes());
+                    put_bytes(&mut b, f);
+                }
+                b.put_u32(u32::try_from(remove.len()).unwrap_or(u32::MAX));
+                for n in remove {
+                    put_bytes(&mut b, n.as_bytes());
+                }
+            }
         }
         b.freeze()
     }
@@ -310,6 +333,20 @@ impl Request {
                 tag: r.arr::<32>()?,
                 part: r.u32()?,
             },
+            7 => {
+                let p = r.u32()?;
+                let n = r.count(8)?;
+                let mut files = Vec::with_capacity(n);
+                for _ in 0..n {
+                    files.push((r.name()?, r.bytes()?));
+                }
+                let n = r.count(4)?;
+                let mut remove = Vec::with_capacity(n);
+                for _ in 0..n {
+                    remove.push(r.name()?);
+                }
+                Self::KeyStore { p, files, remove }
+            }
             _ => return None,
         };
         r.done().then_some(out)
@@ -323,7 +360,8 @@ impl Request {
             | Self::Fetch { p, .. }
             | Self::Count { p, .. }
             | Self::Expire { p, .. }
-            | Self::PartDone { p, .. } => *p,
+            | Self::PartDone { p, .. }
+            | Self::KeyStore { p, .. } => *p,
         }
     }
 }
@@ -452,6 +490,13 @@ impl Rd {
         let n = usize::try_from(self.u32()?).ok()?;
         (n.saturating_mul(min) <= self.0.remaining()).then_some(n)
     }
+    fn name(&mut self) -> Option<String> {
+        let b = self.bytes()?;
+        if b.len() > MAX_NAME {
+            return None;
+        }
+        String::from_utf8(b.to_vec()).ok()
+    }
     fn err(&mut self) -> Option<MailboxError> {
         Some(match self.u8()? {
             1 => MailboxError::Full,
@@ -566,6 +611,14 @@ mod tests {
                 p: 0,
                 tag: [7; 32],
                 part: 3,
+            },
+            Request::KeyStore {
+                p: 2,
+                files: vec![
+                    ("w1.p0.e1.g2".into(), Bytes::from_static(b"page")),
+                    ("head".into(), Bytes::from_static(b"head")),
+                ],
+                remove: vec!["w1.p0.e1.g1".into()],
             },
         ];
         for r in all {

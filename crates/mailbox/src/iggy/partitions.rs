@@ -23,11 +23,20 @@ pub(crate) trait Peer: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Result<Response, MailboxError>> + Send + '_>>;
 }
 
+/// Sends a partition's key-store writes to its standby node (D-0034).
+pub(crate) trait Replicator: Send + Sync + 'static {
+    /// Delivers one write; failures are counted, not returned (the owner keeps running).
+    fn replicate(
+        &self,
+        p: u32,
+        replica: super::keys::Replica,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+}
+
 /// One partition's writer.
 #[derive(Clone)]
 pub(crate) enum Slot {
     Local(Arc<Part>),
-    #[allow(dead_code, reason = "cluster mode wires it in the next step (D-0034)")]
     Remote(Arc<dyn Peer>),
     Unknown,
 }
@@ -237,7 +246,6 @@ pub(crate) async fn fetch_local(
 }
 
 /// Serves a request from another node against this node's partitions.
-#[allow(dead_code, reason = "cluster mode wires it in the next step (D-0034)")]
 pub(crate) async fn serve(parts: &Partitions, req: Request) -> Response {
     let Some(part) = parts.local(req.partition()) else {
         return Response::NotOwner;
@@ -269,5 +277,7 @@ pub(crate) async fn serve(parts: &Partitions, req: Request) -> Response {
             let _ = part.tx.send(Job::PartDone(tag, other)).await;
             Response::Done(Ok(()))
         }
+        // Handled by the cluster: it is for a partition this node is the standby of.
+        Request::KeyStore { .. } => Response::Done(Err(MailboxError::Unavailable)),
     }
 }

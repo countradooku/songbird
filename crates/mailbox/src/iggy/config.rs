@@ -114,6 +114,9 @@ pub struct IggyConfig {
     /// Idempotency entries are written to the idempotency topic this often (off the write path);
     /// until then they hold the low-water offset back.
     pub idem_flush: Duration,
+    /// Cluster mode (D-0034): several nodes share the topic, each partition owned by one of them.
+    /// `None`: this node runs every partition.
+    pub cluster: Option<super::ClusterConfig>,
     /// Fault injection for tests: stop a multi-partition send after its home record, as a crash
     /// would (the re-driver must complete it).
     #[doc(hidden)]
@@ -161,6 +164,7 @@ impl IggyConfig {
             key_window: Duration::from_mins(10),
             key_interval: Duration::from_secs(1),
             idem_flush: Duration::from_secs(1),
+            cluster: None,
             fault_skip_remote_parts: false,
         }
     }

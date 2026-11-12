@@ -956,7 +956,7 @@ impl KeyFile {
 
     /// Seals and writes a change set (blocking): new pages, then the head, then deletes the
     /// files it replaced.
-    pub(crate) fn write(&self, mut changes: Changes) -> Result<(), KeyError> {
+    pub(crate) fn write(&self, mut changes: Changes) -> Result<Replica, KeyError> {
         let epoch = changes.epoch;
         let generation = changes.generation;
         let mut pages = Vec::with_capacity(changes.pages.len());
@@ -1011,11 +1011,21 @@ impl KeyFile {
             leftover.extend(pages.into_iter().map(|(p, _)| p));
             return Err(KeyError::Write);
         }
+        let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned());
+        let mut replica = Replica {
+            files: pages
+                .iter()
+                .filter_map(|(p, b)| Some((name(p)?, b.clone())))
+                .collect(),
+            remove: Vec::new(),
+        };
+        replica.files.push(("head".into(), head));
         let mut gone: Vec<PathBuf> = changes
             .obsolete
             .iter()
             .map(|((w, p), r)| self.page_path(*w, *p, *r))
             .collect();
+        replica.remove = gone.iter().filter_map(|p| name(p)).collect();
         gone.append(&mut leftover);
         for path in gone {
             match std::fs::remove_file(&path) {
@@ -1026,7 +1036,108 @@ impl KeyFile {
         }
         let _ = sync_dir(&self.dir);
         drop(lock);
-        Ok(())
+        Ok(replica)
+    }
+
+    /// The whole store as on disk (head and every page it lists), for a new standby. `None` if
+    /// there is no store yet.
+    pub(crate) fn snapshot(&self) -> Result<Option<Replica>, KeyError> {
+        let lock = match std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.dir.join("lock"))
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(KeyError::File),
+        };
+        lock.lock().map_err(|_| KeyError::File)?;
+        let head = match std::fs::read(self.head_path()) {
+            Ok(h) => h,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(KeyError::File),
+        };
+        let mut plain = self.open_file(&head, None, |e| self.head_aad(e))?;
+        let ring = KeyRing::decode_head(&plain);
+        plain.fill(0);
+        let ring = ring?;
+        let mut files = Vec::with_capacity(ring.pages.len() + 1);
+        for ((w, p), r) in &ring.pages {
+            let path = self.page_path(*w, *p, *r);
+            let bytes = std::fs::read(&path).map_err(|_| KeyError::File)?;
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .ok_or(KeyError::File)?;
+            files.push((name, bytes));
+        }
+        files.push(("head".into(), head));
+        drop(lock);
+        Ok(Some(Replica {
+            files,
+            remove: Vec::new(),
+        }))
+    }
+
+    /// Applies what the owner wrote (this node is the partition's standby, D-0034): the same
+    /// files, in the same order (pages, then the head, then the removals), so a crash leaves a
+    /// consistent store here too. Refused if a newer epoch's head is already here.
+    pub(crate) fn apply_replica(&self, replica: &Replica) -> Result<(), KeyError> {
+        let valid = |n: &str| n == "head" || page_name_ok(n);
+        if !replica.files.iter().all(|(n, _)| valid(n))
+            || !replica.remove.iter().all(|n| page_name_ok(n))
+        {
+            return Err(KeyError::File);
+        }
+        let head = replica
+            .files
+            .iter()
+            .find(|(n, _)| n == "head")
+            .map(|(_, b)| b)
+            .ok_or(KeyError::File)?;
+        let epoch = head
+            .get(..2)
+            .and_then(|e| e.try_into().ok())
+            .map(u16::from_be_bytes)
+            .ok_or(KeyError::File)?;
+        std::fs::create_dir_all(&self.dir).map_err(|_| KeyError::Write)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700));
+        }
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.dir.join("lock"))
+            .map_err(|_| KeyError::Write)?;
+        lock.lock().map_err(|_| KeyError::Write)?;
+        if let Ok(current) = std::fs::read(self.head_path())
+            && let Some(e) = current.get(..2).and_then(|e| e.try_into().ok())
+            && u16::from_be_bytes(e) > epoch
+        {
+            return Err(KeyError::Fenced);
+        }
+        let commit = || -> std::io::Result<()> {
+            for (n, bytes) in replica.files.iter().filter(|(n, _)| n != "head") {
+                write_file(&self.dir.join(n), bytes)?;
+            }
+            sync_dir(&self.dir)?;
+            write_file(&self.head_path(), head)?;
+            sync_dir(&self.dir)?;
+            for n in &replica.remove {
+                match std::fs::remove_file(self.dir.join(n)) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+                    _ => {}
+                }
+            }
+            sync_dir(&self.dir)
+        };
+        let r = commit().map_err(|_| KeyError::Write);
+        drop(lock);
+        r
     }
 
     /// Advances, writes and commits (tests).
@@ -1055,6 +1166,29 @@ impl KeyFile {
         v.sort();
         v
     }
+}
+
+/// What one key-store write put on disk, for the standby: file names (pages and `head`) with
+/// their sealed bytes, and the page files it removed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Replica {
+    pub(crate) files: Vec<(String, Vec<u8>)>,
+    pub(crate) remove: Vec<String>,
+}
+
+/// A page file name: `w<window>.p<page>.e<epoch>.g<generation>` (nothing that leaves the
+/// directory).
+fn page_name_ok(n: &str) -> bool {
+    let parts: Vec<&str> = n.split('.').collect();
+    parts.len() == 4
+        && ["w", "p", "e", "g"]
+            .iter()
+            .zip(&parts)
+            .all(|(prefix, part)| {
+                part.strip_prefix(prefix).is_some_and(|d| {
+                    !d.is_empty() && d.len() <= 20 && d.bytes().all(|b| b.is_ascii_digit())
+                })
+            })
 }
 
 /// Writes a file atomically: temporary file, fsync, rename (the caller syncs the directory).

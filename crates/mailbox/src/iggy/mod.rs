@@ -32,6 +32,7 @@
 //!   offset (an Iggy consumer offset) moves up and windows below it are destroyed. Iggy deletes
 //!   sealed segments below it after the topic's `message_expiry`.
 
+mod cluster;
 mod keys;
 mod partitions;
 mod record;
@@ -55,6 +56,7 @@ use iggy::prelude::{
 use songbird_types::DeviceId;
 use tokio::sync::{mpsc, oneshot};
 
+pub use self::cluster::ClusterConfig;
 pub use self::config::{IggyConfig, IggyConnection};
 use self::keys::KeyFile;
 use self::partitions::{Partitions, Slot};
@@ -304,6 +306,8 @@ struct Shared {
     keys: Arc<KeyFile>,
     /// Serialises key-store writes.
     persist_lock: tokio::sync::Mutex<()>,
+    /// Sends every key-store write to this partition's standby node (cluster mode).
+    replicator: Option<Arc<dyn partitions::Replicator>>,
     /// Sealed record payloads by offset (recently written or read), bounded by `cache_bytes`.
     cache: Mutex<(BTreeMap<u64, Bytes>, usize)>,
     cache_bytes: usize,
@@ -499,9 +503,14 @@ impl Shared {
         let taken = changes.taken.clone();
         let file = self.keys.clone();
         match tokio::task::spawn_blocking(move || file.write(changes)).await {
-            Ok(Ok(())) => {
+            Ok(Ok(replica)) => {
                 self.lock().ring.committed(manifest);
                 self.stats.key_writes.fetch_add(1, Ordering::Relaxed);
+                // The standby gets the same files before the window they may open is used
+                // (D-0034); held under the persist lock, so it sees writes in order.
+                if let Some(r) = &self.replicator {
+                    r.replicate(self.partition, replica).await;
+                }
                 Ok(())
             }
             other => {
@@ -521,11 +530,88 @@ impl Shared {
 struct Part {
     tx: mpsc::Sender<Job>,
     shared: Arc<Shared>,
+    /// The partition's tasks (writer, key persister, idempotency flusher), stopped when this
+    /// node gives the partition up.
+    tasks: Vec<tokio::task::AbortHandle>,
+}
+
+impl Part {
+    /// Stops the partition's tasks (another node owns it now, or this node is shutting down).
+    fn stop(&self) {
+        for t in &self.tasks {
+            t.abort();
+        }
+    }
+}
+
+/// What starting a partition needs (kept so partitions can start later, in cluster mode).
+struct Ctx {
+    cfg: IggyConfig,
+    stream: Identifier,
+    topic: Identifier,
+    idem_topic: Identifier,
+    stats: Arc<IggyStats>,
+    parts: Arc<Partitions>,
+    /// Key-store replication to standbys (cluster mode).
+    replicator: Option<Arc<dyn partitions::Replicator>>,
+}
+
+/// Loads partition `p`'s key store, replays its log and starts its writer: this node owns it
+/// from now on. Returns its recent home records whose remote parts may be incomplete.
+async fn start_partition(ctx: &Ctx, p: u32) -> Result<(Arc<Part>, Vec<Home>), IggyMailboxError> {
+    let cfg = &ctx.cfg;
+    let keys = Arc::new(KeyFile::new(
+        &cfg.key_dir,
+        &cfg.stream,
+        &cfg.topic,
+        p,
+        cfg.master_key,
+    ));
+    let ring = keys
+        .load()
+        .map_err(|_| IggyMailboxError::Keys { partition: p })?;
+    let shared = Arc::new(Shared {
+        partition: p,
+        state: Mutex::new(State::with_ring(ring)),
+        keys,
+        persist_lock: tokio::sync::Mutex::new(()),
+        replicator: ctx.replicator.clone(),
+        cache: Mutex::new((BTreeMap::new(), 0)),
+        cache_bytes: cfg.cache_bytes,
+        reader: cfg.connection.client().await?,
+        compactor: cfg.connection.client().await?,
+        compacting: AtomicBool::new(false),
+        stream: ctx.stream.clone(),
+        topic: ctx.topic.clone(),
+        idem_topic: ctx.idem_topic.clone(),
+        idem_queue: Mutex::new(Vec::new()),
+        idem_inflight: Mutex::new(Vec::new()),
+        healthy: AtomicBool::new(true),
+        stats: ctx.stats.clone(),
+    });
+    replay_idem(&shared).await?;
+    let homes = replay(&shared).await?;
+    let writer_client = cfg.connection.client().await?;
+    let (tx, rx) = mpsc::channel(cfg.queue);
+    let mut w = Writer::new(shared.clone(), writer_client, cfg, ctx.parts.clone());
+    w.start_epoch().await?;
+    let tasks = vec![
+        tokio::spawn(w.run(rx)).abort_handle(),
+        tokio::spawn(key_persister(shared.clone(), cfg.key_interval)).abort_handle(),
+        tokio::spawn(idem_flusher(
+            shared.clone(),
+            cfg.connection.client().await?,
+            cfg.idem_flush,
+        ))
+        .abort_handle(),
+    ];
+    Ok((Arc::new(Part { tx, shared, tasks }), homes))
 }
 
 /// The Iggy mailbox.
 pub struct IggyMailbox {
     parts: Arc<Partitions>,
+    cluster: Option<Arc<cluster::Cluster>>,
     idem: hmac::Key,
     generation: u64,
     fault_skip_remote_parts: bool,
@@ -701,103 +787,95 @@ impl IggyMailbox {
             .map_err(|_| IggyMailboxError::Keys { partition: 0 })?;
         let stats = Arc::new(IggyStats::default());
         let parts = Arc::new(Partitions::new(cfg.partitions, cfg.timeout));
+        let prepared = match &cfg.cluster {
+            Some(c) => {
+                let (dir, stream, topic, master) = (
+                    cfg.key_dir.clone(),
+                    cfg.stream.clone(),
+                    cfg.topic.clone(),
+                    cfg.master_key,
+                );
+                let store_of =
+                    Box::new(move |p: u32| KeyFile::new(&dir, &stream, &topic, p, master));
+                Some(
+                    cluster::Prepared::new(c.clone(), cfg.timeout, store_of)
+                        .map_err(|_| IggyMailboxError::Keys { partition: 0 })?,
+                )
+            }
+            None => None,
+        };
+        let ctx = Arc::new(Ctx {
+            replicator: prepared.as_ref().map(cluster::Prepared::replicator),
+            cfg,
+            stream,
+            topic,
+            idem_topic,
+            stats: stats.clone(),
+            parts: parts.clone(),
+        });
         let mut incomplete = Vec::new();
-        for p in 0..cfg.partitions {
-            let keys = Arc::new(KeyFile::new(
-                &cfg.key_dir,
-                &cfg.stream,
-                &cfg.topic,
-                p,
-                cfg.master_key,
-            ));
-            let ring = keys
-                .load()
-                .map_err(|_| IggyMailboxError::Keys { partition: p })?;
-            let shared = Arc::new(Shared {
-                partition: p,
-                state: Mutex::new(State::with_ring(ring)),
-                keys,
-                persist_lock: tokio::sync::Mutex::new(()),
-                cache: Mutex::new((BTreeMap::new(), 0)),
-                cache_bytes: cfg.cache_bytes,
-                reader: cfg.connection.client().await?,
-                compactor: cfg.connection.client().await?,
-                compacting: AtomicBool::new(false),
-                stream: stream.clone(),
-                topic: topic.clone(),
-                idem_topic: idem_topic.clone(),
-                idem_queue: Mutex::new(Vec::new()),
-                idem_inflight: Mutex::new(Vec::new()),
-                healthy: AtomicBool::new(true),
-                stats: stats.clone(),
-            });
-            replay_idem(&shared).await?;
-            let homes = replay(&shared).await?;
-            let writer_client = cfg.connection.client().await?;
-            let (tx, rx) = mpsc::channel(cfg.queue);
-            let mut w = Writer::new(shared.clone(), writer_client, &cfg, parts.clone());
-            w.start_epoch().await?;
-            incomplete.push(homes);
-            tokio::spawn(w.run(rx));
-            tokio::spawn(key_persister(shared.clone(), cfg.key_interval));
-            tokio::spawn(idem_flusher(
-                shared.clone(),
-                cfg.connection.client().await?,
-                cfg.idem_flush,
-            ));
-            parts.set(p, Slot::Local(Arc::new(Part { tx, shared })));
-        }
+        let cluster = if let Some(prep) = prepared {
+            // Cluster mode: partitions start as this node wins their leases.
+            let wait = ctx
+                .cfg
+                .cluster
+                .as_ref()
+                .map_or(Duration::ZERO, |c| c.lease_ttl * 3);
+            Some(
+                prep.start(ctx.clone(), wait)
+                    .await
+                    .map_err(|_| IggyMailboxError::Keys { partition: 0 })?,
+            )
+        } else {
+            for p in 0..ctx.cfg.partitions {
+                let (part, homes) = start_partition(&ctx, p).await?;
+                parts.set(p, Slot::Local(part));
+                incomplete.push((p, homes));
+            }
+            None
+        };
         let mailbox = Self {
             parts,
-            idem: hmac::Key::new(hmac::HMAC_SHA256, &cfg.idempotency_secret),
-            generation: cfg.store_generation,
-            fault_skip_remote_parts: cfg.fault_skip_remote_parts,
-            max_per_device: cfg.max_per_device,
+            cluster,
+            idem: hmac::Key::new(hmac::HMAC_SHA256, &ctx.cfg.idempotency_secret),
+            generation: ctx.cfg.store_generation,
+            fault_skip_remote_parts: ctx.cfg.fault_skip_remote_parts,
+            max_per_device: ctx.cfg.max_per_device,
             stats,
         };
-        mailbox.resume_parts(incomplete).await;
+        resume_parts(&mailbox.parts, incomplete).await;
         Ok(mailbox)
     }
 
-    /// Remote parts of recent home records: those their partitions hold (checked in the
-    /// replayed tag indexes; an 8-byte prefix match counts as held) have their slots punctured;
-    /// the others are re-driven, one home partition at a time.
-    async fn resume_parts(&self, incomplete: Vec<Vec<Home>>) {
-        for (home, homes) in incomplete.into_iter().enumerate() {
-            let Some(h) = self.parts.local(u32::try_from(home).unwrap_or(u32::MAX)) else {
-                continue;
-            };
-            let mut missing = Vec::new();
-            for (offset, tag, parts) in homes {
-                let mut redrive = false;
-                for (p, slot) in parts {
-                    // A partition owned by another node is checked by re-driving (idempotent).
-                    let held = self
-                        .parts
-                        .local(p)
-                        .is_some_and(|x| x.shared.lock().idem.contains_key(&tag));
-                    if held {
-                        let _ = h.tx.send(Job::Puncture(offset, slot)).await;
-                    } else {
-                        redrive = true;
-                    }
-                }
-                if redrive {
-                    missing.push(offset);
-                }
-            }
-            if missing.is_empty() {
-                continue;
-            }
-            let shared = h.shared.clone();
-            let all = self.parts.clone();
-            let home_tx = h.tx.clone();
-            tokio::spawn(async move {
-                for offset in missing {
-                    redrive_with(&shared, &all, &home_tx, offset).await;
-                }
-            });
+    /// Graceful shutdown in cluster mode: key stores written and replicated, writers stopped,
+    /// leases released (standbys take over at once). A no-op on a single node.
+    pub async fn shutdown(&self) {
+        if let Some(c) = &self.cluster {
+            c.shutdown().await;
         }
+    }
+
+    /// Key-store writes that did not reach a standby (cluster mode).
+    #[must_use]
+    pub fn replica_failures(&self) -> u64 {
+        self.cluster.as_ref().map_or(0, |c| c.replica_failures())
+    }
+
+    /// Test-only crash: this node stops renewing its leases and running its writers without
+    /// writing or releasing anything, as a killed process would.
+    #[doc(hidden)]
+    pub fn crash(&self) {
+        if let Some(c) = &self.cluster {
+            c.crash();
+        }
+    }
+
+    /// Partitions this node owns now.
+    #[must_use]
+    pub fn owned_partitions(&self) -> Vec<u32> {
+        (0..self.parts.count())
+            .filter(|p| self.parts.local(*p).is_some())
+            .collect()
     }
 
     /// Counters.
@@ -821,6 +899,46 @@ impl IggyMailbox {
 
     fn partition(&self, device: &DeviceId) -> u32 {
         partition_of(device, self.partitions())
+    }
+}
+
+/// Remote parts of recent home records: those their partitions hold (checked in the
+/// replayed tag indexes; an 8-byte prefix match counts as held) have their slots punctured;
+/// the others are re-driven, one home partition at a time.
+async fn resume_parts(table: &Arc<Partitions>, incomplete: Vec<(u32, Vec<Home>)>) {
+    for (home, homes) in incomplete {
+        let Some(h) = table.local(home) else {
+            continue;
+        };
+        let mut missing = Vec::new();
+        for (offset, tag, parts) in homes {
+            let mut redrive = false;
+            for (p, slot) in parts {
+                // A partition owned by another node is checked by re-driving (idempotent).
+                let held = table
+                    .local(p)
+                    .is_some_and(|x| x.shared.lock().idem.contains_key(&tag));
+                if held {
+                    let _ = h.tx.send(Job::Puncture(offset, slot)).await;
+                } else {
+                    redrive = true;
+                }
+            }
+            if redrive {
+                missing.push(offset);
+            }
+        }
+        if missing.is_empty() {
+            continue;
+        }
+        let shared = h.shared.clone();
+        let all = table.clone();
+        let home_tx = h.tx.clone();
+        tokio::spawn(async move {
+            for offset in missing {
+                redrive_with(&shared, &all, &home_tx, offset).await;
+            }
+        });
     }
 }
 

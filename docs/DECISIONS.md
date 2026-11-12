@@ -53,11 +53,12 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (Valkey routing, owned partitions over node links, replicated key stores) decided by the agent
   under the owner's delegation; the owner may revisit it. New dependency `redis` (with `arcstr`,
   `async-lock`, `xxhash-rust` under BSL-1.0), exempted pending audits.
-- Prompt 2, milestone 5 (report `docs/reports/P02-M5.md`): approve the gate; approve two threat-model
-  rows added beyond the two approved (the sealed job queue and the hashed request nonces, both
+- Prompt 2, milestone 5 (report `docs/reports/P02-M5.md`): gate approved by the owner on 2026-11-13.
+  Still open: approve two threat-model rows added beyond the two approved (the sealed job queue and the hashed request nonces, both
   forms of data already listed); D-0036 decided by the agent under the owner's standing
-  instruction. Real APNs, FCM and UnifiedPush credentials are needed to test against the real
-  providers (mocks only so far).
+  instruction. Provider credentials (2026-11-13): an APNs sandbox key and a least-privilege FCM
+  service account exist outside the repository and were verified against Apple and Google;
+  waking a real device waits for the apps; production keys go to SOPS at deployment.
 - D-0038: whether to store who invited whom for abuse handling (default: no, only per-user counts).
 - D-0037: when the `send` crate is extracted, `api` (and `calls`, `worker`) must reach Iggy partition
   owners; admitting `api.` certificates to node links, or another route, is to be decided then.

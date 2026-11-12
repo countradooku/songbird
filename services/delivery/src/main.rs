@@ -104,6 +104,7 @@ fn cluster_config(
         valkey_tls_ca_pem: conn.tls_ca_pem,
         valkey_tls_client: conn.tls_client,
         lease_ttl: Duration::from_millis(c.lease_ttl_ms),
+        zone: c.zone.clone(),
     })
 }
 

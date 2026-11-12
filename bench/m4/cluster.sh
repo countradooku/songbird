@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # M4: three delivery nodes sharing an Iggy topic (cluster mode, D-0034) behind Valkey routing,
-# the load generator spread over all three, the checker after every phase: steady load, a node
-# killed (-9) and restarted, Valkey restarted, a node stopped gracefully.
+# twelve mailbox partitions, the load generator spread over all three, the checker after every
+# phase: steady load, the partition owner killed (-9) and restarted, Valkey restarted, the owner
+# stopped gracefully, two nodes killed at once, a rolling restart; partition leases per node
+# after the start and at the end (rebalancing).
 #
 #   bench/m4/cluster.sh <workdir> <out.txt>
 #
@@ -41,6 +43,7 @@ accepts_per_sec = 50000
 accept_burst = 100000
 [delivery.runtime]
 workers = 2
+storage_threads = 4
 [delivery.mailbox]
 backend = "iggy"
 max_per_device = 100000
@@ -49,6 +52,7 @@ addr = "${IGGY_ADDR:-127.0.0.1:47990}"
 user = "iggy"
 pass = { file = "$W/iggy-pass" }
 stream = "$STREAM"
+partitions = 12
 idempotency_secret = { file = "$W/idem-secret" }
 key_dir = "$W/keystore-$n"
 master_key = { file = "$W/master-key" }
@@ -80,6 +84,14 @@ owner() {
   podman exec "${VALKEY_CONTAINER:-songbird-valkey-m4}" valkey-cli --no-auth-warning -a "$(cat "$W/valkey-pass")" \
     GET "songbird:$STREAM:mailbox:lease:0" | sed -E 's/.*delivery\.([a-z]+)\.songbird.*/\1/'
 }
+# Partition leases per node.
+leases() {
+  local keys=""; for p in $(seq 0 11); do keys="$keys songbird:$STREAM:mailbox:lease:$p"; done
+  # shellcheck disable=SC2086
+  podman exec "${VALKEY_CONTAINER:-songbird-valkey-m4}" valkey-cli --no-auth-warning -a "$(cat "$W/valkey-pass")" \
+    MGET $keys | sed -E 's/.*delivery\.([a-z]+)\.songbird.*/\1/; s/^$/(none)/' | sort | uniq -c | tr '\n' ' '
+  echo
+}
 load() { # secs rate
   taskset -c 12-15,28-31 target/release/songbird-loadgen run --addr 127.0.0.1:9291,127.0.0.1:9292,127.0.0.1:9293 \
     --seeds "$W/keys/seeds.txt" --devices 3000 --secs "$1" --rate "$2" --size 256 --threads 16 --connect-rate 20000 2>&1 \
@@ -88,6 +100,7 @@ load() { # secs rate
 [ -n "${IGGY_FRESH:-}" ] && "$IGGY_FRESH"
 for n in $NODES; do : > "$W/node-$n.log"; conf "$n"; done
 for n in $NODES; do start "$n"; done
+sleep 15; echo "leases per node after the start: $(leases)" >> "$OUT"
 for rate in 5000 20000 50000; do
   echo "== steady rate=$rate (3 nodes)" >> "$OUT"; load 8 "$rate" >> "$OUT"
 done
@@ -108,5 +121,22 @@ sleep 6; kill -TERM "${PID[$G]}"; echo "stopped $G at $(date +%T)" >> "$OUT"
 # Its devices reconnect when it is back (a load balancer would send them elsewhere at once).
 sleep 8; wait "${PID[$G]}" 2>/dev/null; start "$G"; echo "restarted $G at $(date +%T)" >> "$OUT"
 wait $L; cat "$W/phase.txt" >> "$OUT"
+sleep 10
+K=$(owner); for n in $NODES; do [ "$n" != "$K" ] && O=$n && break; done
+echo "== two nodes killed at once (-9): partition owner ($K) and $O at 6 s, restarted at 14 s, 25 s at 10000/s" >> "$OUT"
+load 25 10000 > "$W/phase.txt" & L=$!
+sleep 6; kill -9 "${PID[$K]}" "${PID[$O]}"; echo "killed $K and $O at $(date +%T)" >> "$OUT"
+sleep 8; start "$K"; start "$O"; echo "restarted $K and $O at $(date +%T)" >> "$OUT"
+wait $L; cat "$W/phase.txt" >> "$OUT"
+sleep 10
+echo "== rolling restart: each node stopped (SIGTERM) and restarted in turn, 12 s apart, 45 s at 10000/s" >> "$OUT"
+load 45 10000 > "$W/phase.txt" & L=$!
+sleep 5
+for n in $NODES; do
+  kill -TERM "${PID[$n]}"; wait "${PID[$n]}" 2>/dev/null; start "$n"; echo "restarted $n at $(date +%T)" >> "$OUT"
+  sleep 12
+done
+wait $L; cat "$W/phase.txt" >> "$OUT"
+sleep 15; echo "leases per node at the end: $(leases)" >> "$OUT"
 for n in $NODES; do kill "${PID[$n]}" 2>/dev/null; done; wait 2>/dev/null
 echo DONE >> "$OUT"

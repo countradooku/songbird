@@ -22,25 +22,36 @@ aggregate counters only; nothing in them or in the logs identifies a device (inv
 
 ## Several nodes (cluster mode, D-0034)
 
-- Each mailbox partition has one owner node (it runs the writer) and one standby (it receives a
-  copy of every key-store write). Leases live in the router's Valkey (`songbird:<stream>:<topic>:
-  lease:<p>`), renewed every third of `lease_ttl_ms` (default 10 s); members in
-  `songbird:<stream>:<topic>:members`. Nodes reach each other's partitions over node links
-  (`[delivery.cluster] link_listen`, mutual TLS with the `delivery` leaf certificates).
+- Each mailbox partition has one owner node (it runs the writer) and two standbys (each holds a
+  copy of its key store; the second in another `zone` when there is one). Leases live in the
+  router's Valkey (`songbird:<stream>:<topic>:lease:<p>`), renewed every third of
+  `lease_ttl_ms` (default 3 s); members in `songbird:<stream>:<topic>:members` (expiry on
+  Valkey's clock). Nodes reach each other's partitions over node links (`[delivery.cluster]
+  link_listen`, mutual TLS with the `delivery` leaf certificates). Give the topic several
+  partitions per node (`partitions`, fixed when the topic is created): partitions are the unit
+  of failover and of balance.
 - **A node dies** (crash, host loss): its devices reconnect elsewhere at once; its partitions
-  move to their standbys after about one lease period. Sends to devices on those partitions are
-  rejected as retryable (reason 6) meanwhile; nothing is lost. Logs on the standby: `mailbox
-  partition taken over`. Restarting the dead node is not required; when it returns it serves
-  connections and takes free partitions only.
-- **A node stops gracefully** (deploy): it writes and replicates its key stores and releases its
-  leases on SIGTERM; standbys take over within a renewal tick.
+  move to their first live standby about one lease period later. Sends to devices on those
+  partitions are rejected as retryable (reason 6) meanwhile; nothing is lost. Logs on the
+  standby: `mailbox partition taken over`. Two nodes may die at once: every partition still has
+  a copy. The returning node takes its share back (below).
+- **A node stops gracefully** (deploy): it writes and copies its key stores and releases its
+  leases on SIGTERM; standbys take over within a renewal tick. Rolling deploys need no
+  draining: one node at a time.
+- **A node joins or returns**: once it has been up two lease periods and holds a full copy, each
+  owner hands it the partitions it ranks first for, one per renewal tick (`mailbox partition
+  handed to its preferred node`; each move pauses that partition's sends for well under a
+  second, retried by clients).
 - **Valkey restarts or fails over**: routing re-subscribes by itself (sessions drain their
   mailboxes once); leases are taken back by their owners without restarting anything. Expect
-  `mailbox key store not replicated to its standby` only if a node cannot reach another.
-- **`mailbox key store not replicated to its standby`** (warning, repeated): the standby is
-  unreachable (link port, certificates, firewall). The owner keeps running; if it then dies, its
-  standby lacks recent keys and the partition refuses to start there ("Mailbox key store
-  unusable"). Fix the link; the full store is copied again once it is back.
+  `mailbox key store not replicated to a standby` only if a node cannot reach another.
+- **`mailbox key store not replicated to a standby`** (warning): a standby is unreachable (link
+  port, certificates, firewall). A new key window is used only once at least one standby holds
+  it, so with every standby unreachable, sends to that partition are refused (retryable) until
+  one is back or drops out of the members (a lease period). Fix the link; the full store is
+  copied again once it is back.
+- **`mailbox key store copy deleted (no longer a standby)`** (info): placement changed; copies a
+  node no longer needs are deleted after three lease periods (deleted keys must not linger).
 - **`mailbox partition lease lost; writer stopped`**: another node took the partition (this node
   was cut off from Valkey longer than a lease). Normal after a network partition; check that the
   partition is running somewhere (`/metrics`, logs on the other nodes).

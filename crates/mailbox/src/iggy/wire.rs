@@ -54,6 +54,8 @@ pub(crate) enum Request {
         p: u32,
         files: Vec<(String, Bytes)>,
         remove: Vec<String>,
+        /// The whole store: the standby deletes every key file it holds that is not listed.
+        full: bool,
     },
 }
 
@@ -240,7 +242,12 @@ impl Request {
                 b.put_slice(tag);
                 b.put_u32(*part);
             }
-            Self::KeyStore { p, files, remove } => {
+            Self::KeyStore {
+                p,
+                files,
+                remove,
+                full,
+            } => {
                 b.put_u8(7);
                 b.put_u32(*p);
                 b.put_u32(u32::try_from(files.len()).unwrap_or(u32::MAX));
@@ -252,9 +259,35 @@ impl Request {
                 for n in remove {
                     put_bytes(&mut b, n.as_bytes());
                 }
+                b.put_u8(u8::from(*full));
             }
         }
         b.freeze()
+    }
+
+    fn decode_key_store(r: &mut Rd) -> Option<Self> {
+        let p = r.u32()?;
+        let n = r.count(8)?;
+        let mut files = Vec::with_capacity(n);
+        for _ in 0..n {
+            files.push((r.name()?, r.bytes()?));
+        }
+        let n = r.count(4)?;
+        let mut remove = Vec::with_capacity(n);
+        for _ in 0..n {
+            remove.push(r.name()?);
+        }
+        let full = match r.u8()? {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
+        Some(Self::KeyStore {
+            p,
+            files,
+            remove,
+            full,
+        })
     }
 
     pub(crate) fn decode(src: &Bytes) -> Option<Self> {
@@ -333,20 +366,7 @@ impl Request {
                 tag: r.arr::<32>()?,
                 part: r.u32()?,
             },
-            7 => {
-                let p = r.u32()?;
-                let n = r.count(8)?;
-                let mut files = Vec::with_capacity(n);
-                for _ in 0..n {
-                    files.push((r.name()?, r.bytes()?));
-                }
-                let n = r.count(4)?;
-                let mut remove = Vec::with_capacity(n);
-                for _ in 0..n {
-                    remove.push(r.name()?);
-                }
-                Self::KeyStore { p, files, remove }
-            }
+            7 => Self::decode_key_store(&mut r)?,
             _ => return None,
         };
         r.done().then_some(out)
@@ -619,6 +639,13 @@ mod tests {
                     ("head".into(), Bytes::from_static(b"head")),
                 ],
                 remove: vec!["w1.p0.e1.g1".into()],
+                full: false,
+            },
+            Request::KeyStore {
+                p: 1,
+                files: vec![("head".into(), Bytes::from_static(b"head"))],
+                remove: Vec::new(),
+                full: true,
             },
         ];
         for r in all {

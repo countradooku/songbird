@@ -23,14 +23,16 @@ pub(crate) trait Peer: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Result<Response, MailboxError>> + Send + '_>>;
 }
 
-/// Sends a partition's key-store writes to its standby node (D-0034).
+/// Sends a partition's key-store writes to its standby nodes (D-0034).
 pub(crate) trait Replicator: Send + Sync + 'static {
-    /// Delivers one write; failures are counted, not returned (the owner keeps running).
+    /// Delivers one write (an empty one: just bring every standby up to date). True when at
+    /// least one standby holds everything written so far, or there is no other node to hold it:
+    /// only then may a newly written window seal records.
     fn replicate(
         &self,
         p: u32,
         replica: super::keys::Replica,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + '_>>;
 }
 
 /// One partition's writer.

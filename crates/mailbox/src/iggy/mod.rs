@@ -489,43 +489,58 @@ impl Shared {
     /// never lands after a newer one. Blocking I/O off the async threads.
     async fn persist_keys(&self) -> Result<(), MailboxError> {
         let _serial = self.persist_lock.lock().await;
-        let changes = {
+        let (changes, newest) = {
             let mut st = self.lock();
             // Slots written since the last write get individual keys and leave the tree, so the
             // store stays proportional to the pending entries.
             if st.ring.advance().is_err() {
                 return Err(MailboxError::Unavailable);
             }
-            match st.ring.take_changes(self.keys.epoch()) {
-                Some(c) => c,
-                None => return Ok(()),
+            let newest = st.ring.newest();
+            let changes = st.ring.take_changes(self.keys.epoch());
+            if changes.is_none() && (newest == 0 || st.ring.is_confirmed(newest)) {
+                return Ok(());
             }
+            (changes, newest)
         };
-        let manifest = changes.manifest.clone();
-        let taken = changes.taken.clone();
-        let file = self.keys.clone();
-        match tokio::task::spawn_blocking(move || file.write(changes)).await {
-            Ok(Ok(replica)) => {
-                self.lock().ring.committed(manifest);
-                self.stats.key_writes.fetch_add(1, Ordering::Relaxed);
-                // The standby gets the same files before the window they may open is used
-                // (D-0034); held under the persist lock, so it sees writes in order.
-                if let Some(r) = &self.replicator {
-                    r.replicate(self.partition, replica).await;
+        let replica = match changes {
+            Some(changes) => {
+                let manifest = changes.manifest.clone();
+                let taken = changes.taken.clone();
+                let file = self.keys.clone();
+                match tokio::task::spawn_blocking(move || file.write(changes)).await {
+                    Ok(Ok(replica)) => {
+                        self.lock().ring.committed(manifest);
+                        self.stats.key_writes.fetch_add(1, Ordering::Relaxed);
+                        replica
+                    }
+                    other => {
+                        self.lock().ring.failed(taken);
+                        if matches!(other, Ok(Err(keys::KeyError::Fenced))) {
+                            tracing::error!("mailbox key store owned by a newer writer; stopping");
+                            self.healthy.store(false, Ordering::Relaxed);
+                        } else {
+                            tracing::warn!("mailbox key store write failed");
+                        }
+                        return Err(MailboxError::Unavailable);
+                    }
                 }
-                Ok(())
             }
-            other => {
-                self.lock().ring.failed(taken);
-                if matches!(other, Ok(Err(keys::KeyError::Fenced))) {
-                    tracing::error!("mailbox key store owned by a newer writer; stopping");
-                    self.healthy.store(false, Ordering::Relaxed);
-                } else {
-                    tracing::warn!("mailbox key store write failed");
-                }
-                Err(MailboxError::Unavailable)
-            }
+            // On disk already, not yet confirmed by a standby: bring the standbys up to date.
+            None => keys::Replica::default(),
+        };
+        // A window seals records only once a standby holds its keys too (D-0034): a key on one
+        // disk only would die with it. Held under the persist lock, so standbys see writes in
+        // order.
+        let confirmed = match &self.replicator {
+            Some(r) => r.replicate(self.partition, replica).await,
+            None => true,
+        };
+        if !confirmed {
+            return Err(MailboxError::Unavailable);
         }
+        self.lock().ring.confirm(newest);
+        Ok(())
     }
 }
 
@@ -1247,18 +1262,21 @@ impl Writer {
     }
 
     /// The window to seal `needed` slots in: the current one, or a new one written to the key
-    /// file first (a record must never be appended under keys that are not on disk).
+    /// file (and, in cluster mode, to a standby) first: a record is never appended under keys
+    /// that are not on disk, nor under keys only this node holds.
     async fn window(&self, needed: u32) -> Option<u64> {
         let now = now_ms();
-        let opened = {
+        let w = {
             let mut st = self.shared.lock();
-            if let Some(w) = st.ring.current(now, self.key_window_ms, needed) {
-                return Some(w);
+            match st.ring.current(now, self.key_window_ms, needed) {
+                Some(w) if st.ring.is_confirmed(w) => return Some(w),
+                // Opened, but its write or its copy to a standby failed: try again.
+                Some(w) => w,
+                None => st.ring.open_window(now).ok()?,
             }
-            st.ring.open_window(now).ok()?
         };
         self.shared.persist_keys().await.ok()?;
-        Some(opened)
+        self.shared.lock().ring.is_confirmed(w).then_some(w)
     }
 
     /// Seals records into `window`; returns the payloads and each record's first leaf.

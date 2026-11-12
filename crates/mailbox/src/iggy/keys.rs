@@ -24,7 +24,7 @@
 //! appended; punctures reach it within the key interval (the log's ACK records are the authority:
 //! replay punctures again after a crash).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -299,6 +299,9 @@ pub(crate) struct KeyRing {
     pages: BTreeMap<(u64, u32), PageRef>,
     /// Generation of the last write attempted (file names are never reused).
     generation: u64,
+    /// Windows up to this id are on disk and, in cluster mode, on a standby too: only these may
+    /// seal records (D-0034; a key only this node holds dies with its disk).
+    confirmed: u64,
 }
 
 /// What one write puts on disk (plaintext until [`KeyFile::write`] seals it).
@@ -350,6 +353,21 @@ impl KeyRing {
         let fresh = w.opened_ms.saturating_add(max_age_ms) > now_ms;
         let room = SLOTS.saturating_sub(w.next_slot) >= needed;
         (fresh && room).then_some(*id)
+    }
+
+    /// The newest window's id (0: none).
+    pub(crate) fn newest(&self) -> u64 {
+        self.windows.keys().next_back().copied().unwrap_or(0)
+    }
+
+    /// Windows up to `id` are written everywhere they must be.
+    pub(crate) fn confirm(&mut self, id: u64) {
+        self.confirmed = self.confirmed.max(id);
+    }
+
+    /// Whether window `id` may seal records.
+    pub(crate) fn is_confirmed(&self, id: u64) -> bool {
+        id != 0 && id <= self.confirmed
     }
 
     /// Reserves `n` consecutive slots in window `id`; returns the first.
@@ -635,6 +653,8 @@ impl KeyRing {
             dirty_pages: BTreeSet::new(),
             pages,
             generation,
+            // Reopened: nothing confirmed until written again (a new writer opens a new window).
+            confirmed: 0,
         })
     }
 
@@ -936,7 +956,7 @@ impl KeyFile {
 
     /// Deletes page and temporary files the head does not list (left by an interrupted write).
     fn remove_unlisted(&self, pages: &BTreeMap<(u64, u32), PageRef>) {
-        let keep: std::collections::HashSet<PathBuf> = pages
+        let keep: HashSet<PathBuf> = pages
             .iter()
             .map(|((w, p), r)| self.page_path(*w, *p, *r))
             .collect();
@@ -1018,6 +1038,7 @@ impl KeyFile {
                 .filter_map(|(p, b)| Some((name(p)?, b.clone())))
                 .collect(),
             remove: Vec::new(),
+            full: false,
         };
         replica.files.push(("head".into(), head));
         let mut gone: Vec<PathBuf> = changes
@@ -1077,7 +1098,44 @@ impl KeyFile {
         Ok(Some(Replica {
             files,
             remove: Vec::new(),
+            full: true,
         }))
+    }
+
+    /// Whether this node holds a key store for the partition (its own or a standby copy).
+    pub(crate) fn has_store(&self) -> bool {
+        self.head_path().exists()
+    }
+
+    /// Deletes this node's copy of the store (it is no longer the partition's owner or one of
+    /// its standbys: keys nobody needs here must not stay on disk).
+    pub(crate) fn remove_all(&self) -> Result<(), KeyError> {
+        let lock = match std::fs::OpenOptions::new()
+            .truncate(false)
+            .write(true)
+            .open(self.dir.join("lock"))
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(KeyError::Write),
+        };
+        lock.lock().map_err(|_| KeyError::Write)?;
+        let entries = std::fs::read_dir(&self.dir).map_err(|_| KeyError::Write)?;
+        for e in entries.flatten() {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if name == "head" || page_name_ok(&name) || name.ends_with(".tmp") {
+                match std::fs::remove_file(e.path()) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                        return Err(KeyError::Write);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        sync_dir(&self.dir).map_err(|_| KeyError::Write)?;
+        drop(lock);
+        Ok(())
     }
 
     /// Applies what the owner wrote (this node is the partition's standby, D-0034): the same
@@ -1133,6 +1191,19 @@ impl KeyFile {
                     _ => {}
                 }
             }
+            if replica.full {
+                // A whole store replaces whatever this node held: pages it does not list hold
+                // keys the owner has since deleted.
+                let listed: HashSet<&str> = replica.files.iter().map(|(n, _)| n.as_str()).collect();
+                for e in std::fs::read_dir(&self.dir)?.flatten() {
+                    let name = e.file_name();
+                    let name = name.to_string_lossy();
+                    let ours = page_name_ok(&name) || name.ends_with(".tmp");
+                    if ours && !listed.contains(name.as_ref()) {
+                        std::fs::remove_file(e.path())?;
+                    }
+                }
+            }
             sync_dir(&self.dir)
         };
         let r = commit().map_err(|_| KeyError::Write);
@@ -1174,6 +1245,8 @@ impl KeyFile {
 pub(crate) struct Replica {
     pub(crate) files: Vec<(String, Vec<u8>)>,
     pub(crate) remove: Vec<String>,
+    /// The whole store ([`KeyFile::snapshot`]): key files not listed are deleted on the standby.
+    pub(crate) full: bool,
 }
 
 /// A page file name: `w<window>.p<page>.e<epoch>.g<generation>` (nothing that leaves the
@@ -1550,6 +1623,56 @@ mod tests {
         new.store(&mut ring).unwrap();
         assert_eq!(old.store(&mut ring).unwrap_err(), KeyError::Fenced);
         assert!(new.load().is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_new_window_seals_nothing_until_confirmed() {
+        let mut ring = KeyRing::default();
+        assert_eq!(ring.newest(), 0);
+        assert!(!ring.is_confirmed(0));
+        let w1 = ring.open_window(0).unwrap();
+        assert!(!ring.is_confirmed(w1));
+        ring.confirm(ring.newest());
+        assert!(ring.is_confirmed(w1));
+        let w2 = ring.open_window(1).unwrap();
+        assert!(!ring.is_confirmed(w2));
+        assert!(ring.is_confirmed(w1));
+    }
+
+    #[test]
+    fn a_standby_follows_its_owner_and_drops_what_a_full_copy_no_longer_lists() {
+        let dir = temp_dir("replica");
+        let owner = KeyFile::new(&dir.join("owner"), "s", "t", 0, [9; 32]);
+        let standby = KeyFile::new(&dir.join("standby"), "s", "t", 0, [9; 32]);
+        let mut ring = KeyRing::default();
+        let w = ring.open_window(1000).unwrap();
+        ring.reserve(w, 3000).unwrap();
+        ring.advance().unwrap();
+        let changes = ring.take_changes(owner.epoch()).unwrap();
+        let manifest = changes.manifest.clone();
+        let first = owner.write(changes).unwrap();
+        ring.committed(manifest);
+        assert!(!first.full);
+        assert!(!standby.has_store());
+        standby.apply_replica(&first).unwrap();
+        assert!(standby.has_store());
+        let leaf = ring.leaf(w, 1500).unwrap();
+        assert_eq!(standby.load().unwrap().leaf(w, 1500).unwrap(), leaf);
+        // A puncture whose copy never reached the standby: it still holds the key.
+        ring.puncture(w, 1500).unwrap();
+        owner.store(&mut ring).unwrap();
+        assert!(standby.load().unwrap().leaf(w, 1500).unwrap().is_some());
+        // A full copy brings it up to date and deletes the page file it replaced.
+        let full = owner.snapshot().unwrap().unwrap();
+        assert!(full.full);
+        standby.apply_replica(&full).unwrap();
+        assert_eq!(standby.files(), owner.files());
+        assert_eq!(standby.load().unwrap().leaf(w, 1500).unwrap(), None);
+        // No longer a standby: the copy goes.
+        standby.remove_all().unwrap();
+        assert!(!standby.has_store());
+        assert_eq!(standby.files(), vec!["lock"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

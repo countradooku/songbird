@@ -128,10 +128,15 @@ pub struct ClusterSettings {
     /// partitions move after about this long).
     #[serde(default = "default_lease_ttl_ms")]
     pub lease_ttl_ms: u64,
+    /// This node's failure domain (zone or rack, `[a-z0-9-]`, at most 32 bytes): each
+    /// partition's second standby is placed in a zone neither its owner nor its first standby
+    /// is in. Empty: no zones.
+    #[serde(default)]
+    pub zone: String,
 }
 
 const fn default_lease_ttl_ms() -> u64 {
-    10_000
+    3_000
 }
 
 impl Validate for ClusterSettings {
@@ -146,6 +151,15 @@ impl Validate for ClusterSettings {
             (1_000..=60_000).contains(&self.lease_ttl_ms),
             "lease_ttl_ms",
             "must be in 1000..=60000",
+        );
+        v.check(
+            self.zone.len() <= 32
+                && self
+                    .zone
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+            "zone",
+            "must be [a-z0-9-], at most 32 bytes",
         );
     }
 }

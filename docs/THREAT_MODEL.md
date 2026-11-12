@@ -115,7 +115,8 @@ One subsection per component. Each threat names its mitigation and the test or p
 | Disconnecting devices by replaying captured `close` messages | D | Attacker who recorded Valkey traffic | A `close` older than 30 s is ignored; payloads authenticated | router unit tests; D-0034 |
 | Another internal service (API, push) reading or writing mailboxes over node links | I, T, E | Compromised internal service holding an internal-CA certificate | Node links need mutual TLS from the internal CA and a peer name starting `delivery.` that its certificate is valid for | `other_components_and_other_cas_are_refused`; `the_client_refuses_a_server_with_another_name` |
 | Two nodes writing one partition (seq reuse, key-store clobbering) | T | Network partition, Valkey loss, a slow node | Leases in Valkey with compare-and-set renewal; Iggy producer epochs fence a stale writer; key stores fenced by epoch; a lost lease is taken back without a restart, a lease taken by another node stops the writer | `leases_lost_with_valkey_are_taken_back_without_restarting`; `the_standby_takes_over_without_losing_anything`; `restart_rebuilds_state_and_fences_the_old_writer` |
-| A node's death losing its pending messages | T | Host failure | Each partition's key store replicated to a standby node (full copy when the standby changes, then every write); the standby takes the lease after it expires | `the_standby_takes_over_without_losing_anything`; chaos run in report P02-M4 |
+| A node's death losing its pending messages | T | Host failure, two at once, a zone | Each partition's key store copied to two standby nodes, the second in another zone (full copy when a standby changes, then every write); a key window seals records only once a standby holds its keys; the first live standby takes the lease when it expires | `the_standby_takes_over_without_losing_anything`; `two_nodes_can_die_at_once`; `a_window_seals_nothing_before_a_standby_holds_its_keys`; chaos run in report P02-M4 |
+| Deleted keys lingering on a node that no longer needs them | I | Placement changes, a standby that missed punctures | A full copy deletes the page files it does not list; a node that stops being a standby deletes its copy after three lease periods; a stopped node serves no link requests | `a_standby_follows_its_owner_and_drops_what_a_full_copy_no_longer_lists`; `a_stopped_server_serves_nothing_more_even_on_open_connections` |
 | Third-party client logs leaking addresses | I | Log store | Iggy SDK log targets forced off in every filter | `inv6_no_identifiers_in_logs_or_metrics` (TRACE through the production filter); D-0030 |
 | A container escape through io_uring | E | Attacker who compromised Iggy | Iggy's seccomp profile adds only the three io_uring syscalls to Docker's default; `no-new-privileges`, all capabilities dropped; private address only | `deploy/compose/iggy-seccomp.json`; D-0029 |
 | Malformed SurrealDB responses | T, D | Compromised database, network | Bounded CBOR decoder (depth, lengths before allocation), fuzzed; TLS with the internal CA outside development | `cbor.rs` tests; `surreal_cbor` fuzz target |
@@ -137,8 +138,9 @@ One subsection per component. Each threat names its mitigation and the test or p
   D-0031). On a quiet node a delivered message's sealed bytes (unopenable) stay until its
   16 MiB segment fills.
 - Losing a node's key store (`key_dir`) or master key loses its pending messages (D-0031), unless
-  its standby holds the replica (cluster mode, D-0034). A partition's key store now exists on two
-  nodes; deleted keys can survive in either node's flash (full-disk encryption, #28).
+  a standby holds a copy (cluster mode, D-0034). A partition's key store exists on three nodes;
+  deleted keys can survive in any of their flash (full-disk encryption, #28). With fewer live
+  nodes than copies, writes continue on the copies that exist.
 - Valkey holds leases and routing without persistence: losing it costs re-subscribing and re-taking
   leases (seconds), not messages; Iggy's epochs remain the guard against two writers.
 - Iggy is pre-1.0; the Iggy SDK added 153 exempted crates to the audit backlog (D-0030).

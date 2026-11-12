@@ -56,7 +56,7 @@ pub use self::config::{IggyConfig, IggyConnection};
 use self::keys::KeyFile;
 use self::record::{Local, Record, Remote};
 use self::sealed::{Meta, OpenError, Sealed, StoreMeta};
-use self::state::{Entry, Fact, State};
+use self::state::{Entry, Fact, Idem, State};
 use crate::{
     IDEMPOTENCY_RETENTION, MAX_ENVELOPE_AGE, Mailbox, MailboxError, MlsCommit, Payload,
     StoreOutcome, StoreRequest, Stored, idempotency_tag,
@@ -107,6 +107,8 @@ const REDRIVE_AFTER: Duration = Duration::from_secs(2);
 const READ_SPAN: u64 = 512;
 /// Most entries one compaction pass copies forward (the rest wait for the next pass).
 const RELOCATE_PER_PASS: usize = 100_000;
+/// The idempotency topic keeps its records this long (the idempotency window and a margin).
+const IDEM_EXPIRY: Duration = Duration::from_secs(7 * 3600);
 
 /// Counters for metrics and benchmarks.
 #[derive(Debug, Default)]
@@ -160,17 +162,56 @@ fn hash16(b: &[u8]) -> u64 {
     u64::from_le_bytes(p).wrapping_mul(0x9E37_79B9_7F4A_7C15)
 }
 
-/// First 16 bytes of SHA-256 over the sorted recipient device IDs.
-fn recipients_fingerprint(devices: &[DeviceId]) -> [u8; 16] {
+/// First 16 bytes of HMAC-SHA256 (server key) over the sorted recipient device IDs: keyed, so
+/// whoever holds the log cannot test guessed recipient sets against it.
+fn recipients_fingerprint(key: &hmac::Key, devices: &[DeviceId]) -> [u8; 16] {
     let mut sorted: Vec<&DeviceId> = devices.iter().collect();
     sorted.sort_unstable();
-    let mut ctx = aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA256);
+    let mut ctx = hmac::Context::with_key(key);
+    ctx.update(b"songbird-recipients-v1");
     for d in sorted {
         ctx.update(d.as_bytes());
     }
     let mut out = [0u8; 16];
-    out.copy_from_slice(ctx.finish().as_ref().get(..16).unwrap_or(&[0; 16]));
+    out.copy_from_slice(ctx.sign().as_ref().get(..16).unwrap_or(&[0; 16]));
     out
+}
+
+/// Idempotency topic records: (tag, keyed fingerprint, `at_ms`, store record offset)*.
+fn encode_idem(items: &[([u8; 32], Idem)]) -> Bytes {
+    let mut b = Vec::with_capacity(5 + items.len() * 64);
+    b.push(1u8);
+    b.extend_from_slice(&u32::try_from(items.len()).unwrap_or(u32::MAX).to_be_bytes());
+    for (t, i) in items {
+        b.extend_from_slice(t);
+        b.extend_from_slice(&i.fp);
+        b.extend_from_slice(&i.at_ms.to_be_bytes());
+        b.extend_from_slice(&i.offset.to_be_bytes());
+    }
+    Bytes::from(b)
+}
+
+fn decode_idem(b: &[u8]) -> Option<Vec<([u8; 32], Idem)>> {
+    let (head, rest) = b.split_at_checked(5)?;
+    if head.first() != Some(&1) {
+        return None;
+    }
+    let n = usize::try_from(u32::from_be_bytes(head.get(1..5)?.try_into().ok()?)).ok()?;
+    if rest.len() != n.checked_mul(64)? {
+        return None;
+    }
+    rest.chunks_exact(64)
+        .map(|c| {
+            Some((
+                c.get(..32)?.try_into().ok()?,
+                Idem {
+                    fp: c.get(32..48)?.try_into().ok()?,
+                    at_ms: u64::from_be_bytes(c.get(48..56)?.try_into().ok()?),
+                    offset: u64::from_be_bytes(c.get(56..64)?.try_into().ok()?),
+                },
+            ))
+        })
+        .collect()
 }
 
 fn partition_of(d: &DeviceId, n: u32) -> u32 {
@@ -264,6 +305,8 @@ struct Shared {
     compacting: AtomicBool,
     stream: Identifier,
     topic: Identifier,
+    /// The idempotency topic (keyed hashes only, D-0031).
+    idem_topic: Identifier,
     healthy: AtomicBool,
     stats: Arc<IggyStats>,
 }
@@ -586,9 +629,22 @@ impl IggyMailbox {
                 message_expiry: Some(IggyExpiry::ExpireDuration(IggyDuration::from(
                     cfg.segment_expiry,
                 ))),
+                segment_size: Some(iggy::prelude::IggyByteSize::from(cfg.segment_bytes)),
                 ..TopicCreateOptions::default()
             };
             admin.create_topic(&stream, &cfg.topic, &opts).await?;
+        }
+        let idem_name = format!("{}-idem", cfg.topic);
+        let idem_topic = Identifier::named(&idem_name)?;
+        if admin.get_topic(&stream, &idem_topic).await?.is_none() {
+            let opts = TopicCreateOptions {
+                partitions_count: Some(cfg.partitions),
+                durability: Durability::Persisted,
+                consumer_offset_durability: Durability::Persisted,
+                message_expiry: Some(IggyExpiry::ExpireDuration(IggyDuration::from(IDEM_EXPIRY))),
+                ..TopicCreateOptions::default()
+            };
+            admin.create_topic(&stream, &idem_name, &opts).await?;
         }
         std::fs::create_dir_all(&cfg.key_dir)
             .map_err(|_| IggyMailboxError::Keys { partition: 0 })?;
@@ -618,9 +674,11 @@ impl IggyMailbox {
                 compacting: AtomicBool::new(false),
                 stream: stream.clone(),
                 topic: topic.clone(),
+                idem_topic: idem_topic.clone(),
                 healthy: AtomicBool::new(true),
                 stats: stats.clone(),
             });
+            replay_idem(&shared).await?;
             let homes = replay(&shared).await?;
             shared
                 .persist_keys()
@@ -664,7 +722,7 @@ impl IggyMailbox {
                     let held = self
                         .parts
                         .get(idx(p))
-                        .is_some_and(|x| !x.shared.lock().tag_candidates(&tag).is_empty());
+                        .is_some_and(|x| x.shared.lock().idem.contains_key(&tag));
                     if held {
                         let _ = h.tx.send(Job::Puncture(offset, slot)).await;
                     } else {
@@ -790,7 +848,7 @@ fn open_fact(
             (
                 Fact::Store {
                     at_ms: m.at_ms,
-                    tag: m.tag.map(|(t, _)| t),
+                    tag: m.tag,
                     mls: m.mls,
                     entries,
                     body_leaf,
@@ -848,7 +906,7 @@ fn fact_of(rec: &Record, first_leaf: u32) -> Fact {
                 .collect();
             Fact::Store {
                 at_ms: *at_ms,
-                tag: tag.map(|(t, _)| t),
+                tag: *tag,
                 mls: *mls,
                 entries,
                 body_leaf: matches!(local, Local::Shared { .. }).then_some(first_leaf + n),
@@ -862,6 +920,46 @@ fn fact_of(rec: &Record, first_leaf: u32) -> Fact {
                 .collect(),
         },
         other => fact_of_plain(other.clone()),
+    }
+}
+
+/// Loads the idempotency entries of the window from the idempotency topic.
+async fn replay_idem(shared: &Shared) -> Result<(), IggyMailboxError> {
+    let consumer = Consumer::new(Identifier::named(LOW_WATER_CONSUMER)?);
+    let cutoff = now_ms().saturating_sub(ms(IDEMPOTENCY_RETENTION));
+    let mut offset = 0;
+    loop {
+        let polled = shared
+            .reader
+            .poll_messages(
+                &shared.stream,
+                &shared.idem_topic,
+                shared.partition,
+                &consumer,
+                &PollingStrategy::offset(offset),
+                PollOptions {
+                    count: REPLAY_POLL,
+                    ..PollOptions::default()
+                },
+            )
+            .await?;
+        if polled.messages.is_empty() {
+            return Ok(());
+        }
+        let mut st = shared.lock();
+        for m in &polled.messages {
+            offset = offset.max(m.header.offset + 1);
+            let items = decode_idem(&m.payload).ok_or(IggyMailboxError::Unreadable {
+                partition: shared.partition,
+                offset: m.header.offset,
+                version: m.payload.first().copied().unwrap_or(0),
+            })?;
+            for (t, i) in items {
+                if i.at_ms >= cutoff {
+                    st.add_idem(t, i);
+                }
+            }
+        }
     }
 }
 
@@ -935,6 +1033,9 @@ struct Writer {
     relocate_after: Duration,
     key_window_ms: u64,
     pending_acks: HashMap<DeviceId, u64>,
+    /// Idempotency entries not yet in the idempotency topic (the low-water offset cannot pass
+    /// their records until they are).
+    idem_pending: Vec<([u8; 32], Idem)>,
     /// Tag of a multi-partition send -> (home record offset, accepted at, remote partitions not
     /// yet confirmed with their part slots).
     incomplete: HashMap<[u8; 32], (u64, tokio::time::Instant, Vec<(u32, u32)>)>,
@@ -967,6 +1068,7 @@ impl Writer {
             relocate_after: cfg.relocate_after,
             key_window_ms: ms(cfg.key_window),
             pending_acks: HashMap::new(),
+            idem_pending: Vec::new(),
             incomplete: HashMap::new(),
             senders,
             tag_window_ms: ms(IDEMPOTENCY_RETENTION),
@@ -1126,6 +1228,7 @@ impl Writer {
                 biased;
                 _ = ack_tick.tick() => {
                     self.flush_acks().await;
+                    self.flush_idem().await;
                     // Punctures from ACKs, relocations and confirmed parts reach the disk here.
                     let _ = self.shared.persist_keys().await;
                 }
@@ -1232,18 +1335,50 @@ impl Writer {
         }
     }
 
-    /// Looks up a tag: the sealed record and its metadata, if any (prefix hits are verified).
-    async fn find_tag(&self, tag: &[u8; 32]) -> Result<Option<(Sealed, StoreMeta)>, MailboxError> {
-        let candidates = self.shared.lock().tag_candidates(tag);
-        for offset in candidates {
-            let s = self.shared.one(offset).await?;
-            if let Meta::Store(m) = self.shared.meta(&s)?
-                && m.tag.is_some_and(|(t, _)| t == *tag)
+    /// The current `seq`s of a replayed send's entries that are still pending (acknowledged
+    /// ones are unreadable now and left out: they answer 0).
+    async fn replay_seqs(&self, offset: u64) -> Vec<(DeviceId, u64)> {
+        let Ok(s) = self.shared.one(offset).await else {
+            // Below the low-water offset: everything in it was delivered or moved.
+            return Vec::new();
+        };
+        let Ok(Meta::Store(m)) = self.shared.meta(&s) else {
+            return Vec::new();
+        };
+        let mut seqs = Vec::new();
+        for i in 0..m.n_local {
+            if let Ok(Some(plain)) = self.shared.slot(&s, i)
+                && let Ok(e) = sealed::decode_entry(&plain, m.shared)
             {
-                return Ok(Some((s, m)));
+                seqs.push((e.device, e.seq));
             }
         }
-        Ok(None)
+        seqs
+    }
+
+    /// Writes pending idempotency entries to the idempotency topic.
+    async fn flush_idem(&mut self) {
+        if self.idem_pending.is_empty() {
+            return;
+        }
+        let payload = encode_idem(&self.idem_pending);
+        let Ok(msg) = IggyMessage::builder().payload(payload).build() else {
+            return;
+        };
+        let mut msgs = vec![msg];
+        if self
+            .client
+            .send_messages(
+                &self.shared.stream,
+                &self.shared.idem_topic,
+                &iggy::prelude::Partitioning::partition_id(self.shared.partition),
+                &mut msgs,
+            )
+            .await
+            .is_ok()
+        {
+            self.idem_pending.clear();
+        }
     }
 
     async fn commit(&mut self, batch: &mut Vec<StoreJob>) {
@@ -1309,6 +1444,21 @@ impl Writer {
                 now,
             );
             if let Record::Store {
+                tag: Some((t, fp)),
+                at_ms,
+                ..
+            } = rec
+            {
+                self.idem_pending.push((
+                    *t,
+                    Idem {
+                        fp: *fp,
+                        at_ms: *at_ms,
+                        offset,
+                    },
+                ));
+            }
+            if let Record::Store {
                 remote,
                 tag: Some(tag),
                 local,
@@ -1351,31 +1501,14 @@ impl Writer {
                 // The same send twice in one batch: the client retried while the first was queued.
                 return Plan::Done(Err(MailboxError::Unavailable));
             }
-            match self.find_tag(tag).await {
-                Err(e) => return Plan::Done(Err(e)),
-                Ok(Some((s, m))) => {
-                    // The same key for the same recipient set is a retry; for another set it is
-                    // refused (reason 7), whichever part of the earlier send this partition holds.
-                    if m.tag.is_some_and(|(_, stored)| stored != *fp) {
-                        return Plan::Done(Err(MailboxError::IdempotencyConflict));
-                    }
-                    // Entries still pending answer with their seq; acknowledged ones are
-                    // unreadable now and answer 0 (delivered, nothing to route).
-                    let mut seqs = Vec::new();
-                    for i in 0..m.n_local {
-                        match self.shared.slot(&s, i) {
-                            Ok(Some(plain)) => {
-                                if let Ok(e) = sealed::decode_entry(&plain, m.shared) {
-                                    seqs.push((e.device, e.seq));
-                                }
-                            }
-                            Ok(None) => {}
-                            Err(e) => return Plan::Done(Err(e)),
-                        }
-                    }
-                    return Plan::Done(Ok((seqs, true)));
+            let known = self.shared.lock().idem.get(tag).copied();
+            if let Some(i) = known {
+                // The same key for the same recipient set is a retry; for another set it is
+                // refused (reason 7), whichever part of the earlier send this partition holds.
+                if i.fp != *fp {
+                    return Plan::Done(Err(MailboxError::IdempotencyConflict));
                 }
-                Ok(None) => {}
+                return Plan::Done(Ok((self.replay_seqs(i.offset).await, true)));
             }
         }
         let mut mls = None;
@@ -1521,16 +1654,21 @@ impl Writer {
     /// key windows below it.
     async fn finish_compaction(&mut self) {
         let now = now_ms();
-        let (cut, tag_cut, min_live, current_low) = {
-            let st = self.shared.lock();
+        let (cut, min_live, current_low) = {
+            let mut st = self.shared.lock();
+            st.prune_idem(now.saturating_sub(self.tag_window_ms));
             (
                 st.offset_at(now.saturating_sub(ms(self.relocate_after))),
-                st.offset_at(now.saturating_sub(self.tag_window_ms)),
                 st.min_live(),
                 st.times.front().map_or(st.next_offset, |(o, _)| *o),
             )
         };
-        let mut low = cut.min(tag_cut);
+        // Idempotency lives in its own topic: only pending entries, incomplete parts and
+        // idempotency entries not yet written there hold the low-water offset back.
+        let mut low = cut;
+        if let Some(m) = self.idem_pending.iter().map(|(_, i)| i.offset).min() {
+            low = low.min(m);
+        }
         if let Some(m) = min_live {
             low = low.min(m);
         }
@@ -1563,7 +1701,6 @@ impl Writer {
             let destroyed = {
                 let mut st = self.shared.lock();
                 st.prune_times(low);
-                st.prune_tags(tag_cut.min(low));
                 let current = st.ring.windows.keys().next_back().copied();
                 st.destroy_windows_below(low, current)
             };
@@ -1755,7 +1892,7 @@ impl Mailbox for IggyMailbox {
             }
             None => None,
         };
-        let tag = key.map(|t| (t, recipients_fingerprint(&devices)));
+        let tag = key.map(|t| (t, recipients_fingerprint(&self.idem, &devices)));
         // Split by partition.
         let mut by_part: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
         for (i, d) in devices.iter().enumerate() {

@@ -85,6 +85,7 @@ fn iggy_config(
     cfg.timeout = Duration::from_millis(s.timeout_ms);
     cfg.relocate_after = Duration::from_secs(s.relocate_after_secs);
     cfg.segment_expiry = Duration::from_secs(s.segment_expiry_secs);
+    cfg.segment_bytes = s.segment_mib.saturating_mul(1 << 20);
     cfg.cache_bytes = s.cache_mib.saturating_mul(1 << 20);
     cfg.store_generation = generation;
     Ok(cfg)

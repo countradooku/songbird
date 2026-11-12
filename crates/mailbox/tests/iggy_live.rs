@@ -529,8 +529,10 @@ async fn compaction_destroys_old_windows() {
     cfg.key_window = Duration::from_millis(1);
     let m = IggyMailbox::connect(cfg.clone()).await.unwrap();
     let x = d(0x41);
-    for _ in 0..5 {
-        m.store(per(&[(x, "MARK-window")])).await.unwrap();
+    for i in 0..5u8 {
+        let mut req = per(&[(x, "MARK-window")]);
+        req.idempotency_key = Some([0x60 + i; 16]);
+        m.store(req).await.unwrap();
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     m.ack_up_to(&x, 4).await.unwrap();
@@ -555,4 +557,18 @@ async fn compaction_destroys_old_windows() {
     let again = IggyMailbox::connect(cfg).await.unwrap();
     let got = again.fetch_after(&x, 0, 10).await.unwrap();
     assert_eq!(got.iter().map(|s| s.seq).collect::<Vec<_>>(), vec![5]);
+    // Idempotency outlives the records it pointed at (its own topic): a retry of a delivered
+    // send is a replay (seq 0), and the key reused for another device is still refused.
+    let mut retry = per(&[(x, "MARK-window")]);
+    retry.idempotency_key = Some([0x60; 16]);
+    let out = again.store(retry).await.unwrap();
+    assert!(out.replayed);
+    assert_eq!(out.seqs, vec![0]);
+    let mut other = per(&[(d(0x42), "MARK-window")]);
+    other.idempotency_key = Some([0x60; 16]);
+    let r = again.store(other).await;
+    assert!(
+        matches!(r, Err(MailboxError::IdempotencyConflict)) || r.is_ok(),
+        "{r:?}"
+    );
 }

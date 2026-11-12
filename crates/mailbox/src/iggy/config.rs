@@ -92,6 +92,10 @@ pub struct IggyConfig {
     /// Sealed segments below the low-water offset are deleted after this (topic
     /// `message_expiry`, set when the topic is created).
     pub segment_expiry: Duration,
+    /// Size of the topic's segments (set when the topic is created). Iggy deletes whole sealed
+    /// segments only, so the time to fill one is part of how long delivered ciphertext stays on
+    /// disk: size it to the traffic.
+    pub segment_bytes: u64,
     /// Record payloads kept in memory per partition for reads (bytes).
     pub cache_bytes: usize,
     /// HMAC key for idempotency tags.
@@ -140,8 +144,9 @@ impl IggyConfig {
             ack_interval: Duration::from_millis(50),
             timeout: Duration::from_secs(5),
             compaction_interval: Duration::from_secs(60),
-            relocate_after: Duration::from_secs(3600),
-            segment_expiry: Duration::from_secs(8 * 3600),
+            relocate_after: Duration::from_secs(900),
+            segment_expiry: Duration::from_secs(600),
+            segment_bytes: 16 << 20,
             cache_bytes: 64 << 20,
             idempotency_secret,
             store_generation: 1,

@@ -44,7 +44,8 @@ struct RecInfo {
 pub(crate) enum Fact {
     Store {
         at_ms: u64,
-        tag: Option<[u8; 32]>,
+        /// Idempotency tag and keyed recipient-set fingerprint.
+        tag: Option<([u8; 32], [u8; 16])>,
         mls: Option<([u8; 16], u64)>,
         /// (device, seq, leaf).
         entries: Vec<(DeviceId, u64, u32)>,
@@ -69,9 +70,8 @@ pub(crate) struct State {
     pub(crate) devices: HashMap<DeviceId, DeviceState>,
     /// MLS group -> current epoch.
     pub(crate) epochs: HashMap<[u8; 16], u64>,
-    /// Tag prefix -> offsets of store records carrying a tag with that prefix (verified against
-    /// the record on a hit).
-    pub(crate) tags: HashMap<u64, TagSlot>,
+    /// Idempotency tag -> what a retry needs (kept for the idempotency window).
+    pub(crate) idem: HashMap<[u8; 32], Idem>,
     /// Offset -> records still holding pending entries.
     records: BTreeMap<u64, RecInfo>,
     /// Window -> last offset sealed with it.
@@ -86,17 +86,15 @@ pub(crate) struct State {
     pub(crate) ring: KeyRing,
 }
 
-/// Offsets for one tag prefix (almost always one).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TagSlot {
-    One(u64),
-    Many(Vec<u64>),
-}
-
-pub(crate) fn tag_prefix(tag: &[u8; 32]) -> u64 {
-    let mut p = [0u8; 8];
-    p.copy_from_slice(tag.get(..8).unwrap_or(&[0; 8]));
-    u64::from_le_bytes(p)
+/// A send's idempotency record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Idem {
+    /// Keyed fingerprint of the send's whole recipient set.
+    pub(crate) fp: [u8; 16],
+    /// When the send was accepted (ms).
+    pub(crate) at_ms: u64,
+    /// Offset of this partition's store record of the send.
+    pub(crate) offset: u64,
 }
 
 impl State {
@@ -108,43 +106,14 @@ impl State {
         }
     }
 
-    /// Offsets whose record may carry `tag`.
-    pub(crate) fn tag_candidates(&self, tag: &[u8; 32]) -> Vec<u64> {
-        match self.tags.get(&tag_prefix(tag)) {
-            None => Vec::new(),
-            Some(TagSlot::One(o)) => vec![*o],
-            Some(TagSlot::Many(v)) => v.clone(),
-        }
+    /// Records a send's idempotency entry (the first one wins).
+    pub(crate) fn add_idem(&mut self, tag: [u8; 32], idem: Idem) {
+        self.idem.entry(tag).or_insert(idem);
     }
 
-    pub(crate) fn add_tag(&mut self, tag: &[u8; 32], offset: u64) {
-        let p = tag_prefix(tag);
-        match self.tags.get_mut(&p) {
-            None => {
-                self.tags.insert(p, TagSlot::One(offset));
-            }
-            Some(slot) => {
-                let mut v = match slot {
-                    TagSlot::One(o) => vec![*o],
-                    TagSlot::Many(v) => std::mem::take(v),
-                };
-                if !v.contains(&offset) {
-                    v.push(offset);
-                }
-                *slot = TagSlot::Many(v);
-            }
-        }
-    }
-
-    /// Drops tags recorded before `offset` (older than the idempotency window).
-    pub(crate) fn prune_tags(&mut self, offset: u64) {
-        self.tags.retain(|_, slot| match slot {
-            TagSlot::One(o) => *o >= offset,
-            TagSlot::Many(v) => {
-                v.retain(|o| *o >= offset);
-                !v.is_empty()
-            }
-        });
+    /// Drops idempotency entries accepted before `cutoff_ms`.
+    pub(crate) fn prune_idem(&mut self, cutoff_ms: u64) {
+        self.idem.retain(|_, i| i.at_ms >= cutoff_ms);
     }
 
     fn puncture(&mut self, window: u64, leaf: u32) {
@@ -321,8 +290,16 @@ impl State {
                 body_leaf,
             } => {
                 self.note_batch(offset, *at_ms);
-                if let (Some(t), true) = (tag, at_ms.saturating_add(tag_window_ms) >= now_ms) {
-                    self.add_tag(t, offset);
+                if let (Some((t, fp)), true) = (tag, at_ms.saturating_add(tag_window_ms) >= now_ms)
+                {
+                    self.add_idem(
+                        *t,
+                        Idem {
+                            fp: *fp,
+                            at_ms: *at_ms,
+                            offset,
+                        },
+                    );
                 }
                 if let Some((g, e)) = mls {
                     let cur = self.epochs.entry(*g).or_default();
@@ -406,7 +383,7 @@ mod tests {
     fn store(entries: &[(u8, u64, u32)], at: u64, tag: Option<[u8; 32]>) -> Fact {
         Fact::Store {
             at_ms: at,
-            tag,
+            tag: tag.map(|t| (t, [0; 16])),
             mls: None,
             entries: entries.iter().map(|(b, s, l)| (d(*b), *s, *l)).collect(),
             body_leaf: None,
@@ -430,7 +407,7 @@ mod tests {
         assert_eq!(st.next_offset, 4);
         let one = &st.devices[&d(1)];
         assert_eq!((one.last, one.acked, one.pending.len()), (2, 1, 1));
-        assert_eq!(st.tag_candidates(&[7; 32]), vec![1]);
+        assert_eq!(st.idem[&[7; 32]].offset, 1);
         assert!(
             st.ring.leaf(w, 0).unwrap().is_none(),
             "acknowledged: punctured"
@@ -535,18 +512,18 @@ mod tests {
     }
 
     #[test]
-    fn tags_collide_safely_and_prune() {
+    fn idempotency_entries_prune_by_age() {
         let (mut st, _) = state();
-        let mut a = [1u8; 32];
-        let mut b = [1u8; 32];
-        a[31] = 1;
-        b[31] = 2;
-        st.add_tag(&a, 4);
-        st.add_tag(&b, 7);
-        assert_eq!(st.tag_candidates(&a), vec![4, 7]);
-        st.prune_tags(5);
-        assert_eq!(st.tag_candidates(&b), vec![7]);
-        st.prune_tags(8);
-        assert!(st.tags.is_empty());
+        let e = |at| Idem {
+            fp: [1; 16],
+            at_ms: at,
+            offset: 0,
+        };
+        st.add_idem([1; 32], e(10));
+        st.add_idem([2; 32], e(20));
+        st.add_idem([1; 32], e(99));
+        assert_eq!(st.idem[&[1; 32]].at_ms, 10, "the first one wins");
+        st.prune_idem(15);
+        assert_eq!(st.idem.len(), 1);
     }
 }

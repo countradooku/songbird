@@ -331,6 +331,10 @@ pub struct IggySettings {
     /// `message_expiry`, applied when the topic is created).
     #[serde(default = "default_segment_expiry_secs")]
     pub segment_expiry_secs: u64,
+    /// Segment size in MiB (applied when the topic is created): smaller segments are deleted
+    /// sooner after delivery on a quiet node.
+    #[serde(default = "default_segment_mib")]
+    pub segment_mib: u64,
     /// Log records cached in memory per partition for reads, in MiB.
     #[serde(default = "default_cache_mib")]
     pub cache_mib: usize,
@@ -343,10 +347,13 @@ const fn default_partitions() -> u32 {
     4
 }
 const fn default_relocate_after_secs() -> u64 {
-    3600
+    900
 }
 const fn default_segment_expiry_secs() -> u64 {
-    8 * 3600
+    600
+}
+const fn default_segment_mib() -> u64 {
+    16
 }
 const fn default_cache_mib() -> usize {
     64
@@ -390,11 +397,16 @@ impl Validate for IggySettings {
             "relocate_after_secs",
             "must be in 60..=604800",
         );
-        // Idempotency records must outlive their 6-hour window on disk.
+        // The low-water offset protects what is still needed; the expiry only delays deletion.
         v.check(
-            self.segment_expiry_secs >= 7 * 3600,
+            (60..=24 * 3600).contains(&self.segment_expiry_secs),
             "segment_expiry_secs",
-            "must be at least 25200 (7 h)",
+            "must be in 60..=86400",
+        );
+        v.check(
+            (1..=1024).contains(&self.segment_mib),
+            "segment_mib",
+            "must be in 1..=1024",
         );
         v.check(
             (1..=65_536).contains(&self.cache_mib),

@@ -167,7 +167,7 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
         events.push(ev);
         tokio::time::sleep(gap).await;
     }
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     for c in &mut clients {
         let left = deadline.saturating_duration_since(Instant::now());
         match tokio::time::timeout(left, c.wait_for(State::Connected)).await {

@@ -50,7 +50,7 @@ fn config(name: &str) -> Option<IggyConfig> {
     cfg.stream = stream;
     cfg.ack_interval = Duration::from_millis(20);
     cfg.timeout = Duration::from_secs(10);
-    cfg.compaction_interval = Duration::from_secs(3600);
+    cfg.compaction_interval = Duration::from_hours(1);
     Some(cfg)
 }
 
@@ -284,6 +284,7 @@ async fn restart_rebuilds_state_and_fences_the_old_writer() {
             break;
         }
         assert!(Instant::now() < deadline, "old writer still accepted {r:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(second.is_healthy());
 }
@@ -305,7 +306,7 @@ async fn compaction_relocates_and_keeps_counters_across_restart() {
     // Expire nothing (30 days), but compact: busy's entries are copied forward, the counters
     // snapshotted and the low-water offset moved past everything older.
     assert_eq!(
-        m.expire_older_than(Duration::from_secs(30 * 24 * 3600))
+        m.expire_older_than(Duration::from_hours(30 * 24))
             .await
             .unwrap(),
         0
@@ -537,7 +538,7 @@ async fn compaction_destroys_old_windows() {
     }
     m.ack_up_to(&x, 4).await.unwrap();
     wait_pending(&m, &x, 1).await;
-    m.expire_older_than(Duration::from_secs(30 * 24 * 3600))
+    m.expire_older_than(Duration::from_hours(30 * 24))
         .await
         .unwrap();
     let stats = m.stats();

@@ -33,7 +33,7 @@ pub(crate) const DEPTH: u8 = 24;
 /// Slots per window.
 pub(crate) const SLOTS: u32 = 1 << DEPTH;
 
-const FILE_VERSION: u8 = 1;
+const FILE_VERSION: u8 = 2;
 const FILE_AAD: &[u8] = b"songbird-mailbox-keys-v1";
 
 /// A 32-byte key, wiped on drop.
@@ -66,6 +66,9 @@ pub(crate) enum KeyError {
     /// Randomness or a cipher failed.
     #[error("mailbox key operation failed")]
     Crypto,
+    /// A writer with a newer producer epoch owns the key file: this one is fenced.
+    #[error("mailbox key file owned by a newer writer")]
+    Fenced,
 }
 
 fn random_key() -> Result<Key, KeyError> {
@@ -160,6 +163,76 @@ impl Tree {
         Ok(true)
     }
 
+    /// Every leaf in `[start, end)` still derivable, with its key: each node on the way is
+    /// expanded once (about two expansions per leaf for a range).
+    pub(crate) fn range(&self, start: u32, end: u32) -> Result<Vec<(u32, Key)>, KeyError> {
+        let mut out = Vec::new();
+        let mut stack: Vec<(u8, u32, Key)> = self
+            .frontier
+            .iter()
+            .filter(|((d, p), _)| {
+                let (a, b) = span(*d, *p);
+                a < u64::from(end) && b > u64::from(start)
+            })
+            .map(|((d, p), k)| (*d, *p, k.clone()))
+            .collect();
+        while let Some((d, p, k)) = stack.pop() {
+            if d == DEPTH {
+                out.push((p, k));
+                continue;
+            }
+            let (l, r) = expand(&k)?;
+            for (child, key) in [(p << 1, l), ((p << 1) | 1, r)] {
+                let (a, b) = span(d + 1, child);
+                if a < u64::from(end) && b > u64::from(start) {
+                    stack.push((d + 1, child, key));
+                }
+            }
+        }
+        out.sort_unstable_by_key(|(s, _)| *s);
+        Ok(out)
+    }
+
+    /// Makes every leaf below `mark` underivable from the tree (their keys, if still needed,
+    /// are kept individually by the window): nodes entirely below go; a node straddling `mark` is
+    /// split down the path to it, keeping only the halves entirely at or above it.
+    pub(crate) fn drop_below(&mut self, mark: u32) -> Result<(), KeyError> {
+        let m = u64::from(mark);
+        let below: Vec<(u8, u32)> = self
+            .frontier
+            .keys()
+            .filter(|(d, p)| span(*d, *p).0 < m)
+            .copied()
+            .collect();
+        for (d, p) in below {
+            let Some(mut key) = self.frontier.remove(&(d, p)) else {
+                continue;
+            };
+            let (mut depth, mut prefix) = (d, p);
+            // Only a node that straddles the mark has anything to keep.
+            while span(depth, prefix).1 > m && depth < DEPTH {
+                let (l, r) = expand(&key)?;
+                depth += 1;
+                let (left, right) = (prefix << 1, (prefix << 1) | 1);
+                if span(depth, left).1 <= m {
+                    // Left half entirely below: drop it, go right.
+                    prefix = right;
+                    key = r;
+                } else {
+                    // Right half entirely at or above: keep it, go left.
+                    self.frontier.insert((depth, right), r);
+                    prefix = left;
+                    key = l;
+                }
+                if span(depth, prefix).0 >= m {
+                    self.frontier.insert((depth, prefix), key);
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Frontier size (keys kept).
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
@@ -167,11 +240,24 @@ impl Tree {
     }
 }
 
-/// A window: its metadata key and its tree.
+/// The leaves `[a, b)` under node `(depth, prefix)`.
+fn span(depth: u8, prefix: u32) -> (u64, u64) {
+    let shift = u32::from(DEPTH - depth);
+    let a = u64::from(prefix) << shift;
+    (a, a + (1u64 << shift))
+}
+
+/// A window: its metadata key, its tree for recent slots and the individual keys of older slots
+/// still pending.
 #[derive(Debug, Clone)]
 pub(crate) struct Window {
     pub(crate) meta: Key,
+    /// Derives the slots at or above `mark`.
     pub(crate) tree: Tree,
+    /// Slots below it are not derivable from the tree.
+    pub(crate) mark: u32,
+    /// Keys of slots below `mark` still needed (pending); deleting one deletes the slot.
+    pub(crate) explicit: BTreeMap<u32, Key>,
     /// Next unused slot.
     pub(crate) next_slot: u32,
     /// When it was opened (ms).
@@ -195,6 +281,8 @@ impl KeyRing {
             Window {
                 meta: random_key()?,
                 tree: Tree::new(random_key()?),
+                mark: 0,
+                explicit: BTreeMap::new(),
                 next_slot: 0,
                 opened_ms: now_ms,
             },
@@ -226,16 +314,63 @@ impl KeyRing {
 
     pub(crate) fn leaf(&self, id: u64, slot: u32) -> Result<Option<Key>, KeyError> {
         match self.windows.get(&id) {
+            Some(w) if slot < w.mark => Ok(w.explicit.get(&slot).cloned()),
             Some(w) => w.tree.leaf(slot),
             None => Ok(None),
         }
     }
 
+    /// The keys of slots `[first, first + n)` (`None`: punctured), derived in one pass.
+    pub(crate) fn leaves(&self, id: u64, first: u32, n: u32) -> Result<Vec<Option<Key>>, KeyError> {
+        let w = self.windows.get(&id).ok_or(KeyError::Crypto)?;
+        let end = first.checked_add(n).ok_or(KeyError::Crypto)?;
+        let mut out: Vec<Option<Key>> =
+            vec![None; usize::try_from(n).map_err(|_| KeyError::Crypto)?];
+        for s in first..end.min(w.mark) {
+            if let (Some(k), Some(o)) = (w.explicit.get(&s), out.get_mut(idx(s - first))) {
+                *o = Some(k.clone());
+            }
+        }
+        if end > w.mark {
+            for (s, k) in w.tree.range(first.max(w.mark), end)? {
+                if let Some(o) = out.get_mut(idx(s - first)) {
+                    *o = Some(k);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Punctures a slot (no-op if the window is gone or the slot already punctured).
     pub(crate) fn puncture(&mut self, id: u64, slot: u32) -> Result<(), KeyError> {
-        if let Some(w) = self.windows.get_mut(&id)
-            && w.tree.puncture(slot)?
-        {
+        let Some(w) = self.windows.get_mut(&id) else {
+            return Ok(());
+        };
+        let hit = if slot < w.mark {
+            w.explicit.remove(&slot).is_some()
+        } else {
+            w.tree.puncture(slot)?
+        };
+        if hit {
+            self.dirty = true;
+        }
+        Ok(())
+    }
+
+    /// Moves every window's mark to its next unused slot: the slots written since the last
+    /// call that are still derivable get individual keys, and the tree is cut so it derives
+    /// nothing below the mark. Keeps the key state proportional to the pending entries,
+    /// whatever order they are acknowledged in. Called before every key-file write.
+    pub(crate) fn advance(&mut self) -> Result<(), KeyError> {
+        for w in self.windows.values_mut() {
+            if w.next_slot <= w.mark {
+                continue;
+            }
+            for (s, k) in w.tree.range(w.mark, w.next_slot)? {
+                w.explicit.insert(s, k);
+            }
+            w.tree.drop_below(w.next_slot)?;
+            w.mark = w.next_slot;
             self.dirty = true;
         }
         Ok(())
@@ -259,7 +394,17 @@ impl KeyRing {
             out.extend_from_slice(&id.to_be_bytes());
             out.extend_from_slice(&w.opened_ms.to_be_bytes());
             out.extend_from_slice(&w.next_slot.to_be_bytes());
+            out.extend_from_slice(&w.mark.to_be_bytes());
             out.extend_from_slice(&w.meta.0);
+            out.extend_from_slice(
+                &u32::try_from(w.explicit.len())
+                    .unwrap_or(u32::MAX)
+                    .to_be_bytes(),
+            );
+            for (slot, k) in &w.explicit {
+                out.extend_from_slice(&slot.to_be_bytes());
+                out.extend_from_slice(&k.0);
+            }
             out.extend_from_slice(
                 &u32::try_from(w.tree.frontier.len())
                     .unwrap_or(u32::MAX)
@@ -286,7 +431,21 @@ impl KeyRing {
             let id = r.u64()?;
             let opened_ms = r.u64()?;
             let next_slot = r.u32()?;
+            let mark = r.u32()?;
             let meta = Key(r.arr()?);
+            let e = r.u32()?;
+            if usize::try_from(e)
+                .map_err(|_| KeyError::File)?
+                .saturating_mul(36)
+                > b.len()
+            {
+                return Err(KeyError::File);
+            }
+            let mut explicit = BTreeMap::new();
+            for _ in 0..e {
+                let slot = r.u32()?;
+                explicit.insert(slot, Key(r.arr()?));
+            }
             let m = r.u32()?;
             if usize::try_from(m)
                 .map_err(|_| KeyError::File)?
@@ -309,6 +468,8 @@ impl KeyRing {
                 Window {
                     meta,
                     tree: Tree { frontier },
+                    mark,
+                    explicit,
                     next_slot,
                     opened_ms,
                 },
@@ -359,6 +520,9 @@ pub(crate) struct KeyFile {
     master: Key,
     /// Binds the file to its stream, topic and partition.
     aad: Vec<u8>,
+    /// Producer epoch of this process's writer: a file written by a newer epoch is never
+    /// overwritten (the older writer is fenced, as Iggy fences its appends).
+    epoch: std::sync::atomic::AtomicU16,
 }
 
 impl KeyFile {
@@ -382,12 +546,25 @@ impl KeyFile {
             path: dir.join(format!("{stream}.{topic}.{partition}.keys")),
             master: Key(master),
             aad,
+            epoch: std::sync::atomic::AtomicU16::new(0),
         }
     }
 
     fn sealing_key(&self) -> Result<LessSafeKey, KeyError> {
         let k = UnboundKey::new(&AES_256_GCM, &self.master.0).map_err(|_| KeyError::Crypto)?;
         Ok(LessSafeKey::new(k))
+    }
+
+    /// Sets the producer epoch this process writes with.
+    pub(crate) fn set_epoch(&self, epoch: u16) {
+        self.epoch
+            .store(epoch, std::sync::atomic::Ordering::Release);
+    }
+
+    fn aad_for(&self, epoch: u16) -> Vec<u8> {
+        let mut a = self.aad.clone();
+        a.extend_from_slice(&epoch.to_be_bytes());
+        a
     }
 
     /// Loads the ring; a missing file is an empty ring (a new partition).
@@ -397,12 +574,14 @@ impl KeyFile {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(KeyRing::default()),
             Err(_) => return Err(KeyError::File),
         };
-        let (nonce, ct) = data.split_at_checked(NONCE_LEN).ok_or(KeyError::File)?;
+        let (epoch, rest) = data.split_at_checked(2).ok_or(KeyError::File)?;
+        let epoch = u16::from_be_bytes(epoch.try_into().map_err(|_| KeyError::File)?);
+        let (nonce, ct) = rest.split_at_checked(NONCE_LEN).ok_or(KeyError::File)?;
         let nonce = Nonce::try_assume_unique_for_key(nonce).map_err(|_| KeyError::File)?;
         let mut buf = ct.to_vec();
         let plain = self
             .sealing_key()?
-            .open_in_place(nonce, Aad::from(self.aad.as_slice()), &mut buf)
+            .open_in_place(nonce, Aad::from(self.aad_for(epoch).as_slice()), &mut buf)
             .map_err(|_| KeyError::File)?;
         let ring = KeyRing::decode(plain);
         buf.fill(0);
@@ -411,17 +590,19 @@ impl KeyFile {
 
     /// The ring sealed for the file (cheap; done under the state lock).
     pub(crate) fn seal(&self, ring: &KeyRing) -> Result<Vec<u8>, KeyError> {
+        let epoch = self.epoch.load(std::sync::atomic::Ordering::Acquire);
         let mut nonce = [0u8; NONCE_LEN];
         aws_lc_rs::rand::fill(&mut nonce).map_err(|_| KeyError::Crypto)?;
         let mut buf = ring.encode();
         self.sealing_key()?
             .seal_in_place_append_tag(
                 Nonce::assume_unique_for_key(nonce),
-                Aad::from(self.aad.as_slice()),
+                Aad::from(self.aad_for(epoch).as_slice()),
                 &mut buf,
             )
             .map_err(|_| KeyError::Crypto)?;
-        let mut out = nonce.to_vec();
+        let mut out = epoch.to_be_bytes().to_vec();
+        out.extend_from_slice(&nonce);
         out.extend_from_slice(&buf);
         Ok(out)
     }
@@ -429,6 +610,24 @@ impl KeyFile {
     /// Replaces the file atomically (write, fsync, rename, fsync of the directory). Blocking.
     pub(crate) fn write(&self, sealed: &[u8]) -> Result<(), KeyError> {
         let tmp = self.path.with_extension("keys.tmp");
+        // One writer at a time, and never over a newer epoch's file.
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.path.with_extension("keys.lock"))
+            .map_err(|_| KeyError::Write)?;
+        lock.lock().map_err(|_| KeyError::Write)?;
+        let mine = sealed
+            .get(..2)
+            .and_then(|e| e.try_into().ok())
+            .map_or(0, u16::from_be_bytes);
+        if let Ok(current) = std::fs::read(&self.path)
+            && let Some(e) = current.get(..2).and_then(|e| e.try_into().ok())
+            && u16::from_be_bytes(e) > mine
+        {
+            return Err(KeyError::Fenced);
+        }
         let write = || -> std::io::Result<()> {
             let mut f = std::fs::OpenOptions::new();
             f.write(true).create(true).truncate(true);
@@ -446,7 +645,9 @@ impl KeyFile {
             }
             Ok(())
         };
-        write().map_err(|_| KeyError::Write)
+        let result = write().map_err(|_| KeyError::Write);
+        drop(lock);
+        result
     }
 
     /// Seals and writes (tests).
@@ -454,6 +655,10 @@ impl KeyFile {
     pub(crate) fn store(&self, ring: &KeyRing) -> Result<(), KeyError> {
         self.write(&self.seal(ring)?)
     }
+}
+
+fn idx(n: u32) -> usize {
+    usize::try_from(n).unwrap_or(usize::MAX)
 }
 
 /// Seals `plain` with a leaf key (used once: constant nonce).
@@ -567,6 +772,56 @@ mod tests {
     }
 
     #[test]
+    fn range_matches_single_leaves_and_skips_punctured() {
+        let mut t = Tree::new(Key([5; 32]));
+        t.puncture(7).unwrap();
+        let r = t.range(3, 12).unwrap();
+        let slots: Vec<u32> = r.iter().map(|(s, _)| *s).collect();
+        assert_eq!(slots, vec![3, 4, 5, 6, 8, 9, 10, 11]);
+        for (s, k) in r {
+            assert_eq!(t.leaf(s).unwrap(), Some(k));
+        }
+    }
+
+    #[test]
+    fn advance_keeps_only_pending_keys_and_cuts_the_tree() {
+        let mut ring = KeyRing::default();
+        let w = ring.open_window(0).unwrap();
+        ring.reserve(w, 1000).unwrap();
+        let before: Vec<Key> = (0..1000)
+            .map(|s| ring.leaf(w, s).unwrap().unwrap())
+            .collect();
+        // Acknowledgements in a scattered order.
+        for s in (0..1000).filter(|s| s % 3 != 0) {
+            ring.puncture(w, s).unwrap();
+        }
+        ring.advance().unwrap();
+        let win = &ring.windows[&w];
+        assert_eq!(win.mark, 1000);
+        assert_eq!(win.explicit.len(), 334, "one key per pending slot");
+        assert!(
+            win.tree.len() <= usize::from(DEPTH) + 1,
+            "{}",
+            win.tree.len()
+        );
+        // Nothing below the mark is derivable from the tree any more.
+        assert_eq!(win.tree.range(0, 1000).unwrap(), Vec::new());
+        for s in 0..1000u32 {
+            let want = (s % 3 == 0).then(|| before[usize::try_from(s).unwrap()].clone());
+            assert_eq!(ring.leaf(w, s).unwrap(), want, "slot {s}");
+        }
+        ring.puncture(w, 3).unwrap();
+        assert!(ring.leaf(w, 3).unwrap().is_none());
+        // New slots above the mark still come from the tree, and match a batch derivation.
+        let first = ring.reserve(w, 10).unwrap();
+        let batch = ring.leaves(w, first, 10).unwrap();
+        for (i, k) in batch.iter().enumerate() {
+            let s = first + u32::try_from(i).unwrap();
+            assert_eq!(k.as_ref(), ring.leaf(w, s).unwrap().as_ref());
+        }
+    }
+
+    #[test]
     fn ring_file_round_trips_and_binds_its_partition() {
         let dir = std::env::temp_dir().join(format!("sb-keys-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -576,6 +831,7 @@ mod tests {
         let first = ring.reserve(w, 10).unwrap();
         let leaf3 = ring.leaf(w, first + 3).unwrap().unwrap();
         ring.puncture(w, first + 2).unwrap();
+        ring.advance().unwrap();
         file.store(&ring).unwrap();
         let back = file.load().unwrap();
         assert_eq!(back.leaf(w, first + 3).unwrap(), Some(leaf3));
@@ -589,6 +845,22 @@ mod tests {
             KeyFile::new(&dir, "s", "t", 1, [9; 32]).load().unwrap_err(),
             KeyError::File
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_older_writer_cannot_overwrite_a_newer_one() {
+        let dir = std::env::temp_dir().join(format!("sb-keys-fence-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = KeyFile::new(&dir, "s", "t", 0, [9; 32]);
+        let new = KeyFile::new(&dir, "s", "t", 0, [9; 32]);
+        old.set_epoch(1);
+        new.set_epoch(2);
+        let ring = KeyRing::default();
+        old.store(&ring).unwrap();
+        new.store(&ring).unwrap();
+        assert_eq!(old.store(&ring).unwrap_err(), KeyError::Fenced);
+        assert!(new.load().is_ok());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

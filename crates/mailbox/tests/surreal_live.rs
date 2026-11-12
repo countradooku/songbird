@@ -305,9 +305,7 @@ async fn expiry_deletes_old_entries_and_bodies() {
     .unwrap();
     // Nothing is older than an hour.
     assert_eq!(
-        m.expire_older_than(Duration::from_secs(3600))
-            .await
-            .unwrap(),
+        m.expire_older_than(Duration::from_hours(1)).await.unwrap(),
         0
     );
     tokio::time::sleep(Duration::from_millis(1100)).await;

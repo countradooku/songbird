@@ -108,7 +108,7 @@ const READ_SPAN: u64 = 512;
 /// Most entries one compaction pass copies forward (the rest wait for the next pass).
 const RELOCATE_PER_PASS: usize = 100_000;
 /// The idempotency topic keeps its records this long (the idempotency window and a margin).
-const IDEM_EXPIRY: Duration = Duration::from_secs(7 * 3600);
+const IDEM_EXPIRY: Duration = Duration::from_hours(7);
 
 /// Counters for metrics and benchmarks.
 #[derive(Debug, Default)]
@@ -472,6 +472,11 @@ impl Shared {
     async fn persist_keys(&self) -> Result<(), MailboxError> {
         let sealed = {
             let mut st = self.lock();
+            // Slots written since the last write get individual keys and leave the tree, so the
+            // file stays proportional to the pending entries.
+            if st.ring.advance().is_err() {
+                return Err(MailboxError::Unavailable);
+            }
             if !st.ring.dirty {
                 return Ok(());
             }
@@ -481,10 +486,15 @@ impl Shared {
         let ok = match sealed {
             Ok(bytes) => {
                 let file = self.keys.clone();
-                matches!(
-                    tokio::task::spawn_blocking(move || file.write(&bytes)).await,
-                    Ok(Ok(()))
-                )
+                match tokio::task::spawn_blocking(move || file.write(&bytes)).await {
+                    Ok(Ok(())) => true,
+                    Ok(Err(keys::KeyError::Fenced)) => {
+                        tracing::error!("mailbox key file owned by a newer writer; stopping");
+                        self.healthy.store(false, Ordering::Relaxed);
+                        false
+                    }
+                    _ => false,
+                }
             }
             Err(_) => false,
         };
@@ -616,6 +626,26 @@ impl IggyMailbox {
     /// The connection, the topic set-up, a key file or the replay failed, or another writer
     /// holds a newer producer epoch.
     pub async fn connect(cfg: IggyConfig) -> Result<Self, IggyMailboxError> {
+        // Set-up is retried while Iggy answers that it is busy (start-up under load).
+        let mut backoff = Duration::from_millis(50);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match Self::connect_once(cfg.clone()).await {
+                Err(IggyMailboxError::Iggy(
+                    e @ (IggyError::TransientNotAccepted
+                    | IggyError::NotPrimary
+                    | IggyError::DeferredPollCapacityExceeded),
+                )) if tokio::time::Instant::now() < deadline => {
+                    tracing::warn!(code = e.as_code(), "mailbox set-up busy; retrying");
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(2));
+                }
+                other => return other,
+            }
+        }
+    }
+
+    async fn connect_once(cfg: IggyConfig) -> Result<Self, IggyMailboxError> {
         let admin = cfg.connection.client().await?;
         let stream = Identifier::named(&cfg.stream)?;
         let topic = Identifier::named(&cfg.topic)?;
@@ -1100,14 +1130,9 @@ impl Writer {
     /// Seals records into `window`; returns the payloads and each record's first leaf.
     fn seal_all(&self, records: &[Record], window: u64) -> Option<(Vec<Bytes>, Vec<u32>)> {
         let mut st = self.shared.lock();
-        let mut payloads = Vec::with_capacity(records.len());
-        let mut leaves = Vec::with_capacity(records.len());
-        for r in records {
-            let (p, first) = sealed::seal(r, &mut st.ring, window, self.shared.partition).ok()?;
-            payloads.push(p);
-            leaves.push(first);
-        }
-        Some((payloads, leaves))
+        let sealed =
+            sealed::seal_batch(records, &mut st.ring, window, self.shared.partition).ok()?;
+        Some(sealed.into_iter().unzip())
     }
 
     /// Seals, appends and applies records written by the writer itself (no store replies).
@@ -1147,6 +1172,8 @@ impl Writer {
             .ok_or(IggyError::InvalidCommand)?;
         let p = BatchProducer::new(self.producer_id, epoch, 0).ok_or(IggyError::InvalidCommand)?;
         self.producer = Some(p);
+        self.shared.keys.set_epoch(epoch);
+        self.shared.lock().ring.dirty = true;
         let window = self
             .window(0)
             .await

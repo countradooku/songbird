@@ -129,16 +129,72 @@ pub(crate) struct EntrySlot {
 }
 
 /// Seals a record into the current window; returns the payload and the first leaf.
-#[allow(
-    clippy::too_many_lines,
-    reason = "one flat match over every record kind"
-)]
+#[cfg(test)]
 pub(crate) fn seal(
     rec: &Record,
     ring: &mut KeyRing,
     window: u64,
     partition: u32,
 ) -> Result<(Bytes, u32), KeyError> {
+    seal_batch(std::slice::from_ref(rec), ring, window, partition)?
+        .pop()
+        .ok_or(KeyError::Crypto)
+}
+
+/// Seals a batch into the current window: the slots of all records are reserved together and
+/// their keys derived in one pass over the tree. Returns each record's payload and first leaf.
+pub(crate) fn seal_batch(
+    records: &[Record],
+    ring: &mut KeyRing,
+    window: u64,
+    partition: u32,
+) -> Result<Vec<(Bytes, u32)>, KeyError> {
+    let parts: Vec<(u8, BytesMut, Vec<BytesMut>)> = records.iter().map(parts_of).collect();
+    let total: u32 = parts
+        .iter()
+        .map(|(_, _, sl)| u32::try_from(sl.len()).unwrap_or(u32::MAX))
+        .sum();
+    let first = ring.reserve(window, total).ok_or(KeyError::Crypto)?;
+    let leaves = ring.leaves(window, first, total)?;
+    let meta_key = ring.meta(window).ok_or(KeyError::Crypto)?;
+    let mut out = Vec::with_capacity(records.len());
+    let mut next = 0usize;
+    for (kind, meta, slots) in parts {
+        let n = u32::try_from(slots.len()).map_err(|_| KeyError::Crypto)?;
+        let first_leaf = first + u32::try_from(next).map_err(|_| KeyError::Crypto)?;
+        let mut header = [0u8; HEADER];
+        header[0] = VERSION;
+        header[1] = kind;
+        header[2..10].copy_from_slice(&window.to_be_bytes());
+        header[10..14].copy_from_slice(&first_leaf.to_be_bytes());
+        header[14..18].copy_from_slice(&n.to_be_bytes());
+        let meta_ct = seal_meta(meta_key, &aad(&header, partition, None), &meta)?;
+        let mut buf = BytesMut::with_capacity(
+            HEADER + 4 + meta_ct.len() + slots.iter().map(|s| s.len() + 20).sum::<usize>(),
+        );
+        buf.put_slice(&header);
+        put_bytes(&mut buf, &meta_ct);
+        for (i, plain) in slots.iter().enumerate() {
+            let leaf = leaves
+                .get(next + i)
+                .and_then(Option::as_ref)
+                .ok_or(KeyError::Crypto)?;
+            let i = u32::try_from(i).map_err(|_| KeyError::Crypto)?;
+            let ct = seal_leaf(leaf, &aad(&header, partition, Some(i)), plain)?;
+            put_bytes(&mut buf, &ct);
+        }
+        next += slots.len();
+        out.push((buf.freeze(), first_leaf));
+    }
+    Ok(out)
+}
+
+/// A record's kind, metadata plaintext and slot plaintexts.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one flat match over every record kind"
+)]
+fn parts_of(rec: &Record) -> (u8, BytesMut, Vec<BytesMut>) {
     let mut meta = BytesMut::new();
     let mut slots: Vec<BytesMut> = Vec::new();
     let kind = match rec {
@@ -237,28 +293,7 @@ pub(crate) fn seal(
             KIND_SNAPSHOT
         }
     };
-    let n = u32::try_from(slots.len()).map_err(|_| KeyError::Crypto)?;
-    let first_leaf = ring.reserve(window, n).ok_or(KeyError::Crypto)?;
-    let mut header = [0u8; HEADER];
-    header[0] = VERSION;
-    header[1] = kind;
-    header[2..10].copy_from_slice(&window.to_be_bytes());
-    header[10..14].copy_from_slice(&first_leaf.to_be_bytes());
-    header[14..18].copy_from_slice(&n.to_be_bytes());
-    let meta_key = ring.meta(window).ok_or(KeyError::Crypto)?;
-    let meta_ct = seal_meta(meta_key, &aad(&header, partition, None), &meta)?;
-    let mut out = BytesMut::with_capacity(
-        HEADER + 4 + meta_ct.len() + slots.iter().map(|s| s.len() + 20).sum::<usize>(),
-    );
-    out.put_slice(&header);
-    put_bytes(&mut out, &meta_ct);
-    for (i, s) in slots.iter().enumerate() {
-        let i = u32::try_from(i).map_err(|_| KeyError::Crypto)?;
-        let leaf = ring.leaf(window, first_leaf + i)?.ok_or(KeyError::Crypto)?;
-        let ct = seal_leaf(&leaf, &aad(&header, partition, Some(i)), s)?;
-        put_bytes(&mut out, &ct);
-    }
-    Ok((out.freeze(), first_leaf))
+    (kind, meta, slots)
 }
 
 impl Sealed {

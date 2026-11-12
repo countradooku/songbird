@@ -61,7 +61,7 @@ mod tests {
         assert!(wait <= Duration::from_millis(101) && wait >= Duration::from_millis(99));
         assert!(b.take(t0 + Duration::from_millis(100)).is_ok());
         // Never exceeds the burst after a long pause.
-        let later = t0 + Duration::from_secs(60);
+        let later = t0 + Duration::from_mins(1);
         for _ in 0..3 {
             assert!(b.take(later).is_ok());
         }

@@ -88,7 +88,7 @@ pub async fn serve<M, R>(
     let mut tasks = JoinSet::new();
     // Hourly expiry sweep: nothing undelivered outlives MAX_ENVELOPE_AGE (invariant 3). The
     // worker service takes this over with the SurrealDB store (milestone 5).
-    let mut expiry = tokio::time::interval(Duration::from_secs(3600));
+    let mut expiry = tokio::time::interval(Duration::from_hours(1));
     expiry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {

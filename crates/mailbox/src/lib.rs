@@ -169,11 +169,11 @@ pub struct StoreOutcome {
 }
 
 /// Longest an undelivered envelope is kept (invariant 3).
-pub const MAX_ENVELOPE_AGE: Duration = Duration::from_secs(30 * 24 * 3600);
+pub const MAX_ENVELOPE_AGE: Duration = Duration::from_hours(30 * 24);
 
 /// How long an idempotency key is remembered: the client's retry horizon (D-0021). A send retried
 /// later is stored again and the recipient app drops it by the message ID inside the envelope.
-pub const IDEMPOTENCY_RETENTION: Duration = Duration::from_secs(6 * 3600);
+pub const IDEMPOTENCY_RETENTION: Duration = Duration::from_hours(6);
 
 /// Mailbox failures. All are retryable from the client's point of view.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

@@ -60,6 +60,82 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0036 — Milestone 5: sealed jobs, push that leaks nothing, a minimal account registry, uploads through `api`, deletion proven across every store
+
+- Date: 2026-11-12
+- Status: accepted (design); built and measured in M5
+- Decided by: owner for scope (a minimal account and device registry in SurrealDB now; push
+  tokens and attachment records added to the threat model's list); design by agent under the
+  owner's standing instruction ("think like a Proton founder or a top-tier engineer").
+- Context: M5 builds `jobs` with an outbox, `push`, `worker` and `api` with RustFS uploads. Gate:
+  an offline device receives a push end to end; account deletion verified across every store.
+  No account store existed (delivery read a static file); the mailbox is Iggy (D-0029), owned
+  per partition by delivery nodes (D-0034); RustFS listens on loopback behind an mTLS tunnel
+  (D-0035), so clients can never reach it directly.
+- Decision:
+  - **Account registry (`crates/accounts`, SurrealDB).** Tables `account` and `device` (IDs,
+    the Ed25519 auth key, a `disabled` flag), `directory:version` bumped by every change. Delivery
+    loads its directory from SurrealDB and reloads it when the version changes (polled every
+    second; the static file stays for development). Registration proper (usernames, keys, proof
+    of work) is Prompt 3; until then accounts are created through an internal mutual-TLS endpoint
+    of `api`.
+  - **Jobs (`crates/jobs`, Valkey Streams on `valkey-jobs`).** One stream per kind (`push`,
+    `cleanup`, `deletion`; `backup` arrives with M6), one consumer group each. Jobs carry IDs
+    only, and **every job is sealed** (AES-256-GCM-SIV under a key derived from the jobs secret,
+    bound to the stream and the job ID): `valkey-jobs` persists to disk, and a plaintext queue of
+    device IDs would be a record of who was messaged when. Per-job `XACK` plus `XDEL` (an
+    acknowledged job leaves memory and the AOF rewrite). Stuck jobs: `XPENDING … IDLE` then
+    `XCLAIM` (instead of `XAUTOCLAIM`, because `XPENDING` also returns the delivery count, which
+    bounds retries of a job that crashes its consumer). Failures: exponential backoff with full
+    jitter through a delayed sorted set promoted by a Lua script; after the last attempt a
+    dead-letter stream (capped) with a metric to alert on. Every handler is idempotent.
+  - **Outbox.** A SurrealDB `outbox` table written in the same transaction as the change that
+    needs a job (account deletion); a relay in `api` and `worker` moves rows to the stream and
+    deletes them. A crash between the two repeats a job, which handlers tolerate.
+  - **Delivery → push.** `Routed::Offline` enqueues a push job without touching the hot path:
+    a per-core debounce (one job per device per window) and a bounded buffer flushed as one
+    pipelined `XADD` batch; when Valkey is down the buffer drops and counts (the message is safe
+    in the mailbox; the device fetches it at its next connection; runbook).
+  - **Push tokens.** Registered through `api`, **sealed to the push service's X25519 public key**
+    (ephemeral X25519, HKDF-SHA256, AES-256-GCM; `api` and `worker` hold only the public key, so
+    only `push` can ever read a token), stored under a keyed hash of the device ID (HMAC-SHA256,
+    push-index secret) so the table alone does not link a token to a device. Deleted at once when
+    the provider reports the token unregistered, and with the device.
+  - **Push service.** APNs (HTTP/2, ES256 provider token, `mutable-content: 1`, one generic alert
+    text, constant `apns-collapse-id`), FCM HTTP v1 (OAuth 2 service-account token, high-priority
+    data message with no data, constant `collapse_key`), UnifiedPush (Web Push, RFC 8291
+    `aes128gcm` and RFC 8292 VAPID, constant body). Every push looks identical whatever caused
+    it. Per-device debounce, a circuit breaker per provider, retries through the job queue.
+    Provider credentials exist only in this service's configuration. All crypto through
+    aws-lc-rs; HTTP/2 through `hyper`'s client connection API (adds `h2`).
+  - **API without a framework.** `hyper` server directly (already in the tree), not Axum: a
+    handful of endpoints, bodies bounded before reading, fewer crates to audit. Device requests
+    are signed with the device's Ed25519 key over a domain-separated transcript (method, path,
+    server name, timestamp, nonce, body digest); timestamps within 60 s and nonces single-use
+    (keyed hash in `valkey-hot`, expiring). Account creation and test hooks are on a separate
+    mutual-TLS listener.
+  - **Attachments.** Uploads stream through `api` to RustFS (RustFS is never exposed): a grant
+    fixes an exact padded size and how many recipient fetches are due; the upload must match the
+    size exactly; object names are 32 random bytes (no identifiers). After upload the record holds
+    no link to the uploader. Each download decrements the count; at zero a cleanup job deletes
+    the object, and the worker deletes everything older than 30 days. Our own S3 client (SigV4
+    with aws-lc-rs over `hyper`), instead of the AWS SDK and its dependency tree. Each service
+    gets its own least-privilege RustFS credential (D-0035).
+  - **Account deletion.** `api` disables the account's devices (sessions refused within a
+    directory reload) and writes the outbox row in one transaction. The worker then, each step
+    idempotent: asks delivery, over a mutual-TLS internal link that accepts only `worker.`
+    certificates and only these operations, to close the devices' sessions and **forget** their
+    mailboxes (pending entries acknowledged, so their keys are punctured, and counters dropped;
+    a short tombstone makes a racing send skip the device); deletes push tokens, pending upload
+    grants and their partial objects, device and account rows; repeats the mailbox step after
+    the directory has propagated; and verifies every store holds nothing (SurrealDB rows, mailbox
+    state on the owner, push tokens, RustFS objects of pending grants). Attachments already sent
+    are not linked to the account by design; they go when fetched or after 30 days. Backups are
+    M6's.
+- Consequences: Valkey still learns nothing (routing D-0034; jobs sealed); new metadata limited
+  to the two rows the owner approved; the static directory is no longer the only source of
+  devices, so `delivery` becomes deployable once Prompt 3 adds registration.
+
 ## D-0035 — Object storage: RustFS replaces Garage
 
 - Date: 2026-11-12

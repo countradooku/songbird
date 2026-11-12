@@ -140,7 +140,7 @@ end. The restart takes longer because the key store is loaded and a new window w
 
 ## What the owner needs to decide
 
-1. **Backups and pending messages.** With deletion by key destruction, a backup of the key store
+1. **Backups and pending messages. Accepted by the owner on 2026-11-12.** With deletion by key destruction, a backup of the key store
    would keep the keys of acknowledged messages, so key stores are never backed up, and an Iggy
    backup alone cannot be read. A node that loses its disk loses its undelivered messages (the
    senders saw them accepted) until M4 replicates partitions. Recommended: accept (forward

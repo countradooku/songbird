@@ -153,6 +153,10 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     the node (not tmpfs), never in backups (a backup would keep keys that ACKs destroyed), and
     the master key in the secrets store (D-0010). A restored Iggy backup without its matching
     key store does not start (runbook).
+    **Owner decision (2026-11-12): accepted** ("i accept the backup decision"): key stores are
+    never backed up; a node that loses its disk loses its undelivered messages until M4
+    replicates partitions, as the master prompt's beta targets allow (undelivered envelopes may
+    be lost on total server loss; clients resend on a new `store_generation`).
   - **Limits.** Overwritten and deleted files can survive in SSD flash until garbage collection,
     so an attacker with the raw flash and the master key might recover an older key page: the
     data volumes must use full-disk encryption with a key that never touches the disk

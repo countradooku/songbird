@@ -109,9 +109,13 @@ pub fn iggy_config() -> Option<IggyConfig> {
         user: std::env::var("SONGBIRD_TEST_IGGY_USER").unwrap_or_else(|_| "iggy".into()),
         pass: std::env::var("SONGBIRD_TEST_IGGY_PASS").expect("SONGBIRD_TEST_IGGY_PASS"),
     };
-    let mut cfg = IggyConfig::new(connection, [9; 32]);
     let id = DeviceId::random().unwrap().to_hex_unredacted();
-    cfg.stream = format!("e2e_{}", &id[..16]);
+    let stream = format!("e2e_{}", &id[..16]);
+    let key_dir = std::env::temp_dir().join(format!("songbird-mailbox-keys-{stream}"));
+    let mut master = [0u8; 32];
+    master.copy_from_slice(&DeviceId::random().unwrap().as_bytes().repeat(2));
+    let mut cfg = IggyConfig::new(connection, [9; 32], key_dir, master);
+    cfg.stream = stream;
     cfg.ack_interval = Duration::from_millis(10);
     cfg.timeout = Duration::from_secs(10);
     Some(cfg)

@@ -1,5 +1,6 @@
 //! Settings of the Iggy mailbox and its connections.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -97,6 +98,12 @@ pub struct IggyConfig {
     pub idempotency_secret: [u8; 32],
     /// Store generation (increment after restoring Iggy from a backup).
     pub store_generation: u64,
+    /// Directory of the key files (one per partition), on this host's persistent disk (D-0031).
+    pub key_dir: PathBuf,
+    /// Master key sealing the key files (from a secret; the same on a replacement host).
+    pub master_key: [u8; 32],
+    /// A new key window is opened this often.
+    pub key_window: Duration,
     /// Fault injection for tests: stop a multi-partition send after its home record, as a crash
     /// would (the re-driver must complete it).
     #[doc(hidden)]
@@ -113,9 +120,14 @@ impl std::fmt::Debug for IggyConfig {
 }
 
 impl IggyConfig {
-    /// Defaults for everything but the connection, names and secret.
+    /// Defaults for everything but the connection, the secrets and the key directory.
     #[must_use]
-    pub fn new(connection: IggyConnection, idempotency_secret: [u8; 32]) -> Self {
+    pub fn new(
+        connection: IggyConnection,
+        idempotency_secret: [u8; 32],
+        key_dir: PathBuf,
+        master_key: [u8; 32],
+    ) -> Self {
         Self {
             connection,
             stream: "songbird".into(),
@@ -133,6 +145,9 @@ impl IggyConfig {
             cache_bytes: 64 << 20,
             idempotency_secret,
             store_generation: 1,
+            key_dir,
+            master_key,
+            key_window: Duration::from_secs(600),
             fault_skip_remote_parts: false,
         }
     }

@@ -236,7 +236,7 @@ fn main() {
                     user: "iggy".into(),
                     pass: env("IGGY_PASS"),
                 };
-                let mut cfg = songbird_mailbox::iggy::IggyConfig::new(connection, random_secret());
+                let mut cfg = songbird_mailbox::iggy::IggyConfig::new(connection, random_secret(), std::env::temp_dir().join(format!("songbird-bench-keys-{}", std::process::id())), random_secret());
                 cfg.stream = format!("bench{}", std::process::id());
                 cfg.partitions = setting("PARTITIONS", 4) as u32;
                 cfg.max_batch = max_batch;

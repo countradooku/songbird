@@ -25,6 +25,8 @@ server_name = "localhost"
 # user = "iggy"
 # pass = { env = "IGGY_ROOT_PASSWORD" }
 # idempotency_secret = { file = "/path/to/idempotency-secret.hex" }   # 64 hex chars, mode 0600
+# key_dir = "/var/lib/songbird/mailbox-keys"                           # persistent; losing it loses pending messages
+# master_key = { file = "/path/to/mailbox-master-key.hex" }            # 64 hex chars, mode 0600
 #
 # Or SurrealDB (M2's first design), likewise:
 #

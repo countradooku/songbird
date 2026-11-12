@@ -1,19 +1,22 @@
-//! In-memory state of one partition, rebuilt from the log on start (no I/O here).
+//! In-memory state of one partition, rebuilt from the log on start (no I/O here). It owns the
+//! partition's key ring: every entry that leaves the index (acknowledged, expired, copied forward)
+//! has its leaf punctured here, and a shared body's leaf goes with the record's last entry.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use songbird_types::DeviceId;
 
-use super::record::{Local, Record};
+use super::keys::KeyRing;
 
-/// A pending (un-acknowledged) entry: where its ciphertext is in the log.
+/// A pending (un-acknowledged) entry: where its sealed slot is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Entry {
     pub(crate) seq: u64,
     /// Iggy offset of the record holding it.
     pub(crate) offset: u64,
-    /// Its index in that record.
-    pub(crate) slot: u32,
+    /// Key window and leaf of its slot.
+    pub(crate) window: u64,
+    pub(crate) leaf: u32,
     /// When the send was accepted (ms).
     pub(crate) at_ms: u64,
 }
@@ -26,6 +29,40 @@ pub(crate) struct DeviceState {
     pub(crate) pending: VecDeque<Entry>,
 }
 
+/// A record that still holds pending entries.
+#[derive(Debug, Clone, Copy)]
+struct RecInfo {
+    window: u64,
+    live: u32,
+    /// Leaf of a shared body, punctured with the record's last entry.
+    body_leaf: Option<u32>,
+}
+
+/// What a record says, in the form the state needs (built by the writer from what it appended,
+/// or by replay from what it could open; punctured entries are simply absent).
+#[derive(Debug, Clone)]
+pub(crate) enum Fact {
+    Store {
+        at_ms: u64,
+        tag: Option<[u8; 32]>,
+        mls: Option<([u8; 16], u64)>,
+        /// (device, seq, leaf).
+        entries: Vec<(DeviceId, u64, u32)>,
+        body_leaf: Option<u32>,
+    },
+    Relocate {
+        /// (device, seq, `at_ms`, leaf).
+        entries: Vec<(DeviceId, u64, u64, u32)>,
+    },
+    Ack(Vec<(DeviceId, u64)>),
+    Owner(u16),
+    Snapshot {
+        owner: u16,
+        devices: Vec<(DeviceId, u64, u64)>,
+        groups: Vec<([u8; 16], u64)>,
+    },
+}
+
 /// One partition.
 #[derive(Debug, Default)]
 pub(crate) struct State {
@@ -35,14 +72,18 @@ pub(crate) struct State {
     /// Tag prefix -> offsets of store records carrying a tag with that prefix (verified against
     /// the record on a hit).
     pub(crate) tags: HashMap<u64, TagSlot>,
-    /// Offset -> number of pending entries in the record at that offset.
-    pub(crate) live: BTreeMap<u64, u32>,
+    /// Offset -> records still holding pending entries.
+    records: BTreeMap<u64, RecInfo>,
+    /// Window -> last offset sealed with it.
+    windows: BTreeMap<u64, u64>,
     /// (first offset, `at_ms`) of each appended batch, ascending; maps a time to an offset.
     pub(crate) times: VecDeque<(u64, u64)>,
     /// Highest producer epoch recorded.
     pub(crate) owner_epoch: u16,
     /// Next offset of the partition.
     pub(crate) next_offset: u64,
+    /// The partition's keys.
+    pub(crate) ring: KeyRing,
 }
 
 /// Offsets for one tag prefix (almost always one).
@@ -59,6 +100,14 @@ pub(crate) fn tag_prefix(tag: &[u8; 32]) -> u64 {
 }
 
 impl State {
+    /// A state over a loaded key ring.
+    pub(crate) fn with_ring(ring: KeyRing) -> Self {
+        Self {
+            ring,
+            ..Self::default()
+        }
+    }
+
     /// Offsets whose record may carry `tag`.
     pub(crate) fn tag_candidates(&self, tag: &[u8; 32]) -> Vec<u64> {
         match self.tags.get(&tag_prefix(tag)) {
@@ -98,22 +147,42 @@ impl State {
         });
     }
 
-    fn live_add(&mut self, offset: u64) {
-        *self.live.entry(offset).or_default() += 1;
+    fn puncture(&mut self, window: u64, leaf: u32) {
+        // A failing cipher here would be a broken build; the leaf then stays until the window
+        // is destroyed.
+        let _ = self.ring.puncture(window, leaf);
     }
 
-    fn live_remove(&mut self, offset: u64) {
-        if let Some(n) = self.live.get_mut(&offset) {
-            *n = n.saturating_sub(1);
-            if *n == 0 {
-                self.live.remove(&offset);
+    fn record_add(&mut self, offset: u64, window: u64) {
+        self.records
+            .entry(offset)
+            .or_insert(RecInfo {
+                window,
+                live: 0,
+                body_leaf: None,
+            })
+            .live += 1;
+    }
+
+    fn record_remove(&mut self, offset: u64) {
+        let gone = match self.records.get_mut(&offset) {
+            Some(r) => {
+                r.live = r.live.saturating_sub(1);
+                (r.live == 0).then_some(*r)
+            }
+            None => None,
+        };
+        if let Some(r) = gone {
+            self.records.remove(&offset);
+            if let Some(b) = r.body_leaf {
+                self.puncture(r.window, b);
             }
         }
     }
 
     /// Lowest offset still holding a pending entry.
     pub(crate) fn min_live(&self) -> Option<u64> {
-        self.live.keys().next().copied()
+        self.records.keys().next().copied()
     }
 
     /// The first recorded batch offset at or after `at_ms` (or the head).
@@ -136,17 +205,19 @@ impl State {
         }
     }
 
-    /// Records a new pending entry (keeps `seq` order; a relocated copy replaces the old one).
-    pub(crate) fn insert(&mut self, device: DeviceId, e: Entry) {
+    /// Records a pending entry (keeps `seq` order; a relocated copy replaces the old one, whose
+    /// leaf is punctured). An entry already acknowledged is punctured, not kept.
+    fn insert(&mut self, device: DeviceId, e: Entry) {
         let st = self.devices.entry(device).or_default();
         st.last = st.last.max(e.seq);
         if e.seq <= st.acked {
+            self.puncture(e.window, e.leaf);
             return;
         }
         let pos = st.pending.partition_point(|x| x.seq < e.seq);
         let old = match st.pending.get_mut(pos) {
             Some(x) if x.seq == e.seq => {
-                let old = x.offset;
+                let old = *x;
                 *x = e;
                 Some(old)
             }
@@ -156,22 +227,17 @@ impl State {
             }
         };
         if let Some(o) = old {
-            self.live_remove(o);
+            self.puncture(o.window, o.leaf);
+            self.record_remove(o.offset);
         }
-        self.live_add(e.offset);
+        self.record_add(e.offset, e.window);
     }
 
-    /// Acknowledges `device` up to `seq`.
+    /// Acknowledges `device` up to `seq`: the entries leave the index and their leaves are
+    /// punctured.
     pub(crate) fn ack(&mut self, device: &DeviceId, seq: u64) {
-        let Some(st) = self.devices.get_mut(device) else {
-            let st = DeviceState {
-                last: seq,
-                acked: seq,
-                ..DeviceState::default()
-            };
-            self.devices.insert(*device, st);
-            return;
-        };
+        let st = self.devices.entry(*device).or_default();
+        st.last = st.last.max(seq);
         if seq <= st.acked {
             return;
         }
@@ -179,31 +245,29 @@ impl State {
         let mut gone = Vec::new();
         while st.pending.front().is_some_and(|e| e.seq <= seq) {
             if let Some(e) = st.pending.pop_front() {
-                gone.push(e.offset);
+                gone.push(e);
             }
         }
-        for o in gone {
-            self.live_remove(o);
+        for e in gone {
+            self.puncture(e.window, e.leaf);
+            self.record_remove(e.offset);
         }
     }
 
-    /// Removes entries accepted before `cutoff_ms`; returns how many.
-    pub(crate) fn expire(&mut self, cutoff_ms: u64) -> u64 {
-        let mut gone = Vec::new();
-        for st in self.devices.values_mut() {
-            st.pending.retain(|e| {
-                let keep = e.at_ms >= cutoff_ms;
-                if !keep {
-                    gone.push(e.offset);
-                }
-                keep
-            });
-        }
-        let n = u64::try_from(gone.len()).unwrap_or(u64::MAX);
-        for o in gone {
-            self.live_remove(o);
-        }
-        n
+    /// Devices with entries accepted before `cutoff_ms`, and the highest such `seq` of each.
+    /// Expiry is written as an acknowledgement up to it (entries of a device are in `seq` and
+    /// time order, so the expired ones are a prefix).
+    pub(crate) fn expired(&self, cutoff_ms: u64) -> Vec<(DeviceId, u64)> {
+        self.devices
+            .iter()
+            .filter_map(|(d, st)| {
+                st.pending
+                    .iter()
+                    .take_while(|e| e.at_ms < cutoff_ms)
+                    .last()
+                    .map(|e| (*d, e.seq))
+            })
+            .collect()
     }
 
     /// Pending entries stored in records before `offset`: (device, entry).
@@ -216,65 +280,95 @@ impl State {
                 }
             }
         }
-        out.sort_by_key(|(_, e)| (e.offset, e.slot));
+        out.sort_by_key(|(_, e)| (e.offset, e.leaf));
         out
     }
 
-    /// Applies one record read back from the log at `offset` (start-up replay).
-    pub(crate) fn apply(&mut self, offset: u64, rec: &Record, tag_window_ms: u64, now_ms: u64) {
+    /// Destroys the keys of every window whose records are all below `low` (except `keep`, the
+    /// window being written). Returns how many.
+    pub(crate) fn destroy_windows_below(&mut self, low: u64, keep: Option<u64>) -> usize {
+        let doomed: Vec<u64> = self
+            .windows
+            .iter()
+            .filter(|(w, last)| **last < low && Some(**w) != keep)
+            .map(|(w, _)| *w)
+            .collect();
+        for w in &doomed {
+            self.windows.remove(w);
+            self.ring.destroy(*w);
+        }
+        doomed.len()
+    }
+
+    /// Applies one record at `offset`, sealed in `window`.
+    pub(crate) fn apply(
+        &mut self,
+        offset: u64,
+        window: u64,
+        fact: &Fact,
+        tag_window_ms: u64,
+        now_ms: u64,
+    ) {
         self.next_offset = self.next_offset.max(offset + 1);
-        match rec {
-            Record::Store {
-                tag,
+        let last = self.windows.entry(window).or_default();
+        *last = (*last).max(offset);
+        match fact {
+            Fact::Store {
                 at_ms,
+                tag,
                 mls,
-                local,
-                ..
+                entries,
+                body_leaf,
             } => {
                 self.note_batch(offset, *at_ms);
-                if let (Some((t, _)), true) = (tag, at_ms.saturating_add(tag_window_ms) >= now_ms) {
+                if let (Some(t), true) = (tag, at_ms.saturating_add(tag_window_ms) >= now_ms) {
                     self.add_tag(t, offset);
                 }
                 if let Some((g, e)) = mls {
                     let cur = self.epochs.entry(*g).or_default();
                     *cur = (*cur).max(*e);
                 }
-                for slot in 0..local.len() {
-                    if let Some((d, seq)) = local.entry(slot) {
-                        let slot = u32::try_from(slot).unwrap_or(u32::MAX);
-                        self.insert(
-                            d,
-                            Entry {
-                                seq,
-                                offset,
-                                slot,
-                                at_ms: *at_ms,
-                            },
-                        );
-                    }
-                }
-            }
-            Record::Ack(items) => {
-                for (d, s) in items {
-                    self.ack(d, *s);
-                }
-            }
-            Record::Relocate(items) => {
-                for (slot, (d, seq, at_ms, _)) in items.iter().enumerate() {
-                    let slot = u32::try_from(slot).unwrap_or(u32::MAX);
+                for (d, seq, leaf) in entries {
                     self.insert(
                         *d,
                         Entry {
                             seq: *seq,
                             offset,
-                            slot,
+                            window,
+                            leaf: *leaf,
+                            at_ms: *at_ms,
+                        },
+                    );
+                }
+                if let Some(b) = body_leaf {
+                    match self.records.get_mut(&offset) {
+                        Some(r) => r.body_leaf = Some(*b),
+                        // Nobody left to read it.
+                        None => self.puncture(window, *b),
+                    }
+                }
+            }
+            Fact::Relocate { entries } => {
+                for (d, seq, at_ms, leaf) in entries {
+                    self.insert(
+                        *d,
+                        Entry {
+                            seq: *seq,
+                            offset,
+                            window,
+                            leaf: *leaf,
                             at_ms: *at_ms,
                         },
                     );
                 }
             }
-            Record::Owner { epoch } => self.owner_epoch = self.owner_epoch.max(*epoch),
-            Record::Snapshot {
+            Fact::Ack(items) => {
+                for (d, s) in items {
+                    self.ack(d, *s);
+                }
+            }
+            Fact::Owner(epoch) => self.owner_epoch = self.owner_epoch.max(*epoch),
+            Fact::Snapshot {
                 owner,
                 devices,
                 groups,
@@ -283,10 +377,7 @@ impl State {
                 for (d, last, acked) in devices {
                     let st = self.devices.entry(*d).or_default();
                     st.last = st.last.max(*last);
-                    if *acked > st.acked {
-                        let acked = *acked;
-                        self.ack(d, acked);
-                    }
+                    self.ack(d, *acked);
                 }
                 for (g, e) in groups {
                     let cur = self.epochs.entry(*g).or_default();
@@ -297,75 +388,111 @@ impl State {
     }
 }
 
-/// The (device, seq) pairs of a store record's local entries, in slot order.
-pub(crate) fn local_seqs(local: &Local) -> Vec<(DeviceId, u64)> {
-    (0..local.len()).filter_map(|i| local.entry(i)).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
 
     fn d(b: u8) -> DeviceId {
         DeviceId::from_bytes([b; 16])
     }
 
-    fn store(entries: &[(u8, u64)], at: u64, tag: Option<[u8; 32]>) -> Record {
-        Record::Store {
-            tag: tag.map(|t| (t, [0; 16])),
+    fn state() -> (State, u64) {
+        let mut ring = KeyRing::default();
+        let w = ring.open_window(0).unwrap();
+        ring.reserve(w, 100).unwrap();
+        (State::with_ring(ring), w)
+    }
+
+    fn store(entries: &[(u8, u64, u32)], at: u64, tag: Option<[u8; 32]>) -> Fact {
+        Fact::Store {
             at_ms: at,
+            tag,
             mls: None,
-            local: Local::PerDevice(
-                entries
-                    .iter()
-                    .map(|(b, s)| (d(*b), *s, Bytes::from_static(b"e")))
-                    .collect(),
-            ),
-            remote: vec![],
+            entries: entries.iter().map(|(b, s, l)| (d(*b), *s, *l)).collect(),
+            body_leaf: None,
         }
     }
 
     #[test]
-    fn replay_rebuilds_counters_pending_and_tags() {
-        let mut st = State::default();
-        st.apply(0, &Record::Owner { epoch: 3 }, 1000, 10);
-        st.apply(1, &store(&[(1, 1), (2, 1)], 5, Some([7; 32])), 1000, 10);
-        st.apply(2, &store(&[(1, 2)], 6, None), 1000, 10);
-        st.apply(3, &Record::Ack(vec![(d(1), 1)]), 1000, 10);
+    fn ack_removes_entries_and_punctures_their_leaves() {
+        let (mut st, w) = state();
+        st.apply(0, w, &Fact::Owner(3), 1000, 10);
+        st.apply(
+            1,
+            w,
+            &store(&[(1, 1, 0), (2, 1, 1)], 5, Some([7; 32])),
+            1000,
+            10,
+        );
+        st.apply(2, w, &store(&[(1, 2, 2)], 6, None), 1000, 10);
+        st.apply(3, w, &Fact::Ack(vec![(d(1), 1)]), 1000, 10);
         assert_eq!(st.owner_epoch, 3);
         assert_eq!(st.next_offset, 4);
         let one = &st.devices[&d(1)];
         assert_eq!((one.last, one.acked, one.pending.len()), (2, 1, 1));
         assert_eq!(st.tag_candidates(&[7; 32]), vec![1]);
+        assert!(
+            st.ring.leaf(w, 0).unwrap().is_none(),
+            "acknowledged: punctured"
+        );
+        assert!(st.ring.leaf(w, 1).unwrap().is_some(), "pending: readable");
         assert_eq!(st.min_live(), Some(1));
         st.ack(&d(2), 1);
         assert_eq!(st.min_live(), Some(2));
+        assert!(st.ring.leaf(w, 1).unwrap().is_none());
     }
 
     #[test]
-    fn relocation_replaces_the_old_location() {
-        let mut st = State::default();
-        st.apply(1, &store(&[(1, 1), (1, 2)], 5, None), 1000, 10);
+    fn shared_body_goes_with_the_last_entry() {
+        let (mut st, w) = state();
+        st.apply(
+            1,
+            w,
+            &Fact::Store {
+                at_ms: 1,
+                tag: None,
+                mls: None,
+                entries: vec![(d(1), 1, 0), (d(2), 1, 1)],
+                body_leaf: Some(2),
+            },
+            0,
+            0,
+        );
+        st.ack(&d(1), 1);
+        assert!(
+            st.ring.leaf(w, 2).unwrap().is_some(),
+            "device 2 still needs it"
+        );
+        st.ack(&d(2), 1);
+        assert!(st.ring.leaf(w, 2).unwrap().is_none());
+    }
+
+    #[test]
+    fn relocation_replaces_and_punctures_the_old_location() {
+        let (mut st, w) = state();
+        st.apply(1, w, &store(&[(1, 1, 0), (1, 2, 1)], 5, None), 1000, 10);
         st.apply(
             9,
-            &Record::Relocate(vec![(d(1), 1, 5, Bytes::from_static(b"e"))]),
+            w,
+            &Fact::Relocate {
+                entries: vec![(d(1), 1, 5, 7)],
+            },
             1000,
             10,
         );
         let p = &st.devices[&d(1)].pending;
-        assert_eq!(p.len(), 2);
-        assert_eq!((p[0].seq, p[0].offset, p[0].slot), (1, 9, 0));
-        assert_eq!(st.live.get(&1), Some(&1));
-        assert_eq!(st.live.get(&9), Some(&1));
+        assert_eq!((p[0].seq, p[0].offset, p[0].leaf), (1, 9, 7));
+        assert!(st.ring.leaf(w, 0).unwrap().is_none(), "old copy punctured");
+        assert_eq!(st.min_live(), Some(1));
     }
 
     #[test]
-    fn snapshot_keeps_counters_for_idle_devices() {
-        let mut st = State::default();
+    fn counters_never_go_back() {
+        let (mut st, w) = state();
         st.apply(
             5,
-            &Record::Snapshot {
+            w,
+            &Fact::Snapshot {
                 owner: 2,
                 devices: vec![(d(4), 10, 10)],
                 groups: vec![([1; 16], 3)],
@@ -373,19 +500,43 @@ mod tests {
             0,
             0,
         );
-        let s = &st.devices[&d(4)];
-        assert_eq!((s.last, s.acked), (10, 10));
         assert_eq!(st.epochs[&[1; 16]], 3);
         assert_eq!(st.owner_epoch, 2);
-        // An older store record replayed after it cannot lower the counter or revive entries.
-        st.apply(6, &store(&[(4, 9)], 1, None), 0, 0);
+        // An older entry replayed after it cannot lower the counter or come back; its leaf is
+        // punctured on the way.
+        st.apply(6, w, &store(&[(4, 9, 3)], 1, None), 0, 0);
         assert_eq!(st.devices[&d(4)].last, 10);
         assert!(st.devices[&d(4)].pending.is_empty());
+        assert!(st.ring.leaf(w, 3).unwrap().is_none());
+        // An acknowledgement alone raises the counter (its entry may be unreadable).
+        st.ack(&d(5), 4);
+        assert_eq!(st.devices[&d(5)].last, 4);
+    }
+
+    #[test]
+    fn expiry_is_a_prefix_and_windows_are_destroyed_below_low_water() {
+        let (mut st, w) = state();
+        st.apply(1, w, &store(&[(1, 1, 0)], 100, None), 0, 0);
+        st.apply(2, w, &store(&[(1, 2, 1)], 200, None), 0, 0);
+        assert_eq!(st.offset_at(150), 2);
+        assert_eq!(st.expired(150), vec![(d(1), 1)]);
+        assert_eq!(
+            st.destroy_windows_below(3, Some(w)),
+            0,
+            "the current window stays"
+        );
+        assert_eq!(
+            st.destroy_windows_below(2, None),
+            0,
+            "it still has a record at 2"
+        );
+        assert_eq!(st.destroy_windows_below(3, None), 1);
+        assert!(st.ring.meta(w).is_none());
     }
 
     #[test]
     fn tags_collide_safely_and_prune() {
-        let mut st = State::default();
+        let (mut st, _) = state();
         let mut a = [1u8; 32];
         let mut b = [1u8; 32];
         a[31] = 1;
@@ -397,19 +548,5 @@ mod tests {
         assert_eq!(st.tag_candidates(&b), vec![7]);
         st.prune_tags(8);
         assert!(st.tags.is_empty());
-    }
-
-    #[test]
-    fn expiry_and_times() {
-        let mut st = State::default();
-        st.apply(1, &store(&[(1, 1)], 100, None), 0, 0);
-        st.apply(2, &store(&[(1, 2)], 200, None), 0, 0);
-        assert_eq!(st.offset_at(150), 2);
-        assert_eq!(st.offset_at(999), 3);
-        assert_eq!(st.entries_before(2).len(), 1);
-        assert_eq!(st.expire(150), 1);
-        assert_eq!(st.devices[&d(1)].pending.len(), 1);
-        st.prune_times(2);
-        assert_eq!(st.times.len(), 1);
     }
 }

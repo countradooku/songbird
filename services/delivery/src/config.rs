@@ -307,6 +307,14 @@ pub struct IggySettings {
     pub partitions: u32,
     /// 64 hex characters keying idempotency records; the same on every node.
     pub idempotency_secret: SecretRef,
+    /// Directory of the mailbox key files (one per partition) on this host's persistent disk;
+    /// losing it loses the pending messages (D-0031).
+    pub key_dir: PathBuf,
+    /// 64 hex characters: the master key sealing the key files.
+    pub master_key: SecretRef,
+    /// A new key window is opened this often, in seconds.
+    #[serde(default = "default_key_window_secs")]
+    pub key_window_secs: u64,
     /// Most sends per append.
     #[serde(default = "default_max_batch")]
     pub max_batch: usize,
@@ -342,6 +350,9 @@ const fn default_segment_expiry_secs() -> u64 {
 }
 const fn default_cache_mib() -> usize {
     64
+}
+const fn default_key_window_secs() -> u64 {
+    600
 }
 
 impl Validate for IggySettings {
@@ -389,6 +400,16 @@ impl Validate for IggySettings {
             (1..=65_536).contains(&self.cache_mib),
             "cache_mib",
             "must be in 1..=65536",
+        );
+        v.check(
+            self.key_dir.is_absolute(),
+            "key_dir",
+            "must be an absolute path",
+        );
+        v.check(
+            (60..=3_600).contains(&self.key_window_secs),
+            "key_window_secs",
+            "must be in 60..=3600",
         );
     }
 }

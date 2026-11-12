@@ -27,7 +27,7 @@ fn main() {
                 keep.push(conn.client().await.unwrap());
             }
         } else {
-            let mut cfg = songbird_mailbox::iggy::IggyConfig::new(conn, random_secret());
+            let mut cfg = songbird_mailbox::iggy::IggyConfig::new(conn, random_secret(), std::env::temp_dir().join(format!("songbird-bench-keys-{}", std::process::id())), random_secret());
             cfg.stream = format!("idle{}", std::process::id());
             mb = Some(songbird_mailbox::iggy::IggyMailbox::connect(cfg).await.unwrap());
         }

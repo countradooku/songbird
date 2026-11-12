@@ -159,7 +159,9 @@ pub struct StoreRequest {
 /// Result of [`Mailbox::store`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreOutcome {
-    /// The `seq` of each recipient, in input order.
+    /// The `seq` of each recipient, in input order. On a replay, 0 for a recipient that has
+    /// already acknowledged the entry (stores that delete on acknowledgement cannot read it any
+    /// more; there is nothing left to route).
     pub seqs: Vec<u64>,
     /// The idempotency key was seen before: nothing new was stored and `seqs` are the original
     /// ones.

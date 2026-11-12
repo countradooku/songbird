@@ -74,6 +74,13 @@ pub fn allowed_cpus() -> Vec<usize> {
 }
 
 /// Pins the calling thread to `cpu`.
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "pinning is Linux-only; elsewhere it cannot fail"
+    )
+)]
 fn pin(cpu: usize) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     {

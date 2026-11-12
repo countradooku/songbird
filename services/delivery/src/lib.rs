@@ -14,8 +14,10 @@
 pub mod bucket;
 pub mod config;
 pub mod directory;
+pub mod internal;
 pub mod metrics;
 pub mod ordering;
+pub mod push;
 pub mod server;
 pub mod session;
 pub mod ws;
@@ -23,8 +25,9 @@ pub mod ws;
 use songbird_proto::Limits;
 
 pub use config::{DeliveryConfig, DeliverySettings};
-pub use directory::Directory;
+pub use directory::{Directory, LiveDirectory};
 pub use metrics::DeliveryMetrics;
+pub use push::Pusher;
 
 /// What every session of a process shares (read-only apart from the mailbox and router).
 #[derive(Debug)]
@@ -33,14 +36,16 @@ pub struct Shared<M, R> {
     pub config: DeliverySettings,
     /// Frame limits (from `config.limits`).
     pub limits: Limits,
-    /// Device authentication keys.
-    pub directory: Directory,
+    /// Device authentication keys (reloaded from the registry).
+    pub directory: std::sync::Arc<LiveDirectory>,
     /// The mailbox store.
     pub mailbox: M,
     /// The router.
     pub router: R,
     /// Metrics.
     pub metrics: DeliveryMetrics,
+    /// Push jobs for offline devices (disabled unless configured).
+    pub push: Pusher,
 }
 
 impl<M, R> Shared<M, R> {
@@ -56,10 +61,18 @@ impl<M, R> Shared<M, R> {
         Self {
             limits: config.limits.limits(),
             config,
-            directory,
+            directory: std::sync::Arc::new(directory.into()),
             mailbox,
             router,
             metrics,
+            push: Pusher::disabled(),
         }
+    }
+
+    /// With push jobs for offline devices.
+    #[must_use]
+    pub fn with_push(mut self, push: Pusher) -> Self {
+        self.push = push;
+        self
     }
 }

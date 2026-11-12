@@ -9,6 +9,7 @@ license.workspace = true
 
 [dependencies]
 bytes.workspace = true
+songbird-types.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
 rustls-webpki = { version = "0.103.16", default-features = false, features = ["std"] }

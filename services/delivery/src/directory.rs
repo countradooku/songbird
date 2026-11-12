@@ -1,9 +1,9 @@
 //! Device directory: which devices exist, which account each belongs to, and their
 //! authentication keys.
 //!
-//! Loaded from a static file (development and CI only; refused in staging and production by
-//! configuration validation). The identity service (Prompt 3) replaces it with SurrealDB tables
-//! behind the same calls.
+//! Loaded from the account registry in SurrealDB (D-0036) and reloaded whenever its version
+//! changes ([`LiveDirectory`]: readers take no lock), or from a static file (development and CI
+//! only; refused in staging and production by configuration validation).
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read as _;
@@ -241,6 +241,72 @@ impl Directory {
             Ok(())
         } else {
             Err(m)
+        }
+    }
+}
+
+/// The directory sessions read, swapped whole when the registry changes. Readers take no lock
+/// (`arc-swap`): authentication and the device-list check load the current snapshot.
+#[derive(Debug)]
+pub struct LiveDirectory {
+    current: arc_swap::ArcSwap<Directory>,
+}
+
+impl From<Directory> for LiveDirectory {
+    fn from(d: Directory) -> Self {
+        Self {
+            current: arc_swap::ArcSwap::from_pointee(d),
+        }
+    }
+}
+
+impl LiveDirectory {
+    /// The current snapshot.
+    pub fn load(&self) -> arc_swap::Guard<std::sync::Arc<Directory>> {
+        self.current.load()
+    }
+
+    /// Replaces the snapshot.
+    pub fn store(&self, d: Directory) {
+        self.current.store(std::sync::Arc::new(d));
+    }
+}
+
+/// Keeps a [`LiveDirectory`] in step with the registry: polls its version every `every` and
+/// reloads on a change. A failed poll keeps the last snapshot (sessions keep working; a
+/// deleted device stays authenticated until the registry is back, which the runbook covers).
+pub async fn follow_registry(
+    registry: std::sync::Arc<songbird_accounts::Registry>,
+    live: std::sync::Arc<LiveDirectory>,
+    mut version: i64,
+    every: std::time::Duration,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut tick = tokio::time::interval(every);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {}
+            _ = stop.changed() => return,
+        }
+        let v = match registry.directory_version().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "directory version poll failed");
+                continue;
+            }
+        };
+        if v == version {
+            continue;
+        }
+        match registry.load_directory().await {
+            Ok(rows) => {
+                live.store(Directory::from_accounts(
+                    rows.into_iter().map(|(d, a, k)| (d, k, a)),
+                ));
+                version = v;
+            }
+            Err(e) => tracing::warn!(error = %e, "directory reload failed"),
         }
     }
 }

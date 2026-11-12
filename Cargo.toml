@@ -88,6 +88,9 @@ rustix = { version = "1.1.6", default-features = false, features = ["std", "thre
 # Device directory (D-0032: fastest and best p99 of papaya, scc, dashmap); already in the graph
 # through the Iggy SDK.
 papaya = "=0.2.5"
+# Hot-swapped read-mostly state (the device directory reloaded from SurrealDB, D-0036): readers
+# take no lock (constitution: arc-swap for hot-reloaded configuration).
+arc-swap = "1.9.5"
 # Valkey client for cross-node routing (D-0034); TLS through rustls with the process's aws-lc-rs
 # provider; default features (scripting, streams, geo, bignum, ACL helpers) off.
 redis = { version = "=1.8.1", default-features = false, features = ["tokio-comp", "tokio-rustls-comp"] }

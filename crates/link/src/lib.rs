@@ -11,6 +11,8 @@
 //! - **No identifiers in logs** (invariant 6): errors are counted and logged without peers or
 //!   payloads.
 
+pub mod devices;
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;

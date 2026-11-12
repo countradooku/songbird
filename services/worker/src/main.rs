@@ -26,7 +26,9 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[serde(deny_unknown_fields)]
 struct WorkerConfig {
     common: CommonConfig,
-    worker: WorkerSettings,
+    /// Absent in development: the service idles (smoke test without stores).
+    #[serde(default)]
+    worker: Option<WorkerSettings>,
 }
 
 impl HasCommon for WorkerConfig {
@@ -38,12 +40,17 @@ impl HasCommon for WorkerConfig {
 impl Validate for WorkerConfig {
     fn validate(&self, v: &mut Validator) {
         v.section("common", &self.common);
-        v.section("worker", &self.worker);
-        if self.common.environment.is_deployed() {
+        let deployed = self.common.environment.is_deployed();
+        let Some(w) = &self.worker else {
+            v.check(!deployed, "worker", "is required in staging and production");
+            return;
+        };
+        v.section("worker", w);
+        if deployed {
             v.check(
-                self.worker.s3.tls_ca.is_some() && self.worker.surrealdb.tls_ca.is_some(),
+                w.s3.tls_ca.is_some() && w.surrealdb.tls_ca.is_some() && w.jobs.valkey.tls(),
                 "worker.s3.tls_ca",
-                "and worker.surrealdb.tls_ca are required in staging and production",
+                "worker.surrealdb.tls_ca and worker.jobs.valkey.tls_ca are required in staging and production",
             );
         }
     }
@@ -156,7 +163,7 @@ impl Validate for DeliverySettings {
 }
 
 struct WorkerService {
-    settings: WorkerSettings,
+    settings: Option<WorkerSettings>,
     metrics: WorkerMetrics,
 }
 
@@ -201,7 +208,10 @@ impl Service for WorkerService {
     }
 
     async fn run(self, mut ctx: Ctx) -> Result<(), BoxError> {
-        let s = &self.settings;
+        let Some(s) = &self.settings else {
+            tracing::info!("no [worker] section: idle (development)");
+            return songbird_service::idle_until_shutdown(ctx).await;
+        };
         let db = songbird_accounts::Db::connect(s.surrealdb.config()?).await?;
         let registry = Arc::new(songbird_accounts::Registry::connect(db).await?);
         let queue = Arc::new(

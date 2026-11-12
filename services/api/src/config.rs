@@ -14,8 +14,9 @@ use songbird_types::config::{CommonConfig, Validate, Validator};
 pub struct ApiConfig {
     /// Shared settings.
     pub common: CommonConfig,
-    /// `api` settings.
-    pub api: ApiSettings,
+    /// `api` settings; absent in development, the service idles (smoke test without stores).
+    #[serde(default)]
+    pub api: Option<ApiSettings>,
 }
 
 impl HasCommon for ApiConfig {
@@ -27,22 +28,28 @@ impl HasCommon for ApiConfig {
 impl Validate for ApiConfig {
     fn validate(&self, v: &mut Validator) {
         v.section("common", &self.common);
-        v.section("api", &self.api);
-        if self.common.environment.is_deployed() {
+        let deployed = self.common.environment.is_deployed();
+        let Some(api) = &self.api else {
+            v.check(!deployed, "api", "is required in staging and production");
+            return;
+        };
+        v.section("api", api);
+        if deployed {
+            v.check(api.tls.is_some(), "api.tls", "is required in staging and production");
             v.check(
-                self.api.tls.is_some(),
-                "api.tls",
-                "is required in staging and production",
-            );
-            v.check(
-                self.api.s3.tls_ca.is_some(),
+                api.s3.tls_ca.is_some(),
                 "api.s3.tls_ca",
                 "is required in staging and production",
             );
             v.check(
-                self.api.surrealdb.tls_ca.is_some(),
+                api.surrealdb.tls_ca.is_some(),
                 "api.surrealdb.tls_ca",
                 "is required in staging and production",
+            );
+            v.check(
+                api.valkey_hot.tls() && api.jobs.valkey.tls(),
+                "api.valkey_hot.tls_ca",
+                "and api.jobs.valkey.tls_ca are required in staging and production",
             );
         }
     }

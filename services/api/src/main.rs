@@ -21,7 +21,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 const RELAY_EVERY: Duration = Duration::from_secs(2);
 
 struct Api {
-    settings: ApiSettings,
+    settings: Option<ApiSettings>,
     metrics: ApiMetrics,
     tls: Option<tokio_rustls::TlsAcceptor>,
 }
@@ -105,7 +105,12 @@ impl Service for Api {
     type Config = ApiConfig;
 
     fn new(config: ApiConfig, metrics: &mut Metrics) -> Result<Self, BoxError> {
-        let tls = config.api.tls.as_ref().map(tls_acceptor).transpose()?;
+        let tls = config
+            .api
+            .as_ref()
+            .and_then(|a| a.tls.as_ref())
+            .map(tls_acceptor)
+            .transpose()?;
         let m = ApiMetrics::default();
         m.register(metrics)?;
         Ok(Self {
@@ -116,19 +121,23 @@ impl Service for Api {
     }
 
     async fn run(self, mut ctx: Ctx) -> Result<(), BoxError> {
-        let app = build(&self.settings, self.metrics).await?;
+        let Some(settings) = self.settings else {
+            tracing::info!("no [api] section: idle (development)");
+            return songbird_service::idle_until_shutdown(ctx).await;
+        };
+        let app = build(&settings, self.metrics).await?;
         let (stop_tx, stop_rx) = watch::channel(false);
-        let listener = tokio::net::TcpListener::bind(self.settings.listen).await?;
+        let listener = tokio::net::TcpListener::bind(settings.listen).await?;
         tracing::info!(tls = self.tls.is_some(), "api listening");
         let server = tokio::spawn(songbird_api::server::serve(
             listener,
             self.tls,
             Arc::clone(&app),
-            self.settings.max_connections,
+            settings.max_connections,
             stop_rx.clone(),
         ));
         let mut admin = None;
-        if let Some(a) = &self.settings.admin {
+        if let Some(a) = &settings.admin {
             let chain = std::fs::read(&a.cert_chain)?;
             let key = a.key.resolve()?;
             let ca = std::fs::read(&a.ca)?;

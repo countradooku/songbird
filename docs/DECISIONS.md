@@ -46,11 +46,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   - D-0025: own minimal SurrealDB client instead of the official SDK (264 crates); SurrealDB no
     longer holds the mailbox, but keeps accounts and devices from Prompt 3.
   - D-0028: benchmark compio (owner's suggestion) against per-core Tokio in M3; changing the
-    runtime touches the locked stack. Measured (D-0032): compio +2–4 %; recommendation: stay on
-    per-core Tokio (io_uring attack surface on the public service, Tokio-only Iggy SDK, compio
-    pre-1.0). Owner to confirm.
-- Prompt 2, milestone 3 (report `docs/reports/P02-M3.md`): approve the gate; confirm D-0032's
-  runtime recommendation.
+    runtime touches the locked stack. Decided: per-core Tokio stays (owner, after D-0032's
+    measurement: compio +2–4 %); io_uring is measured again in M7.
+- Prompt 2, milestone 3 (report `docs/reports/P02-M3.md`): approve the gate.
 
 ## Decisions
 
@@ -80,8 +78,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0032 — Milestone 3: thread-per-core runtime, device directory, inboxes, metrics, compio
 
 - Date: 2026-11-12
-- Status: accepted for the parts within the locked stack; the runtime choice (stay on per-core
-  Tokio, D-0028) goes to the owner at the M3 gate
+- Status: accepted; the runtime choice confirmed by the owner (2026-11-12: "let's stick with
+  tokio")
 - Decided by: agent, by benchmark (master prompt §4: "benchmark X against Y, decide by p99 and
   throughput")
 - Context: M1 and M2 ran `delivery` on one current-thread Tokio runtime: one core.
@@ -118,7 +116,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     extra crate and is async-native; sessions keep their per-session bounded inboxes.
   - **Metrics: per-core shards** (`songbird_telemetry::sharded`): one value per core on its own
     128-byte line, summed at scrape; workers name their shard at start.
-  - **compio: not adopted (D-0028), owner to confirm.** Same sockudo-ws echo, 512 connections,
+  - **compio: not adopted (D-0028; owner's decision).** Same sockudo-ws echo, 512 connections,
     4 in flight, 256 bytes (`bench/runtime-echo`): per-core Tokio 176,000–178,000 round trips/s
     on 1 core and 717,000–718,000 on 4; compio (io_uring) 180,000 and 745,000–748,000: +2–4 %,
     p99 alike. Against it: io_uring on the internet-facing service (a large kernel attack surface
@@ -384,8 +382,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0028 — Milestone 3 runtime candidates: per-core Tokio and compio
 
 - Date: 2026-11-11
-- Status: measured in M3 (D-0032): compio +2–4 % on an echo benchmark; the agent recommends staying
-  on per-core Tokio; owner to confirm at the M3 gate
+- Status: decided: stay on per-core Tokio (owner, 2026-11-12: "let's stick with tokio"), after the
+  M3 measurement (D-0032: compio +2–4 % on an echo benchmark). io_uring against epoll is measured
+  again in M7 (master prompt), on the reference hardware
 - Decided by: owner suggestion, recorded by agent
 - Context: the owner pointed out that sockudo-ws supports compio for true thread-per-core. The
   constitution locks "per-core single-threaded Tokio runtimes"; a different runtime is a

@@ -3050,8 +3050,29 @@ version = "0.1.0"
 name = "songbird-api"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
+ "bytes",
+ "futures-core",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "mimalloc",
+ "redis",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "songbird-accounts",
+ "songbird-jobs",
+ "songbird-link",
+ "songbird-s3",
  "songbird-service",
+ "songbird-surreal",
+ "songbird-types",
+ "songbird-valkey",
+ "tokio",
+ "tokio-rustls",
  "tracing",
 ]
 

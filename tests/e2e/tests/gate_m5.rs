@@ -625,3 +625,148 @@ async fn an_offline_device_receives_a_push_end_to_end() {
     running.stop().await;
     let _ = stop.send(true);
 }
+
+/// Numbers for the M5 report (ignored by default; `cargo test -p songbird-e2e --test gate_m5
+/// --release -- --ignored --nocapture m5_numbers`): job queue round trip, push job to provider,
+/// attachment upload and download through `api`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark"]
+#[allow(
+    clippy::print_stdout,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::as_conversions,
+    clippy::many_single_char_names,
+    reason = "benchmark output"
+)]
+async fn m5_numbers() {
+    use songbird_jobs::{ConsumeConfig, Job};
+    use std::time::Instant;
+
+    let Some(e) = stack_env() else { return };
+    let pct = |v: &mut Vec<Duration>, p: f64| {
+        v.sort();
+        v[((v.len() as f64 - 1.0) * p) as usize]
+    };
+
+    // 1. Job queue: enqueue 20,000 push jobs in batches of 256, consume them.
+    let q = queue(&e, "bench").await;
+    let n = 20_000usize;
+    let t = Instant::now();
+    for chunk in (0..n).collect::<Vec<_>>().chunks(256) {
+        let jobs: Vec<Job> = chunk
+            .iter()
+            .map(|_| {
+                Job::new(Work::Push {
+                    device: DeviceId::random().unwrap(),
+                    call: false,
+                })
+                .unwrap()
+            })
+            .collect();
+        q.enqueue(&jobs).await.unwrap();
+    }
+    let enq = t.elapsed();
+    let done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let d2 = Arc::clone(&done);
+    let t = Instant::now();
+    let c = tokio::spawn(songbird_jobs::consume(
+        Arc::clone(&q),
+        Stream::Push,
+        ConsumeConfig {
+            batch: 256,
+            concurrency: 256,
+            ..ConsumeConfig::default()
+        },
+        move |_| {
+            d2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            async { Outcome::Done }
+        },
+        stop_rx,
+    ));
+    while done.load(std::sync::atomic::Ordering::Relaxed) < n {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let cons = t.elapsed();
+    let _ = stop_tx.send(true);
+    c.await.unwrap();
+    println!(
+        "jobs: enqueue {:.0}/s (batches of 256), consume+ack+delete {:.0}/s",
+        n as f64 / enq.as_secs_f64(),
+        n as f64 / cons.as_secs_f64()
+    );
+
+    // 2. Attachments through api: 1 MiB and 16 MiB, upload and download.
+    let registry = registry(&e).await;
+    let s3 = s3(&e);
+    s3.create_bucket().await.unwrap();
+    let dev = Dev::new();
+    registry
+        .create_account(
+            &AccountId::random().unwrap(),
+            &[(dev.id, dev.key().public_key())],
+        )
+        .await
+        .unwrap();
+    let (_, push_public) = songbird_accounts::push_token::key_pair(&[0x24; 32]).unwrap();
+    let app = Arc::new(App {
+        server_name: API.into(),
+        registry: Arc::clone(&registry),
+        s3,
+        queue: Arc::clone(&q),
+        hot: songbird_valkey::ValkeyConn::connect(redis::Client::open(e.hot.as_str()).unwrap())
+            .await
+            .unwrap(),
+        push_public,
+        push_index_secret: PUSH_INDEX,
+        limits: songbird_api::config::AttachmentLimits::default(),
+        metrics: ApiMetrics::default(),
+    });
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_addr = l.local_addr().unwrap();
+    let (stop, rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(songbird_api::server::serve(
+        l,
+        None,
+        Arc::clone(&app),
+        256,
+        rx,
+    ));
+    let api = dev.api(api_addr);
+    for (size, rounds) in [(1usize << 20, 40usize), (16 << 20, 10)] {
+        let (mut up, mut down) = (Vec::new(), Vec::new());
+        let body = Bytes::from(vec![0x5a; size]);
+        for _ in 0..rounds {
+            let g = api
+                .send(
+                    "POST",
+                    "/v1/attachments",
+                    Some(format!(r#"{{"size":{size},"fetches":1}}"#).as_bytes()),
+                )
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&g.1).unwrap();
+            let path = format!("/v1/attachments/{}", v["id"].as_str().unwrap());
+            let t = Instant::now();
+            assert_eq!(api.upload(&path, body.clone()).await.unwrap().0, 201);
+            up.push(t.elapsed());
+            let t = Instant::now();
+            let (st, got) = api.send("GET", &path, None).await.unwrap();
+            assert_eq!((st, got.len()), (200, size));
+            down.push(t.elapsed());
+        }
+        let mib = size as f64 / f64::from(1u32 << 20);
+        println!(
+            "attachments {mib:.0} MiB x{rounds}: upload p50 {:?} p99 {:?} ({:.0} MiB/s at p50); download p50 {:?} p99 {:?} ({:.0} MiB/s at p50)",
+            pct(&mut up, 0.5),
+            pct(&mut up, 0.99),
+            mib / pct(&mut up, 0.5).as_secs_f64(),
+            pct(&mut down, 0.5),
+            pct(&mut down, 0.99),
+            mib / pct(&mut down, 0.5).as_secs_f64(),
+        );
+    }
+    let _ = stop.send(true);
+}

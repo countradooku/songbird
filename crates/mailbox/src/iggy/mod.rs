@@ -33,6 +33,7 @@
 //!   sealed segments below it after the topic's `message_expiry`.
 
 mod keys;
+mod partitions;
 mod record;
 mod sealed;
 mod state;
@@ -41,7 +42,7 @@ mod wire;
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aws_lc_rs::hmac;
@@ -56,6 +57,7 @@ use tokio::sync::{mpsc, oneshot};
 
 pub use self::config::{IggyConfig, IggyConnection};
 use self::keys::KeyFile;
+use self::partitions::{Partitions, Slot};
 use self::record::{Local, Record, Remote};
 use self::sealed::{Meta, OpenError, Sealed};
 use self::state::{Entry, Fact, Idem, State};
@@ -269,7 +271,6 @@ impl LocalReq {
 
 /// A writer's answer: (device, seq) of its part, and whether it was a replay.
 type PartResult = Result<(Vec<(DeviceId, u64)>, bool), MailboxError>;
-type Reply = oneshot::Receiver<PartResult>;
 
 /// A store request for one writer.
 struct StoreJob {
@@ -524,9 +525,8 @@ struct Part {
 
 /// The Iggy mailbox.
 pub struct IggyMailbox {
-    parts: Arc<Vec<Part>>,
+    parts: Arc<Partitions>,
     idem: hmac::Key,
-    timeout: Duration,
     generation: u64,
     fault_skip_remote_parts: bool,
     max_per_device: u64,
@@ -536,7 +536,7 @@ pub struct IggyMailbox {
 impl std::fmt::Debug for IggyMailbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IggyMailbox")
-            .field("partitions", &self.parts.len())
+            .field("partitions", &self.parts.count())
             .finish_non_exhaustive()
     }
 }
@@ -700,8 +700,7 @@ impl IggyMailbox {
         std::fs::create_dir_all(&cfg.key_dir)
             .map_err(|_| IggyMailboxError::Keys { partition: 0 })?;
         let stats = Arc::new(IggyStats::default());
-        let senders: Arc<OnceLock<Vec<mpsc::Sender<Job>>>> = Arc::new(OnceLock::new());
-        let mut parts = Vec::new();
+        let parts = Arc::new(Partitions::new(cfg.partitions, cfg.timeout));
         let mut incomplete = Vec::new();
         for p in 0..cfg.partitions {
             let keys = Arc::new(KeyFile::new(
@@ -736,7 +735,7 @@ impl IggyMailbox {
             let homes = replay(&shared).await?;
             let writer_client = cfg.connection.client().await?;
             let (tx, rx) = mpsc::channel(cfg.queue);
-            let mut w = Writer::new(shared.clone(), writer_client, &cfg, senders.clone());
+            let mut w = Writer::new(shared.clone(), writer_client, &cfg, parts.clone());
             w.start_epoch().await?;
             incomplete.push(homes);
             tokio::spawn(w.run(rx));
@@ -746,13 +745,11 @@ impl IggyMailbox {
                 cfg.connection.client().await?,
                 cfg.idem_flush,
             ));
-            parts.push(Part { tx, shared });
+            parts.set(p, Slot::Local(Arc::new(Part { tx, shared })));
         }
-        let _ = senders.set(parts.iter().map(|p| p.tx.clone()).collect());
         let mailbox = Self {
-            parts: Arc::new(parts),
+            parts,
             idem: hmac::Key::new(hmac::HMAC_SHA256, &cfg.idempotency_secret),
-            timeout: cfg.timeout,
             generation: cfg.store_generation,
             fault_skip_remote_parts: cfg.fault_skip_remote_parts,
             max_per_device: cfg.max_per_device,
@@ -766,18 +763,18 @@ impl IggyMailbox {
     /// replayed tag indexes; an 8-byte prefix match counts as held) have their slots punctured;
     /// the others are re-driven, one home partition at a time.
     async fn resume_parts(&self, incomplete: Vec<Vec<Home>>) {
-        let all: Vec<mpsc::Sender<Job>> = self.parts.iter().map(|p| p.tx.clone()).collect();
         for (home, homes) in incomplete.into_iter().enumerate() {
-            let Some(h) = self.parts.get(home) else {
+            let Some(h) = self.parts.local(u32::try_from(home).unwrap_or(u32::MAX)) else {
                 continue;
             };
             let mut missing = Vec::new();
             for (offset, tag, parts) in homes {
                 let mut redrive = false;
                 for (p, slot) in parts {
+                    // A partition owned by another node is checked by re-driving (idempotent).
                     let held = self
                         .parts
-                        .get(idx(p))
+                        .local(p)
                         .is_some_and(|x| x.shared.lock().idem.contains_key(&tag));
                     if held {
                         let _ = h.tx.send(Job::Puncture(offset, slot)).await;
@@ -793,7 +790,7 @@ impl IggyMailbox {
                 continue;
             }
             let shared = h.shared.clone();
-            let all = all.clone();
+            let all = self.parts.clone();
             let home_tx = h.tx.clone();
             tokio::spawn(async move {
                 for offset in missing {
@@ -813,39 +810,17 @@ impl IggyMailbox {
     #[must_use]
     pub fn is_healthy(&self) -> bool {
         self.parts
+            .locals()
             .iter()
             .all(|p| p.shared.healthy.load(Ordering::Relaxed))
     }
 
     fn partitions(&self) -> u32 {
-        u32::try_from(self.parts.len()).unwrap_or(1)
+        self.parts.count()
     }
 
-    fn part_of(&self, device: &DeviceId) -> Result<&Part, MailboxError> {
-        self.parts
-            .get(idx(partition_of(device, self.partitions())))
-            .ok_or(MailboxError::Unavailable)
-    }
-
-    async fn submit(&self, p: u32, job: StoreJob) -> Result<(), MailboxError> {
-        let part = self.parts.get(idx(p)).ok_or(MailboxError::Unavailable)?;
-        part.tx
-            .send(Job::Store(job))
-            .await
-            .map_err(|_| MailboxError::Unavailable)
-    }
-
-    async fn wait(&self, rx: Reply) -> PartResult {
-        match tokio::time::timeout(self.timeout, rx).await {
-            Ok(Ok(r)) => r,
-            _ => Err(MailboxError::Unavailable),
-        }
-    }
-
-    fn pending_of(&self, device: &DeviceId) -> Result<u64, MailboxError> {
-        let part = self.part_of(device)?;
-        let st = part.shared.lock();
-        Ok(st.devices.get(device).map_or(0, |s| n64(s.pending.len())))
+    fn partition(&self, device: &DeviceId) -> u32 {
+        partition_of(device, self.partitions())
     }
 }
 
@@ -1098,7 +1073,7 @@ struct Writer {
     /// Tag of a multi-partition send -> (home record offset, accepted at, remote partitions not
     /// yet confirmed with their part slots).
     incomplete: HashMap<[u8; 32], Incomplete>,
-    senders: Arc<OnceLock<Vec<mpsc::Sender<Job>>>>,
+    parts: Arc<Partitions>,
     tag_window_ms: u64,
 }
 
@@ -1117,7 +1092,7 @@ impl Writer {
         shared: Arc<Shared>,
         client: IggyClient,
         cfg: &IggyConfig,
-        senders: Arc<OnceLock<Vec<mpsc::Sender<Job>>>>,
+        parts: Arc<Partitions>,
     ) -> Self {
         Self {
             producer_id: cfg.producer_base + u64::from(shared.partition),
@@ -1132,7 +1107,7 @@ impl Writer {
             key_window_ms: ms(cfg.key_window),
             pending_acks: HashMap::new(),
             incomplete: HashMap::new(),
-            senders,
+            parts,
             tag_window_ms: ms(IDEMPOTENCY_RETENTION),
         }
     }
@@ -1393,19 +1368,16 @@ impl Writer {
             .map(|(t, (o, _, _))| (*t, *o))
             .collect();
         let home = self
-            .senders
-            .get()
-            .and_then(|s| s.get(idx(self.shared.partition)))
-            .cloned();
+            .parts
+            .local(self.shared.partition)
+            .map(|p| p.tx.clone());
         for (tag, offset) in stale {
             self.incomplete.remove(&tag);
             let shared = self.shared.clone();
-            let senders = self.senders.clone();
+            let parts = self.parts.clone();
             let Some(home) = home.clone() else { continue };
             tokio::spawn(async move {
-                if let Some(s) = senders.get() {
-                    redrive_with(&shared, s, &home, offset).await;
-                }
+                redrive_with(&shared, &parts, &home, offset).await;
             });
         }
     }
@@ -1700,10 +1672,9 @@ impl Writer {
             return count;
         }
         let me = self
-            .senders
-            .get()
-            .and_then(|s| s.get(idx(self.shared.partition)))
-            .cloned();
+            .parts
+            .local(self.shared.partition)
+            .map(|p| p.tx.clone());
         let Some(me) = me else {
             self.shared.compacting.store(false, Ordering::Release);
             return count;
@@ -1938,12 +1909,7 @@ async fn compactor(shared: Arc<Shared>, moves: Vec<(DeviceId, Entry)>, writer: m
 
 /// The re-driver: stores the remote parts of the home record at `offset` that are still
 /// readable, and tells the home writer to puncture each one stored.
-async fn redrive_with(
-    shared: &Shared,
-    senders: &[mpsc::Sender<Job>],
-    home: &mpsc::Sender<Job>,
-    offset: u64,
-) {
+async fn redrive_with(shared: &Shared, parts: &Partitions, home: &mpsc::Sender<Job>, offset: u64) {
     let mut backoff = Duration::from_millis(100);
     loop {
         let mut all = true;
@@ -1951,36 +1917,28 @@ async fn redrive_with(
             let Meta::Store(m) = shared.meta(&s)? else {
                 return Err(MailboxError::Unavailable);
             };
-            let mut parts = Vec::new();
+            let mut pending = Vec::new();
             for (i, p) in m.remotes.iter().enumerate() {
                 let slot = m.remote_slot(i);
                 if let Some(plain) = shared.slot(&s, slot)? {
                     let r =
                         sealed::decode_remote(&plain, *p).map_err(|_| MailboxError::Unavailable)?;
-                    parts.push((slot, r));
+                    pending.push((slot, r));
                 }
             }
-            Ok((m.tag, parts))
+            Ok((m.tag, pending))
         });
         match opened {
-            Ok((tag, parts)) => {
-                for (slot, r) in parts {
-                    let Some(tx) = senders.get(idx(r.partition)) else {
-                        continue;
-                    };
-                    let (rtx, rrx) = oneshot::channel();
-                    let job = StoreJob {
+            Ok((tag, pending)) => {
+                for (slot, r) in pending {
+                    let p = r.partition;
+                    let job = wire::JobData {
                         tag,
                         mls: None,
                         local: LocalReq::from_remote(r),
                         remote: vec![],
-                        reply: rtx,
                     };
-                    let ok = tx.send(Job::Store(job)).await.is_ok()
-                        && matches!(
-                            tokio::time::timeout(Duration::from_secs(30), rrx).await,
-                            Ok(Ok(Ok(_)))
-                        );
+                    let ok = parts.submit(p, job).await.is_ok();
                     if ok {
                         shared.stats.redriven.fetch_add(1, Ordering::Relaxed);
                         let _ = home.send(Job::Puncture(offset, slot)).await;
@@ -2082,60 +2040,49 @@ impl Mailbox for IggyMailbox {
                 replayed: false,
             });
         }
-        // Capacity check across partitions before anything is written (soft limit).
+        // Capacity check before anything is written (soft limit), where this node holds the
+        // device's partition; an owner elsewhere checks its own when it plans the store.
         for d in &devices {
-            let p = self.part_of(d)?;
-            if p.shared
-                .lock()
-                .devices
-                .get(d)
-                .map_or(0, |s| n64(s.pending.len()))
-                >= self.max_per_device
+            if let Some(p) = self.parts.local(self.partition(d))
+                && partitions::pending_local(&p, d) >= self.max_per_device
             {
                 return Err(MailboxError::Full);
             }
         }
         let mut seq_of: HashMap<DeviceId, u64> = HashMap::with_capacity(devices.len());
-        let (tx, rx) = oneshot::channel();
-        let job = StoreJob {
+        let job = wire::JobData {
             tag,
             mls: req.mls,
             local,
             remote: remote.clone(),
-            reply: tx,
         };
-        self.submit(home, job).await?;
-        let (home_seqs, mut replayed) = self.wait(rx).await?;
+        let (home_seqs, mut replayed) = self.parts.submit(home, job).await?;
         for (d, s) in home_seqs {
             seq_of.insert(d, s);
         }
         if self.fault_skip_remote_parts && !remote.is_empty() {
             return Err(MailboxError::Unavailable);
         }
-        // Remote parts (idempotent under the tag; completed by the re-driver if this fails).
-        let mut waits = Vec::new();
-        for r in remote {
-            let (tx, rx) = oneshot::channel();
+        // Remote parts, in parallel (idempotent under the tag; completed by the re-driver if
+        // this fails).
+        let parts = remote.into_iter().map(|r| {
             let p = r.partition;
-            let job = StoreJob {
+            let job = wire::JobData {
                 tag,
                 mls: None,
                 local: LocalReq::from_remote(r),
                 remote: vec![],
-                reply: tx,
             };
-            self.submit(p, job).await?;
-            waits.push((p, rx));
-        }
-        let home_tx = self.parts.get(idx(home)).map(|p| p.tx.clone());
-        for (p, w) in waits {
-            let (part_seqs, part_replayed) = self.wait(w).await?;
+            async move { (p, self.parts.submit(p, job).await) }
+        });
+        for (p, result) in futures_util::future::join_all(parts).await {
+            let (part_seqs, part_replayed) = result?;
             replayed &= part_replayed;
             for (d, s) in part_seqs {
                 seq_of.insert(d, s);
             }
-            if let (Some(t), Some(h)) = (tag, &home_tx) {
-                let _ = h.send(Job::PartDone(t.0, p)).await;
+            if let Some(t) = tag {
+                self.parts.part_done(home, t.0, p).await;
             }
         }
         // A replay answers 0 for entries already acknowledged (unreadable now: nothing to route).
@@ -2156,51 +2103,23 @@ impl Mailbox for IggyMailbox {
         after_seq: u64,
         limit: usize,
     ) -> Result<Vec<Stored>, MailboxError> {
-        let part = self.part_of(device)?;
-        let entries: Vec<Entry> = {
-            let st = part.shared.lock();
-            st.devices
-                .get(device)
-                .map(|s| {
-                    s.pending
-                        .iter()
-                        .filter(|e| e.seq > after_seq)
-                        .take(limit)
-                        .copied()
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        let offsets: Vec<u64> = entries.iter().map(|e| e.offset).collect();
-        let recs = part.shared.sealed(&part.shared.reader, &offsets).await?;
-        let mut out = Vec::with_capacity(entries.len());
-        for e in entries {
-            let s = recs.get(&e.offset).ok_or(MailboxError::Unavailable)?;
-            out.push(Stored {
-                seq: e.seq,
-                envelope: part.shared.envelope(s, &e)?,
-            });
-        }
-        Ok(out)
+        self.parts
+            .fetch(self.partition(device), *device, after_seq, limit)
+            .await
     }
 
     async fn ack_up_to(&self, device: &DeviceId, up_to_seq: u64) -> Result<(), MailboxError> {
-        self.part_of(device)?
-            .tx
-            .send(Job::Ack(*device, up_to_seq))
+        self.parts
+            .ack(self.partition(device), *device, up_to_seq)
             .await
-            .map_err(|_| MailboxError::Unavailable)
     }
 
+    /// Each node expires the partitions it owns.
     async fn expire_older_than(&self, age: Duration) -> Result<u64, MailboxError> {
         let age_ms = ms(age);
         let mut total = 0;
-        for p in self.parts.iter() {
-            let (tx, rx) = oneshot::channel();
-            p.tx.send(Job::Expire(age_ms, tx))
-                .await
-                .map_err(|_| MailboxError::Unavailable)?;
-            total += rx.await.map_err(|_| MailboxError::Unavailable)?;
+        for p in self.parts.locals() {
+            total += Partitions::expire_local(&p, age_ms).await?;
         }
         Ok(total)
     }
@@ -2209,10 +2128,7 @@ impl Mailbox for IggyMailbox {
         std::future::ready(Ok(self.generation))
     }
 
-    fn count_pending(
-        &self,
-        device: &DeviceId,
-    ) -> impl Future<Output = Result<u64, MailboxError>> + Send {
-        std::future::ready(self.pending_of(device))
+    async fn count_pending(&self, device: &DeviceId) -> Result<u64, MailboxError> {
+        self.parts.pending(self.partition(device), *device).await
     }
 }

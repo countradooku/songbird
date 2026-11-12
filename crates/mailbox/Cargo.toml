@@ -8,6 +8,7 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
+futures-util.workspace = true
 songbird-surreal.workspace = true
 iggy.workspace = true
 rustls.workspace = true

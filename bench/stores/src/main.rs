@@ -243,7 +243,7 @@ fn main() {
                     user: "iggy".into(),
                     pass: env("IGGY_PASS"),
                 };
-                let mut cfg = songbird_mailbox::iggy::IggyConfig::new(connection, random_secret(), std::env::temp_dir().join(format!("songbird-bench-keys-{}", std::process::id())), random_secret());
+                let mut cfg = songbird_mailbox::iggy::IggyConfig::new(connection, random_secret(), private_key_dir(), random_secret());
                 cfg.stream = format!("bench{}", std::process::id());
                 cfg.partitions = setting("PARTITIONS", 4) as u32;
                 cfg.max_batch = max_batch;
@@ -285,6 +285,20 @@ fn main() {
             other => panic!("unknown STORE {other}"),
         }
     });
+}
+
+/// A new private directory for this run's mailbox key stores: an unpredictable name, created
+/// exclusively with mode 0700 under `target/` (never a predictable path in a shared temp dir).
+fn private_key_dir() -> std::path::PathBuf {
+    let parent = std::path::Path::new("target").join("bench-keys");
+    std::fs::create_dir_all(&parent).expect("create target/bench-keys");
+    let name: String = random_secret()[..16].iter().map(|b| format!("{b:02x}")).collect();
+    let dir = parent.join(name);
+    let mut b = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+    b.create(&dir).expect("create a private key directory");
+    dir
 }
 
 /// A fresh random idempotency secret for each benchmark run (never a fixed key).

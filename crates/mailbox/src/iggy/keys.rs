@@ -1243,10 +1243,22 @@ mod tests {
         }
     }
 
+    /// A new private directory under the build's `target/` (unpredictable name, mode 0700).
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("sb-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let parent = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-keys");
+        std::fs::create_dir_all(&parent).unwrap();
+        let tag = random_key().unwrap().0[..8]
+            .iter()
+            .fold(String::new(), |mut t, b| {
+                use std::fmt::Write as _;
+                let _ = write!(t, "{b:02x}");
+                t
+            });
+        let dir = parent.join(format!("{name}-{tag}"));
+        let mut b = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+        b.create(&dir).unwrap();
         dir
     }
 

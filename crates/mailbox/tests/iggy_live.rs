@@ -45,7 +45,8 @@ fn config(name: &str) -> Option<IggyConfig> {
     );
     let mut master = [0u8; 32];
     master.copy_from_slice(&DeviceId::random().unwrap().as_bytes().repeat(2));
-    let key_dir = std::env::temp_dir().join(format!("songbird-mailbox-keys-{stream}"));
+    let key_dir =
+        private_key_dir(&std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("mailbox-keys"));
     let mut cfg = IggyConfig::new(connection, [7; 32], key_dir, master);
     cfg.stream = stream;
     cfg.ack_interval = Duration::from_millis(20);
@@ -54,6 +55,18 @@ fn config(name: &str) -> Option<IggyConfig> {
     cfg.timeout = Duration::from_secs(10);
     cfg.compaction_interval = Duration::from_hours(1);
     Some(cfg)
+}
+
+/// A new private directory for a test's key stores: an unpredictable name, created exclusively
+/// with mode 0700 under the build's own directory (never a predictable path in a shared temp dir).
+fn private_key_dir(parent: &std::path::Path) -> std::path::PathBuf {
+    std::fs::create_dir_all(parent).unwrap();
+    let dir = parent.join(DeviceId::random().unwrap().to_hex_unredacted());
+    let mut b = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+    b.create(&dir).unwrap();
+    dir
 }
 
 fn d(b: u8) -> DeviceId {

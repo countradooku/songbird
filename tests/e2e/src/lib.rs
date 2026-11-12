@@ -90,6 +90,18 @@ pub fn surreal_config() -> Option<SurrealConfig> {
     })
 }
 
+/// A new private directory for a test's key stores: an unpredictable name, created exclusively
+/// with mode 0700 under the build's own directory (never a predictable path in a shared temp dir).
+fn private_key_dir(parent: &std::path::Path) -> std::path::PathBuf {
+    std::fs::create_dir_all(parent).unwrap();
+    let dir = parent.join(DeviceId::random().unwrap().to_hex_unredacted());
+    let mut b = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+    b.create(&dir).unwrap();
+    dir
+}
+
 /// Apache Iggy for the tests, if `SONGBIRD_TEST_IGGY` (`host:port`) and `SONGBIRD_TEST_IGGY_PASS`
 /// are set (`SONGBIRD_TEST_IGGY_USER` defaults to `iggy`); each call gets a fresh stream. With
 /// `SONGBIRD_REQUIRE_IGGY=1` (the compose CI job) a missing server fails the test.
@@ -111,7 +123,9 @@ pub fn iggy_config() -> Option<IggyConfig> {
     };
     let id = DeviceId::random().unwrap().to_hex_unredacted();
     let stream = format!("e2e_{}", &id[..16]);
-    let key_dir = std::env::temp_dir().join(format!("songbird-mailbox-keys-{stream}"));
+    let key_dir = private_key_dir(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-keys"),
+    );
     let mut master = [0u8; 32];
     master.copy_from_slice(&DeviceId::random().unwrap().as_bytes().repeat(2));
     let mut cfg = IggyConfig::new(connection, [9; 32], key_dir, master);

@@ -3095,6 +3095,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "songbird-link"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+]
+
+[[package]]
 name = "songbird-loadgen"
 version = "0.1.0"
 dependencies = [

@@ -3,6 +3,23 @@
 Metrics are on the private admin endpoint (`/metrics`, prefix `songbird_delivery_`). They are
 aggregate counters only; nothing in them or in the logs identifies a device (invariant 6).
 
+## Cores and threads (thread-per-core, D-0032)
+
+- `delivery` runs one worker thread per core (`[delivery.runtime] workers`, 0 = every CPU the
+  process may use), each pinned to its own CPU with its own listener on the same port
+  (`SO_REUSEPORT`: the kernel spreads connections), plus the mailbox's threads
+  (`storage_threads`, default one per Iggy partition) and the main control thread.
+- On a single server, confine it so Iggy and the other stores keep their own cores: run it with a
+  cgroup cpuset (the container's `cpuset`, systemd `AllowedCPUs=`) or `taskset`; pinning follows the
+  allowed CPUs, in order.
+  Give `workers` fewer CPUs than allowed so the mailbox threads have room.
+- Logs at start: `websocket listeners bound cores=N pinned=true` and `mailbox runtime started
+  storage_threads=M`. `cannot pin worker` means the CPU set changed under it: it runs unpinned
+  (slower, still correct).
+- Memory: about 26 KiB per idle connection (report P02-M3): size the host for the connection cap.
+- Kernel settings (open files, `somaxconn`, `tcp_max_syn_backlog`, ephemeral ports) are in
+  `deploy/`; with per-core listeners `backlog` applies to each core's listener.
+
 ## Overload: connections refused (close 4101)
 
 - Detection: `connections_refused_total` rising; clients report 4101 with a retry hint.

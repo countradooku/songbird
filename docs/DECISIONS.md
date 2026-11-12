@@ -46,9 +46,87 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   - D-0025: own minimal SurrealDB client instead of the official SDK (264 crates); SurrealDB no
     longer holds the mailbox, but keeps accounts and devices from Prompt 3.
   - D-0028: benchmark compio (owner's suggestion) against per-core Tokio in M3; changing the
-    runtime touches the locked stack.
+    runtime touches the locked stack. Measured (D-0032): compio +2–4 %; recommendation: stay on
+    per-core Tokio (io_uring attack surface on the public service, Tokio-only Iggy SDK, compio
+    pre-1.0). Owner to confirm.
+- Prompt 2, milestone 3 (report `docs/reports/P02-M3.md`): approve the gate; confirm D-0032's
+  runtime recommendation.
 
 ## Decisions
+
+## D-0033 — Unsafe exception: a test-only counting allocator
+
+- Date: 2026-11-12
+- Status: accepted
+- Decided by: agent (constitution: an `unsafe` exception must be measured, reviewed and recorded)
+- Context: M3's gate requires proving that steady-state delivery does not allocate per message,
+  and keeping the proof in CI. Counting allocations needs a `GlobalAlloc`, which can only be
+  implemented with `unsafe`; every Songbird crate forbids `unsafe_code`.
+- Options considered: `dhat` (does the counting inside its own `unsafe`, but adds about eight crates
+  to the audit backlog and counts process-wide, so the test's clients would be counted with the
+  server); `heaptrack` or valgrind's DHAT (external tools, not a CI assertion; used to attribute the
+  sites); our own allocator in a separate test-only crate.
+- Decision: `crates/alloc-count` (`songbird-alloc-count`): a `GlobalAlloc` that forwards every call
+  to `std::alloc::System` with the caller's own arguments and counts allocations on threads that
+  opted in (a const-initialised thread-local flag, two relaxed atomics). Its lint table is the
+  workspace's except `unsafe_code = "deny"`, allowed on the one `impl` with a `SAFETY` comment per
+  block. No service depends on it; only `tests/e2e` (dev-dependency). Its own test checks the
+  per-thread counting; the deep CI tier runs it under Miri.
+- Evidence: `tests/e2e/tests/allocations.rs` (budget 5.5 allocations per message; measured 5.20),
+  valgrind DHAT attributing each site (report P02-M3).
+- Consequences: one reviewed `unsafe` block family, test-only. Any new `unsafe` elsewhere still
+  needs its own entry.
+
+## D-0032 — Milestone 3: thread-per-core runtime, device directory, inboxes, metrics, compio
+
+- Date: 2026-11-12
+- Status: accepted for the parts within the locked stack; the runtime choice (stay on per-core
+  Tokio, D-0028) goes to the owner at the M3 gate
+- Decided by: agent, by benchmark (master prompt §4: "benchmark X against Y, decide by p99 and
+  throughput")
+- Context: M1 and M2 ran `delivery` on one current-thread Tokio runtime: one core.
+- Hardware for every number below: AMD Ryzen 9 7950X (16 cores, 32 threads), 30 GiB, Linux
+  7.3.1, Rust 1.99.1; NVMe with btrfs (zstd); loopback; same session. Load generator on other
+  physical cores than the server.
+- Decisions:
+  - **Runtime** (`crates/runtime`): one OS thread per worker, pinned to its own CPU
+    (`sched_getaffinity` order, so `taskset` and cgroup cpusets confine it), each running a
+    current-thread Tokio runtime; one listener per worker with `SO_REUSEPORT` (`socket2`), bound
+    on the main thread before workers start. Pinning uses `rustix` (already in the graph, safe
+    API) instead of `core_affinity` (adds `num_cpus`, unmaintained since 2023). No new crates.
+    `[delivery.runtime] workers` (0: every allowed CPU), `pin`, `backlog`, `storage_threads`.
+  - **Storage runtime**: the mailbox runs on its own multi-thread runtime (`storage_threads`,
+    default one per Iggy partition), so partition writers run in parallel beside the delivery
+    cores; on the main thread they capped a node at about 216,000 messages/s and fell to 165,000
+    with 8 cores.
+  - **Device directory: papaya** (`bench/directory`, own lockfile; 200,000 devices, 98 %
+    lookups, 2 % attach/detach churn):
+
+    | Threads | Mutex<HashMap> | papaya | scc 3.8.8 | dashmap 6.2.1 |
+    | --- | --- | --- | --- | --- |
+    | 1 | 44.9 M ops/s | 29.8 M | 36.7 M | 39.0 M |
+    | 4 | 11.3 M (p99 3.7 µs) | 112.4 M (p99 80 ns) | 100.8 M (80 ns) | 100.7 M (90 ns) |
+    | 8 | 7.6 M (p99 8.5 µs) | 215.9 M (90 ns) | 187.2 M (81 ns) | 181.4 M (100 ns) |
+    | 16 | 4.8 M (p99 30.6 µs) | 362.6 M (211 ns) | 134.9 M (381 ns) | 127.9 M (421 ns) |
+
+    papaya has the highest throughput and the best p99 from 8 threads up (its p99.9 is 0.6–0.8 µs
+    from epoch reclamation; scc's 0.1–0.5 µs); already in the graph through the Iggy SDK, vet
+    exempted. Routing reads the session handle under papaya's guard without cloning it.
+  - **Cross-core inbox: tokio mpsc kept.** At 2 M messages/s spread over 8 cores: p99 6–22 µs for
+    tokio mpsc, 7–160 µs for crossbeam with a `Notify`, 0.87 ms for kanal; flat out, tokio and
+    crossbeam both about 22–35 M msgs/s, kanal 13–15 M with 2–11 % drops. tokio mpsc needs no
+    extra crate and is async-native; sessions keep their per-session bounded inboxes.
+  - **Metrics: per-core shards** (`songbird_telemetry::sharded`): one value per core on its own
+    128-byte line, summed at scrape; workers name their shard at start.
+  - **compio: not adopted (D-0028), owner to confirm.** Same sockudo-ws echo, 512 connections,
+    4 in flight, 256 bytes (`bench/runtime-echo`): per-core Tokio 176,000–178,000 round trips/s
+    on 1 core and 717,000–718,000 on 4; compio (io_uring) 180,000 and 745,000–748,000: +2–4 %,
+    p99 alike. Against it: io_uring on the internet-facing service (a large kernel attack surface
+    with a history of privilege-escalation bugs, and the seccomp relaxation the Iggy container
+    already needs), a second runtime per core (the Iggy SDK is Tokio-only), compio is pre-1.0 with
+    breaking minor releases. Revisit with io_uring against epoll in M7.
+- Consequences: throughput scales with cores (report P02-M3: 70,600 messages/s on 1 core to
+  626,000 on 8 with the in-memory mailbox); the Iggy curve and its limits are in the report.
 
 ## D-0031 — Mailbox deletion on acknowledgement: puncturable keys, then physical deletion within minutes
 
@@ -306,7 +384,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0028 — Milestone 3 runtime candidates: per-core Tokio and compio
 
 - Date: 2026-11-11
-- Status: proposed (M3)
+- Status: measured in M3 (D-0032): compio +2–4 % on an echo benchmark; the agent recommends staying
+  on per-core Tokio; owner to confirm at the M3 gate
 - Decided by: owner suggestion, recorded by agent
 - Context: the owner pointed out that sockudo-ws supports compio for true thread-per-core. The
   constitution locks "per-core single-threaded Tokio runtimes"; a different runtime is a

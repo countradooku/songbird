@@ -202,7 +202,7 @@ impl Service for Delivery {
         tracing::info!(
             tls = self.tls.is_some(),
             cores,
-            pin = runtime.pin,
+            pinned = runtime.pin,
             "websocket listeners bound"
         );
         let listeners: Arc<std::sync::Mutex<Vec<Option<std::net::TcpListener>>>> = Arc::new(

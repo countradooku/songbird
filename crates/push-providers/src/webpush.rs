@@ -501,10 +501,12 @@ impl WebPush {
         let Ok(as_private) = PrivateKey::generate(&ECDH_P256) else {
             return Outcome::Failed;
         };
-        let mut salt = [0u8; 16];
-        if aws_lc_rs::rand::fill(&mut salt).is_err() {
+        // A fresh random salt per push (RFC 8291), generated rather than filled in.
+        let Ok(salt) = aws_lc_rs::rand::generate::<[u8; 16]>(&aws_lc_rs::rand::SystemRandom::new())
+            .map(aws_lc_rs::rand::Random::expose)
+        else {
             return Outcome::Failed;
-        }
+        };
         // A key that is not a valid P-256 point can never be pushed to.
         let Some(body) = encrypt(p256dh, auth, PLAINTEXT, PADDED_LEN, &as_private, &salt) else {
             return Outcome::Unregistered;
@@ -652,25 +654,24 @@ mod tests {
         let ua_public: [u8; 65] = arr(ua.compute_public_key().unwrap().as_ref());
         let bin: EcPrivateKeyBin<'static> = ua.as_be_bytes().unwrap();
         let ua_private: [u8; 32] = arr(bin.as_ref());
-        let auth = [7u8; 16];
+        // Random values: this test needs no fixed vector (D-0015).
+        let rng = aws_lc_rs::rand::SystemRandom::new();
+        let random = || {
+            aws_lc_rs::rand::generate::<[u8; 16]>(&rng)
+                .unwrap()
+                .expose()
+        };
+        let (auth, salt, wrong) = (random(), random(), random());
         let as_private = PrivateKey::generate(&ECDH_P256).unwrap();
-        let body = encrypt(
-            &ua_public,
-            &auth,
-            PLAINTEXT,
-            PADDED_LEN,
-            &as_private,
-            &[1; 16],
-        )
-        .unwrap();
+        let body = encrypt(&ua_public, &auth, PLAINTEXT, PADDED_LEN, &as_private, &salt).unwrap();
         assert_eq!(body.len(), 86 + PADDED_LEN + 16);
         assert_eq!(decrypt(&ua_private, &auth, &body).unwrap(), PLAINTEXT);
         // A wrong auth secret does not open it.
-        assert!(decrypt(&ua_private, &[8; 16], &body).is_none());
+        assert!(decrypt(&ua_private, &wrong, &body).is_none());
         // A public key that is not a curve point is refused.
         let mut bad = ua_public;
         bad[64] ^= 1;
-        assert!(encrypt(&bad, &auth, PLAINTEXT, PADDED_LEN, &as_private, &[1; 16]).is_none());
+        assert!(encrypt(&bad, &auth, PLAINTEXT, PADDED_LEN, &as_private, &salt).is_none());
     }
 
     #[test]

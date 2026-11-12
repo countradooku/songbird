@@ -67,8 +67,7 @@ impl Signed {
             return None;
         }
         let ts_ms = ts.parse().ok()?;
-        let mut nonce = [0u8; 16];
-        hex::decode_to_slice(parts.next()?, &mut nonce).ok()?;
+        let nonce: [u8; 16] = hex::decode(parts.next()?).ok()?.try_into().ok()?;
         let mut sig = [0u8; 64];
         hex::decode_to_slice(parts.next()?, &mut sig).ok()?;
         if parts.next().is_some() {
@@ -169,8 +168,10 @@ pub fn sign(
     let ts_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-    let mut nonce = [0u8; 16];
-    let _ = aws_lc_rs::rand::fill(&mut nonce);
+    // Generated, never a fixed value. Without the system's random source no nonce is safe to
+    // send: stop rather than sign with a predictable one.
+    let nonce: [u8; 16] = aws_lc_rs::rand::generate(&aws_lc_rs::rand::SystemRandom::new())
+        .map_or_else(|_| std::process::abort(), aws_lc_rs::rand::Random::expose);
     let hash = body.map(body_sha256);
     let t = transcript(
         server_name,
@@ -249,7 +250,10 @@ mod tests {
             "Signed(<redacted>)"
         );
         assert!(!fresh(0));
-        let k = nonce_key(&DeviceId::from_bytes([9; 16]), &[1; 16]);
+        let n: [u8; 16] = aws_lc_rs::rand::generate(&aws_lc_rs::rand::SystemRandom::new())
+            .unwrap()
+            .expose();
+        let k = nonce_key(&DeviceId::from_bytes([9; 16]), &n);
         assert_eq!(k.len(), 34);
         assert!(!k.contains(&"09".repeat(16)));
     }

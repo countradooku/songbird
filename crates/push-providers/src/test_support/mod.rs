@@ -151,8 +151,9 @@ impl TestSubscription {
         let k = PrivateKey::generate(&ECDH_P256).expect("ecdh key");
         let public = k.compute_public_key().expect("public");
         let bin: EcPrivateKeyBin<'static> = k.as_be_bytes().expect("private");
-        let mut auth = [0u8; 16];
-        aws_lc_rs::rand::fill(&mut auth).expect("rand");
+        let auth: [u8; 16] = aws_lc_rs::rand::generate(&SystemRandom::new())
+            .expect("rand")
+            .expose();
         Self {
             p256dh: public.as_ref().try_into().expect("65 bytes"),
             auth,

@@ -78,10 +78,11 @@ fn random_key() -> Result<Key, KeyError> {
 fn expand(seed: &Key) -> Result<(Key, Key), KeyError> {
     let key = UnboundCipherKey::new(&AES_256, &seed.0).map_err(|_| KeyError::Crypto)?;
     let aes = EncryptingKey::ecb(key).map_err(|_| KeyError::Crypto)?;
+    // Four distinct counter blocks (0, 1, 2, 3 in their first byte).
     let mut buf = [0u8; 64];
-    for (i, block) in buf.chunks_exact_mut(16).enumerate() {
-        if let Some(b) = block.first_mut() {
-            *b = u8::try_from(i).unwrap_or(0);
+    for (i, b) in [(16usize, 1u8), (32, 2), (48, 3)] {
+        if let Some(x) = buf.get_mut(i) {
+            *x = b;
         }
     }
     aes.less_safe_encrypt(&mut buf, EncryptionContext::None)
@@ -90,7 +91,7 @@ fn expand(seed: &Key) -> Result<(Key, Key), KeyError> {
     let mut r = [0u8; 32];
     l.copy_from_slice(buf.get(..32).ok_or(KeyError::Crypto)?);
     r.copy_from_slice(buf.get(32..).ok_or(KeyError::Crypto)?);
-    buf.iter_mut().for_each(|b| *b = 0);
+    buf.fill(0);
     Ok((Key(l), Key(r)))
 }
 
@@ -160,6 +161,7 @@ impl Tree {
     }
 
     /// Frontier size (keys kept).
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.frontier.len()
     }
@@ -231,10 +233,10 @@ impl KeyRing {
 
     /// Punctures a slot (no-op if the window is gone or the slot already punctured).
     pub(crate) fn puncture(&mut self, id: u64, slot: u32) -> Result<(), KeyError> {
-        if let Some(w) = self.windows.get_mut(&id) {
-            if w.tree.puncture(slot)? {
-                self.dirty = true;
-            }
+        if let Some(w) = self.windows.get_mut(&id)
+            && w.tree.puncture(slot)?
+        {
+            self.dirty = true;
         }
         Ok(())
     }
@@ -272,6 +274,7 @@ impl KeyRing {
         out
     }
 
+    #[allow(clippy::many_single_char_names, reason = "a flat decoder")]
     fn decode(b: &[u8]) -> Result<Self, KeyError> {
         let mut r = Rd { b, pos: 0 };
         if r.u8()? != FILE_VERSION {
@@ -402,7 +405,7 @@ impl KeyFile {
             .open_in_place(nonce, Aad::from(self.aad.as_slice()), &mut buf)
             .map_err(|_| KeyError::File)?;
         let ring = KeyRing::decode(plain);
-        buf.iter_mut().for_each(|b| *b = 0);
+        buf.fill(0);
         ring
     }
 
@@ -446,7 +449,8 @@ impl KeyFile {
         write().map_err(|_| KeyError::Write)
     }
 
-    /// Seals and writes (tests and start-up).
+    /// Seals and writes (tests).
+    #[cfg(test)]
     pub(crate) fn store(&self, ring: &KeyRing) -> Result<(), KeyError> {
         self.write(&self.seal(ring)?)
     }
@@ -529,7 +533,7 @@ mod tests {
         for s in (0..64).filter(|s| *s != 5) {
             assert_eq!(
                 t.leaf(s).unwrap().as_ref(),
-                Some(&before[s as usize]),
+                Some(&before[usize::try_from(s).unwrap()]),
                 "slot {s}"
             );
         }

@@ -129,6 +129,10 @@ pub(crate) struct EntrySlot {
 }
 
 /// Seals a record into the current window; returns the payload and the first leaf.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one flat match over every record kind"
+)]
 pub(crate) fn seal(
     rec: &Record,
     ring: &mut KeyRing,
@@ -270,19 +274,19 @@ impl Sealed {
         }
         let u64_at = |i: usize| {
             let mut a = [0u8; 8];
-            a.copy_from_slice(&header[i..i + 8]);
+            a.copy_from_slice(header.get(i..i + 8).unwrap_or(&[0; 8]));
             u64::from_be_bytes(a)
         };
         let u32_at = |i: usize| {
             let mut a = [0u8; 4];
-            a.copy_from_slice(&header[i..i + 4]);
+            a.copy_from_slice(header.get(i..i + 4).unwrap_or(&[0; 4]));
             u32::from_be_bytes(a)
         };
         let window = u64_at(2);
         let first_leaf = u32_at(10);
         let n = u32_at(14);
         let mut pos = HEADER;
-        let mut take = |pos: &mut usize| -> Result<Bytes, OpenError> {
+        let take = |pos: &mut usize| -> Result<Bytes, OpenError> {
             let len_b = payload.get(*pos..*pos + 4).ok_or(OpenError::Malformed)?;
             let mut a = [0u8; 4];
             a.copy_from_slice(len_b);
@@ -516,6 +520,7 @@ impl Rd<'_> {
 }
 
 #[cfg(test)]
+#[allow(clippy::many_single_char_names, reason = "tests")]
 mod tests {
     use super::*;
 

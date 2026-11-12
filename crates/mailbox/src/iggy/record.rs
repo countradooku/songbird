@@ -74,6 +74,7 @@ impl Local {
     }
 
     /// The ciphertext of entry `slot`.
+    #[cfg(test)]
     pub(crate) fn envelope(&self, slot: usize) -> Option<Bytes> {
         match self {
             Self::PerDevice(e) => e.get(slot).map(|(_, _, b)| b.clone()),

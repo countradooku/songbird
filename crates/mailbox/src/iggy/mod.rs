@@ -55,7 +55,7 @@ use tokio::sync::{mpsc, oneshot};
 pub use self::config::{IggyConfig, IggyConnection};
 use self::keys::KeyFile;
 use self::record::{Local, Record, Remote};
-use self::sealed::{Meta, OpenError, Sealed, StoreMeta};
+use self::sealed::{Meta, OpenError, Sealed};
 use self::state::{Entry, Fact, Idem, State};
 use crate::{
     IDEMPOTENCY_RETENTION, MAX_ENVELOPE_AGE, Mailbox, MailboxError, MlsCommit, Payload,
@@ -200,7 +200,9 @@ fn decode_idem(b: &[u8]) -> Option<Vec<([u8; 32], Idem)>> {
     if rest.len() != n.checked_mul(64)? {
         return None;
     }
-    rest.chunks_exact(64)
+    rest.as_chunks::<64>()
+        .0
+        .iter()
         .map(|c| {
             Some((
                 c.get(..32)?.try_into().ok()?,
@@ -435,6 +437,7 @@ impl Shared {
     }
 
     /// The envelope of a pending entry.
+    #[allow(clippy::many_single_char_names, reason = "short-lived locals")]
     fn envelope(&self, s: &Sealed, e: &Entry) -> Result<Bytes, MailboxError> {
         let i = e
             .leaf
@@ -589,10 +592,10 @@ pub async fn forensic_scan(
                     continue;
                 };
                 for i in 0..s.slots() {
-                    if let Ok(Some(plain)) = s.slot(&ring, p, i) {
-                        if contains(&plain) {
-                            open_hits += 1;
-                        }
+                    if let Ok(Some(plain)) = s.slot(&ring, p, i)
+                        && contains(&plain)
+                    {
+                        open_hits += 1;
                     }
                 }
             }
@@ -1038,10 +1041,14 @@ struct Writer {
     idem_pending: Vec<([u8; 32], Idem)>,
     /// Tag of a multi-partition send -> (home record offset, accepted at, remote partitions not
     /// yet confirmed with their part slots).
-    incomplete: HashMap<[u8; 32], (u64, tokio::time::Instant, Vec<(u32, u32)>)>,
+    incomplete: HashMap<[u8; 32], Incomplete>,
     senders: Arc<OnceLock<Vec<mpsc::Sender<Job>>>>,
     tag_window_ms: u64,
 }
+
+/// A multi-partition send's home record offset, when it was accepted, and the remote
+/// partitions not yet confirmed with their part slots.
+type Incomplete = (u64, tokio::time::Instant, Vec<(u32, u32)>);
 
 /// Outcome of a store job before the append.
 enum Plan {
@@ -1818,9 +1825,8 @@ async fn redrive_with(
     loop {
         let mut all = true;
         let opened = shared.one(offset).await.and_then(|s| {
-            let m = match shared.meta(&s)? {
-                Meta::Store(m) => m,
-                _ => return Err(MailboxError::Unavailable),
+            let Meta::Store(m) = shared.meta(&s)? else {
+                return Err(MailboxError::Unavailable);
             };
             let mut parts = Vec::new();
             for (i, p) in m.remotes.iter().enumerate() {

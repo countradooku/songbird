@@ -3288,9 +3288,22 @@ dependencies = [
 name = "songbird-push"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
+ "hex",
  "mimalloc",
+ "prometheus-client",
+ "redis",
+ "serde",
+ "songbird-accounts",
+ "songbird-jobs",
+ "songbird-push-providers",
  "songbird-service",
+ "songbird-surreal",
+ "songbird-types",
+ "songbird-valkey",
+ "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

@@ -1,29 +1,111 @@
-//! Songbird `push` service. Push: consumes push jobs and talks to APNs, FCM and UnifiedPush; holds the only push credentials (Prompt 8).
-//!
-//! Empty for now: it loads and validates its configuration, serves `/metrics`, `/healthz` and
-//! `/readyz`, and drains on SIGTERM.
+//! Songbird `push` service binary. See the library crate for the design.
 #![forbid(unsafe_code)]
 
+use std::sync::Arc;
+use std::time::Duration;
+
+use songbird_jobs::{ConsumeConfig, Queue, QueueConfig, Stream};
+use songbird_push::{Handler, Providers, PushConfig, PushMetrics, PushSettings};
 use songbird_service::telemetry::Metrics;
-use songbird_service::{BasicConfig, BoxError, Ctx, Service};
+use songbird_service::{BoxError, Ctx, Service};
+use zeroize::Zeroizing;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-#[derive(Debug)]
-struct Push;
+/// Everything resolved at startup, before anything connects.
+struct Resolved {
+    surreal: songbird_surreal::Config,
+    jobs: redis::Client,
+    jobs_secret: Zeroizing<[u8; 32]>,
+    push_key: Zeroizing<[u8; 32]>,
+    index_secret: Zeroizing<[u8; 32]>,
+    providers: Providers,
+    concurrency: usize,
+    debounce: Duration,
+}
+
+struct Push {
+    resolved: Option<Resolved>,
+    metrics: PushMetrics,
+}
+
+impl std::fmt::Debug for Push {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Push").finish_non_exhaustive()
+    }
+}
+
+fn resolve(p: &PushSettings) -> Result<Resolved, BoxError> {
+    Ok(Resolved {
+        surreal: p.surrealdb.config()?,
+        jobs: p.jobs.valkey.client()?,
+        jobs_secret: p.jobs.secret.resolve_key32()?,
+        push_key: p.push_key.resolve_key32()?,
+        index_secret: p.push_index_secret.resolve_key32()?,
+        providers: p.providers()?,
+        concurrency: p.concurrency,
+        debounce: Duration::from_millis(p.debounce_ms),
+    })
+}
 
 impl Service for Push {
     const NAME: &'static str = "push";
-    type Config = BasicConfig;
+    type Config = PushConfig;
 
-    fn new(_config: BasicConfig, _metrics: &mut Metrics) -> Result<Self, BoxError> {
-        Ok(Self)
+    fn new(config: PushConfig, metrics: &mut Metrics) -> Result<Self, BoxError> {
+        let resolved = config.push.as_ref().map(resolve).transpose()?;
+        // Fail at startup, not at the first job, if the key is wrong.
+        if let Some(r) = &resolved {
+            songbird_accounts::push_token::key_pair(&r.push_key)
+                .map_err(|_| "push_key is not a valid X25519 private key")?;
+        }
+        let m = PushMetrics::default();
+        m.register(metrics)?;
+        Ok(Self {
+            resolved,
+            metrics: m,
+        })
     }
 
-    async fn run(self, ctx: Ctx) -> Result<(), BoxError> {
-        tracing::debug!("no work yet");
-        songbird_service::idle_until_shutdown(ctx).await
+    async fn run(self, mut ctx: Ctx) -> Result<(), BoxError> {
+        let Some(r) = self.resolved else {
+            tracing::info!("no [push] section: idle (development)");
+            return songbird_service::idle_until_shutdown(ctx).await;
+        };
+        let db = songbird_accounts::Db::connect(r.surreal).await?;
+        let registry = Arc::new(songbird_accounts::Registry::connect(db).await?);
+        let mut id = [0u8; 8];
+        aws_lc_rs::rand::fill(&mut id).map_err(|_| "no system randomness")?;
+        let queue = Queue::connect(
+            r.jobs,
+            &r.jobs_secret,
+            QueueConfig::new(format!("push-{}", hex::encode(id))),
+        )
+        .await?;
+        queue.ensure_groups(&[Stream::Push]).await?;
+        let handler = Handler::new(
+            registry,
+            &r.index_secret,
+            &r.push_key,
+            r.providers,
+            r.debounce,
+            self.metrics,
+        )?;
+        let running = songbird_push::spawn(
+            Arc::new(queue),
+            Arc::new(handler),
+            ConsumeConfig {
+                concurrency: r.concurrency,
+                ..ConsumeConfig::default()
+            },
+        );
+        tracing::info!("consuming push jobs");
+        ctx.health.set_ready(true);
+        ctx.shutdown().await;
+        ctx.health.set_ready(false);
+        running.stop().await;
+        Ok(())
     }
 }
 

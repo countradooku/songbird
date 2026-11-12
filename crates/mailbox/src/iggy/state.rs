@@ -223,7 +223,7 @@ impl State {
         }
     }
 
-    /// Devices with entries accepted before `cutoff_ms`, and the highest such `seq` of each.
+    /// Devices with entries accepted at or before `cutoff_ms`, and the highest such `seq` of each.
     /// Expiry is written as an acknowledgement up to it (entries of a device are in `seq` and
     /// time order, so the expired ones are a prefix).
     pub(crate) fn expired(&self, cutoff_ms: u64) -> Vec<(DeviceId, u64)> {
@@ -232,7 +232,7 @@ impl State {
             .filter_map(|(d, st)| {
                 st.pending
                     .iter()
-                    .take_while(|e| e.at_ms < cutoff_ms)
+                    .take_while(|e| e.at_ms <= cutoff_ms)
                     .last()
                     .map(|e| (*d, e.seq))
             })

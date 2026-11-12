@@ -7,15 +7,20 @@ use std::time::Duration;
 
 use rustls_pki_types::CertificateDer;
 use rustls_pki_types::pem::PemObject as _;
-use songbird_delivery::config::{IggySettings, MailboxBackend, SurrealSettings};
+use songbird_delivery::config::{
+    ClusterSettings, IggySettings, MailboxBackend, RouterBackend, SurrealSettings,
+    ValkeyRouterSettings,
+};
 use songbird_delivery::{
     DeliveryConfig, DeliveryMetrics, DeliverySettings, Directory, Shared, server,
 };
+use songbird_link::LinkTls;
 use songbird_mailbox::AnyMailbox;
-use songbird_mailbox::iggy::{IggyConfig, IggyConnection, IggyMailbox};
+use songbird_mailbox::iggy::{ClusterConfig, IggyConfig, IggyConnection, IggyMailbox};
 use songbird_mailbox::memory::MemoryMailbox;
 use songbird_mailbox::surreal::{SurrealConfig, SurrealMailbox};
-use songbird_router::LocalRouter;
+use songbird_router::valkey::{ValkeyRouter, ValkeyRouterConfig};
+use songbird_router::{AnyRouter, LocalRouter};
 use songbird_service::telemetry::Metrics;
 use songbird_service::{BoxError, Ctx, Service};
 use tokio::sync::watch;
@@ -29,6 +34,78 @@ struct Delivery {
     metrics: DeliveryMetrics,
     tls: Option<tokio_rustls::TlsAcceptor>,
     store: Store,
+    route: Option<ValkeyRouterConfig>,
+}
+
+/// Valkey connection settings resolved at startup: URL with credentials, CA, client identity.
+struct ValkeyConn {
+    url: String,
+    tls_ca_pem: Option<Vec<u8>>,
+    tls_client: Option<(Vec<u8>, Vec<u8>)>,
+}
+
+fn valkey_conn(s: &ValkeyRouterSettings) -> Result<ValkeyConn, BoxError> {
+    let pass = s.pass.resolve()?;
+    let user = s.user.clone().unwrap_or_default();
+    let (scheme, host_port) = match &s.tls_domain {
+        // With TLS the URL names the certificate's host (it must resolve to Valkey).
+        Some(domain) if s.tls_ca.is_some() => {
+            let port = s.addr.rsplit_once(':').map_or("6379", |(_, p)| p);
+            ("rediss", format!("{domain}:{port}"))
+        }
+        _ => ("redis", s.addr.clone()),
+    };
+    let tls_client = match (&s.tls_cert, &s.tls_key) {
+        (Some(cert), Some(key)) => Some((
+            std::fs::read(cert)?,
+            key.resolve()?.expose().as_bytes().to_vec(),
+        )),
+        _ => None,
+    };
+    Ok(ValkeyConn {
+        url: format!("{scheme}://{user}:{}@{host_port}/", pass.expose()),
+        tls_ca_pem: s.tls_ca.as_ref().map(std::fs::read).transpose()?,
+        tls_client,
+    })
+}
+
+/// Resolves the Valkey router settings (secrets, CA) at startup, before anything listens.
+fn router_config(s: &ValkeyRouterSettings) -> Result<ValkeyRouterConfig, BoxError> {
+    let conn = valkey_conn(s)?;
+    let mut node_id = [0u8; 8];
+    aws_lc_rs::rand::fill(&mut node_id).map_err(|_| "no system randomness")?;
+    Ok(ValkeyRouterConfig {
+        url: conn.url,
+        tls_ca_pem: conn.tls_ca_pem,
+        tls_client: conn.tls_client,
+        cluster_secret: idempotency_secret(&s.cluster_secret)
+            .map_err(|_| "cluster_secret must be 64 hex characters")?,
+        subscribers: s.subscribers,
+        node_id: u64::from_be_bytes(node_id),
+    })
+}
+
+/// Resolves cluster mode (D-0034): node link TLS and the lease store (the router's Valkey).
+fn cluster_config(
+    c: &ClusterSettings,
+    valkey: &ValkeyRouterSettings,
+) -> Result<ClusterConfig, BoxError> {
+    let chain = std::fs::read(&c.cert_chain)?;
+    let key = c.key.resolve()?;
+    let ca = std::fs::read(&c.ca)?;
+    let link_tls = LinkTls::from_pem(&chain, key.expose().as_bytes(), &ca, &c.node_name)?;
+    let conn = valkey_conn(valkey)?;
+    Ok(ClusterConfig {
+        node_name: c.node_name.clone(),
+        link_listen: c.link_listen,
+        link_advertise: c.link_advertise,
+        link_tls,
+        valkey_url: conn.url,
+        valkey_tls_ca_pem: conn.tls_ca_pem,
+        valkey_tls_client: conn.tls_client,
+        lease_ttl: Duration::from_millis(c.lease_ttl_ms),
+        zone: c.zone.clone(),
+    })
 }
 
 /// The mailbox store chosen by configuration, resolved before anything listens.
@@ -155,12 +232,26 @@ impl Service for Delivery {
             }
             MailboxBackend::Iggy => {
                 let s = d.mailbox.iggy.as_ref().ok_or("mailbox.iggy is required")?;
-                Store::Iggy(Box::new(iggy_config(
-                    s,
-                    d.mailbox.max_per_device,
-                    d.mailbox.store_generation,
-                )?))
+                let mut cfg = iggy_config(s, d.mailbox.max_per_device, d.mailbox.store_generation)?;
+                if let Some(c) = &d.cluster {
+                    let valkey = d
+                        .router
+                        .valkey
+                        .as_ref()
+                        .ok_or("cluster needs router.valkey")?;
+                    cfg.cluster = Some(cluster_config(c, valkey)?);
+                }
+                Store::Iggy(Box::new(cfg))
             }
+        };
+        let route = match d.router.backend {
+            RouterBackend::Local => None,
+            RouterBackend::Valkey => Some(router_config(
+                d.router
+                    .valkey
+                    .as_ref()
+                    .ok_or("router.valkey is required")?,
+            )?),
         };
         let m = DeliveryMetrics::default();
         m.register(metrics)?;
@@ -170,6 +261,7 @@ impl Service for Delivery {
             metrics: m,
             tls,
             store,
+            route,
         })
     }
 
@@ -195,6 +287,8 @@ impl Service for Delivery {
             .spawn(open_mailbox(store, max_per_device, generation))
             .await??;
         tracing::info!(storage_threads, "mailbox runtime started");
+        // The router's subscriber tasks also live on the storage runtime.
+        let router = storage.handle().spawn(open_router(self.route)).await??;
         let cores = runtime.worker_count();
         // One listener per core on the same address: the kernel spreads connections (D-0032).
         let listeners =
@@ -212,7 +306,7 @@ impl Service for Delivery {
             self.settings,
             self.directory,
             mailbox,
-            LocalRouter::new(),
+            router,
             self.metrics,
         ));
         let (stop_tx, stop_rx) = watch::channel(false);
@@ -266,6 +360,11 @@ impl Service for Delivery {
         watcher.abort();
         let _ = stop_tx.send(true);
         let panicked = serve.await?;
+        // Cluster mode: key stores written and replicated, leases released, so the standbys take
+        // over at once instead of after a lease period.
+        if let AnyMailbox::Iggy(m) = &shared.mailbox {
+            m.shutdown().await;
+        }
         drop(shared);
         drop(storage);
         if panicked > 0 {
@@ -293,6 +392,18 @@ async fn open_mailbox(
             AnyMailbox::Iggy(m)
         }
         Store::Memory => AnyMailbox::Memory(MemoryMailbox::new(max_per_device, generation)),
+    })
+}
+
+/// The configured router (Valkey: connected on the storage runtime, where its subscribers run).
+async fn open_router(cfg: Option<ValkeyRouterConfig>) -> Result<AnyRouter, BoxError> {
+    Ok(match cfg {
+        None => AnyRouter::Local(LocalRouter::new()),
+        Some(cfg) => {
+            let r = ValkeyRouter::connect(cfg).await?;
+            tracing::info!("valkey router connected");
+            AnyRouter::Valkey(Box::new(r))
+        }
     })
 }
 

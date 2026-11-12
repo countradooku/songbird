@@ -55,6 +55,15 @@ impl Validate for DeliveryConfig {
                 "delivery.mailbox.iggy.tls_ca",
                 "and tls_domain are required in staging and production",
             );
+            v.check(
+                d.router.backend == RouterBackend::Local
+                    || d.router
+                        .valkey
+                        .as_ref()
+                        .is_some_and(|s| s.tls_ca.is_some() && s.tls_cert.is_some()),
+                "delivery.router.valkey.tls_ca",
+                "and tls_cert are required in staging and production",
+            );
         }
         v.check(
             d.session.drain_window_ms < self.common.shutdown_grace_secs.saturating_mul(1000),
@@ -90,6 +99,153 @@ pub struct DeliverySettings {
     /// Thread-per-core runtime.
     #[serde(default)]
     pub runtime: RuntimeSettings,
+    /// Routing between nodes.
+    #[serde(default)]
+    pub router: RouterConfig,
+    /// Several nodes sharing the mailbox (D-0034); absent: this node runs every partition.
+    #[serde(default)]
+    pub cluster: Option<ClusterSettings>,
+}
+
+/// `[delivery.cluster]`: this node in a cluster of delivery nodes sharing the Iggy topic. Leases
+/// and membership live in the router's Valkey; nodes talk over node links with mutual TLS.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterSettings {
+    /// This node's name, the one its certificate is for (`delivery.<host>.songbird.internal`).
+    pub node_name: String,
+    /// Where the node link listener binds (private address).
+    pub link_listen: SocketAddr,
+    /// The address other nodes reach it at.
+    pub link_advertise: SocketAddr,
+    /// PEM certificate chain (internal CA), leaf first.
+    pub cert_chain: PathBuf,
+    /// PEM private key.
+    pub key: SecretRef,
+    /// PEM root of the internal CA.
+    pub ca: PathBuf,
+    /// Partition lease length in milliseconds (renewed every third of it; a dead owner's
+    /// partitions move after about this long).
+    #[serde(default = "default_lease_ttl_ms")]
+    pub lease_ttl_ms: u64,
+    /// This node's failure domain (zone or rack, `[a-z0-9-]`, at most 32 bytes): each
+    /// partition's second standby is placed in a zone neither its owner nor its first standby
+    /// is in. Empty: no zones.
+    #[serde(default)]
+    pub zone: String,
+}
+
+const fn default_lease_ttl_ms() -> u64 {
+    3_000
+}
+
+impl Validate for ClusterSettings {
+    fn validate(&self, v: &mut Validator) {
+        v.check(
+            self.node_name.starts_with("delivery.")
+                && self.node_name.ends_with(".songbird.internal"),
+            "node_name",
+            "must be delivery.<host>.songbird.internal",
+        );
+        v.check(
+            (1_000..=60_000).contains(&self.lease_ttl_ms),
+            "lease_ttl_ms",
+            "must be in 1000..=60000",
+        );
+        v.check(
+            self.zone.len() <= 32
+                && self
+                    .zone
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+            "zone",
+            "must be [a-z0-9-], at most 32 bytes",
+        );
+    }
+}
+
+/// Router backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RouterBackend {
+    /// Within this process only (one node).
+    #[default]
+    Local,
+    /// Across nodes over Valkey pub/sub (D-0034).
+    Valkey,
+}
+
+/// `[delivery.router]`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RouterConfig {
+    /// Backend.
+    pub backend: RouterBackend,
+    /// Valkey settings (required for `valkey`).
+    pub valkey: Option<ValkeyRouterSettings>,
+}
+
+/// `[delivery.router.valkey]`: Valkey sees only keyed channel names and sealed payloads
+/// (D-0034).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValkeyRouterSettings {
+    /// `host:port`.
+    pub addr: String,
+    /// TLS server name (required with `tls_ca`).
+    #[serde(default)]
+    pub tls_domain: Option<String>,
+    /// PEM root of the internal CA; TLS is on when set.
+    #[serde(default)]
+    pub tls_ca: Option<PathBuf>,
+    /// ACL user (default user when absent).
+    #[serde(default)]
+    pub user: Option<String>,
+    /// Password.
+    pub pass: SecretRef,
+    /// PEM client certificate chain (Valkey requires client certificates in deployments).
+    #[serde(default)]
+    pub tls_cert: Option<PathBuf>,
+    /// PEM client key.
+    #[serde(default)]
+    pub tls_key: Option<SecretRef>,
+    /// 64 hex characters, the same on every node: channel names and payload keys derive from it.
+    pub cluster_secret: SecretRef,
+    /// Subscriber connections.
+    #[serde(default = "default_subscribers")]
+    pub subscribers: usize,
+}
+
+const fn default_subscribers() -> usize {
+    4
+}
+
+impl Validate for RouterConfig {
+    fn validate(&self, v: &mut Validator) {
+        v.check(
+            self.backend != RouterBackend::Valkey || self.valkey.is_some(),
+            "valkey",
+            "is required for the valkey backend",
+        );
+        if let Some(s) = &self.valkey {
+            v.check(!s.addr.is_empty(), "valkey.addr", "must be host:port");
+            v.check(
+                (1..=64).contains(&s.subscribers),
+                "valkey.subscribers",
+                "must be in 1..=64",
+            );
+            v.check(
+                s.tls_ca.is_none() || s.tls_domain.is_some(),
+                "valkey.tls_domain",
+                "is required with tls_ca",
+            );
+            v.check(
+                s.tls_cert.is_some() == s.tls_key.is_some(),
+                "valkey.tls_key",
+                "and tls_cert go together",
+            );
+        }
+    }
 }
 
 /// `[delivery.runtime]`: one pinned worker thread per core, each with its own listener
@@ -173,6 +329,20 @@ impl Validate for DeliverySettings {
         v.section("session", &self.session);
         v.section("mailbox", &self.mailbox);
         v.section("runtime", &self.runtime);
+        v.section("router", &self.router);
+        if let Some(c) = &self.cluster {
+            v.section("cluster", c);
+            v.check(
+                self.mailbox.backend == MailboxBackend::Iggy,
+                "cluster",
+                "needs the iggy mailbox",
+            );
+            v.check(
+                self.router.backend == RouterBackend::Valkey,
+                "cluster",
+                "needs the valkey router (leases live there)",
+            );
+        }
     }
 }
 

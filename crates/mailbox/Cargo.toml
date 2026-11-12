@@ -8,6 +8,10 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
+redis.workspace = true
+songbird-link.workspace = true
+songbird-router.workspace = true
+futures-util.workspace = true
 songbird-surreal.workspace = true
 iggy.workspace = true
 rustls.workspace = true
@@ -21,6 +25,8 @@ tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 
 [dev-dependencies]
+tracing-subscriber.workspace = true
+rcgen.workspace = true
 proptest.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 

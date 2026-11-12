@@ -17,6 +17,9 @@
 //! (one channel per device) behind the same trait.
 #![forbid(unsafe_code)]
 
+pub mod conn;
+pub mod valkey;
+
 use std::future::{Future, ready};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -166,6 +169,32 @@ impl LocalRouter {
         self.sessions.len()
     }
 
+    /// Whether a session holds `device` here.
+    #[must_use]
+    pub fn holds(&self, device: &DeviceId) -> bool {
+        self.sessions.pin().contains_key(device)
+    }
+
+    /// Drops this node's session for `device` (a newer one connected on another node): it is
+    /// signalled to close as replaced (invariant 4). Returns whether one was held.
+    pub fn evict(&self, device: &DeviceId) -> bool {
+        match self.sessions.pin().remove(device) {
+            Some(h) => {
+                h.signals.replace();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Marks every session lagged so each drains its mailbox (after routing may have lost
+    /// notifications, e.g. a Valkey reconnect).
+    pub fn lag_all(&self) {
+        for (_, h) in &self.sessions.pin() {
+            h.signals.lag();
+        }
+    }
+
     fn attach_now(&self, device: DeviceId, sizes: InboxSizes) -> Inbox {
         let (live_tx, live) = mpsc::channel(sizes.live.max(1));
         let (eph_tx, ephemeral) = mpsc::channel(sizes.ephemeral.max(1));
@@ -234,6 +263,45 @@ impl Router for LocalRouter {
             },
         };
         ready(r)
+    }
+}
+
+/// The router chosen at start-up from configuration.
+#[derive(Debug)]
+pub enum AnyRouter {
+    /// One node (development, tests, a single server).
+    Local(LocalRouter),
+    /// Several nodes over Valkey (D-0034); boxed, it is much larger than the local router.
+    Valkey(Box<valkey::ValkeyRouter>),
+}
+
+impl Router for AnyRouter {
+    async fn attach(&self, device: DeviceId, sizes: InboxSizes) -> Inbox {
+        match self {
+            Self::Local(r) => r.attach(device, sizes).await,
+            Self::Valkey(r) => r.attach(device, sizes).await,
+        }
+    }
+
+    async fn detach(&self, device: &DeviceId, conn: u64) {
+        match self {
+            Self::Local(r) => r.detach(device, conn).await,
+            Self::Valkey(r) => r.detach(device, conn).await,
+        }
+    }
+
+    async fn route(&self, device: &DeviceId, live: Live) -> Routed {
+        match self {
+            Self::Local(r) => r.route(device, live).await,
+            Self::Valkey(r) => r.route(device, live).await,
+        }
+    }
+
+    async fn route_ephemeral(&self, device: &DeviceId, payload: Bytes) -> Routed {
+        match self {
+            Self::Local(r) => r.route_ephemeral(device, payload).await,
+            Self::Valkey(r) => r.route_ephemeral(device, payload).await,
+        }
     }
 }
 

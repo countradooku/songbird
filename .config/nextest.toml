@@ -9,3 +9,17 @@ failure-output = "immediate-final"
 
 [profile.ci.junit]
 path = "junit.xml"
+
+# Tests against the shared Valkey run one at a time: some drop every Valkey connection on purpose
+# (a restart), which would break the others mid-test. (Within one test binary a lock does this;
+# nextest runs each test in its own process.)
+[test-groups]
+valkey = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(valkey_live) | binary(iggy_cluster)'
+test-group = 'valkey'
+
+[[profile.ci.overrides]]
+filter = 'binary(valkey_live) | binary(iggy_cluster)'
+test-group = 'valkey'

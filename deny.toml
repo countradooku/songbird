@@ -19,11 +19,13 @@ allow = [
     "Unicode-3.0",
 ]
 confidence-threshold = 0.93
-# Per-crate exceptions, each recorded in docs/DECISIONS.md (D-0030: Iggy SDK dependencies).
+# Per-crate exceptions, each recorded in docs/DECISIONS.md (D-0030: Iggy SDK dependencies;
+# D-0034: the Valkey client).
 exceptions = [
     { allow = ["Zlib"], crate = "foldhash" },
     { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
     { allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs" },
+    { allow = ["BSL-1.0"], crate = "xxhash-rust" },
 ]
 
 [licenses.private]

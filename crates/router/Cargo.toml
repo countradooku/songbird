@@ -11,10 +11,18 @@ license.workspace = true
 songbird-types.workspace = true
 bytes.workspace = true
 papaya.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+redis.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+aws-lc-rs.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["sync", "rt", "time", "macros"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["sync", "rt", "macros"] }
+redis.workspace = true
+futures-util.workspace = true
+tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
 
 [lints]
 workspace = true

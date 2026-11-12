@@ -436,3 +436,192 @@ async fn account_deletion_is_verified_across_every_store() {
 
     let _ = stop.send(true);
 }
+
+/// Gate: an offline device receives a push end to end. Bob writes to Alice's phone while it is
+/// offline: delivery stores the messages, finds no session, queues a sealed push job (one per
+/// burst); the push service opens Alice's sealed registration and wakes the phone through
+/// (mock) APNs with the constant, identifier-free alert. The phone connects and reads every
+/// message from its mailbox. While it is online, no push is sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_offline_device_receives_a_push_end_to_end() {
+    use songbird_push_providers::apns::{Apns, ApnsConfig};
+    use songbird_push_providers::test_support::{MockServer, TestCa, p256_pkcs8};
+
+    let Some(e) = stack_env() else { return };
+    let registry = registry(&e).await;
+    let s3 = s3(&e);
+    s3.create_bucket().await.unwrap();
+    let (alice, bob) = (AccountId::random().unwrap(), AccountId::random().unwrap());
+    let (a1, b1) = (Dev::new(), Dev::new());
+    registry
+        .create_account(&alice, &[(a1.id, a1.key().public_key())])
+        .await
+        .unwrap();
+    registry
+        .create_account(&bob, &[(b1.id, b1.key().public_key())])
+        .await
+        .unwrap();
+
+    // Delivery with push jobs.
+    let rows = registry.load_directory().await.unwrap();
+    let mut cfg = settings();
+    cfg.listen = "127.0.0.1:0".parse().unwrap();
+    let listener = tokio::net::TcpListener::bind(cfg.listen).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let metrics = DeliveryMetrics::default();
+    let (pusher, rx) = songbird_delivery::Pusher::new(metrics.clone());
+    let shared = Arc::new(
+        Shared::new(
+            cfg,
+            Directory::from_accounts(rows.into_iter().map(|(d, a, k)| (d, k, a))),
+            test_mailbox().await,
+            LocalRouter::new(),
+            metrics.clone(),
+        )
+        .with_push(pusher),
+    );
+    let (stop, stop_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(server::serve(
+        listener,
+        None,
+        Arc::clone(&shared),
+        stop_rx.clone(),
+    ));
+    tokio::spawn(songbird_delivery::push::run(
+        queue(&e, "gate-delivery").await,
+        rx,
+        Duration::from_secs(5),
+        metrics.clone(),
+        stop_rx.clone(),
+    ));
+
+    // api: Alice registers her APNs token (sealed to the push service's key).
+    let push_key = [0x24; 32];
+    let (_, push_public) = songbird_accounts::push_token::key_pair(&push_key).unwrap();
+    let app = Arc::new(App {
+        server_name: API.into(),
+        registry: Arc::clone(&registry),
+        s3,
+        queue: queue(&e, "gate-api").await,
+        hot: songbird_valkey::ValkeyConn::connect(redis::Client::open(e.hot.as_str()).unwrap())
+            .await
+            .unwrap(),
+        push_public,
+        push_index_secret: PUSH_INDEX,
+        limits: songbird_api::config::AttachmentLimits::default(),
+        metrics: ApiMetrics::default(),
+    });
+    let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_addr = api_listener.local_addr().unwrap();
+    tokio::spawn(songbird_api::server::serve(
+        api_listener,
+        None,
+        Arc::clone(&app),
+        64,
+        stop_rx.clone(),
+    ));
+    let token = [0xa7u8; 32];
+    let body = format!(r#"{{"apns":{{"token":"{}"}}}}"#, hex::encode(token));
+    assert_eq!(
+        a1.api(api_addr)
+            .send("PUT", "/v1/push", Some(body.as_bytes()))
+            .await
+            .unwrap()
+            .0,
+        204
+    );
+
+    // The push service, against mock APNs.
+    let ca = TestCa::new();
+    let apns_mock = MockServer::apns(&ca).await;
+    let mut apns_cfg = ApnsConfig::new("TEAM123456", "KEYID12345", "eu.songbird.app");
+    apns_cfg.base_url = apns_mock.url();
+    apns_cfg.http = ca.http_config();
+    let handler = songbird_push::Handler::new(
+        Arc::clone(&registry),
+        &PUSH_INDEX,
+        &push_key,
+        songbird_push::Providers {
+            apns: Some(Apns::with_pkcs8_der(apns_cfg, &p256_pkcs8()).unwrap()),
+            ..songbird_push::Providers::default()
+        },
+        Duration::from_secs(1),
+        songbird_push::PushMetrics::default(),
+    )
+    .unwrap();
+    let running = songbird_push::spawn(
+        queue(&e, "gate-push").await,
+        Arc::new(handler),
+        songbird_jobs::ConsumeConfig {
+            housekeeping: Duration::from_millis(50),
+            ..songbird_jobs::ConsumeConfig::default()
+        },
+    );
+
+    // Bob writes three messages to Alice's offline phone.
+    let client_cfg = || {
+        let mut c = songbird_client::ClientConfig::new(addr.to_string(), SERVER_NAME);
+        c.backoff.initial = Duration::from_millis(20);
+        c.backoff.max = Duration::from_millis(200);
+        c
+    };
+    let (mut bob_c, _bev) =
+        songbird_client::Client::start(client_cfg(), b1.key(), ResumeState::default());
+    bob_c.wait_for(songbird_client::State::Connected).await;
+    for i in 0..3 {
+        let r = bob_c
+            .send(key(), vec![to(a1.id, format!("hello-{i}"))])
+            .await
+            .unwrap();
+        assert_eq!(r, SendStatus::Accepted);
+    }
+    // One wake-up for the burst, with the constant alert and nothing of the device.
+    let mut woke = false;
+    for _ in 0..200 {
+        if !apns_mock.requests().is_empty() {
+            woke = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(woke, "no push reached APNs");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let reqs = apns_mock.requests();
+    assert_eq!(reqs.len(), 1, "one push per burst");
+    let r = &reqs[0];
+    assert_eq!(r.path, format!("/3/device/{}", hex::encode(token)));
+    assert_eq!(r.header("apns-push-type"), Some("alert"));
+    assert_eq!(
+        r.body,
+        br#"{"aps":{"alert":{"body":"New message","title":"Songbird"},"mutable-content":1}}"#
+    );
+    let seen: Vec<u8> = r
+        .headers
+        .iter()
+        .flat_map(|(k, v)| [k.as_bytes(), v.as_bytes()].concat())
+        .chain(r.body.iter().copied())
+        .chain(r.path.bytes())
+        .collect();
+    for id in [a1.id.as_bytes(), b1.id.as_bytes(), alice.as_bytes()] {
+        assert!(!contains_id(&seen, id), "an identifier reached APNs");
+    }
+
+    // The phone wakes, connects, and reads every message from its mailbox, in order.
+    let (mut a1_c, mut a1_ev) =
+        songbird_client::Client::start(client_cfg(), a1.key(), ResumeState::default());
+    a1_c.wait_for(songbird_client::State::Connected).await;
+    for i in 0..3u64 {
+        let (seq, env) = next_delivery(&mut a1_ev).await;
+        assert_eq!(seq, i + 1);
+        assert_eq!(&env[..], format!("hello-{i}").as_bytes());
+    }
+    // Online: messages go straight to the session, no push.
+    let before = metrics.push_jobs.get();
+    bob_c.send(key(), vec![to(a1.id, "live")]).await.unwrap();
+    assert_eq!(&next_delivery(&mut a1_ev).await.1[..], b"live");
+    assert_eq!(metrics.push_jobs.get(), before);
+    assert_eq!(apns_mock.requests().len(), 1);
+
+    running.stop().await;
+    let _ = stop.send(true);
+}

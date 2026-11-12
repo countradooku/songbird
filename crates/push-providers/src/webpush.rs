@@ -472,10 +472,11 @@ impl WebPush {
         Some(v)
     }
 
-    /// Resolves the endpoint's host to an address that passes the SSRF rules.
-    async fn resolve(&self, ep: &Endpoint) -> Result<SocketAddr, Outcome> {
+    /// Resolves the endpoint's host to the addresses that pass the SSRF rules (every answer is
+    /// checked; the connection is made only to these).
+    async fn resolve(&self, ep: &Endpoint) -> Result<Vec<SocketAddr>, Outcome> {
         if let Some(ip) = ep.ip {
-            return Ok(SocketAddr::new(ip, ep.port));
+            return Ok(vec![SocketAddr::new(ip, ep.port)]);
         }
         let lookup = tokio::time::timeout(
             self.connect_timeout,
@@ -486,15 +487,15 @@ impl WebPush {
             Ok(Ok(it)) => it.take(MAX_ADDRS).collect(),
             _ => return Err(Outcome::Retry { after: None }),
         };
-        let Some(first) = addrs.first() else {
+        if addrs.is_empty() {
             return Err(Outcome::Retry { after: None });
-        };
+        }
         // One forbidden answer taints the name (DNS rebinding, split answers).
         if !self.insecure && addrs.iter().any(|a| is_forbidden_ip(a.ip())) {
             tracing::warn!("web push endpoint resolves to a forbidden address; refused");
             return Err(Outcome::Failed);
         }
-        Ok(*first)
+        Ok(addrs)
     }
 
     async fn deliver(&self, ep: &Endpoint, p256dh: &[u8; 65], auth: &[u8; 16]) -> Outcome {
@@ -529,8 +530,8 @@ impl WebPush {
             return Outcome::Failed;
         };
         let send = async {
-            let addr = self.resolve(ep).await?;
-            h1_once(addr, &ep.host, &self.tls, self.connect_timeout, req)
+            let addrs = self.resolve(ep).await?;
+            h1_once(&addrs, &ep.host, &self.tls, self.connect_timeout, req)
                 .await
                 .map_err(|e| {
                     tracing::debug!(error = %e, "web push request failed");

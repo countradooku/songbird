@@ -348,19 +348,26 @@ pub(crate) async fn h2_once(
     Ok(read(resp).await)
 }
 
-/// One request over HTTP/1.1 on a fresh TLS connection to `addr` (already resolved and checked),
-/// presenting `host` for SNI and certificate verification.
+/// One request over HTTP/1.1 on a fresh TLS connection to the first of `addrs` (already resolved
+/// and checked) that accepts, presenting `host` for SNI and certificate verification. Trying each
+/// address in turn keeps a host with one dead address family (an unreachable IPv6 answer, found
+/// by CI where `localhost` resolved to `::1` first) reachable.
 pub(crate) async fn h1_once(
-    addr: SocketAddr,
+    addrs: &[SocketAddr],
     host: &str,
     connector: &TlsConnector,
     connect_timeout: Duration,
     req: Request<Body>,
 ) -> Result<Reply, NetError> {
     let connect = async {
-        let tcp = TcpStream::connect(addr)
-            .await
-            .map_err(|_| NetError::Connect)?;
+        let mut tcp = None;
+        for addr in addrs {
+            if let Ok(t) = TcpStream::connect(addr).await {
+                tcp = Some(t);
+                break;
+            }
+        }
+        let tcp = tcp.ok_or(NetError::Connect)?;
         tls_connect(connector, tcp, host).await
     };
     let tls = tokio::time::timeout(connect_timeout, connect)
@@ -418,5 +425,39 @@ mod tests {
         c.connections = 17;
         assert!(c.validate().is_err());
         assert!(!format!("{:?}", HttpConfig::default()).contains("TrustAnchor"));
+    }
+
+    /// A host whose first address is dead (as `::1` was for `localhost` on the Linux CI
+    /// runner, with the server on `127.0.0.1` only) is still reached through the next one.
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn a_dead_first_address_falls_through_to_the_next() {
+        use crate::test_support::{MockServer, TestCa};
+        let ca = TestCa::new();
+        let mock = MockServer::web_push(&ca).await;
+        // A port nothing listens on.
+        let dead = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+        let connector = tls_connector(&ca.http_config().roots, &[b"http/1.1"]).unwrap();
+        let req = || {
+            Request::builder()
+                .method("POST")
+                .uri("/wpush/x")
+                .header("host", "localhost")
+                .body(Full::new(Bytes::from_static(b"x")))
+                .unwrap()
+        };
+        let t = Duration::from_secs(5);
+        assert!(
+            h1_once(&[dead], "localhost", &connector, t, req())
+                .await
+                .is_err()
+        );
+        let r = h1_once(&[dead, mock.addr()], "localhost", &connector, t, req())
+            .await
+            .unwrap();
+        assert!(r.status.is_success(), "{}", r.status);
     }
 }

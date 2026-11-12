@@ -79,9 +79,16 @@ async fn run<M: Mailbox>(m: Arc<M>) {
         let m = m.clone();
         tasks.push(tokio::spawn(async move {
             let mut rng = Rng(run_id ^ (t + 1).wrapping_mul(0xA24B_AED4_963E_E407) | 1);
-            let env = Bytes::from(vec![0xAB; size]);
+            // Envelopes are ciphertext in production: random bytes, so a compressing file system
+            // (btrfs zstd) cannot flatter a store that writes them in the clear.
+            let mut env_rng = Rng(rng.next() | 1);
             let mut r = Result_ { retries: 0, sends: 0, entries: 0, errors: 0, lat: Vec::new(), seqs: Vec::new() };
             while Instant::now() < deadline {
+                let env: Vec<u8> = (0..size.div_ceil(8))
+                    .flat_map(|_| env_rng.next().to_le_bytes())
+                    .take(size)
+                    .collect();
+                let env = Bytes::from(env);
                 let mut devs: Vec<DeviceId> = Vec::with_capacity(recipients);
                 while devs.len() < recipients {
                     let d = device(rng.next() % devices, run_id);
@@ -236,7 +243,7 @@ fn main() {
                     user: "iggy".into(),
                     pass: env("IGGY_PASS"),
                 };
-                let mut cfg = songbird_mailbox::iggy::IggyConfig::new(connection, random_secret());
+                let mut cfg = songbird_mailbox::iggy::IggyConfig::new(connection, random_secret(), private_key_dir(), random_secret());
                 cfg.stream = format!("bench{}", std::process::id());
                 cfg.partitions = setting("PARTITIONS", 4) as u32;
                 cfg.max_batch = max_batch;
@@ -278,6 +285,20 @@ fn main() {
             other => panic!("unknown STORE {other}"),
         }
     });
+}
+
+/// A new private directory for this run's mailbox key stores: an unpredictable name, created
+/// exclusively with mode 0700 under `target/` (never a predictable path in a shared temp dir).
+fn private_key_dir() -> std::path::PathBuf {
+    let parent = std::path::Path::new("target").join("bench-keys");
+    std::fs::create_dir_all(&parent).expect("create target/bench-keys");
+    let name: String = random_secret()[..16].iter().map(|b| format!("{b:02x}")).collect();
+    let dir = parent.join(name);
+    let mut b = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+    b.create(&dir).expect("create a private key directory");
+    dir
 }
 
 /// A fresh random idempotency secret for each benchmark run (never a fixed key).

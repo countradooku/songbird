@@ -1,5 +1,6 @@
 //! Settings of the Iggy mailbox and its connections.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -91,12 +92,28 @@ pub struct IggyConfig {
     /// Sealed segments below the low-water offset are deleted after this (topic
     /// `message_expiry`, set when the topic is created).
     pub segment_expiry: Duration,
+    /// Size of the topic's segments (set when the topic is created). Iggy deletes whole sealed
+    /// segments only, so the time to fill one is part of how long delivered ciphertext stays on
+    /// disk: size it to the traffic.
+    pub segment_bytes: u64,
     /// Record payloads kept in memory per partition for reads (bytes).
     pub cache_bytes: usize,
     /// HMAC key for idempotency tags.
     pub idempotency_secret: [u8; 32],
     /// Store generation (increment after restoring Iggy from a backup).
     pub store_generation: u64,
+    /// Directory of the key stores (a directory per partition), on this host's persistent disk (D-0031).
+    pub key_dir: PathBuf,
+    /// Master key sealing the key stores (from a secret; the same on a replacement host).
+    pub master_key: [u8; 32],
+    /// A new key window is opened this often.
+    pub key_window: Duration,
+    /// The key store is written this often (when it changed): an acknowledged message's key
+    /// leaves the disk within about this long.
+    pub key_interval: Duration,
+    /// Idempotency entries are written to the idempotency topic this often (off the write path);
+    /// until then they hold the low-water offset back.
+    pub idem_flush: Duration,
     /// Fault injection for tests: stop a multi-partition send after its home record, as a crash
     /// would (the re-driver must complete it).
     #[doc(hidden)]
@@ -113,9 +130,14 @@ impl std::fmt::Debug for IggyConfig {
 }
 
 impl IggyConfig {
-    /// Defaults for everything but the connection, names and secret.
+    /// Defaults for everything but the connection, the secrets and the key directory.
     #[must_use]
-    pub fn new(connection: IggyConnection, idempotency_secret: [u8; 32]) -> Self {
+    pub fn new(
+        connection: IggyConnection,
+        idempotency_secret: [u8; 32],
+        key_dir: PathBuf,
+        master_key: [u8; 32],
+    ) -> Self {
         Self {
             connection,
             stream: "songbird".into(),
@@ -127,12 +149,18 @@ impl IggyConfig {
             max_per_device: 10_000,
             ack_interval: Duration::from_millis(50),
             timeout: Duration::from_secs(5),
-            compaction_interval: Duration::from_secs(60),
-            relocate_after: Duration::from_secs(3600),
-            segment_expiry: Duration::from_secs(8 * 3600),
+            compaction_interval: Duration::from_mins(1),
+            relocate_after: Duration::from_mins(15),
+            segment_expiry: Duration::from_mins(10),
+            segment_bytes: 16 << 20,
             cache_bytes: 64 << 20,
             idempotency_secret,
             store_generation: 1,
+            key_dir,
+            master_key,
+            key_window: Duration::from_mins(10),
+            key_interval: Duration::from_secs(1),
+            idem_flush: Duration::from_secs(1),
             fault_skip_remote_parts: false,
         }
     }

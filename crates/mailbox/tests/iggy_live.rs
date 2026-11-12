@@ -34,8 +34,7 @@ fn config(name: &str) -> Option<IggyConfig> {
         user: std::env::var("SONGBIRD_TEST_IGGY_USER").unwrap_or_else(|_| "iggy".into()),
         pass: std::env::var("SONGBIRD_TEST_IGGY_PASS").expect("SONGBIRD_TEST_IGGY_PASS"),
     };
-    let mut cfg = IggyConfig::new(connection, [7; 32]);
-    cfg.stream = format!(
+    let stream = format!(
         "t_{name}_{}_{}",
         std::process::id(),
         DeviceId::random()
@@ -44,10 +43,30 @@ fn config(name: &str) -> Option<IggyConfig> {
             .get(..8)
             .unwrap()
     );
+    let mut master = [0u8; 32];
+    master.copy_from_slice(&DeviceId::random().unwrap().as_bytes().repeat(2));
+    let key_dir =
+        private_key_dir(&std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("mailbox-keys"));
+    let mut cfg = IggyConfig::new(connection, [7; 32], key_dir, master);
+    cfg.stream = stream;
     cfg.ack_interval = Duration::from_millis(20);
+    cfg.key_interval = Duration::from_millis(50);
+    cfg.idem_flush = Duration::from_millis(20);
     cfg.timeout = Duration::from_secs(10);
-    cfg.compaction_interval = Duration::from_secs(3600);
+    cfg.compaction_interval = Duration::from_hours(1);
     Some(cfg)
+}
+
+/// A new private directory for a test's key stores: an unpredictable name, created exclusively
+/// with mode 0700 under the build's own directory (never a predictable path in a shared temp dir).
+fn private_key_dir(parent: &std::path::Path) -> std::path::PathBuf {
+    std::fs::create_dir_all(parent).unwrap();
+    let dir = parent.join(DeviceId::random().unwrap().to_hex_unredacted());
+    let mut b = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+    b.create(&dir).unwrap();
+    dir
 }
 
 fn d(b: u8) -> DeviceId {
@@ -280,6 +299,7 @@ async fn restart_rebuilds_state_and_fences_the_old_writer() {
             break;
         }
         assert!(Instant::now() < deadline, "old writer still accepted {r:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(second.is_healthy());
 }
@@ -301,7 +321,7 @@ async fn compaction_relocates_and_keeps_counters_across_restart() {
     // Expire nothing (30 days), but compact: busy's entries are copied forward, the counters
     // snapshotted and the low-water offset moved past everything older.
     assert_eq!(
-        m.expire_older_than(Duration::from_secs(30 * 24 * 3600))
+        m.expire_older_than(Duration::from_hours(30 * 24))
             .await
             .unwrap(),
         0
@@ -438,4 +458,191 @@ async fn start_up_refuses_an_unreadable_log() {
         }) => {}
         other => panic!("expected Unreadable, got {other:?}"),
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_never_reuses_key_slots() {
+    let Some(mut cfg) = config("slots") else {
+        return;
+    };
+    // The key store is written only when a window opens: records appended after that are on
+    // the log but not in the key store's slot count, as after a crash.
+    cfg.key_interval = Duration::from_hours(1);
+    let x = d(0x51);
+    let first = IggyMailbox::connect(cfg.clone()).await.unwrap();
+    for _ in 0..5 {
+        first.store(per(&[(x, "before")])).await.unwrap();
+    }
+    let again = IggyMailbox::connect(cfg.clone()).await.unwrap();
+    for _ in 0..5 {
+        again.store(per(&[(x, "after")])).await.unwrap();
+    }
+    // Acknowledging the messages from before the restart must not touch the ones after it.
+    again.ack_up_to(&x, 5).await.unwrap();
+    wait_pending(&again, &x, 5).await;
+    let got = again.fetch_after(&x, 5, 10).await.unwrap();
+    assert_eq!(
+        got.iter().map(|s| s.seq).collect::<Vec<_>>(),
+        vec![6, 7, 8, 9, 10]
+    );
+    assert!(got.iter().all(|s| s.envelope.as_ref() == b"after"));
+    drop(first);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn start_up_refuses_a_lost_key_page() {
+    use songbird_mailbox::iggy::IggyMailboxError;
+    let Some(cfg) = config("lostpage") else {
+        return;
+    };
+    let m = IggyMailbox::connect(cfg.clone()).await.unwrap();
+    for i in 0..20u8 {
+        m.store(per(&[(d(i), "pending")])).await.unwrap();
+    }
+    // The pending keys reach their pages.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let mut lost = 0;
+    for dir in std::fs::read_dir(&cfg.key_dir).unwrap().flatten() {
+        for f in std::fs::read_dir(dir.path()).unwrap().flatten() {
+            if f.file_name().to_string_lossy().starts_with('w') {
+                std::fs::remove_file(f.path()).unwrap();
+                lost += 1;
+            }
+        }
+    }
+    assert!(lost > 0, "no key pages written");
+    // Pending messages would otherwise look acknowledged and vanish: the mailbox does not start.
+    match IggyMailbox::connect(cfg).await {
+        Err(IggyMailboxError::Keys { .. }) => {}
+        other => panic!("expected Keys, got {:?}", other.map(|_| ())),
+    }
+}
+
+/// Waits until an attacker with the Iggy data, the key files and the master key opens exactly
+/// `want` plaintexts containing `marker` (`usize::MAX`: at least one).
+async fn wait_openable(cfg: &IggyConfig, marker: &[u8], want: usize) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (_, open) = songbird_mailbox::iggy::forensic_scan(cfg, marker)
+            .await
+            .unwrap();
+        if open == want || (want == usize::MAX && open > 0) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "openable {open}, want {want}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn acknowledged_messages_cannot_be_decrypted_even_with_every_key() {
+    let Some(cfg) = config("forensic") else {
+        return;
+    };
+    let m = IggyMailbox::connect(cfg.clone()).await.unwrap();
+    let (a, b) = (d(0x31), d(0x32));
+    m.store(per(&[(a, "MARK-alpha-0001")])).await.unwrap();
+    m.store(per(&[(b, "MARK-beta-00002")])).await.unwrap();
+    let group = devices(3);
+    m.store(StoreRequest {
+        idempotency_key: Some([5; 16]),
+        mls: None,
+        payload: Payload::Shared {
+            devices: group.clone(),
+            body: Bytes::from_static(b"MARK-group-body"),
+        },
+    })
+    .await
+    .unwrap();
+    // Nothing is in the log in the clear.
+    let (raw, _) = songbird_mailbox::iggy::forensic_scan(&cfg, b"MARK-")
+        .await
+        .unwrap();
+    assert_eq!(raw, 0, "plaintext in the log");
+    // While pending, the holder of every key can read them (otherwise they would be lost).
+    wait_openable(&cfg, b"MARK-alpha", 1).await;
+    // A group body is stored once per partition its recipients live on.
+    wait_openable(&cfg, b"MARK-group-body", usize::MAX).await;
+    // Acknowledged: unreadable with the key state on disk, while the other stays readable.
+    m.ack_up_to(&a, 1).await.unwrap();
+    wait_openable(&cfg, b"MARK-alpha", 0).await;
+    wait_openable(&cfg, b"MARK-beta", 1).await;
+    // A shared body stays readable until its last recipient acknowledges.
+    m.ack_up_to(&group[0], 1).await.unwrap();
+    m.ack_up_to(&group[1], 1).await.unwrap();
+    wait_pending(&m, &group[1], 0).await;
+    wait_openable(&cfg, b"MARK-group-body", usize::MAX).await;
+    m.ack_up_to(&group[2], 1).await.unwrap();
+    wait_openable(&cfg, b"MARK-group-body", 0).await;
+    // After a restart the acknowledged ones stay gone and the pending one is delivered.
+    let again = IggyMailbox::connect(cfg).await.unwrap();
+    assert_eq!(again.count_pending(&a).await.unwrap(), 0);
+    let got = again.fetch_after(&b, 0, 10).await.unwrap();
+    assert_eq!(&got[0].envelope[..], b"MARK-beta-00002");
+    // A retried send after delivery is a replay with seq 0 for the recipients that acknowledged.
+    let mut retry = StoreRequest {
+        idempotency_key: Some([5; 16]),
+        mls: None,
+        payload: Payload::Shared {
+            devices: group.clone(),
+            body: Bytes::from_static(b"MARK-group-body"),
+        },
+    };
+    let out = again.store(retry.clone()).await.unwrap();
+    assert!(out.replayed);
+    assert_eq!(out.seqs, vec![0, 0, 0]);
+    retry.idempotency_key = None;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn compaction_destroys_old_windows() {
+    let Some(mut cfg) = config("windows") else {
+        return;
+    };
+    cfg.relocate_after = Duration::ZERO;
+    cfg.key_window = Duration::from_millis(1);
+    let m = IggyMailbox::connect(cfg.clone()).await.unwrap();
+    let x = d(0x41);
+    for i in 0..5u8 {
+        let mut req = per(&[(x, "MARK-window")]);
+        req.idempotency_key = Some([0x60 + i; 16]);
+        m.store(req).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    m.ack_up_to(&x, 4).await.unwrap();
+    wait_pending(&m, &x, 1).await;
+    m.expire_older_than(Duration::from_hours(30 * 24))
+        .await
+        .unwrap();
+    let stats = m.stats();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while stats.compactions.load(std::sync::atomic::Ordering::Relaxed) < u64::from(cfg.partitions) {
+        assert!(Instant::now() < deadline, "compaction did not finish");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        stats
+            .windows_destroyed
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= 1
+    );
+    // The pending message was re-sealed forward and is still readable, once.
+    wait_openable(&cfg, b"MARK-window", 1).await;
+    let again = IggyMailbox::connect(cfg).await.unwrap();
+    let got = again.fetch_after(&x, 0, 10).await.unwrap();
+    assert_eq!(got.iter().map(|s| s.seq).collect::<Vec<_>>(), vec![5]);
+    // Idempotency outlives the records it pointed at (its own topic): a retry of a delivered
+    // send is a replay (seq 0), and the key reused for another device is still refused.
+    let mut retry = per(&[(x, "MARK-window")]);
+    retry.idempotency_key = Some([0x60; 16]);
+    let out = again.store(retry).await.unwrap();
+    assert!(out.replayed);
+    assert_eq!(out.seqs, vec![0]);
+    let mut other = per(&[(d(0x42), "MARK-window")]);
+    other.idempotency_key = Some([0x60; 16]);
+    let r = again.store(other).await;
+    assert!(
+        matches!(r, Err(MailboxError::IdempotencyConflict)) || r.is_ok(),
+        "{r:?}"
+    );
 }

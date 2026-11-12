@@ -307,6 +307,18 @@ pub struct IggySettings {
     pub partitions: u32,
     /// 64 hex characters keying idempotency records; the same on every node.
     pub idempotency_secret: SecretRef,
+    /// Directory of the mailbox key stores (a directory per partition) on this host's persistent disk;
+    /// losing it loses the pending messages (D-0031).
+    pub key_dir: PathBuf,
+    /// 64 hex characters: the master key sealing the key stores.
+    pub master_key: SecretRef,
+    /// A new key window is opened this often, in seconds.
+    #[serde(default = "default_key_window_secs")]
+    pub key_window_secs: u64,
+    /// The key store is written this often when it changed, in milliseconds: an acknowledged
+    /// message's key leaves the disk within about this long.
+    #[serde(default = "default_key_interval_ms")]
+    pub key_interval_ms: u64,
     /// Most sends per append.
     #[serde(default = "default_max_batch")]
     pub max_batch: usize,
@@ -323,6 +335,10 @@ pub struct IggySettings {
     /// `message_expiry`, applied when the topic is created).
     #[serde(default = "default_segment_expiry_secs")]
     pub segment_expiry_secs: u64,
+    /// Segment size in MiB (applied when the topic is created): smaller segments are deleted
+    /// sooner after delivery on a quiet node.
+    #[serde(default = "default_segment_mib")]
+    pub segment_mib: u64,
     /// Log records cached in memory per partition for reads, in MiB.
     #[serde(default = "default_cache_mib")]
     pub cache_mib: usize,
@@ -335,13 +351,22 @@ const fn default_partitions() -> u32 {
     4
 }
 const fn default_relocate_after_secs() -> u64 {
-    3600
+    900
 }
 const fn default_segment_expiry_secs() -> u64 {
-    8 * 3600
+    600
+}
+const fn default_segment_mib() -> u64 {
+    16
 }
 const fn default_cache_mib() -> usize {
     64
+}
+const fn default_key_window_secs() -> u64 {
+    600
+}
+const fn default_key_interval_ms() -> u64 {
+    1_000
 }
 
 impl Validate for IggySettings {
@@ -379,16 +404,36 @@ impl Validate for IggySettings {
             "relocate_after_secs",
             "must be in 60..=604800",
         );
-        // Idempotency records must outlive their 6-hour window on disk.
+        // The low-water offset protects what is still needed; the expiry only delays deletion.
         v.check(
-            self.segment_expiry_secs >= 7 * 3600,
+            (60..=24 * 3600).contains(&self.segment_expiry_secs),
             "segment_expiry_secs",
-            "must be at least 25200 (7 h)",
+            "must be in 60..=86400",
+        );
+        v.check(
+            (1..=1024).contains(&self.segment_mib),
+            "segment_mib",
+            "must be in 1..=1024",
         );
         v.check(
             (1..=65_536).contains(&self.cache_mib),
             "cache_mib",
             "must be in 1..=65536",
+        );
+        v.check(
+            self.key_dir.is_absolute(),
+            "key_dir",
+            "must be an absolute path",
+        );
+        v.check(
+            (50..=10_000).contains(&self.key_interval_ms),
+            "key_interval_ms",
+            "must be in 50..=10000",
+        );
+        v.check(
+            (60..=3_600).contains(&self.key_window_secs),
+            "key_window_secs",
+            "must be in 60..=3600",
         );
     }
 }

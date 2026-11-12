@@ -186,9 +186,10 @@ clients.
 
 `idempotency_key` is 16 random bytes per logical message. A retry with the same key and the same
 recipient devices (after a timeout, a disconnect or a retryable rejection) within 6 hours is
-stored at most once: the server answers it from a record of the recipient devices and `seq`s,
-kept under a keyed hash of the key (never the key itself) and not linked to the sender. The same
-key for other recipients is refused with reason 7. A retry after 6 hours may be stored again;
+stored at most once: the server answers it from a record of the send (a keyed fingerprint of the
+recipient set and where the send is stored), kept under a keyed hash of the key (never the key
+itself) and not linked to the sender; envelopes already acknowledged are not stored or routed
+again. The same key for other recipients is refused with reason 7. A retry after 6 hours may be stored again;
 recipients drop it by the message ID inside the envelope.
 
 ### 3.3 Delivery and ordering

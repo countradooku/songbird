@@ -27,7 +27,7 @@ fn main() {
                 keep.push(conn.client().await.unwrap());
             }
         } else {
-            let mut cfg = songbird_mailbox::iggy::IggyConfig::new(conn, random_secret());
+            let mut cfg = songbird_mailbox::iggy::IggyConfig::new(conn, random_secret(), private_key_dir(), random_secret());
             cfg.stream = format!("idle{}", std::process::id());
             mb = Some(songbird_mailbox::iggy::IggyMailbox::connect(cfg).await.unwrap());
         }
@@ -37,6 +37,20 @@ fn main() {
         println!("mode={mode} clients={n} idle cpu ticks over 5 s: {}", t1 - t0);
         drop(mb);
     });
+}
+
+/// A new private directory for this run's mailbox key stores: an unpredictable name, created
+/// exclusively with mode 0700 under `target/` (never a predictable path in a shared temp dir).
+fn private_key_dir() -> std::path::PathBuf {
+    let parent = std::path::Path::new("target").join("bench-keys");
+    std::fs::create_dir_all(&parent).expect("create target/bench-keys");
+    let name: String = random_secret()[..16].iter().map(|b| format!("{b:02x}")).collect();
+    let dir = parent.join(name);
+    let mut b = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+    b.create(&dir).expect("create a private key directory");
+    dir
 }
 
 /// A fresh random idempotency secret for each benchmark run (never a fixed key).

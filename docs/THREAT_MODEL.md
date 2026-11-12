@@ -12,14 +12,15 @@ server in plaintext. Adding to this list requires the owner's approval.
 | Device ID | Authenticate the connection, address mailboxes | Life of the device | Prompt 2 (M1) |
 | Device authentication public key (Ed25519) | Verify the connection challenge | Life of the device | Prompt 2 (M1) |
 | Connection times and source IP | Accepting the TCP connection; rate limits | Memory only, for the connection's life; never logged or exported | Prompt 2 (M1) |
-| Recipient device ID, `seq`, envelope size and store time per stored envelope | Store, order and deliver | Index: until acknowledged, at most 30 days. Iggy log on disk: until the segment holding it is deleted, by default up to about 14 hours after acknowledgement (D-0029) | Prompt 2 (M1, M2) |
+| Recipient device ID, `seq`, envelope size and store time per stored envelope | Store, order and deliver | Index: until acknowledged, at most 30 days. Iggy log: sealed under a per-message key destroyed at acknowledgement (unopenable within about 1 s, `key_interval`); the sealed bytes are deleted with their segment, about 25 minutes after delivery plus the time to fill a 16 MiB segment (D-0031). Iggy's own message headers (record size, time, partition) stay readable until then | Prompt 2 (M1, M2) |
 | Envelope ciphertext | Store and relay (opaque, never decrypted) | As the row above | Prompt 2 (M1, M2) |
-| Keyed hash (HMAC-SHA256, server secret) of a send's idempotency key, with a fingerprint (SHA-256) of its recipient set, the recipient devices and `seq`s; **not** the sender, never the key itself | Store a retried send once | 6 hours in the index; on disk with the send's record (D-0029) | Prompt 2 (M1), D-0021, D-0024 (owner delegated) |
+| Keyed hash (HMAC-SHA256, server secret) of a send's idempotency key, with a keyed fingerprint of its recipient set and the log offset of the send; **not** the sender, the devices or the content, never the key itself | Store a retried send once | 6 hours in the index; 7 hours in the idempotency topic (D-0031) | Prompt 2 (M1), D-0021, D-0024 (owner delegated) |
+| Mailbox key store (per partition: window keys, punctured key trees, the keys of pending messages), sealed with the node's master key | Decrypt pending messages; destroy acknowledged ones | Until the window's records are below the low-water offset; a key of an acknowledged message leaves it within about 1 s; never backed up (D-0031) | Prompt 2 (M2) |
 | Sender device at send time | Authorization and rate limits | Memory only, for the request; never stored with the envelope | Prompt 2 (M1) |
 | Device-to-account mapping (the device list of each account) | Device-list check on every send | Life of the device | Prompt 2 (M2); owned by Prompt 3 |
 | Per-device counters: last `seq` allocated, last `seq` acknowledged | Ordering, delete on ACK, mailbox capacity | Life of the device | Prompt 2 (M2) |
 | Shared group/channel bodies (ciphertext) | Store a group message once per partition | As envelope ciphertext | Prompt 2 (M2) |
-| Snapshots of every device's last and acknowledged `seq` and every MLS group's epoch, in the Iggy log | Never reuse a `seq` after old records are deleted | Rewritten by every compaction; old copies deleted with their segments | Prompt 2 (M2), D-0029 |
+| Snapshots of every device's last and acknowledged `seq` and every MLS group's epoch, in the Iggy log (sealed with the window's metadata key) | Never reuse a `seq` after old records are deleted | Rewritten by every compaction; old copies unopenable once their window is destroyed and deleted with their segments | Prompt 2 (M2), D-0029, D-0031 |
 | MLS group ID (16 opaque client-chosen bytes) and its current epoch | Order commits (one winner per epoch) | Life of the group | Prompt 2 (M2); group membership is Prompt 5 |
 
 Prompt 1 adds two operational views, neither of which is user data on the server:
@@ -105,7 +106,11 @@ One subsection per component. Each threat names its mitigation and the test or p
 | Losing an acknowledged send (crash, power loss) | T | Faults | Iggy topic `durability = persisted` (fsync before it confirms); `SendResult` only after that; a send's remote parts recorded in its home record and completed by the re-driver | D-0029; `inv1_store_before_acknowledge` on Iggy; `redriver_completes_remote_parts_in_process_and_after_restart` |
 | Reused or skipped `seq` with several writers | T | Faults, races, a second node | One writer per partition; Iggy fences older producer epochs; uncertain appends resent with the same producer sequence; counter snapshots before old records are deleted | `restart_rebuilds_state_and_fences_the_old_writer`; `compaction_relocates_and_keeps_counters_across_restart`; `concurrent_senders_get_gap_free_unique_seqs`; D-0029 |
 | Racing MLS commits forking a group | T | Malicious or racing members | Epoch check on the group's home partition writer, recorded with the commit; one winner | `mls_commits_are_ordered_by_epoch` (Iggy and SurrealDB); `send_path_device_lists_shared_bodies_and_mls_ordering` |
-| Malformed mailbox records read back from Iggy | T, D | Compromised data host, bugs | Bounded record decoder (counts checked against remaining bytes), fuzzed; unreadable records skipped and logged | `record.rs` tests; `iggy_record` fuzz target |
+| Malformed mailbox records read back from Iggy | T, D | Compromised data host, bugs | Bounded record decoder (counts checked against remaining bytes), fuzzed; every record authenticated (AES-GCM, bound to partition, window and slot); an unreadable record stops the start rather than reuse `seq`s | `record.rs`, `sealed.rs` tests; `iggy_record` fuzz target; `start_up_refuses_an_unreadable_log` |
+| Reading delivered messages from the server's disk (seized or stolen server, backups, insider, later compromise) | I | Insider, attacker on the data host, legal seizure | Every entry sealed under its own puncturable key; the key destroyed at acknowledgement and the key store rewritten within about 1 s; segments deleted within minutes; key store never backed up; master key from the secrets store (D-0031) | `acknowledged_messages_cannot_be_decrypted_even_with_every_key` (opens every record with every key on disk); `compaction_destroys_old_windows` |
+| A lost or rolled-back key-store page making pending messages look acknowledged | T | Faults, operator error, tampering | Copy-on-write key store; the head lists every page with its generation and key count; a missing, misplaced or altered page stops the start (runbook) | `start_up_refuses_a_lost_key_page`; key-store unit tests |
+| An older writer overwriting the key store | T | A second delivery process, a stale node | The new writer writes the key store with its epoch before appending; older epochs are refused; writes serialised | `an_older_writer_cannot_overwrite_a_newer_one`; `restart_rebuilds_state_and_fences_the_old_writer` |
+| Two messages sealed under one key (AES-GCM nonce reuse; one ACK destroying another message) | T, I | Faults (crash, restart, takeover) | Each slot used once: replay marks every replayed record's slots used; a new writer seals in a fresh random window | `a_restart_never_reuses_key_slots`; `replayed_records_move_the_next_slot` |
 | Third-party client logs leaking addresses | I | Log store | Iggy SDK log targets forced off in every filter | `inv6_no_identifiers_in_logs_or_metrics` (TRACE through the production filter); D-0030 |
 | A container escape through io_uring | E | Attacker who compromised Iggy | Iggy's seccomp profile adds only the three io_uring syscalls to Docker's default; `no-new-privileges`, all capabilities dropped; private address only | `deploy/compose/iggy-seccomp.json`; D-0029 |
 | Malformed SurrealDB responses | T, D | Compromised database, network | Bounded CBOR decoder (depth, lengths before allocation), fuzzed; TLS with the internal CA outside development | `cbor.rs` tests; `surreal_cbor` fuzz target |
@@ -121,8 +126,12 @@ One subsection per component. Each threat names its mitigation and the test or p
   rotation (runbook `mtls-rotation.md`).
 - SurrealDB and Iggy have server TLS and password authentication but no client-certificate
   authentication.
-- Acknowledged ciphertext stays in Iggy segments for up to about 14 hours by default (D-0029; owner
-  to confirm).
+- Deleted key-store files and overwritten Iggy segments can survive in SSD flash until garbage
+  collection: with the raw flash and the master key an attacker might recover keys that ACKs
+  destroyed. Data volumes need full-disk encryption with a key kept off the disk (Prompt 13,
+  D-0031). On a quiet node a delivered message's sealed bytes (unopenable) stay until its
+  16 MiB segment fills.
+- Losing a node's key store (`key_dir`) or master key loses its pending messages (D-0031).
 - Iggy is pre-1.0; the Iggy SDK added 153 exempted crates to the audit backlog (D-0030).
 - cargo-vet: 57 of 167 crates are exempted rather than vetted; accepted by the owner (report P01, D-0016).
 - Root SSH through the bastion (owner decision open, D-0014).

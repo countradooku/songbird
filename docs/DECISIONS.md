@@ -33,10 +33,10 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 - GitHub environments `staging` and `production` with required reviewers, and their secrets
   (`SOPS_AGE_KEY`, `DEPLOY_SSH_KEY`), must be created by the owner before `deploy.yml` can run.
 - Prompt 2, milestone 2 (report `docs/reports/P02-M2.md`):
-  - D-0029: the mailbox store is Apache Iggy (owner's decision). Still to confirm: acknowledged
-    ciphertext stays on disk until its segment is deleted, about 14 hours by default (6-hour
-    idempotency window plus 8-hour segment expiry); Iggy is pre-1.0 (storage format changed
-    between 0.9 and 0.10); its container needs io_uring allowed in seccomp.
+  - D-0029: the mailbox store is Apache Iggy (owner's decision). Still to confirm: Iggy is
+    pre-1.0 (storage format changed between 0.9 and 0.10); its container needs io_uring allowed
+    in seccomp. (The 14 hours acknowledged ciphertext stayed on disk is answered by D-0031:
+    unopenable within about a second of the ACK, deleted within minutes.)
   - D-0030: official Iggy SDK (owner's decision) brings 153 crates (exempted, audit backlog) and
     `ring` as an unused transitive dependency. Proposed wording for the constitution's locked
     stack: "All TLS and cryptographic operations we perform use rustls with aws-lc-rs. Another
@@ -49,6 +49,126 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     runtime touches the locked stack.
 
 ## Decisions
+
+## D-0031 — Mailbox deletion on acknowledgement: puncturable keys, then physical deletion within minutes
+
+- Date: 2026-11-12
+- Status: accepted (owner delegated: "I am letting you handle this like a Proton co-founder")
+- Decided by: agent, under the owner's standing delegation for security and privacy calls
+- Context: with D-0029 an acknowledged envelope left the index at once but stayed on disk, in
+  the clear form the client sent (MLS ciphertext, plus its recipient device and `seq`), until
+  its Iggy segment was deleted: about 14 hours by default. The owner asked for deletion on
+  acknowledgement and "deleted after delivery too somehow", and for Songbird to be behind
+  nobody. Iggy, like any append-only log, cannot remove one message from a segment.
+- Options considered:
+  - **Keep plaintext records, delete segments sooner.** Shorter segments and expiry only move
+    the bound; a quiet node keeps its active segment for hours; no deletion at ACK time.
+  - **A store with in-place deletes** (FoundationDB, as Signal uses, or Valkey). A delete there
+    is logical: the bytes stay in the storage engine until its compaction, and in the SSD until
+    garbage collection. It would also give up Iggy's throughput (D-0029).
+  - **One random key per message in a key table.** Deletion is exact, but the key table grows
+    and is rewritten per message: the same in-place-delete problem moved to a smaller file.
+  - **Puncturable encryption (chosen).** Every record sealed under keys derived from a
+    Goldreich–Goldwasser–Micali tree per time window; an ACK punctures the leaf, which removes
+    the ability to derive it from anything kept. The key state is small when ACKs arrive in
+    order and proportional to the pending messages otherwise. The log keeps only ciphertext
+    that nothing can open.
+- Decision (`crates/mailbox/src/iggy/{keys,sealed}.rs`):
+  - **Sealed records** (record format version 3). Each window (10 minutes) has a random metadata
+    key and a GGM tree of depth 24 (16.7 M slots; PRG: AES-256 on four counter blocks, aws-lc-rs).
+    Each entry (envelope, recipient device, `seq`) is sealed under its own leaf key (AES-256-GCM,
+    used once, so a constant nonce); a shared group body has its own slot, punctured with the
+    record's last entry; each remote part of a multi-partition send has its own slot, punctured
+    once stored on its partition. Record metadata (idempotency tag and fingerprint, times, MLS
+    group and epoch, ACK checkpoints, counter snapshots) is sealed with the window's metadata key.
+    The associated data binds every slot to its partition, window and position.
+  - **Deletion on acknowledgement.** The ACK is written to the log first (merged into the next
+    store append, or alone on the ACK tick), then the leaves are punctured in memory, and the key
+    store on disk follows within `key_interval` (1 s): from then on nothing on the node — log,
+    key store, master key together — can decrypt the entry, its recipient or its `seq`
+    (`acknowledged_messages_cannot_be_decrypted_even_with_every_key` opens every record of every
+    partition with every key on disk and finds the acknowledged messages in none). The log's ACK
+    records are the authority: after a crash, replay punctures again.
+  - **Key store** (one directory per partition, under `key_dir`, sealed with the node's master
+    key, a 256-bit secret given by SecretRef). Slots written since the last write leave the tree
+    for individual keys (a "mark"), so out-of-order ACKs cannot blow the tree up; those keys are
+    kept in pages of 1,024 slots. A write is copy-on-write: changed pages go to new files named by
+    the writer's epoch and the write's generation, then the head (windows, trees, marks, the page
+    list with each page's generation and key count) replaces the old one atomically (fsync,
+    rename, fsync of the directory), then the replaced files are deleted. Load refuses the store
+    if any listed page is missing, sealed for another place or generation, or holds another number
+    of keys: a lost page would otherwise make pending messages look acknowledged
+    (`start_up_refuses_a_lost_key_page`). A new window is in the store before any record sealed
+    with it is appended (invariant 1).
+  - **Fencing and key uniqueness.** A new writer opens a fresh window (random keys) and writes
+    the key store with its producer epoch before it appends anything; an older writer's writes are
+    then refused (`KeyError::Fenced`, the writer stops as when Iggy fences it). Replay also marks
+    every replayed record's slots as used. Found by the end-to-end restart run (174 messages lost):
+    the key store lags the log by up to `key_interval`, a restarted writer handed out slots already
+    used after the last write, so a new message got the same leaf key (and constant nonce) as an
+    old one and acknowledging the old one destroyed the new one
+    (`a_restart_never_reuses_key_slots` fails without the fix). Writes are serialised, so an older
+    change set never lands after a newer one (a race found while making the store incremental: the
+    periodic write and a new window's write could land out of order and drop the window). Window
+    ids should carry the writer's epoch before M4 runs two writers at a handover.
+  - **Physical deletion within minutes.** Pending entries older than `relocate_after` (15 min)
+    are re-sealed forward by compaction (every minute); the low-water offset follows; a window
+    is destroyed (metadata key and tree) once all its records are below it; Iggy deletes sealed
+    segments below it after `message_expiry` (10 min), with 16 MiB segments. Delivered ciphertext
+    leaves the disk about 25 minutes after delivery plus the time to fill a segment (on a quiet
+    node, hours: still unopenable from the first second).
+  - **Idempotency in its own topic** (`{topic}-idem`): the keyed tag, the recipient-set
+    fingerprint (HMAC, server secret), the time and the log offset; no content, no device. Kept
+    7 hours (6-hour retry window plus margin) so the mailbox log is not held for the idempotency
+    window. A retry after delivery is a replay that returns `seq` 0 for the entries already
+    acknowledged (nothing left to route).
+- Evidence:
+  - Correctness: 15 Iggy live tests (3 consecutive clean runs), 16 end-to-end invariant tests
+    on Iggy, key-store unit tests (punctures, out-of-order ACKs, page rewrites, crash between
+    pages and head, lost and misplaced pages, destroyed windows, fencing), the `iggy_record` fuzz
+    target. End to end through `delivery` (report P02-M2 addendum): steady 1,000–80,000/s
+    offered, reconnect storm, Iggy frozen for 8 s, restart: the checker found no loss,
+    duplicate or reordering.
+  - Cost of sealing (bench `STORE=iggyprod`, random envelopes, same machine, base = main
+    `819d07e`): on this disk both versions are fsync-bound and indistinguishable (1,200–17,000
+    sends/s for both, run to run); on tmpfs (CPU-bound ceiling) 341,000 against 432,000 sends/s
+    at 128 senders (0.79×) and 428,000 against 863,000 at 1,024 senders (0.50×). Writer time at
+    1,024 senders: append 67 %, sealing 14 %, applying 10 %, planning 4 %. One GGM expansion
+    costs 136 ns; sealing a 256-byte entry 181 ns.
+  - Key-store cost (release build, this disk): with 1 M pending entries the store is 36 MB; a
+    write after 100 scattered ACKs replaces 100 pages (3.6 MB), holds the state lock 1.8 ms and
+    takes 80 ms. The first, whole-file design rewrote 36 MB and held the lock 25 ms on every
+    write (every 50 ms): about 720 MB/s of writes, found by measurement before merging.
+  - Measurement note: the comparison benchmarks of M2 sent constant-byte envelopes; this disk is
+    btrfs with zstd, which compressed them almost away, so plaintext stores looked several
+    times faster than with real (incompressible) ciphertext. `bench/stores` and the load
+    generator now send random bytes; M2's disk numbers are optimistic (report addendum).
+- Consequences:
+  - Ahead of the field as far as public documentation goes: Signal deletes a delivered message
+    from its database (FoundationDB), WhatsApp and Threema delete on delivery; in each the
+    bytes remain in the storage engine and the SSD until compaction and garbage collection.
+    Here they are unopenable within about a second and gone from the log within minutes.
+  - **The key store is part of the mailbox.** Losing `key_dir` (or the master key) loses every
+    pending message: the log alone cannot be read. It must be on the same persistent disk as
+    the node (not tmpfs), never in backups (a backup would keep keys that ACKs destroyed), and
+    the master key in the secrets store (D-0010). A restored Iggy backup without its matching
+    key store does not start (runbook).
+    **Owner decision (2026-11-12): accepted** ("i accept the backup decision"): key stores are
+    never backed up; a node that loses its disk loses its undelivered messages until M4
+    replicates partitions, as the master prompt's beta targets allow (undelivered envelopes may
+    be lost on total server loss; clients resend on a new `store_generation`).
+  - **Limits.** Overwritten and deleted files can survive in SSD flash until garbage collection,
+    so an attacker with the raw flash and the master key might recover an older key page: the
+    data volumes must use full-disk encryption with a key that never touches the disk
+    (Prompt 13 deploy work, issue to file). Keys in memory are wiped on drop, best effort.
+    Record sizes, times and partitions stay visible in Iggy's message headers until the segment
+    is deleted.
+  - Sealing halves the CPU ceiling of a partition writer (above); the disk, not the CPU, bounds
+    a node today. M3 (thread-per-core) should pipeline the writer (seal the next batch while the
+    current one appends).
+  - Write amplification: pending entries are rewritten every 15 minutes (relocation), and the
+    key store writes about 36 bytes per new pending entry plus the pages its ACKs touch.
+  - MSRV raised to Rust 1.95 for `File::lock` (D-0030 note).
 
 ## D-0030 — The official Apache Iggy SDK, and what it brings into the tree
 
@@ -79,6 +199,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 - Consequences: a large dependency tree for one TCP protocol; the SDK tracks the server, so
   upgrades move together (the SDK README: mixed versions and rolling upgrades are unsupported).
   Our own client stays an option once Iggy's protocol is stable (1.0).
+- Note (2026-11-12): `iggy =0.12.0` needs Rust 1.95; the workspace MSRV (`rust-version`) is
+  raised from 1.88 to 1.95 (1.88 was declared but never checked), which D-0031's key store also
+  needs (`File::lock`). The pinned toolchain (D-0001) is newer and unchanged.
 
 ## D-0029 — Mailbox on Apache Iggy
 
@@ -171,7 +294,10 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   - **Deletion is not immediate on disk.** An acknowledged envelope leaves the index at once and
     the disk when its segment is deleted: by default up to about 14 hours (6-hour idempotency
     window plus 8-hour segment expiry). SurrealDB deleted on ACK. Shorter windows trade against
-    the retry horizon (D-0021); owner to confirm (Open owner decisions).
+    the retry horizon (D-0021); owner to confirm (Open owner decisions). **Superseded by D-0031:**
+    records are sealed under puncturable keys, an acknowledged entry is unopenable within about
+    a second and its segment deleted within minutes (relocation after 15 minutes, 10-minute
+    segment expiry, idempotency in its own topic).
   - Iggy is pre-1.0 (an Apache top-level project since August 2026); its storage format changed
     between 0.9 and 0.10, so upgrades need a migration plan (runbook).
   - Every pending entry costs about 32 bytes of memory in its writer, every device about 80

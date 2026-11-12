@@ -58,6 +58,43 @@ aggregate counters only; nothing in them or in the logs identifies a device (inv
   should own it (it replays and takes a new producer epoch). Nothing is lost: the fenced writer
   wrote nothing after the takeover.
 
+## Mailbox key store (what it is, where it lives)
+
+- Every mailbox record is sealed under keys in a key store (D-0031): one directory per partition
+  under `[delivery.mailbox.iggy] key_dir` (`p<partition>-<hash>`: `head`, pages `w*.p*.e*.g*`,
+  `lock`), sealed with `master_key` (64 hex characters, from the secrets store, mode 0600).
+- `key_dir` must be on the node's persistent disk, owned by the service user, mode 0700. Not
+  tmpfs (a reboot would lose every pending message), and **never in a backup or snapshot**: a
+  copy keeps keys that acknowledgements destroyed. The data volume must use full-disk
+  encryption.
+- The master key is the same on a replacement host; rotating it is not supported yet (stop,
+  re-seal: follow-up work).
+- `key_interval_ms` (default 1000): how soon an acknowledged message's key leaves the disk.
+  Shorter means more writes (the store writes only the pages that changed).
+
+## Mailbox key store unusable (delivery does not start, or stops)
+
+- Detection: delivery exits at start with `mailbox key store of partition P unusable`, or a
+  running node logs `mailbox key store write failed` (sends then fail as retryable when a new key
+  window cannot be written) or `mailbox key store owned by a newer writer; stopping` (node not
+  ready).
+- Causes and actions:
+  - **Wrong `master_key`** (a rotated or mistyped secret): restore the right secret.
+  - **A missing, altered or misplaced page** (disk fault, a file deleted by hand, a partial
+    copy): the store is refused because the pending messages under that page would otherwise look
+    acknowledged and vanish. Restore the directory from the same host if a copy exists (there
+    should be none: see above); otherwise the pending messages of that partition are lost:
+    move the partition's directory away, start on a new stream (`[delivery.mailbox.iggy] stream`)
+    and raise `store_generation` so clients reset their resume points (PROTOCOL §3.6). Never
+    edit the files.
+  - **Write failures**: disk full or read-only, permissions on `key_dir`. Fix and the next write
+    (every `key_interval_ms`) catches up; nothing acknowledged is lost (the log's ACK records are
+    the authority).
+  - **Owned by a newer writer**: another delivery process took the partition over, as in
+    "Mailbox writer fenced" below.
+- Verification: `/readyz` succeeds; the live test `start_up_refuses_a_lost_key_page` describes the
+  refusal.
+
 ## Mailbox log unreadable (delivery does not start)
 
 - Detection: delivery exits at start with `mailbox log unreadable: partition P, offset O, record
@@ -75,6 +112,12 @@ aggregate counters only; nothing in them or in the logs identifies a device (inv
 - Restore the Iggy data directory, then raise `[delivery.mailbox] store_generation` by one
   before starting delivery: clients see the new generation in `Hello` and reset their resume
   points (PROTOCOL §3.6).
+- Records are sealed (D-0031): a backup of the Iggy data is readable only with the key store it
+  was written with, and key stores are never backed up (a copy would keep the keys of
+  acknowledged messages). So an Iggy backup does not bring pending messages back; it fails to
+  start ("Mailbox log unreadable"). After losing a node's disk, start on a new stream and raise
+  `store_generation`: pending messages of that node are lost. Protection against losing a disk
+  is replication with partition ownership (M4), not backups.
 - Upgrading Iggy across a storage-format change (0.9 to 0.10 was one): stop delivery, let devices
   drain if possible, follow Iggy's upgrade notes; a fresh data directory loses pending envelopes,
   so treat it as a restore (raise `store_generation`).

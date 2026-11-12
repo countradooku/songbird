@@ -69,7 +69,14 @@ fn iggy_config(
         user: s.user.clone(),
         pass: s.pass.resolve()?.expose().to_owned(),
     };
-    let mut cfg = IggyConfig::new(connection, idempotency_secret(&s.idempotency_secret)?);
+    let mut cfg = IggyConfig::new(
+        connection,
+        idempotency_secret(&s.idempotency_secret)?,
+        s.key_dir.clone(),
+        idempotency_secret(&s.master_key).map_err(|_| "master_key must be 64 hex characters")?,
+    );
+    cfg.key_window = Duration::from_secs(s.key_window_secs);
+    cfg.key_interval = Duration::from_millis(s.key_interval_ms);
     cfg.stream.clone_from(&s.stream);
     cfg.topic.clone_from(&s.topic);
     cfg.partitions = s.partitions;
@@ -79,6 +86,7 @@ fn iggy_config(
     cfg.timeout = Duration::from_millis(s.timeout_ms);
     cfg.relocate_after = Duration::from_secs(s.relocate_after_secs);
     cfg.segment_expiry = Duration::from_secs(s.segment_expiry_secs);
+    cfg.segment_bytes = s.segment_mib.saturating_mul(1 << 20);
     cfg.cache_bytes = s.cache_mib.saturating_mul(1 << 20);
     cfg.store_generation = generation;
     Ok(cfg)

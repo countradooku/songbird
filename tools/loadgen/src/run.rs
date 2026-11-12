@@ -118,7 +118,16 @@ fn payload(run: u32, sender: u32, n: u64, sent_ns: u64, size: usize) -> Bytes {
     b.put_u32(sender);
     b.put_u64(n);
     b.put_u64(sent_ns);
-    b.resize(size.max(HEADER), 0xA5);
+    // Padding that does not compress, like the ciphertext real envelopes are (a compressing file
+    // system under the store must not flatter it).
+    let mut x = ((u64::from(run) << 32) | u64::from(sender)) ^ n.rotate_left(17) ^ sent_ns | 1;
+    while b.len() < size {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        let take = (size - b.len()).min(8);
+        b.put_slice(x.to_le_bytes().get(..take).unwrap_or_default());
+    }
     b.freeze()
 }
 
@@ -167,7 +176,7 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
         events.push(ev);
         tokio::time::sleep(gap).await;
     }
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     for c in &mut clients {
         let left = deadline.saturating_duration_since(Instant::now());
         match tokio::time::timeout(left, c.wait_for(State::Connected)).await {

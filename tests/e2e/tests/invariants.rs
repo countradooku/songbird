@@ -268,7 +268,7 @@ async fn inv3_delete_on_ack_and_expiry() {
     assert_eq!(s.pending(1).await, 0);
     assert_eq!(
         songbird_mailbox::MAX_ENVELOPE_AGE,
-        Duration::from_secs(30 * 24 * 3600)
+        Duration::from_hours(30 * 24)
     );
     s.stop().await;
 }

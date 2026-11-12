@@ -26,7 +26,7 @@ exclude = ["fuzz"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95" # the Iggy SDK needs 1.95 (D-0030)
 publish = false
 license = "LicenseRef-Proprietary"
 repository = "https://github.com/countradooku/songbird"

@@ -646,6 +646,11 @@ impl<M: Mailbox, R: Router> Session<M, R> {
             }
         };
         for ((device, envelope), seq) in routes.into_iter().zip(outcome.seqs) {
+            // `seq` 0: a replayed send already acknowledged by this device (the mailbox can no
+            // longer read it, D-0031); nothing to route.
+            if seq == 0 {
+                continue;
+            }
             let live = Live { seq, envelope };
             match self.shared.router.route(&device, live).await {
                 Routed::Queued => {}

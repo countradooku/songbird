@@ -75,6 +75,11 @@ start() {
   for _ in $(seq 1 300); do curl -sf "http://127.0.0.1:919$i/readyz" >/dev/null && return 0; sleep 0.1; done
   echo "node $n not ready" >> "$OUT"
 }
+# The node holding partition 0's lease now (read from Valkey).
+owner() {
+  podman exec "${VALKEY_CONTAINER:-songbird-valkey-m4}" valkey-cli --no-auth-warning -a "$(cat "$W/valkey-pass")" \
+    GET "songbird:$STREAM:mailbox:lease:0" | sed -E 's/.*delivery\.([a-z]+)\.songbird.*/\1/'
+}
 load() { # secs rate
   taskset -c 12-15,28-31 target/release/songbird-loadgen run --addr 127.0.0.1:9291,127.0.0.1:9292,127.0.0.1:9293 \
     --seeds "$W/keys/seeds.txt" --devices 3000 --secs "$1" --rate "$2" --size 256 --threads 16 --connect-rate 20000 2>&1 \
@@ -86,20 +91,22 @@ for n in $NODES; do start "$n"; done
 for rate in 5000 20000 50000; do
   echo "== steady rate=$rate (3 nodes)" >> "$OUT"; load 8 "$rate" >> "$OUT"
 done
-echo "== node b killed (-9) at 6 s, restarted at 14 s, 25 s at 10000/s" >> "$OUT"
+K=$(owner)
+echo "== partition owner ($K) killed (-9) at 6 s, restarted at 14 s, 25 s at 10000/s" >> "$OUT"
 load 25 10000 > "$W/phase.txt" & L=$!
-sleep 6; kill -9 "${PID[b]}"; echo "killed b at $(date +%T)" >> "$OUT"
-sleep 8; start b; echo "restarted b at $(date +%T)" >> "$OUT"
+sleep 6; kill -9 "${PID[$K]}"; echo "killed $K at $(date +%T)" >> "$OUT"
+sleep 8; start "$K"; echo "restarted $K at $(date +%T)" >> "$OUT"
 wait $L; cat "$W/phase.txt" >> "$OUT"
 echo "== Valkey restarted at 6 s (no persistence: leases and subscriptions lost), 20 s at 10000/s" >> "$OUT"
 load 20 10000 > "$W/phase.txt" & L=$!
 sleep 6; podman restart -t 0 "${VALKEY_CONTAINER:-songbird-valkey-m4}" > /dev/null; echo "valkey restarted at $(date +%T)" >> "$OUT"
 wait $L; cat "$W/phase.txt" >> "$OUT"
-echo "== node c stopped gracefully (SIGTERM) at 6 s, restarted at 14 s, 25 s at 10000/s" >> "$OUT"
+G=$(owner)
+echo "== partition owner ($G) stopped gracefully (SIGTERM) at 6 s, restarted at 14 s, 25 s at 10000/s" >> "$OUT"
 load 25 10000 > "$W/phase.txt" & L=$!
-sleep 6; kill -TERM "${PID[c]}"; echo "stopped c at $(date +%T)" >> "$OUT"
+sleep 6; kill -TERM "${PID[$G]}"; echo "stopped $G at $(date +%T)" >> "$OUT"
 # Its devices reconnect when it is back (a load balancer would send them elsewhere at once).
-sleep 8; wait "${PID[c]}" 2>/dev/null; start c; echo "restarted c at $(date +%T)" >> "$OUT"
+sleep 8; wait "${PID[$G]}" 2>/dev/null; start "$G"; echo "restarted $G at $(date +%T)" >> "$OUT"
 wait $L; cat "$W/phase.txt" >> "$OUT"
 for n in $NODES; do kill "${PID[$n]}" 2>/dev/null; done; wait 2>/dev/null
 echo DONE >> "$OUT"

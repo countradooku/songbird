@@ -6,8 +6,8 @@
 //!   released by compare-and-set scripts). Iggy's producer epochs still fence a writer that lost
 //!   its lease but has not noticed yet (D-0029): a lease is an optimisation, not the guard.
 //! - **Who takes a free partition**: its preferred node by rendezvous hashing over the live
-//!   members; any other node takes it after a lease period if the preferred one does not. The
-//!   second choice is the standby. Ownership is sticky: a partition stays with its owner while it
+//!   members (with the owner gone that is its standby, which holds the key store); any other
+//!   node only after three lease periods, if the preferred one cannot. Ownership is sticky: a partition stays with its owner while it
 //!   lives (no handover of live partitions yet).
 //! - **Failover**: the owner dies; its lease expires; the standby (which holds the replicated key
 //!   store) takes the lease, replays the log and fences the old writer.
@@ -604,7 +604,17 @@ impl Cluster {
                 .query::<bool>(redis::cmd("EXISTS").arg(self.released_key(p)))
                 .await
                 .unwrap_or(false);
-        if (!preferred || (had_owner && !released)) && first_free.elapsed() < self.ttl {
+        // The preferred node (also the standby, which holds the key store: rendezvous order is the
+        // same with the old owner gone) goes first; any other node only after three lease
+        // periods, if the preferred one cannot (it would have no key store copy).
+        let wait = if !preferred {
+            self.ttl * 3
+        } else if had_owner && !released {
+            self.ttl
+        } else {
+            Duration::ZERO
+        };
+        if first_free.elapsed() < wait {
             return;
         }
         let took: Option<String> = conn

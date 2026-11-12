@@ -12,7 +12,7 @@
 //! - **Deletion on acknowledgement.** Each entry (envelope, device, `seq`) is sealed under its own
 //!   leaf key of a puncturable key tree; an ACK punctures the leaf once the ACK record is durable,
 //!   and the key store on disk follows within `key_interval` (1 s): the entry cannot be decrypted
-//!   again, from the log or from any later key state ([`keys`]). A window's metadata key is
+//!   again, from the log or from any later key state (`keys.rs`). A window's metadata key is
 //!   destroyed once all its records are below the low-water offset.
 //! - **One writer per partition.** Each writer is an idempotent Iggy producer with a fixed id and a
 //!   new epoch at every start (recorded in the log). Iggy refuses batches of an older epoch

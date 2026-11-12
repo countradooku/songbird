@@ -100,11 +100,17 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     of keys: a lost page would otherwise make pending messages look acknowledged
     (`start_up_refuses_a_lost_key_page`). A new window is in the store before any record sealed
     with it is appended (invariant 1).
-  - **Fencing.** A new writer writes the key store with its producer epoch before it appends
-    anything; an older writer's writes are then refused (`KeyError::Fenced`, the writer stops as
-    when Iggy fences it). Writes are serialised, so an older change set never lands after a newer
-    one (a race found while making the store incremental: the periodic write and a new window's
-    write could land out of order and drop the window).
+  - **Fencing and key uniqueness.** A new writer opens a fresh window (random keys) and writes
+    the key store with its producer epoch before it appends anything; an older writer's writes are
+    then refused (`KeyError::Fenced`, the writer stops as when Iggy fences it). Replay also marks
+    every replayed record's slots as used. Found by the end-to-end restart run (174 messages lost):
+    the key store lags the log by up to `key_interval`, a restarted writer handed out slots already
+    used after the last write, so a new message got the same leaf key (and constant nonce) as an
+    old one and acknowledging the old one destroyed the new one
+    (`a_restart_never_reuses_key_slots` fails without the fix). Writes are serialised, so an older
+    change set never lands after a newer one (a race found while making the store incremental: the
+    periodic write and a new window's write could land out of order and drop the window). Window
+    ids should carry the writer's epoch before M4 runs two writers at a handover.
   - **Physical deletion within minutes.** Pending entries older than `relocate_after` (15 min)
     are re-sealed forward by compaction (every minute); the low-water offset follows; a window
     is destroyed (metadata key and tree) once all its records are below it; Iggy deletes sealed
@@ -117,7 +123,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     window. A retry after delivery is a replay that returns `seq` 0 for the entries already
     acknowledged (nothing left to route).
 - Evidence:
-  - Correctness: 14 Iggy live tests (3 consecutive clean runs), 16 end-to-end invariant tests
+  - Correctness: 15 Iggy live tests (3 consecutive clean runs), 16 end-to-end invariant tests
     on Iggy, key-store unit tests (punctures, out-of-order ACKs, page rewrites, crash between
     pages and head, lost and misplaced pages, destroyed windows, fencing), the `iggy_record` fuzz
     target. End to end through `delivery` (report P02-M2 addendum): steady 1,000–80,000/s

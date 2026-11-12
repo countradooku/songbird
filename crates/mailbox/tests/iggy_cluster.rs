@@ -254,3 +254,55 @@ async fn a_graceful_shutdown_hands_partitions_over_at_once() {
     assert_eq!(fetch_ok(&b, &d, 1).await[0].1.as_ref(), b"pending");
     b.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn leases_lost_with_valkey_are_taken_back_without_restarting() {
+    let Some(e) = env("relet") else { return };
+    let a = node(&e, "a").await;
+    eventually("A owns every partition", || a.owned_partitions().len() == 4).await;
+    let d = DeviceId::random().unwrap();
+    a.store(to(d, "first")).await.unwrap();
+    let starts = a
+        .stats()
+        .partition_starts
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(starts, 4);
+    // Valkey loses everything (a restart without persistence): the lease keys are gone.
+    let client = redis::Client::open(e.valkey.as_str()).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let keys: Vec<String> = redis::cmd("KEYS")
+        .arg(format!("songbird:{}:*", e.stream))
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_ne!(keys.len(), 0);
+    let _: i64 = redis::cmd("DEL")
+        .arg(&keys)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    // A keeps running every partition (no restart, no second writer) and takes the leases back.
+    for _ in 0..30 {
+        assert_eq!(a.owned_partitions().len(), 4);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let held: Vec<Option<String>> = redis::cmd("MGET")
+        .arg(
+            (0..4)
+                .map(|p| format!("songbird:{}:mailbox:lease:{p}", e.stream))
+                .collect::<Vec<_>>(),
+        )
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert!(held.iter().all(Option::is_some), "{held:?}");
+    assert_eq!(
+        a.stats()
+            .partition_starts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        starts,
+        "a partition was restarted"
+    );
+    assert_eq!(a.store(to(d, "second")).await.unwrap().seqs, vec![2]);
+    a.shutdown().await;
+}

@@ -30,7 +30,8 @@ pub(crate) enum Scenario {
 
 #[derive(Debug, clap::Args)]
 pub(crate) struct Args {
-    /// Delivery server `host:port`.
+    /// Delivery server `host:port`; several separated by commas (devices are spread over them
+    /// round-robin, so senders and recipients sit on different nodes).
     #[arg(long)]
     addr: String,
     /// Server name the devices sign (must match the server's `server_name`).
@@ -158,10 +159,18 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
     let n = keys.len();
     ensure!(n >= 2, "need at least 2 devices");
     let ids: Arc<Vec<DeviceId>> = Arc::new(keys.iter().map(DeviceKey::device).collect());
-    let mut cfg = ClientConfig::new(a.addr.clone(), a.server_name.clone());
-    cfg.backoff.initial = Duration::from_millis(100);
-    cfg.backoff.max = Duration::from_secs(5);
-    cfg.event_capacity = 4096;
+    let addrs: Vec<&str> = a.addr.split(',').filter(|s| !s.is_empty()).collect();
+    ensure!(!addrs.is_empty(), "--addr is empty");
+    let cfgs: Vec<ClientConfig> = addrs
+        .iter()
+        .map(|addr| {
+            let mut cfg = ClientConfig::new((*addr).to_owned(), a.server_name.clone());
+            cfg.backoff.initial = Duration::from_millis(100);
+            cfg.backoff.max = Duration::from_secs(5);
+            cfg.event_capacity = 4096;
+            cfg
+        })
+        .collect();
 
     // Ramp up.
     let t_connect = Instant::now();
@@ -170,8 +179,11 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
     let gap = Duration::from_secs_f64(
         1.0 / f64::from(u32::try_from(a.connect_rate.max(1)).unwrap_or(u32::MAX)),
     );
-    for key in keys {
-        let (c, ev) = Client::start(cfg.clone(), key, ResumeState::default());
+    for (i, key) in keys.into_iter().enumerate() {
+        let Some(cfg) = cfgs.get(i % cfgs.len()).cloned() else {
+            break;
+        };
+        let (c, ev) = Client::start(cfg, key, ResumeState::default());
         clients.push(c);
         events.push(ev);
         tokio::time::sleep(gap).await;

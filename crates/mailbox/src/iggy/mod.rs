@@ -143,6 +143,8 @@ pub struct IggyStats {
     pub key_writes: AtomicU64,
     /// Appends Iggy refused for backpressure (retried soon).
     pub busy: AtomicU64,
+    /// Partitions started on this node (at start, or taken over in cluster mode).
+    pub partition_starts: AtomicU64,
 }
 
 fn n64(n: usize) -> u64 {
@@ -591,6 +593,7 @@ async fn start_partition(ctx: &Ctx, p: u32) -> Result<(Arc<Part>, Vec<Home>), Ig
     });
     replay_idem(&shared).await?;
     let homes = replay(&shared).await?;
+    ctx.stats.partition_starts.fetch_add(1, Ordering::Relaxed);
     let writer_client = cfg.connection.client().await?;
     let (tx, rx) = mpsc::channel(cfg.queue);
     let mut w = Writer::new(shared.clone(), writer_client, cfg, ctx.parts.clone());

@@ -515,7 +515,29 @@ impl Cluster {
                     .await
                     .unwrap_or(1);
                 if renewed == 0 {
-                    self.give_up(p);
+                    // Gone or taken. Gone (Valkey lost it): take it back and keep running. Taken
+                    // by another node: stop (Iggy fences this writer anyway).
+                    let retaken: Option<String> = redis::cmd("SET")
+                        .arg(&key)
+                        .arg(me)
+                        .arg("NX")
+                        .arg("PX")
+                        .arg(self.ttl_ms())
+                        .query_async(conn)
+                        .await
+                        .ok()
+                        .flatten();
+                    if retaken.is_none() {
+                        let now: Option<String> = redis::cmd("GET")
+                            .arg(&key)
+                            .query_async(conn)
+                            .await
+                            .ok()
+                            .flatten();
+                        if now.as_deref().is_some_and(|h| h != me) {
+                            self.give_up(p);
+                        }
+                    }
                 }
             }
             Some(h) => {
@@ -527,6 +549,21 @@ impl Cluster {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&p);
+            }
+            None if self.ctx.parts.local(p).is_some() => {
+                // Running here but the lease is gone (Valkey restarted without persistence):
+                // take it back without restarting anything; if another node got it first, the
+                // next round sees its holder and stops this writer (Iggy fences it anyway).
+                let _: Option<String> = redis::cmd("SET")
+                    .arg(&key)
+                    .arg(me)
+                    .arg("NX")
+                    .arg("PX")
+                    .arg(self.ttl_ms())
+                    .query_async(conn)
+                    .await
+                    .ok()
+                    .flatten();
             }
             None => {
                 let first_free = *self

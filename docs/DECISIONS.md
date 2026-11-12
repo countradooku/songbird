@@ -69,7 +69,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   opted in (a const-initialised thread-local flag, two relaxed atomics). Its lint table is the
   workspace's except `unsafe_code = "deny"`, allowed on the one `impl` with a `SAFETY` comment per
   block. No service depends on it; only `tests/e2e` (dev-dependency). Its own test checks the
-  per-thread counting; the deep CI tier runs it under Miri.
+  per-thread counting; the deep CI tier runs it under Miri. semgrep's `unsafe-usage` rule is waived
+  on exactly those four lines (`nosemgrep` with the rule's id), nowhere else.
 - Evidence: `tests/e2e/tests/allocations.rs` (budget 5.5 allocations per message; measured 5.20),
   valgrind DHAT attributing each site (report P02-M3).
 - Consequences: one reviewed `unsafe` block family, test-only. Any new `unsafe` elsewhere still

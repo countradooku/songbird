@@ -60,25 +60,25 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         note(layout.size());
         // SAFETY: the caller upholds `alloc`'s contract for `layout`; forwarded unchanged.
-        unsafe { System.alloc(layout) }
+        unsafe { System.alloc(layout) } // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         note(layout.size());
         // SAFETY: as `alloc`.
-        unsafe { System.alloc_zeroed(layout) }
+        unsafe { System.alloc_zeroed(layout) } // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         note(new_size);
         // SAFETY: the caller guarantees `ptr` came from this allocator (that is, from `System`)
         // with `layout`, and that `new_size` is valid; forwarded unchanged.
-        unsafe { System.realloc(ptr, layout, new_size) }
+        unsafe { System.realloc(ptr, layout, new_size) } // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         // SAFETY: the caller guarantees `ptr` came from this allocator with `layout`.
-        unsafe { System.dealloc(ptr, layout) }
+        unsafe { System.dealloc(ptr, layout) } // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     }
 }
 

@@ -36,6 +36,7 @@ mod keys;
 mod record;
 mod sealed;
 mod state;
+mod wire;
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -236,7 +237,7 @@ fn slots_of(rec: &Record) -> u32 {
 }
 
 /// What a writer stores for its own partition.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 enum LocalReq {
     PerDevice(Vec<(DeviceId, Bytes)>),
     Shared { devices: Vec<DeviceId>, body: Bytes },
@@ -550,6 +551,7 @@ pub fn fuzz_record(data: &[u8]) {
     let _ = sealed::decode_relocated(data);
     let _ = sealed::decode_remote(data, 0);
     keys::fuzz_decode(data);
+    wire::fuzz(data);
     if let Ok(rec) = Record::decode(&src) {
         let again = rec.encode();
         assert_eq!(

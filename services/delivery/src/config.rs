@@ -104,6 +104,9 @@ pub struct RuntimeSettings {
     pub pin: bool,
     /// Listen backlog of each core's listener.
     pub backlog: i32,
+    /// Threads of the mailbox's own runtime; 0 means one per Iggy partition (one for the other
+    /// backends). Leave CPUs for them: give `workers` fewer CPUs than the process may use.
+    pub storage_threads: usize,
 }
 
 impl Default for RuntimeSettings {
@@ -112,6 +115,7 @@ impl Default for RuntimeSettings {
             workers: 0,
             pin: true,
             backlog: 4096,
+            storage_threads: 0,
         }
     }
 }
@@ -128,9 +132,28 @@ impl RuntimeSettings {
     }
 }
 
+impl RuntimeSettings {
+    /// The mailbox runtime's thread count: `storage_threads`, or one per Iggy partition.
+    #[must_use]
+    pub fn storage_thread_count(&self, mailbox: &MailboxConfig) -> usize {
+        if self.storage_threads > 0 {
+            return self.storage_threads;
+        }
+        match (mailbox.backend, &mailbox.iggy) {
+            (MailboxBackend::Iggy, Some(i)) => usize::try_from(i.partitions).unwrap_or(1).max(1),
+            _ => 1,
+        }
+    }
+}
+
 impl Validate for RuntimeSettings {
     fn validate(&self, v: &mut Validator) {
         v.check(self.workers <= 1024, "workers", "must be at most 1024");
+        v.check(
+            self.storage_threads <= 256,
+            "storage_threads",
+            "must be at most 256",
+        );
         v.check(
             (1..=65_535).contains(&self.backlog),
             "backlog",

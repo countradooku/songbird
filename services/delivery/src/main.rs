@@ -174,23 +174,27 @@ impl Service for Delivery {
     }
 
     async fn run(self, mut ctx: Ctx) -> Result<(), BoxError> {
-        let mailbox = match self.store {
-            Store::Surreal(cfg) => {
-                let m = SurrealMailbox::connect(*cfg).await?;
-                tracing::info!("surrealdb mailbox connected");
-                AnyMailbox::Surreal(m)
-            }
-            Store::Iggy(cfg) => {
-                let m = IggyMailbox::connect(*cfg).await?;
-                tracing::info!("iggy mailbox connected and replayed");
-                AnyMailbox::Iggy(m)
-            }
-            Store::Memory => AnyMailbox::Memory(MemoryMailbox::new(
-                self.settings.mailbox.max_per_device,
-                self.settings.mailbox.store_generation,
-            )),
-        };
         let runtime = self.settings.runtime;
+        // The mailbox runs on its own multi-thread runtime (D-0032): each Iggy partition's writer
+        // gets a thread, apart from the delivery cores and from this control thread.
+        let storage_threads = runtime.storage_thread_count(&self.settings.mailbox);
+        let storage = StorageRuntime(Some(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(storage_threads)
+                .thread_name("storage")
+                .enable_all()
+                .build()?,
+        ));
+        let (max_per_device, generation) = (
+            self.settings.mailbox.max_per_device,
+            self.settings.mailbox.store_generation,
+        );
+        let store = self.store;
+        let mailbox = storage
+            .handle()
+            .spawn(open_mailbox(store, max_per_device, generation))
+            .await??;
+        tracing::info!(storage_threads, "mailbox runtime started");
         let cores = runtime.worker_count();
         // One listener per core on the same address: the kernel spreads connections (D-0032).
         let listeners =
@@ -262,10 +266,54 @@ impl Service for Delivery {
         watcher.abort();
         let _ = stop_tx.send(true);
         let panicked = serve.await?;
+        drop(shared);
+        drop(storage);
         if panicked > 0 {
             return Err(format!("{panicked} delivery cores panicked").into());
         }
         Ok(())
+    }
+}
+
+/// Connects the configured mailbox (on the storage runtime: its tasks stay there).
+async fn open_mailbox(
+    store: Store,
+    max_per_device: usize,
+    generation: u64,
+) -> Result<AnyMailbox, BoxError> {
+    Ok(match store {
+        Store::Surreal(cfg) => {
+            let m = SurrealMailbox::connect(*cfg).await?;
+            tracing::info!("surrealdb mailbox connected");
+            AnyMailbox::Surreal(m)
+        }
+        Store::Iggy(cfg) => {
+            let m = IggyMailbox::connect(*cfg).await?;
+            tracing::info!("iggy mailbox connected and replayed");
+            AnyMailbox::Iggy(m)
+        }
+        Store::Memory => AnyMailbox::Memory(MemoryMailbox::new(max_per_device, generation)),
+    })
+}
+
+/// The mailbox's runtime, shut down in the background when dropped, on every path out of `run`
+/// (dropping a runtime in place inside another runtime's context panics).
+struct StorageRuntime(Option<tokio::runtime::Runtime>);
+
+impl StorageRuntime {
+    fn handle(&self) -> tokio::runtime::Handle {
+        match &self.0 {
+            Some(rt) => rt.handle().clone(),
+            None => tokio::runtime::Handle::current(),
+        }
+    }
+}
+
+impl Drop for StorageRuntime {
+    fn drop(&mut self) {
+        if let Some(rt) = self.0.take() {
+            rt.shutdown_background();
+        }
     }
 }
 

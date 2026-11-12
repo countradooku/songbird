@@ -136,6 +136,8 @@ pub struct IggyStats {
     pub windows_destroyed: AtomicU64,
     /// Key file writes.
     pub key_writes: AtomicU64,
+    /// Appends Iggy refused for backpressure (retried soon).
+    pub busy: AtomicU64,
 }
 
 fn n64(n: usize) -> u64 {
@@ -1250,6 +1252,10 @@ impl Writer {
     /// `None` after a fatal error: the writer stops.
     async fn append(&mut self, payloads: Vec<Bytes>) -> Option<u64> {
         let mut backoff = Duration::from_millis(20);
+        // Iggy's backpressure ("not accepted": nothing applied) clears in microseconds to
+        // milliseconds: retry soon, not on the slow schedule for broken connections (M3: the
+        // slow schedule cut a saturated node's throughput by 30x).
+        let mut busy = Duration::from_millis(1);
         loop {
             match self.append_once(payloads.clone()).await {
                 Ok(base) => return Some(base),
@@ -1262,6 +1268,12 @@ impl Writer {
                     );
                     self.shared.healthy.store(false, Ordering::Relaxed);
                     return None;
+                }
+                Err(IggyError::TransientNotAccepted) => {
+                    self.shared.stats.resends.fetch_add(1, Ordering::Relaxed);
+                    self.shared.stats.busy.fetch_add(1, Ordering::Relaxed);
+                    tokio::time::sleep(busy).await;
+                    busy = (busy * 2).min(Duration::from_millis(64));
                 }
                 Err(e) => {
                     self.shared.stats.resends.fetch_add(1, Ordering::Relaxed);

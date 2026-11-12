@@ -41,7 +41,7 @@ rustls-pki-types.workspace = true
 serde.workspace = true
 sockudo-ws.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "net", "io-util", "macros", "time", "sync"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "io-util", "macros", "time", "sync"] }
 tokio-rustls.workspace = true
 toml.workspace = true
 tracing.workspace = true

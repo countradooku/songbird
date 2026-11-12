@@ -192,7 +192,10 @@ pub enum Left {
 
 /// An attachment's object name (as `api` writes it).
 fn object_name(o: &ObjectKey) -> String {
-    format!("a/{}", o.to_hex_unredacted())
+    let mut name = String::with_capacity(66);
+    name.push_str("a/");
+    name.push_str(&o.to_hex_unredacted());
+    name
 }
 
 impl Worker {

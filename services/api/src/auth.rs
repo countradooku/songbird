@@ -182,15 +182,16 @@ pub fn sign(
         &hash.unwrap_or([0; 32]),
     );
     let sig = key.sign(&t);
-    (
-        format!(
-            "Songbird {}.{ts_ms}.{}.{}",
-            device.to_hex_unredacted(),
-            hex::encode(nonce),
-            hex::encode(sig.as_ref())
-        ),
-        hash.map(hex::encode),
-    )
+    let mut header = String::with_capacity(9 + 32 + 1 + 20 + 1 + 32 + 1 + 128);
+    header.push_str("Songbird ");
+    header.push_str(&device.to_hex_unredacted());
+    header.push('.');
+    header.push_str(&ts_ms.to_string());
+    header.push('.');
+    header.push_str(&hex::encode(nonce));
+    header.push('.');
+    header.push_str(&hex::encode(sig.as_ref()));
+    (header, hash.map(hex::encode))
 }
 
 #[cfg(test)]

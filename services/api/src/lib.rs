@@ -581,5 +581,8 @@ impl App {
 /// An attachment's object name in the store: `a/` and its 64 hex characters (no identifiers).
 #[must_use]
 pub fn object_name(o: &ObjectKey) -> String {
-    format!("a/{}", o.to_hex_unredacted())
+    let mut name = String::with_capacity(66);
+    name.push_str("a/");
+    name.push_str(&o.to_hex_unredacted());
+    name
 }

@@ -35,7 +35,11 @@ impl Validate for ApiConfig {
         };
         v.section("api", api);
         if deployed {
-            v.check(api.tls.is_some(), "api.tls", "is required in staging and production");
+            v.check(
+                api.tls.is_some(),
+                "api.tls",
+                "is required in staging and production",
+            );
             v.check(
                 api.s3.tls_ca.is_some(),
                 "api.s3.tls_ca",

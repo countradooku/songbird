@@ -121,6 +121,25 @@ pub enum DbError {
     Statement(String),
 }
 
+/// Connects, retrying a few times when SurrealDB reports a transaction conflict: signing in
+/// and selecting a namespace and database that several clients create at the same moment
+/// conflict, and the server says to retry (found by the parallel CI run).
+async fn connect_retrying(cfg: &Config) -> Result<Client, RpcError> {
+    let mut delay = Duration::from_millis(20);
+    for _ in 0..5 {
+        match Client::connect(cfg).await {
+            Err(RpcError::Server { code, .. })
+                if code == songbird_surreal::CODE_TRANSACTION_CONFLICT =>
+            {
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+            }
+            r => return r,
+        }
+    }
+    Client::connect(cfg).await
+}
+
 /// A reconnecting SurrealDB handle.
 pub struct Db {
     cfg: Config,
@@ -141,7 +160,7 @@ impl Db {
     /// # Errors
     /// [`DbError`].
     pub async fn connect(cfg: Config) -> Result<Self, DbError> {
-        let c = Client::connect(&cfg).await?;
+        let c = connect_retrying(&cfg).await?;
         Ok(Self {
             cfg,
             current: tokio::sync::Mutex::new(Some(c)),
@@ -155,7 +174,7 @@ impl Db {
         {
             return Ok(c.clone());
         }
-        let c = Client::connect(&self.cfg).await?;
+        let c = connect_retrying(&self.cfg).await?;
         *cur = Some(c.clone());
         Ok(c)
     }

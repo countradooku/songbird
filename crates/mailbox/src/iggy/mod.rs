@@ -309,6 +309,10 @@ struct Shared {
     topic: Identifier,
     /// The idempotency topic (keyed hashes only, D-0031).
     idem_topic: Identifier,
+    /// Idempotency entries waiting for the idempotency topic, and those being written: the
+    /// low-water offset cannot pass their store records until they are durable there.
+    idem_queue: Mutex<Vec<([u8; 32], Idem)>>,
+    idem_inflight: Mutex<Vec<([u8; 32], Idem)>>,
     healthy: AtomicBool,
     stats: Arc<IggyStats>,
 }
@@ -645,7 +649,10 @@ impl IggyMailbox {
         }
     }
 
-    async fn connect_once(cfg: IggyConfig) -> Result<Self, IggyMailboxError> {
+    /// Creates the stream, the mailbox topic and the idempotency topic if missing.
+    async fn ensure_topics(
+        cfg: &IggyConfig,
+    ) -> Result<(Identifier, Identifier, Identifier), IggyMailboxError> {
         let admin = cfg.connection.client().await?;
         let stream = Identifier::named(&cfg.stream)?;
         let topic = Identifier::named(&cfg.topic)?;
@@ -679,6 +686,11 @@ impl IggyMailbox {
             };
             admin.create_topic(&stream, &idem_name, &opts).await?;
         }
+        Ok((stream, topic, idem_topic))
+    }
+
+    async fn connect_once(cfg: IggyConfig) -> Result<Self, IggyMailboxError> {
+        let (stream, topic, idem_topic) = Self::ensure_topics(&cfg).await?;
         std::fs::create_dir_all(&cfg.key_dir)
             .map_err(|_| IggyMailboxError::Keys { partition: 0 })?;
         let stats = Arc::new(IggyStats::default());
@@ -708,6 +720,8 @@ impl IggyMailbox {
                 stream: stream.clone(),
                 topic: topic.clone(),
                 idem_topic: idem_topic.clone(),
+                idem_queue: Mutex::new(Vec::new()),
+                idem_inflight: Mutex::new(Vec::new()),
                 healthy: AtomicBool::new(true),
                 stats: stats.clone(),
             });
@@ -723,6 +737,12 @@ impl IggyMailbox {
             w.start_epoch().await?;
             incomplete.push(homes);
             tokio::spawn(w.run(rx));
+            tokio::spawn(key_persister(shared.clone(), cfg.ack_interval));
+            tokio::spawn(idem_flusher(
+                shared.clone(),
+                cfg.connection.client().await?,
+                cfg.ack_interval,
+            ));
             parts.push(Part { tx, shared });
         }
         let _ = senders.set(parts.iter().map(|p| p.tx.clone()).collect());
@@ -1066,9 +1086,6 @@ struct Writer {
     relocate_after: Duration,
     key_window_ms: u64,
     pending_acks: HashMap<DeviceId, u64>,
-    /// Idempotency entries not yet in the idempotency topic (the low-water offset cannot pass
-    /// their records until they are).
-    idem_pending: Vec<([u8; 32], Idem)>,
     /// Tag of a multi-partition send -> (home record offset, accepted at, remote partitions not
     /// yet confirmed with their part slots).
     incomplete: HashMap<[u8; 32], Incomplete>,
@@ -1105,7 +1122,6 @@ impl Writer {
             relocate_after: cfg.relocate_after,
             key_window_ms: ms(cfg.key_window),
             pending_acks: HashMap::new(),
-            idem_pending: Vec::new(),
             incomplete: HashMap::new(),
             senders,
             tag_window_ms: ms(IDEMPOTENCY_RETENTION),
@@ -1260,12 +1276,8 @@ impl Writer {
             }
             tokio::select! {
                 biased;
-                _ = ack_tick.tick() => {
-                    self.flush_acks().await;
-                    self.flush_idem().await;
-                    // Punctures from ACKs, relocations and confirmed parts reach the disk here.
-                    let _ = self.shared.persist_keys().await;
-                }
+                // ACK checkpoints ride with store batches; this writes them when no send does.
+                _ = ack_tick.tick() => self.flush_acks().await,
                 _ = compact_tick.tick() => { self.start_compaction(None).await; }
                 _ = redrive_tick.tick() => self.redrive_stale(),
                 job = rx.recv() => {
@@ -1390,31 +1402,6 @@ impl Writer {
         seqs
     }
 
-    /// Writes pending idempotency entries to the idempotency topic.
-    async fn flush_idem(&mut self) {
-        if self.idem_pending.is_empty() {
-            return;
-        }
-        let payload = encode_idem(&self.idem_pending);
-        let Ok(msg) = IggyMessage::builder().payload(payload).build() else {
-            return;
-        };
-        let mut msgs = vec![msg];
-        if self
-            .client
-            .send_messages(
-                &self.shared.stream,
-                &self.shared.idem_topic,
-                &iggy::prelude::Partitioning::partition_id(self.shared.partition),
-                &mut msgs,
-            )
-            .await
-            .is_ok()
-        {
-            self.idem_pending.clear();
-        }
-    }
-
     async fn commit(&mut self, batch: &mut Vec<StoreJob>) {
         let now = now_ms();
         let mut plans: Vec<Plan> = Vec::with_capacity(batch.len());
@@ -1435,7 +1422,18 @@ impl Writer {
                 .await,
             );
         }
+        // Pending ACKs ride in the same append (one fsync for both).
+        let acks: Vec<(DeviceId, u64)> = self.pending_acks.drain().collect();
+        if !acks.is_empty() {
+            records.push(Record::Ack(acks.clone()));
+        }
         let ok = records.is_empty() || self.commit_records(&records, now).await;
+        if !ok {
+            for (d, s) in acks {
+                let e = self.pending_acks.entry(d).or_default();
+                *e = (*e).max(s);
+            }
+        }
         for (job, plan) in batch.drain(..).zip(plans) {
             let r = match plan {
                 Plan::Done(r) => r,
@@ -1483,14 +1481,18 @@ impl Writer {
                 ..
             } = rec
             {
-                self.idem_pending.push((
-                    *t,
-                    Idem {
-                        fp: *fp,
-                        at_ms: *at_ms,
-                        offset,
-                    },
-                ));
+                self.shared
+                    .idem_queue
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push((
+                        *t,
+                        Idem {
+                            fp: *fp,
+                            at_ms: *at_ms,
+                            offset,
+                        },
+                    ));
             }
             if let Record::Store {
                 remote,
@@ -1660,7 +1662,6 @@ impl Writer {
         {
             return 0;
         }
-        let _ = self.shared.persist_keys().await;
         let mut moves = {
             let st = self.shared.lock();
             let cut = st.offset_at(now.saturating_sub(ms(self.relocate_after)));
@@ -1700,7 +1701,17 @@ impl Writer {
         // Idempotency lives in its own topic: only pending entries, incomplete parts and
         // idempotency entries not yet written there hold the low-water offset back.
         let mut low = cut;
-        if let Some(m) = self.idem_pending.iter().map(|(_, i)| i.offset).min() {
+        let idem_floor = [&self.shared.idem_queue, &self.shared.idem_inflight]
+            .iter()
+            .filter_map(|m| {
+                m.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .map(|(_, i)| i.offset)
+                    .min()
+            })
+            .min();
+        if let Some(m) = idem_floor {
             low = low.min(m);
         }
         if let Some(m) = min_live {
@@ -1742,7 +1753,6 @@ impl Writer {
                 .stats
                 .windows_destroyed
                 .fetch_add(n64(destroyed), Ordering::Relaxed);
-            let _ = self.shared.persist_keys().await;
         }
     }
 
@@ -1756,8 +1766,7 @@ impl Writer {
             return false;
         }
         self.shared.stats.relocated.fetch_add(n, Ordering::Relaxed);
-        // The old copies' leaves were punctured on apply.
-        let _ = self.shared.persist_keys().await;
+        // The old copies' leaves were punctured on apply (written by the key persister).
         true
     }
 
@@ -1797,6 +1806,64 @@ impl Writer {
         let now = now_ms();
         self.shared.lock().note_batch(base, now);
         Some(base)
+    }
+}
+
+/// Writes the key file when punctures or windows changed it, off the writer's path. The
+/// deletion guarantee holds: an acknowledged entry's key leaves the disk within one interval.
+async fn key_persister(shared: Arc<Shared>, every: Duration) {
+    let mut tick = tokio::time::interval(every);
+    loop {
+        tick.tick().await;
+        if !shared.healthy.load(Ordering::Relaxed) {
+            return;
+        }
+        let _ = shared.persist_keys().await;
+    }
+}
+
+/// Writes idempotency entries to the idempotency topic, off the writer's path.
+async fn idem_flusher(shared: Arc<Shared>, client: IggyClient, every: Duration) {
+    let mut tick = tokio::time::interval(every);
+    let lock = |m: &Mutex<Vec<([u8; 32], Idem)>>| {
+        std::mem::take(&mut *m.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    };
+    loop {
+        tick.tick().await;
+        if !shared.healthy.load(Ordering::Relaxed) {
+            return;
+        }
+        let batch = {
+            let mut q = shared
+                .idem_queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut f = shared
+                .idem_inflight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            f.append(&mut q);
+            f.clone()
+        };
+        if batch.is_empty() {
+            continue;
+        }
+        let Ok(msg) = IggyMessage::builder().payload(encode_idem(&batch)).build() else {
+            continue;
+        };
+        let mut msgs = vec![msg];
+        if client
+            .send_messages(
+                &shared.stream,
+                &shared.idem_topic,
+                &iggy::prelude::Partitioning::partition_id(shared.partition),
+                &mut msgs,
+            )
+            .await
+            .is_ok()
+        {
+            let _ = lock(&shared.idem_inflight);
+        }
     }
 }
 

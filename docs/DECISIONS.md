@@ -49,6 +49,10 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     runtime touches the locked stack. Decided: per-core Tokio stays (owner, after D-0032's
     measurement: compio +2–4 %); io_uring is measured again in M7.
 - Prompt 2, milestone 3 (report `docs/reports/P02-M3.md`): gate approved by the owner on 2026-11-12.
+- Prompt 2, milestone 4 (report `docs/reports/P02-M4.md`): gate waiting for the owner. D-0034
+  (Valkey routing, owned partitions over node links, replicated key stores) decided by the agent
+  under the owner's delegation; the owner may revisit it. New dependency `redis` (with `arcstr`,
+  `async-lock`, `xxhash-rust` under BSL-1.0), exempted pending audits.
 
 ## Decisions
 
@@ -72,7 +76,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     subscriptions being the presence registry (`PUBLISH` returns 0: offline; a new connection
     publishes `close` before subscribing). Valkey learns nothing: channel names are keyed hashes of
     the device ID (HMAC-SHA256, cluster secret), payloads (envelope notifications, close) are
-    sealed with a cluster key (AES-256-GCM, from the secrets store, rotatable), connections use TLS
+    sealed with a cluster key (AES-256-GCM-SIV, bound to channel and kind; HKDF from the cluster
+    secret in the secrets store, rotatable), connections use TLS
     with the internal CA (D-0012). Re-subscribe in batches after a Valkey restart or failover.
   - **Mailbox partitions: one owner node each**, a lease in Valkey (renewed; expiry hands the
     partition over), Iggy producer epochs fencing any stale owner (D-0029). Sends, fetches and
@@ -91,6 +96,37 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   drop the old), duplicates during the overlap being dropped by `seq`; for the cluster, a
   slot-aware subscriber with one connection per shard primary (`redis-rs` exposes no sharded
   subscribe on its cluster client); no replica connections (the router never reads).
+- Implementation (refinements found while building and chaos-testing):
+  - Every Valkey connection used for commands (publishes, leases, members) is a self-healing
+    multiplexed connection that drops itself on an I/O error, timeout or refusal and reconnects
+    on the next command: `redis-rs` multiplexed connections stayed dead after a Valkey restart
+    (chaos run 2 hung, leases lapsed and two nodes ran one partition until Iggy fenced it).
+  - Leases: `SET NX PX` and Lua renew/release keyed by the holder. Owner and standby are the
+    first two of a rendezvous ranking (SHA-256 of member and partition) over the live members
+    (a sorted set with expiring scores). Ownership is sticky. A free partition goes first to the
+    preferred node (the standby, which holds the key store); others wait three lease periods. A
+    partition whose owner was known waits one lease period (its owner may only have lost the
+    lease with Valkey) unless the owner left a `released` marker (graceful shutdown: at once).
+    A node still running a partition whose lease vanished takes it back with `SET NX` without
+    restarting anything; it stops only if another node holds the lease.
+  - Key-store replication: the paged key store's write returns a replica (the changed pages);
+    the standby validates page names and epochs before applying. A new or changed standby, or
+    one a copy failed to reach, first gets the whole store.
+  - Close messages older than 30 s are ignored (a replayed close cannot evict a session).
+- Dependencies: `redis` 1.8.1 (default features off; Tokio and rustls only), bringing `arcstr`,
+  `async-lock` and `xxhash-rust` (the last under BSL-1.0, an OSI-approved permissive licence:
+  exception in `deny.toml`); all four exempted in `cargo vet` pending audits (same footing as the
+  other client libraries).
+- Evidence (AMD Ryzen 9 7950X, three delivery nodes of 2 cores, Iggy on tmpfs, Valkey 9.1.3
+  container; [P02-M4 report](reports/P02-M4.md)): cross-node p99 1.1 ms at 5,000 messages/s,
+  1.5 ms at 20,000, 3.3–3.6 ms at 50,000 (two of three messages crossing nodes); chaos runs
+  (partition owner `kill -9`, Valkey restart without persistence, owner SIGTERM) pass the
+  checker with no loss, duplicate or reordering; failover 6 s after a crash, 2–3 s after a
+  graceful stop at a 3 s lease. Tests: `crates/router/tests/valkey_live.rs` (6, including
+  dropping every Valkey connection mid-run), `crates/link/tests/link.rs` (4),
+  `crates/mailbox/tests/iggy_cluster.rs` (5: remote partitions, standby takeover with nothing
+  lost, graceful handover, leases lost with Valkey taken back without restarts, renewals after
+  every connection dropped); node-to-node requests fuzzed in `iggy_record`.
 - Consequences: no node is a single point of loss for pending messages (one standby per
   partition); Valkey sees opaque channels and blobs only; the node link is new code with its own
   tests and fuzz target. DirectLinks for live routing stays an alternative to measure only if the

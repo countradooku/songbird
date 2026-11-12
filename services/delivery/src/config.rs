@@ -55,6 +55,12 @@ impl Validate for DeliveryConfig {
                 "delivery.mailbox.iggy.tls_ca",
                 "and tls_domain are required in staging and production",
             );
+            v.check(
+                d.router.backend == RouterBackend::Local
+                    || d.router.valkey.as_ref().is_some_and(|s| s.tls_ca.is_some()),
+                "delivery.router.valkey.tls_ca",
+                "is required in staging and production",
+            );
         }
         v.check(
             d.session.drain_window_ms < self.common.shutdown_grace_secs.saturating_mul(1000),
@@ -90,6 +96,82 @@ pub struct DeliverySettings {
     /// Thread-per-core runtime.
     #[serde(default)]
     pub runtime: RuntimeSettings,
+    /// Routing between nodes.
+    #[serde(default)]
+    pub router: RouterConfig,
+}
+
+/// Router backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RouterBackend {
+    /// Within this process only (one node).
+    #[default]
+    Local,
+    /// Across nodes over Valkey pub/sub (D-0034).
+    Valkey,
+}
+
+/// `[delivery.router]`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RouterConfig {
+    /// Backend.
+    pub backend: RouterBackend,
+    /// Valkey settings (required for `valkey`).
+    pub valkey: Option<ValkeyRouterSettings>,
+}
+
+/// `[delivery.router.valkey]`: Valkey sees only keyed channel names and sealed payloads
+/// (D-0034).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValkeyRouterSettings {
+    /// `host:port`.
+    pub addr: String,
+    /// TLS server name (required with `tls_ca`).
+    #[serde(default)]
+    pub tls_domain: Option<String>,
+    /// PEM root of the internal CA; TLS is on when set.
+    #[serde(default)]
+    pub tls_ca: Option<PathBuf>,
+    /// ACL user (default user when absent).
+    #[serde(default)]
+    pub user: Option<String>,
+    /// Password.
+    pub pass: SecretRef,
+    /// 64 hex characters, the same on every node: channel names and payload keys derive from it.
+    pub cluster_secret: SecretRef,
+    /// Subscriber connections.
+    #[serde(default = "default_subscribers")]
+    pub subscribers: usize,
+}
+
+const fn default_subscribers() -> usize {
+    4
+}
+
+impl Validate for RouterConfig {
+    fn validate(&self, v: &mut Validator) {
+        v.check(
+            self.backend != RouterBackend::Valkey || self.valkey.is_some(),
+            "valkey",
+            "is required for the valkey backend",
+        );
+        if let Some(s) = &self.valkey {
+            v.check(!s.addr.is_empty(), "valkey.addr", "must be host:port");
+            v.check(
+                (1..=64).contains(&s.subscribers),
+                "valkey.subscribers",
+                "must be in 1..=64",
+            );
+            v.check(
+                s.tls_ca.is_none() || s.tls_domain.is_some(),
+                "valkey.tls_domain",
+                "is required with tls_ca",
+            );
+        }
+    }
 }
 
 /// `[delivery.runtime]`: one pinned worker thread per core, each with its own listener
@@ -173,6 +255,7 @@ impl Validate for DeliverySettings {
         v.section("session", &self.session);
         v.section("mailbox", &self.mailbox);
         v.section("runtime", &self.runtime);
+        v.section("router", &self.router);
     }
 }
 

@@ -265,6 +265,45 @@ impl Router for LocalRouter {
     }
 }
 
+/// The router chosen at start-up from configuration.
+#[derive(Debug)]
+pub enum AnyRouter {
+    /// One node (development, tests, a single server).
+    Local(LocalRouter),
+    /// Several nodes over Valkey (D-0034).
+    Valkey(valkey::ValkeyRouter),
+}
+
+impl Router for AnyRouter {
+    async fn attach(&self, device: DeviceId, sizes: InboxSizes) -> Inbox {
+        match self {
+            Self::Local(r) => r.attach(device, sizes).await,
+            Self::Valkey(r) => r.attach(device, sizes).await,
+        }
+    }
+
+    async fn detach(&self, device: &DeviceId, conn: u64) {
+        match self {
+            Self::Local(r) => r.detach(device, conn).await,
+            Self::Valkey(r) => r.detach(device, conn).await,
+        }
+    }
+
+    async fn route(&self, device: &DeviceId, live: Live) -> Routed {
+        match self {
+            Self::Local(r) => r.route(device, live).await,
+            Self::Valkey(r) => r.route(device, live).await,
+        }
+    }
+
+    async fn route_ephemeral(&self, device: &DeviceId, payload: Bytes) -> Routed {
+        match self {
+            Self::Local(r) => r.route_ephemeral(device, payload).await,
+            Self::Valkey(r) => r.route_ephemeral(device, payload).await,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

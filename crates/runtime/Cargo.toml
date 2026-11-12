@@ -1,0 +1,23 @@
+[package]
+name = "songbird-runtime"
+description = "Thread-per-core runtime: one pinned OS thread per worker core, each with its own current-thread Tokio runtime and its own SO_REUSEPORT listener (master prompt §4)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+socket2 = { workspace = true }
+tokio = { workspace = true, features = ["rt", "net", "time"] }
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "net", "time", "io-util", "macros", "sync"] }
+
+[lints]
+workspace = true

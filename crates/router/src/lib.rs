@@ -17,10 +17,9 @@
 //! (one channel per device) behind the same trait.
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
 use std::future::{Future, ready};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bytes::Bytes;
 use songbird_types::DeviceId;
@@ -141,10 +140,16 @@ pub trait Router: Send + Sync + 'static {
     ) -> impl Future<Output = Routed> + Send;
 }
 
-/// Routes within one process.
+/// Routes within one process, across all its cores.
+///
+/// The device directory is a lock-free concurrent map (`papaya`, D-0032: of papaya, scc and
+/// dashmap the fastest and with the best p99 lookup from 4 to 16 threads; a `Mutex<HashMap>`
+/// collapsed to 4.8 M operations/s with a 31 µs p99 at 16 threads). Routing reads the session's
+/// handle under the map's guard and sends to its inbox without cloning it, so the hot path takes
+/// no lock and touches no shared reference count.
 #[derive(Debug, Default)]
 pub struct LocalRouter {
-    sessions: Mutex<HashMap<DeviceId, Handle>>,
+    sessions: papaya::HashMap<DeviceId, Handle>,
     next_conn: AtomicU64,
 }
 
@@ -155,15 +160,10 @@ impl LocalRouter {
         Self::default()
     }
 
-    fn lock(&self) -> MutexGuard<'_, HashMap<DeviceId, Handle>> {
-        // Release builds abort on panic: poisoning only happens in tests.
-        self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
     /// Devices currently attached.
     #[must_use]
     pub fn attached(&self) -> usize {
-        self.lock().len()
+        self.sessions.len()
     }
 
     fn attach_now(&self, device: DeviceId, sizes: InboxSizes) -> Inbox {
@@ -177,7 +177,7 @@ impl LocalRouter {
             ephemeral: eph_tx,
             signals: Arc::clone(&signals),
         };
-        if let Some(old) = self.lock().insert(device, handle) {
+        if let Some(old) = self.sessions.pin().insert(device, handle) {
             old.signals.replace();
         }
         Inbox {
@@ -186,10 +186,6 @@ impl LocalRouter {
             ephemeral,
             signals,
         }
-    }
-
-    fn handle(&self, device: &DeviceId) -> Option<Handle> {
-        self.lock().get(device).cloned()
     }
 }
 
@@ -200,15 +196,14 @@ impl Router for LocalRouter {
     }
 
     fn detach(&self, device: &DeviceId, conn: u64) -> impl Future<Output = ()> + Send {
-        let mut map = self.lock();
-        if map.get(device).is_some_and(|h| h.conn == conn) {
-            map.remove(device);
-        }
+        // Only this attachment's entry: a newer session for the device stays.
+        let _ = self.sessions.pin().remove_if(device, |_, h| h.conn == conn);
         ready(())
     }
 
     fn route(&self, device: &DeviceId, live: Live) -> impl Future<Output = Routed> + Send {
-        let r = match self.handle(device) {
+        let map = self.sessions.pin();
+        let r = match map.get(device) {
             None => Routed::Offline,
             Some(h) => match h.live.try_send(live) {
                 Ok(()) => Routed::Queued,
@@ -228,7 +223,8 @@ impl Router for LocalRouter {
         device: &DeviceId,
         payload: Bytes,
     ) -> impl Future<Output = Routed> + Send {
-        let r = match self.handle(device) {
+        let map = self.sessions.pin();
+        let r = match map.get(device) {
             None => Routed::Offline,
             Some(h) => match h.ephemeral.try_send(payload) {
                 Ok(()) => Routed::Queued,

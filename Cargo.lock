@@ -3004,6 +3004,7 @@ dependencies = [
  "songbird-mailbox",
  "songbird-proto",
  "songbird-router",
+ "songbird-runtime",
  "songbird-service",
  "songbird-surreal",
  "songbird-types",
@@ -3123,8 +3124,20 @@ name = "songbird-router"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "papaya",
  "songbird-types",
  "tokio",
+]
+
+[[package]]
+name = "songbird-runtime"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+ "socket2",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

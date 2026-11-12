@@ -87,6 +87,56 @@ pub struct DeliverySettings {
     /// Mailbox store.
     #[serde(default)]
     pub mailbox: MailboxConfig,
+    /// Thread-per-core runtime.
+    #[serde(default)]
+    pub runtime: RuntimeSettings,
+}
+
+/// `[delivery.runtime]`: one pinned worker thread per core, each with its own listener
+/// (`SO_REUSEPORT`) and current-thread runtime (D-0032). The mailbox runs on the main thread.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RuntimeSettings {
+    /// Worker cores; 0 means every CPU this process may use (`taskset`, cgroup cpuset). On a
+    /// single server, confine delivery so the stores keep cores of their own.
+    pub workers: usize,
+    /// Pin each worker to its own CPU.
+    pub pin: bool,
+    /// Listen backlog of each core's listener.
+    pub backlog: i32,
+}
+
+impl Default for RuntimeSettings {
+    fn default() -> Self {
+        Self {
+            workers: 0,
+            pin: true,
+            backlog: 4096,
+        }
+    }
+}
+
+impl RuntimeSettings {
+    /// The worker count to start: `workers`, or every allowed CPU when 0.
+    #[must_use]
+    pub fn worker_count(&self) -> usize {
+        if self.workers == 0 {
+            songbird_runtime::allowed_cpus().len().max(1)
+        } else {
+            self.workers
+        }
+    }
+}
+
+impl Validate for RuntimeSettings {
+    fn validate(&self, v: &mut Validator) {
+        v.check(self.workers <= 1024, "workers", "must be at most 1024");
+        v.check(
+            (1..=65_535).contains(&self.backlog),
+            "backlog",
+            "must be in 1..=65535",
+        );
+    }
 }
 
 impl Validate for DeliverySettings {
@@ -99,6 +149,7 @@ impl Validate for DeliverySettings {
         v.section("limits", &self.limits);
         v.section("session", &self.session);
         v.section("mailbox", &self.mailbox);
+        v.section("runtime", &self.runtime);
     }
 }
 

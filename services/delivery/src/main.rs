@@ -190,8 +190,20 @@ impl Service for Delivery {
                 self.settings.mailbox.store_generation,
             )),
         };
-        let listener = tokio::net::TcpListener::bind(self.settings.listen).await?;
-        tracing::info!(tls = self.tls.is_some(), "websocket listener bound");
+        let runtime = self.settings.runtime;
+        let cores = runtime.worker_count();
+        // One listener per core on the same address: the kernel spreads connections (D-0032).
+        let listeners =
+            songbird_runtime::reuseport_listeners(self.settings.listen, cores, runtime.backlog)?;
+        tracing::info!(
+            tls = self.tls.is_some(),
+            cores,
+            pin = runtime.pin,
+            "websocket listeners bound"
+        );
+        let listeners: Arc<std::sync::Mutex<Vec<Option<std::net::TcpListener>>>> = Arc::new(
+            std::sync::Mutex::new(listeners.into_iter().map(Some).collect()),
+        );
         let shared = Arc::new(Shared::new(
             self.settings,
             self.directory,
@@ -200,7 +212,34 @@ impl Service for Delivery {
             self.metrics,
         ));
         let (stop_tx, stop_rx) = watch::channel(false);
-        let serve = tokio::spawn(server::serve(listener, self.tls, shared.clone(), stop_rx));
+        // The mailbox's tasks stay on this (main) thread's runtime; the cores reach them through
+        // channels.
+        let tls = self.tls;
+        let worker_shared = shared.clone();
+        let workers = songbird_runtime::start(
+            songbird_runtime::Config {
+                workers: cores,
+                pin: runtime.pin,
+            },
+            move |core| {
+                let listener = listeners
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get_mut(core.index)
+                    .and_then(Option::take);
+                let (tls, shared, stop) = (tls.clone(), worker_shared.clone(), stop_rx.clone());
+                async move {
+                    let Some(listener) = listener else { return };
+                    match tokio::net::TcpListener::from_std(listener) {
+                        Ok(l) => server::serve_core(l, tls, shared, stop, core).await,
+                        Err(e) => {
+                            tracing::error!(core = core.index, error = %e, "cannot use listener");
+                        }
+                    }
+                }
+            },
+        )?;
+        let serve = tokio::task::spawn_blocking(move || workers.join());
         ctx.health.set_ready(true);
         // A fenced Iggy writer (another node took the partitions over) makes this node unready.
         let watch_shared = shared.clone();
@@ -221,7 +260,10 @@ impl Service for Delivery {
         ctx.shutdown().await;
         watcher.abort();
         let _ = stop_tx.send(true);
-        serve.await?;
+        let panicked = serve.await?;
+        if panicked > 0 {
+            return Err(format!("{panicked} delivery cores panicked").into());
+        }
         Ok(())
     }
 }

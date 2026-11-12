@@ -58,12 +58,67 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   forms of data already listed); D-0036 decided by the agent under the owner's standing
   instruction. Real APNs, FCM and UnifiedPush credentials are needed to test against the real
   providers (mocks only so far).
+- D-0038: whether to store who invited whom for abuse handling (default: no, only per-user counts).
+- D-0037: when the `send` crate is extracted, `api` (and `calls`, `worker`) must reach Iggy partition
+  owners; admitting `api.` certificates to node links, or another route, is to be decided then.
 - D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
   tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
   `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0038 — Prompt 3 amendment: invite-only registration
+
+- Date: 2026-11-13
+- Status: accepted (prompt amended; built in Prompt 3)
+- Decided by: owner (prompt amendment)
+- Context: the launch is invite-only. Registration abuse controls in Prompt 3 (proof of work,
+  per-IP throttles) do not limit who joins, and an invite system is the usual place where a
+  messenger quietly records its social graph.
+- Decision: `docs/prompts/03-identity.md` gains an **Invite-only launch** item under "Also build":
+  - a server-side invite-only mode, switchable off without a migration;
+  - random invite codes stored only as hashes, single- or multi-use, with expiry, and
+    rate-limited checks so codes cannot be guessed;
+  - a per-user invite allowance (configurable, for example five) and admin-generated batches;
+  - **who invited whom is not stored by default**: only per-user counts. Storing the link for
+    abuse handling would need the owner's decision here and a threat-model row.
+  - Tests: valid, expired, reused and guessed codes; quota limits; mode switched off.
+- Consequences: Prompt 3 has not started, so nothing is built yet; its issue gains the item in
+  Build and its tests in Gate. Open owner decision: whether to store inviter links for abuse
+  handling (default no).
+
+## D-0037 — Prompt 2 amendment: no internal network Send API; a `send` library and `PUT /v1/messages`
+
+- Date: 2026-11-13
+- Status: accepted (prompt amended; to build)
+- Decided by: owner (prompt amendment)
+- Context: Prompt 2 asked for an internal, mutual-TLS "Send API" so `api`, `calls` and `worker`
+  could send through the store-then-route path. A network hop adds latency, a second protocol to
+  secure, and a second path that can drift from the WebSocket's.
+- Decision: `docs/prompts/02-realtime.md` replaces that item:
+  - the **`send` crate** (validate, store, publish on the device's Valkey channel) is a library
+    that `delivery`, `api`, `calls` and `worker` link directly, so every send takes the same
+    tested path with no extra hop;
+  - server-originated notices (for example "your device list changed") are server-signed
+    system frames, never user messages;
+  - for clients with no open WebSocket (notification quick-reply, share extension, failed
+    socket), `api` exposes **`PUT /v1/messages`**, which takes the same encrypted envelopes as
+    the WebSocket `Send` frame and calls the same crate.
+  - The amended text says "store in SurrealDB"; the store is the mailbox, which is Apache Iggy
+    since D-0029 (SurrealDB holds the registry), so the crate stores through the `Mailbox` trait.
+- Evidence: no internal Send API exists in the code (searched 2026-11-13), so there is nothing
+  to refactor. The worker's device link (D-0036, `[delivery.internal]`) is not a send interface:
+  it accepts only `worker.` certificates and only Forget and Known.
+- Consequences: still to build in Prompt 2, before its final gate:
+  - extract the send path from `services/delivery/src/session.rs` (device-list check,
+    idempotency, store, route, push on offline) into `crates/send`;
+  - `api`'s `PUT /v1/messages` on it, signed like every `api` request, with the same limits as the
+    `Send` frame; server-signed system frames in `crates/proto`;
+  - `api`, `calls` and `worker` then need the mailbox and router connections `delivery` has.
+    With Iggy partitions owned by delivery nodes (D-0034), a send from `api` reaches a
+    partition's owner over node links like a non-owning delivery node does, which needs `api`
+    nodes admitted to those links (today `delivery.` certificates only); to decide when built.
 
 ## D-0036 — Milestone 5: sealed jobs, push that leaks nothing, a minimal account registry, uploads through `api`, deletion proven across every store
 

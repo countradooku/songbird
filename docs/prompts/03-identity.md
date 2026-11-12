@@ -24,6 +24,12 @@
 - **Multiple accounts on one device.** Device auth, keys and mailboxes are per account. Document that one push token shared by several accounts links them on the server, and offer per-account push registrations where the platform allows.
 - **Profile links** (website, social handles) as another field of the encrypted profile.
 - **Security notifications.** When a contact's identity key changes, every client is told through the device-list and key-transparency paths so the app can warn the user.
+- **Invite-only launch** *(amended 2026-11-13, D-0038)*:
+  - A server-side invite-only registration mode, switchable off later without a migration.
+  - Invite codes: random, stored only as hashes, single- or multi-use, with expiry; checks are rate-limited so codes cannot be guessed.
+  - Quotas: a per-user invite allowance (configurable, for example five) and admin-generated batches for early testers.
+  - Who invited whom is social-graph metadata: by default store only per-user counts. Storing the link for abuse handling is an owner decision recorded in docs/DECISIONS.md and the threat model.
+  - Tests: valid, expired, reused and guessed codes; quota limits; mode switched off.
 
 **Security:** prekey exhaustion protection (rate limits on fetches per requester and per target), constant-time comparisons for secrets, no enumeration through error messages or timing.
 

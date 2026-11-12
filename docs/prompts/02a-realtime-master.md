@@ -79,7 +79,7 @@ songbird/
     mailbox/      SurrealDB: store, seq allocation, fetch_after, batched ACK delete
     registry/     Valkey: per-device channels, takeover, re-subscribe
     router/       Router trait, Valkey pub/sub (default), direct links, Iggy (feature-gated)
-    send/         send-path validation shared by delivery and api
+    send/         the send path as a library (validate, store, route), linked by delivery, api, calls and worker (D-0037)
     jobs/         Valkey Streams queue, outbox relay, retry/backoff
     telemetry/    metrics, tracing, no-PII guards
     client/       Rust delivery client (used by app-core and loadgen)

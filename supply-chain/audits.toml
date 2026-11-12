@@ -93,6 +93,12 @@ user-id = 539 # Josh Stone (cuviper)
 start = "2025-08-29"
 end = "2027-11-11"
 
+[[trusted.h2]]
+criteria = "safe-to-deploy"
+user-id = 359 # Sean McArthur (seanmonstar)
+start = "2019-03-01"
+end = "2027-11-11"
+
 [[trusted.hashbrown]]
 criteria = "safe-to-deploy"
 user-id = 2915 # Amanieu d'Antras (Amanieu)

@@ -16,6 +16,7 @@ members = [
     "crates/jobs",
     "crates/accounts",
     "crates/s3",
+    "crates/push-providers",
     "services/delivery",
     "services/api",
     "services/push",
@@ -56,6 +57,7 @@ songbird-jobs = { path = "crates/jobs" }
 songbird-accounts = { path = "crates/accounts" }
 songbird-s3 = { path = "crates/s3" }
 songbird-delivery = { path = "services/delivery" }
+songbird-push-providers = { path = "crates/push-providers" }
 
 anyhow = "1.0.104"
 aws-lc-rs = { version = "1.19.0", default-features = false, features = ["aws-lc-sys"] }
@@ -102,6 +104,11 @@ tracing = { version = "0.1.44", default-features = false, features = ["std", "at
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["std", "fmt", "json", "registry", "env-filter", "ansi"] }
 zeroize = "1.9.1"
+# Push providers (D-0036): JSON off the hot path (service-account file, OAuth and provider error
+# bodies), already in the tree through the Iggy SDK; Mozilla's root store for APNs, FCM and Web
+# Push endpoints, already in the tree (licence exception in deny.toml).
+serde_json = "1.0.154"
+webpki-roots = "1.0.12"
 
 # Test-only
 proptest = "1.12.0"

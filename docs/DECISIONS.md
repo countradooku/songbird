@@ -149,6 +149,22 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`get-vanilla`, `get-vanilla-query-order-key-case`, `get-vanilla-empty-query-key`, and the S3
   GET object, PUT object, GET lifecycle and list examples); `crates/s3/tests/rustfs_live.rs` runs
   against RustFS 1.0.5 in the compose job.
+- Dependencies (push providers, `crates/push-providers`): one crate new to `Cargo.lock`, **`h2`
+  0.4.20**, brought by enabling `hyper`'s `client` and `http2` features (HTTP/2 to APNs and FCM
+  through `hyper::client::conn::http2`; Apple requires HTTP/2). Published by Sean McArthur like
+  `hyper`, so covered in `cargo vet` by a `trusted.h2` entry under D-0016's rule; MIT. Its own
+  dependencies were all in the tree already. Direct dependencies already in the tree, now in
+  `[workspace.dependencies]`: `serde_json` 1.0.154 (service-account file, OAuth and provider error
+  bodies, JWT claims; off the hot path, response bodies capped at 16 KiB before parsing) and
+  `webpki-roots` 1.0.12 (Mozilla's roots compiled in, so the push service does not depend on the
+  container's CA bundle; CDLA-Permissive-2.0, exception already in `deny.toml`). Not taken:
+  `jsonwebtoken`, `p256`, `ring`, `base64` (JWTs, VAPID and RFC 8291 use our own 60-line
+  unpadded base64url, tested against RFC 4648), `url` (endpoints parsed with `http::Uri` plus
+  explicit checks). All signing, ECDH, HKDF and AES-GCM through aws-lc-rs 1.19.0; APIs read in the
+  pinned sources (hyper 1.12.0 `client::conn::{http1,http2}`, `server::conn::{http1,http2}`;
+  hyper-util 0.1.21 `rt::{TokioExecutor, TokioIo, TokioTimer}`; aws-lc-rs `agreement::{PrivateKey,
+  agree}`, `signature::{EcdsaKeyPair, RsaKeyPair}`, `hkdf`, `aead::LessSafeKey`; http-body-util
+  0.1.5 `Limited`; rcgen 0.14.10 for the mocks' test CA, behind the `test-support` feature).
 
 ## D-0035 — Object storage: RustFS replaces Garage
 

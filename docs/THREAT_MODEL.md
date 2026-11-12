@@ -111,6 +111,11 @@ One subsection per component. Each threat names its mitigation and the test or p
 | A lost or rolled-back key-store page making pending messages look acknowledged | T | Faults, operator error, tampering | Copy-on-write key store; the head lists every page with its generation and key count; a missing, misplaced or altered page stops the start (runbook) | `start_up_refuses_a_lost_key_page`; key-store unit tests |
 | An older writer overwriting the key store | T | A second delivery process, a stale node | The new writer writes the key store with its epoch before appending; older epochs are refused; writes serialised | `an_older_writer_cannot_overwrite_a_newer_one`; `restart_rebuilds_state_and_fences_the_old_writer` |
 | Two messages sealed under one key (AES-GCM nonce reuse; one ACK destroying another message) | T, I | Faults (crash, restart, takeover) | Each slot used once: replay marks every replayed record's slots used; a new writer seals in a fresh random window | `a_restart_never_reuses_key_slots`; `replayed_records_move_the_next_slot` |
+| Valkey (routing) learning who talks to whom, or reading routed envelopes | I | Insider, attacker on the Valkey host, a Valkey bug | Channel names are keyed hashes of device IDs (HMAC, cluster secret); every routed payload sealed (AES-256-GCM-SIV) and bound to its channel and kind; TLS with client certificates in deployments (D-0034) | `valkey_sees_neither_device_ids_nor_content`; `sealed_payloads_open_only_on_their_channel_kind_and_key` |
+| Disconnecting devices by replaying captured `close` messages | D | Attacker who recorded Valkey traffic | A `close` older than 30 s is ignored; payloads authenticated | router unit tests; D-0034 |
+| Another internal service (API, push) reading or writing mailboxes over node links | I, T, E | Compromised internal service holding an internal-CA certificate | Node links need mutual TLS from the internal CA and a peer name starting `delivery.` that its certificate is valid for | `other_components_and_other_cas_are_refused`; `the_client_refuses_a_server_with_another_name` |
+| Two nodes writing one partition (seq reuse, key-store clobbering) | T | Network partition, Valkey loss, a slow node | Leases in Valkey with compare-and-set renewal; Iggy producer epochs fence a stale writer; key stores fenced by epoch; a lost lease is taken back without a restart, a lease taken by another node stops the writer | `leases_lost_with_valkey_are_taken_back_without_restarting`; `the_standby_takes_over_without_losing_anything`; `restart_rebuilds_state_and_fences_the_old_writer` |
+| A node's death losing its pending messages | T | Host failure | Each partition's key store replicated to a standby node (full copy when the standby changes, then every write); the standby takes the lease after it expires | `the_standby_takes_over_without_losing_anything`; chaos run in report P02-M4 |
 | Third-party client logs leaking addresses | I | Log store | Iggy SDK log targets forced off in every filter | `inv6_no_identifiers_in_logs_or_metrics` (TRACE through the production filter); D-0030 |
 | A container escape through io_uring | E | Attacker who compromised Iggy | Iggy's seccomp profile adds only the three io_uring syscalls to Docker's default; `no-new-privileges`, all capabilities dropped; private address only | `deploy/compose/iggy-seccomp.json`; D-0029 |
 | Malformed SurrealDB responses | T, D | Compromised database, network | Bounded CBOR decoder (depth, lengths before allocation), fuzzed; TLS with the internal CA outside development | `cbor.rs` tests; `surreal_cbor` fuzz target |
@@ -131,7 +136,11 @@ One subsection per component. Each threat names its mitigation and the test or p
   destroyed. Data volumes need full-disk encryption with a key kept off the disk (Prompt 13,
   D-0031). On a quiet node a delivered message's sealed bytes (unopenable) stay until its
   16 MiB segment fills.
-- Losing a node's key store (`key_dir`) or master key loses its pending messages (D-0031).
+- Losing a node's key store (`key_dir`) or master key loses its pending messages (D-0031), unless
+  its standby holds the replica (cluster mode, D-0034). A partition's key store now exists on two
+  nodes; deleted keys can survive in either node's flash (full-disk encryption, #28).
+- Valkey holds leases and routing without persistence: losing it costs re-subscribing and re-taking
+  leases (seconds), not messages; Iggy's epochs remain the guard against two writers.
 - Iggy is pre-1.0; the Iggy SDK added 153 exempted crates to the audit backlog (D-0030).
 - cargo-vet: 57 of 167 crates are exempted rather than vetted; accepted by the owner (report P01, D-0016).
 - Root SSH through the bastion (owner decision open, D-0014).

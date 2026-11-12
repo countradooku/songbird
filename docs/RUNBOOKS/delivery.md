@@ -20,6 +20,33 @@ aggregate counters only; nothing in them or in the logs identifies a device (inv
 - Kernel settings (open files, `somaxconn`, `tcp_max_syn_backlog`, ephemeral ports) are in
   `deploy/`; with per-core listeners `backlog` applies to each core's listener.
 
+## Several nodes (cluster mode, D-0034)
+
+- Each mailbox partition has one owner node (it runs the writer) and one standby (it receives a
+  copy of every key-store write). Leases live in the router's Valkey (`songbird:<stream>:<topic>:
+  lease:<p>`), renewed every third of `lease_ttl_ms` (default 10 s); members in
+  `songbird:<stream>:<topic>:members`. Nodes reach each other's partitions over node links
+  (`[delivery.cluster] link_listen`, mutual TLS with the `delivery` leaf certificates).
+- **A node dies** (crash, host loss): its devices reconnect elsewhere at once; its partitions
+  move to their standbys after about one lease period. Sends to devices on those partitions are
+  rejected as retryable (reason 6) meanwhile; nothing is lost. Logs on the standby: `mailbox
+  partition taken over`. Restarting the dead node is not required; when it returns it serves
+  connections and takes free partitions only.
+- **A node stops gracefully** (deploy): it writes and replicates its key stores and releases its
+  leases on SIGTERM; standbys take over within a renewal tick.
+- **Valkey restarts or fails over**: routing re-subscribes by itself (sessions drain their
+  mailboxes once); leases are taken back by their owners without restarting anything. Expect
+  `mailbox key store not replicated to its standby` only if a node cannot reach another.
+- **`mailbox key store not replicated to its standby`** (warning, repeated): the standby is
+  unreachable (link port, certificates, firewall). The owner keeps running; if it then dies, its
+  standby lacks recent keys and the partition refuses to start there ("Mailbox key store
+  unusable"). Fix the link; the full store is copied again once it is back.
+- **`mailbox partition lease lost; writer stopped`**: another node took the partition (this node
+  was cut off from Valkey longer than a lease). Normal after a network partition; check that the
+  partition is running somewhere (`/metrics`, logs on the other nodes).
+- Every node needs the same `master_key`, `idempotency_secret`, `cluster_secret` and Iggy
+  topic; certificates `delivery.<host>.songbird.internal` from the internal CA (D-0012).
+
 ## Overload: connections refused (close 4101)
 
 - Detection: `connections_refused_total` rising; clients report 4101 with a retry hint.

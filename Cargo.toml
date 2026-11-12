@@ -15,6 +15,7 @@ members = [
     "crates/valkey",
     "crates/jobs",
     "crates/accounts",
+    "crates/s3",
     "services/delivery",
     "services/api",
     "services/push",
@@ -53,6 +54,7 @@ songbird-surreal = { path = "crates/surreal" }
 songbird-valkey = { path = "crates/valkey" }
 songbird-jobs = { path = "crates/jobs" }
 songbird-accounts = { path = "crates/accounts" }
+songbird-s3 = { path = "crates/s3" }
 songbird-delivery = { path = "services/delivery" }
 
 anyhow = "1.0.104"

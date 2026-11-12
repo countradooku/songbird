@@ -135,6 +135,20 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 - Consequences: Valkey still learns nothing (routing D-0034; jobs sealed); new metadata limited
   to the two rows the owner approved; the static directory is no longer the only source of
   devices, so `delivery` becomes deployable once Prompt 3 adds registration.
+- Dependencies (s3): `crates/s3` (`songbird-s3`) adds no crate to `Cargo.lock`. It enables
+  hyper 1.12.0's `client` feature in its own manifest (the workspace keeps `http1` and `server`);
+  that feature's dependencies `want`, `pin-project-lite` and `smallvec` were already locked.
+  Everything else (aws-lc-rs for HMAC-SHA256 and SHA-256, hyper-util 0.1.21's `TokioIo`,
+  tokio-rustls, rustls, bytes, futures-core, hex, zeroize, thiserror) was already a workspace
+  dependency. APIs read in the pinned sources first: hyper `client::conn::http1::{Builder,
+  SendRequest::{ready, try_send_request, is_closed}}`, `TrySendError::take_message` and the h1
+  dispatcher's body loop (it stops polling a body at `Content-Length`, so the upload body holds
+  the completing chunk back until the source confirms its end); http-body 1.1.0 `Body`,
+  `Frame`, `SizeHint`; aws-lc-rs 1.19.0 `hmac::{Key, sign, HMAC_SHA256}`, `digest::digest`;
+  tokio-rustls 0.26.6 `TlsConnector::connect`. SigV4 is checked against AWS's published vectors
+  (`get-vanilla`, `get-vanilla-query-order-key-case`, `get-vanilla-empty-query-key`, and the S3
+  GET object, PUT object, GET lifecycle and list examples); `crates/s3/tests/rustfs_live.rs` runs
+  against RustFS 1.0.5 in the compose job.
 
 ## D-0035 — Object storage: RustFS replaces Garage
 

@@ -3254,6 +3254,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "songbird-s3"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "bytes",
+ "futures-core",
+ "hex",
+ "hyper",
+ "hyper-util",
+ "proptest",
+ "rustls",
+ "rustls-pki-types",
+ "songbird-types",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "zeroize",
+]
+
+[[package]]
 name = "songbird-service"
 version = "0.1.0"
 dependencies = [

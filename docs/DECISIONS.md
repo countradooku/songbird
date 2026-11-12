@@ -49,7 +49,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     runtime touches the locked stack. Decided: per-core Tokio stays (owner, after D-0032's
     measurement: compio +2–4 %); io_uring is measured again in M7.
 - Prompt 2, milestone 3 (report `docs/reports/P02-M3.md`): gate approved by the owner on 2026-11-12.
-- Prompt 2, milestone 4 (report `docs/reports/P02-M4.md`): gate waiting for the owner. D-0034
+- Prompt 2, milestone 4 (report `docs/reports/P02-M4.md`): gate approved by the owner on 2026-11-12. D-0034
   (Valkey routing, owned partitions over node links, replicated key stores) decided by the agent
   under the owner's delegation; the owner may revisit it. New dependency `redis` (with `arcstr`,
   `async-lock`, `xxhash-rust` under BSL-1.0), exempted pending audits.

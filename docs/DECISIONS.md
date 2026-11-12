@@ -48,7 +48,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   - D-0028: benchmark compio (owner's suggestion) against per-core Tokio in M3; changing the
     runtime touches the locked stack. Decided: per-core Tokio stays (owner, after D-0032's
     measurement: compio +2–4 %); io_uring is measured again in M7.
-- Prompt 2, milestone 3 (report `docs/reports/P02-M3.md`): approve the gate.
+- Prompt 2, milestone 3 (report `docs/reports/P02-M3.md`): gate approved by the owner on 2026-11-12.
 
 ## Decisions
 

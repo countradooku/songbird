@@ -447,7 +447,10 @@ impl Mailbox for SurrealMailbox {
 
     /// Development backend: the writer's cached counters are not dropped, so a later send to a
     /// forgotten device would continue its `seq`; deployments use Iggy.
-    fn forget(&self, devices: &[DeviceId]) -> impl Future<Output = Result<(), MailboxError>> + Send {
+    fn forget(
+        &self,
+        devices: &[DeviceId],
+    ) -> impl Future<Output = Result<(), MailboxError>> + Send {
         let conn = Arc::clone(&self.conn);
         let ds = Value::Array(devices.iter().map(|d| bytes_value(d.as_bytes())).collect());
         async move {

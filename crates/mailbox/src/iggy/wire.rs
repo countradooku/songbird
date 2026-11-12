@@ -179,7 +179,10 @@ fn put_local(b: &mut BytesMut, l: &LocalReq) {
 }
 
 impl Request {
-    #[allow(clippy::too_many_lines, reason = "one flat match over every request kind")]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one flat match over every request kind"
+    )]
     pub(crate) fn encode(&self) -> Bytes {
         let mut b = BytesMut::with_capacity(64);
         b.put_u8(VERSION);

@@ -247,7 +247,8 @@ pub trait Mailbox: Send + Sync + 'static {
     /// if acknowledged and the devices' counters are dropped. Durable when it returns. A send
     /// racing the deletion can recreate a device's state; the deletion job forgets again once
     /// every delivery node has dropped the devices from its directory.
-    fn forget(&self, devices: &[DeviceId]) -> impl Future<Output = Result<(), MailboxError>> + Send;
+    fn forget(&self, devices: &[DeviceId])
+    -> impl Future<Output = Result<(), MailboxError>> + Send;
 
     /// Whether the store holds anything of `device`: pending envelopes or counters (deletion
     /// verification).

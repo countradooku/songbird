@@ -265,7 +265,10 @@ impl Mailbox for MemoryMailbox {
         ready(Ok(u64::try_from(self.pending(device)).unwrap_or(u64::MAX)))
     }
 
-    fn forget(&self, devices: &[DeviceId]) -> impl Future<Output = Result<(), MailboxError>> + Send {
+    fn forget(
+        &self,
+        devices: &[DeviceId],
+    ) -> impl Future<Output = Result<(), MailboxError>> + Send {
         let mut inner = self.lock();
         for d in devices {
             inner.boxes.remove(d);

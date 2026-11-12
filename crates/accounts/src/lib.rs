@@ -18,6 +18,7 @@
 #![forbid(unsafe_code)]
 
 mod db;
+pub mod push_token;
 
 use std::time::Duration;
 

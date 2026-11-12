@@ -22,6 +22,16 @@ bytes.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "io-util", "macros", "time", "sync"] }
 
 [dev-dependencies]
+songbird-accounts.workspace = true
+songbird-jobs.workspace = true
+songbird-s3.workspace = true
+songbird-valkey.workspace = true
+songbird-api = { path = "../../services/api" }
+songbird-worker = { path = "../../services/worker" }
+aws-lc-rs.workspace = true
+hex.workspace = true
+redis.workspace = true
+serde_json.workspace = true
 songbird-alloc-count.workspace = true
 songbird-telemetry.workspace = true
 futures-core.workspace = true

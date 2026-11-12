@@ -3145,23 +3145,33 @@ dependencies = [
 name = "songbird-e2e"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "bytes",
  "futures-core",
  "futures-sink",
+ "hex",
  "rcgen",
+ "redis",
  "rustls",
  "rustls-pki-types",
+ "serde_json",
  "sockudo-ws",
+ "songbird-accounts",
  "songbird-alloc-count",
+ "songbird-api",
  "songbird-client",
  "songbird-delivery",
+ "songbird-jobs",
  "songbird-mailbox",
  "songbird-proto",
  "songbird-router",
+ "songbird-s3",
  "songbird-service",
  "songbird-surreal",
  "songbird-telemetry",
  "songbird-types",
+ "songbird-valkey",
+ "songbird-worker",
  "tempfile",
  "tokio",
  "tokio-rustls",
@@ -3431,8 +3441,19 @@ dependencies = [
 name = "songbird-worker"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "mimalloc",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "songbird-accounts",
+ "songbird-jobs",
+ "songbird-link",
+ "songbird-s3",
  "songbird-service",
+ "songbird-types",
+ "songbird-valkey",
+ "tokio",
  "tracing",
 ]
 

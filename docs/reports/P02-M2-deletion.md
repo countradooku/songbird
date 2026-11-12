@@ -127,14 +127,16 @@ end. The restart takes longer because the key store is loaded and a new window w
 1. **The key store is part of the mailbox**: losing `key_dir` or the master key loses the node's
    pending messages, and Iggy backups no longer restore them (owner decision 1).
 2. **SSD remnants**: deleted key-store files and segments can survive in flash until garbage
-   collection; data volumes need full-disk encryption with the key off the disk (issue filed for
-   P13/P12).
+   collection; data volumes need full-disk encryption with the key off the disk
+   (countradooku/songbird#28); master key rotation (countradooku/songbird#29).
 3. **CPU cost**: sealing halves a partition writer's CPU ceiling (still 430,000 sends/s per node
    on tmpfs with 4 partitions); M3 pipelines the writer.
 4. **Visible until segment deletion**: Iggy's message headers (record size, time, partition).
 5. **M4**: window ids should carry the writer epoch; partition handover must fence the old
    writer before the new one replays.
-6. Live tests should delete their Iggy streams.
+6. Live tests should delete their Iggy streams (countradooku/songbird#31).
+7. Long-pending messages are re-sealed every 15 minutes for up to 30 days: hot/cold tiering
+   (countradooku/songbird#30).
 
 ## What the owner needs to decide
 

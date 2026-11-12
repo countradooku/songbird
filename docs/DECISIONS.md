@@ -202,7 +202,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     restart or a standby's takeover keeps nothing. Routed to the partition owner over node
     links (`Forget`, `Known`). `Mailbox::forget` and `Mailbox::knows` on every backend.
   - **Directory** swapped whole with `arc-swap` 1.9.5 (constitution: hot-reloaded state;
-    readers take no lock; one new crate plus `rustversion`, a proc-macro).
+    readers take no lock; one new crate plus `rustversion`, a proc-macro). `arc-swap` is exempted
+    in `cargo vet` pending an audit (its publisher is not trusted by two imported sets, D-0016),
+    like the other client libraries; `h2`'s publisher record is in `supply-chain/imports.lock`.
     `Router::close_everywhere` closes a deleted device's session on every node.
   - **API**: `hyper` 1.12.0 directly; the `api` crate is a library so tests run it in process;
     a signed client (`songbird_api::client`) for tests and tools. A download counts its fetch

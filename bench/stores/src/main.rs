@@ -79,9 +79,16 @@ async fn run<M: Mailbox>(m: Arc<M>) {
         let m = m.clone();
         tasks.push(tokio::spawn(async move {
             let mut rng = Rng(run_id ^ (t + 1).wrapping_mul(0xA24B_AED4_963E_E407) | 1);
-            let env = Bytes::from(vec![0xAB; size]);
+            // Envelopes are ciphertext in production: random bytes, so a compressing file system
+            // (btrfs zstd) cannot flatter a store that writes them in the clear.
+            let mut env_rng = Rng(rng.next() | 1);
             let mut r = Result_ { retries: 0, sends: 0, entries: 0, errors: 0, lat: Vec::new(), seqs: Vec::new() };
             while Instant::now() < deadline {
+                let env: Vec<u8> = (0..size.div_ceil(8))
+                    .flat_map(|_| env_rng.next().to_le_bytes())
+                    .take(size)
+                    .collect();
+                let env = Bytes::from(env);
                 let mut devs: Vec<DeviceId> = Vec::with_capacity(recipients);
                 while devs.len() < recipients {
                     let d = device(rng.next() % devices, run_id);

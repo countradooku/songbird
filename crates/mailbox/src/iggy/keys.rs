@@ -865,24 +865,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "timing; run by hand"]
-    fn expansion_cost() {
-        let k = Key([1; 32]);
-        let t = std::time::Instant::now();
-        for _ in 0..100_000 {
-            let _ = std::hint::black_box(expand(std::hint::black_box(&k)).unwrap());
-        }
-        let per = t.elapsed() / 100_000;
-        let leaf = Key([2; 32]);
-        let t = std::time::Instant::now();
-        for _ in 0..100_000 {
-            let _ = std::hint::black_box(seal_leaf(&leaf, b"aad", &[0u8; 256]).unwrap());
-        }
-        let seal = t.elapsed() / 100_000;
-        panic!("expand {per:?}, seal_leaf(256 B) {seal:?}");
-    }
-
-    #[test]
     fn seal_and_open() {
         let k = Key([3; 32]);
         let s = seal_leaf(&k, b"aad", b"hello").unwrap();

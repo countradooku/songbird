@@ -242,6 +242,16 @@ pub trait Mailbox: Send + Sync + 'static {
         &self,
         device: &DeviceId,
     ) -> impl Future<Output = Result<u64, MailboxError>> + Send;
+
+    /// Forgets deleted devices (account deletion, D-0036): every pending envelope is deleted as
+    /// if acknowledged and the devices' counters are dropped. Durable when it returns. A send
+    /// racing the deletion can recreate a device's state; the deletion job forgets again once
+    /// every delivery node has dropped the devices from its directory.
+    fn forget(&self, devices: &[DeviceId]) -> impl Future<Output = Result<(), MailboxError>> + Send;
+
+    /// Whether the store holds anything of `device`: pending envelopes or counters (deletion
+    /// verification).
+    fn knows(&self, device: &DeviceId) -> impl Future<Output = Result<bool, MailboxError>> + Send;
 }
 
 /// The record ID of an idempotency key: HMAC-SHA256 under a server secret, so stores never hold
@@ -317,6 +327,22 @@ impl Mailbox for AnyMailbox {
             Self::Memory(m) => m.count_pending(device).await,
             Self::Surreal(m) => m.count_pending(device).await,
             Self::Iggy(m) => m.count_pending(device).await,
+        }
+    }
+
+    async fn forget(&self, devices: &[DeviceId]) -> Result<(), MailboxError> {
+        match self {
+            Self::Memory(m) => m.forget(devices).await,
+            Self::Surreal(m) => m.forget(devices).await,
+            Self::Iggy(m) => m.forget(devices).await,
+        }
+    }
+
+    async fn knows(&self, device: &DeviceId) -> Result<bool, MailboxError> {
+        match self {
+            Self::Memory(m) => m.knows(device).await,
+            Self::Surreal(m) => m.knows(device).await,
+            Self::Iggy(m) => m.knows(device).await,
         }
     }
 }

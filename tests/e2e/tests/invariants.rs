@@ -519,6 +519,12 @@ impl Mailbox for Flaky {
     async fn count_pending(&self, d: &DeviceId) -> Result<u64, MailboxError> {
         self.inner.count_pending(d).await
     }
+    async fn forget(&self, ds: &[DeviceId]) -> Result<(), MailboxError> {
+        self.inner.forget(ds).await
+    }
+    async fn knows(&self, d: &DeviceId) -> Result<bool, MailboxError> {
+        self.inner.knows(d).await
+    }
 }
 
 /// Invariant 8 (degraded modes are explicit): with the store unavailable, sends are rejected

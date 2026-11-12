@@ -145,6 +145,41 @@ impl Partitions {
         }
     }
 
+    /// Forgets deleted devices of partition `p` (D-0036); returns once the forget record is
+    /// durable.
+    pub(crate) async fn forget(&self, p: u32, devices: Vec<DeviceId>) -> Result<(), MailboxError> {
+        match self.get(p) {
+            Slot::Local(part) => {
+                let (tx, rx) = oneshot::channel();
+                part.tx
+                    .send(Job::Forget(devices, tx))
+                    .await
+                    .map_err(|_| MailboxError::Unavailable)?;
+                match tokio::time::timeout(self.timeout, rx).await {
+                    Ok(Ok(true)) => Ok(()),
+                    _ => unavailable(),
+                }
+            }
+            Slot::Remote(peer) => match self.remote(&peer, Request::Forget { p, devices }).await? {
+                Response::Done(r) => r,
+                _ => unavailable(),
+            },
+            Slot::Unknown => unavailable(),
+        }
+    }
+
+    /// Whether partition `p` holds counters or entries of `device`.
+    pub(crate) async fn known(&self, p: u32, device: DeviceId) -> Result<bool, MailboxError> {
+        match self.get(p) {
+            Slot::Local(part) => Ok(part.shared.lock().devices.contains_key(&device)),
+            Slot::Remote(peer) => match self.remote(&peer, Request::Known { p, device }).await? {
+                Response::Count(r) => r.map(|n| n > 0),
+                _ => unavailable(),
+            },
+            Slot::Unknown => unavailable(),
+        }
+    }
+
     /// Tells the home partition `p` that the part of the send `tag` on `part` is stored.
     pub(crate) async fn part_done(&self, p: u32, tag: [u8; 32], part: u32) {
         match self.get(p) {
@@ -279,6 +314,10 @@ pub(crate) async fn serve(parts: &Partitions, req: Request) -> Response {
             let _ = part.tx.send(Job::PartDone(tag, other)).await;
             Response::Done(Ok(()))
         }
+        Request::Forget { p, devices } => Response::Done(parts.forget(p, devices).await),
+        Request::Known { device, .. } => Response::Count(Ok(u64::from(
+            part.shared.lock().devices.contains_key(&device),
+        ))),
         // Handled by the cluster: it is for a partition this node is the standby of.
         Request::KeyStore { .. } => Response::Done(Err(MailboxError::Unavailable)),
     }

@@ -49,6 +49,16 @@ pub(crate) enum Request {
         tag: [u8; 32],
         part: u32,
     },
+    /// Forget deleted devices of partition `p` (D-0036).
+    Forget {
+        p: u32,
+        devices: Vec<DeviceId>,
+    },
+    /// Whether partition `p` holds anything of `device` (deletion verification).
+    Known {
+        p: u32,
+        device: DeviceId,
+    },
     /// A key-store write of partition `p`, for its standby (D-0034).
     KeyStore {
         p: u32,
@@ -84,6 +94,8 @@ impl std::fmt::Debug for Request {
             Self::Expire { .. } => "Expire",
             Self::PartDone { .. } => "PartDone",
             Self::KeyStore { .. } => "KeyStore",
+            Self::Forget { .. } => "Forget",
+            Self::Known { .. } => "Known",
         };
         f.debug_struct("Request")
             .field("kind", &kind)
@@ -167,6 +179,7 @@ fn put_local(b: &mut BytesMut, l: &LocalReq) {
 }
 
 impl Request {
+    #[allow(clippy::too_many_lines, reason = "one flat match over every request kind")]
     pub(crate) fn encode(&self) -> Bytes {
         let mut b = BytesMut::with_capacity(64);
         b.put_u8(VERSION);
@@ -235,6 +248,19 @@ impl Request {
                 b.put_u8(5);
                 b.put_u32(*p);
                 b.put_u64(*age_ms);
+            }
+            Self::Forget { p, devices } => {
+                b.put_u8(8);
+                b.put_u32(*p);
+                b.put_u32(u32::try_from(devices.len()).unwrap_or(u32::MAX));
+                for d in devices {
+                    b.put_slice(d.as_bytes());
+                }
+            }
+            Self::Known { p, device } => {
+                b.put_u8(9);
+                b.put_u32(*p);
+                b.put_slice(device.as_bytes());
             }
             Self::PartDone { p, tag, part } => {
                 b.put_u8(6);
@@ -367,6 +393,19 @@ impl Request {
                 part: r.u32()?,
             },
             7 => Self::decode_key_store(&mut r)?,
+            8 => {
+                let p = r.u32()?;
+                let n = r.count(16)?;
+                let mut devices = Vec::with_capacity(n);
+                for _ in 0..n {
+                    devices.push(r.device()?);
+                }
+                Self::Forget { p, devices }
+            }
+            9 => Self::Known {
+                p: r.u32()?,
+                device: r.device()?,
+            },
             _ => return None,
         };
         r.done().then_some(out)
@@ -381,6 +420,8 @@ impl Request {
             | Self::Count { p, .. }
             | Self::Expire { p, .. }
             | Self::PartDone { p, .. }
+            | Self::Forget { p, .. }
+            | Self::Known { p, .. }
             | Self::KeyStore { p, .. } => *p,
         }
     }
@@ -626,6 +667,11 @@ mod tests {
                 limit: 100,
             },
             Request::Count { p: 2, device: d(2) },
+            Request::Forget {
+                p: 1,
+                devices: vec![d(1), d(2)],
+            },
+            Request::Known { p: 3, device: d(3) },
             Request::Expire { p: 1, age_ms: 99 },
             Request::PartDone {
                 p: 0,

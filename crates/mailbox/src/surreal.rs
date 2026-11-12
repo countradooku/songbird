@@ -130,6 +130,21 @@ const EXPLICIT_MAX: u64 = 4096;
 
 const FETCH: &str = "SELECT meta::id(id)[1] AS seq, env, body.env AS benv FROM mailbox:[$d, $after]>..[$d, ..] LIMIT $n;";
 
+/// Forgets deleted devices: their entries (shared bodies by reference count) and counters.
+const FORGET: &str = "
+BEGIN TRANSACTION;
+FOR $d IN $ds {
+  LET $gone = DELETE mailbox:[$d, 0]>..[$d, ..] RETURN BEFORE;
+  FOR $b IN array::filter($gone.body, |$v| $v != NONE) {
+    LET $r = UPDATE ONLY $b SET refs -= 1 RETURN VALUE refs;
+    IF $r <= 0 { DELETE $b RETURN NONE };
+  };
+  DELETE seqctr:[$d] RETURN NONE;
+  DELETE ackctr:[$d] RETURN NONE;
+};
+COMMIT TRANSACTION;
+";
+
 const EXPIRE: &str = "
 BEGIN TRANSACTION;
 LET $cut = time::now() - duration::from_secs($age);
@@ -425,6 +440,42 @@ impl Mailbox for SurrealMailbox {
                 .map_err(|_| MailboxError::Unavailable)?;
             match r.first() {
                 Some(Ok(v)) => uint(v).ok_or(MailboxError::Unavailable),
+                _ => Err(MailboxError::Unavailable),
+            }
+        }
+    }
+
+    /// Development backend: the writer's cached counters are not dropped, so a later send to a
+    /// forgotten device would continue its `seq`; deployments use Iggy.
+    fn forget(&self, devices: &[DeviceId]) -> impl Future<Output = Result<(), MailboxError>> + Send {
+        let conn = Arc::clone(&self.conn);
+        let ds = Value::Array(devices.iter().map(|d| bytes_value(d.as_bytes())).collect());
+        async move {
+            let r = conn
+                .query(FORGET, vec![("ds".to_owned(), ds)])
+                .await
+                .map_err(|_| MailboxError::Unavailable)?;
+            if r.iter().all(Result::is_ok) {
+                Ok(())
+            } else {
+                Err(MailboxError::Unavailable)
+            }
+        }
+    }
+
+    fn knows(&self, device: &DeviceId) -> impl Future<Output = Result<bool, MailboxError>> + Send {
+        let conn = Arc::clone(&self.conn);
+        let vars = vec![("d".to_owned(), bytes_value(device.as_bytes()))];
+        async move {
+            let r = conn
+                .query(
+                    "RETURN count(SELECT VALUE id FROM mailbox:[$d, 0]>..[$d, ..]) + count(SELECT id FROM seqctr:[$d]) + count(SELECT id FROM ackctr:[$d]);",
+                    vars,
+                )
+                .await
+                .map_err(|_| MailboxError::Unavailable)?;
+            match r.first() {
+                Some(Ok(v)) => uint(v).map(|n| n > 0).ok_or(MailboxError::Unavailable),
                 _ => Err(MailboxError::Unavailable),
             }
         }

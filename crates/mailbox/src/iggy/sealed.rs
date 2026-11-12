@@ -1,7 +1,8 @@
-//! Sealed records: what the mailbox writes to Iggy (record format version 3, D-0031).
+//! Sealed records: what the mailbox writes to Iggy (record format version 4, D-0031; version 3,
+//! the same without `Forget`, is still read).
 //!
 //! ```text
-//! u8 version (3) | u8 kind | u64 window | u32 first_leaf | u32 slots |
+//! u8 version (4) | u8 kind | u64 window | u32 first_leaf | u32 slots |
 //! u32 meta_len | meta (AES-256-GCM, window metadata key, random nonce) |
 //! slots × (u32 len | sealed slot (AES-256-GCM, leaf key first_leaf + i, constant nonce))
 //! ```
@@ -13,7 +14,7 @@
 //! | --- | --- | --- |
 //! | Store | flags, tag and fingerprint, `at_ms`, MLS group and epoch, local count, remote partitions | each local entry (`device`, `seq`, envelope; shared: `device`, `seq`), the shared body, each remote part |
 //! | Relocate | count | each entry (`device`, `seq`, `at_ms`, envelope) |
-//! | Ack, Owner, Snapshot | the record | none |
+//! | Ack, Owner, Snapshot, Forget | the record | none |
 
 use bytes::{BufMut, Bytes, BytesMut};
 use songbird_types::DeviceId;
@@ -21,14 +22,17 @@ use songbird_types::DeviceId;
 use super::keys::{KeyError, KeyRing, open_leaf, open_meta, seal_leaf, seal_meta};
 use super::record::{Local, Record, Remote};
 
-/// Sealed record format version.
-pub(crate) const VERSION: u8 = 3;
+/// Sealed record format version written (4 added `Forget`, D-0036).
+pub(crate) const VERSION: u8 = 4;
+/// Oldest version still read.
+pub(crate) const MIN_VERSION: u8 = 3;
 
 const KIND_STORE: u8 = 1;
 const KIND_ACK: u8 = 2;
 const KIND_RELOCATE: u8 = 3;
 const KIND_OWNER: u8 = 4;
 const KIND_SNAPSHOT: u8 = 5;
+const KIND_FORGET: u8 = 6;
 
 const FLAG_TAG: u8 = 0x01;
 const FLAG_MLS: u8 = 0x02;
@@ -292,6 +296,10 @@ fn parts_of(rec: &Record) -> (u8, BytesMut, Vec<BytesMut>) {
             meta.put_slice(&rec.encode());
             KIND_SNAPSHOT
         }
+        Record::Forget(_) => {
+            meta.put_slice(&rec.encode());
+            KIND_FORGET
+        }
     };
     (kind, meta, slots)
 }
@@ -304,7 +312,10 @@ impl Sealed {
         }
         let mut header = [0u8; HEADER];
         header.copy_from_slice(payload.get(..HEADER).ok_or(OpenError::Malformed)?);
-        if header[0] != VERSION || !(KIND_STORE..=KIND_SNAPSHOT).contains(&header[1]) {
+        if !(MIN_VERSION..=VERSION).contains(&header[0])
+            || !(KIND_STORE..=KIND_FORGET).contains(&header[1])
+            || (header[1] == KIND_FORGET && header[0] < 4)
+        {
             return Err(OpenError::Malformed);
         }
         let u64_at = |i: usize| {

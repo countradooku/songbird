@@ -62,6 +62,7 @@ pub(crate) enum Fact {
         devices: Vec<(DeviceId, u64, u64)>,
         groups: Vec<([u8; 16], u64)>,
     },
+    Forget(Vec<DeviceId>),
 }
 
 /// One partition.
@@ -223,6 +224,17 @@ impl State {
         }
     }
 
+    /// Forgets a deleted device (D-0036): every pending entry is acknowledged (leaves
+    /// punctured) and its counters dropped, so nothing of it is left in memory, in snapshots or
+    /// in the key store.
+    pub(crate) fn forget(&mut self, device: &DeviceId) {
+        let last = self.devices.get(device).map(|s| s.last);
+        if let Some(last) = last {
+            self.ack(device, last);
+            self.devices.remove(device);
+        }
+    }
+
     /// Devices with entries accepted at or before `cutoff_ms`, and the highest such `seq` of each.
     /// Expiry is written as an acknowledgement up to it (entries of a device are in `seq` and
     /// time order, so the expired ones are a prefix).
@@ -361,6 +373,11 @@ impl State {
                     *cur = (*cur).max(*e);
                 }
             }
+            Fact::Forget(devices) => {
+                for d in devices {
+                    self.forget(d);
+                }
+            }
         }
     }
 }
@@ -417,6 +434,25 @@ mod tests {
         st.ack(&d(2), 1);
         assert_eq!(st.min_live(), Some(2));
         assert!(st.ring.leaf(w, 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn forget_punctures_everything_and_drops_the_counters() {
+        let (mut st, w) = state();
+        st.apply(1, w, &store(&[(1, 1, 0), (2, 1, 1)], 5, None), 1000, 10);
+        st.apply(2, w, &store(&[(1, 2, 2), (1, 3, 3)], 6, None), 1000, 10);
+        st.apply(3, w, &Fact::Forget(vec![d(1), d(9)]), 1000, 10);
+        assert!(!st.devices.contains_key(&d(1)), "counters dropped");
+        assert!(!st.devices.contains_key(&d(9)), "unknown devices are not created");
+        for leaf in [0, 2, 3] {
+            assert!(st.ring.leaf(w, leaf).unwrap().is_none(), "punctured");
+        }
+        assert!(st.ring.leaf(w, 1).unwrap().is_some(), "other devices untouched");
+        assert_eq!(st.devices[&d(2)].pending.len(), 1);
+        // Record 2 held only the forgotten device: nothing in it is still needed.
+        assert_eq!(st.min_live(), Some(1));
+        st.ack(&d(2), 1);
+        assert_eq!(st.min_live(), None);
     }
 
     #[test]

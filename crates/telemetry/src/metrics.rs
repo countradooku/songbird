@@ -147,7 +147,10 @@ impl Process {
     /// `VmRSS` (kB) from `status`; `utime` + `stime` (fields 14 and 15, in `USER_HZ` = 100 ticks
     /// per second, fixed in Linux's user ABI) from `stat`, read after the command name's closing
     /// parenthesis, which may itself contain spaces.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code, reason = "tested on every platform"))]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(dead_code, reason = "tested on every platform")
+    )]
     fn parse(status: &str, stat: &str, open_fds: u64) -> Option<Self> {
         let rss_kb: u64 = status
             .lines()

@@ -281,7 +281,10 @@ mod tests {
         assert_eq!(counts[4], 1);
         assert_eq!(counts[5], 3);
         assert_eq!(counts[BUCKETS - 1], 3);
-        assert!((sum - (3.0 * (0.000_04 + 0.0015 + 3.0) + 0.001)).abs() < 1e-9, "{sum}");
+        assert!(
+            (sum - (3.0 * (0.000_04 + 0.0015 + 3.0) + 0.001)).abs() < 1e-9,
+            "{sum}"
+        );
         let mut registry = prometheus_client::registry::Registry::default();
         registry.register("lat", "lat", h);
         let mut out = String::new();

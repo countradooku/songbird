@@ -1,4 +1,5 @@
-//! `run`: simulated devices on the real client, 1:1 traffic, optional connection chaos, checker.
+//! `run`: simulated devices on the real client (1:1 or group traffic, idle connections, connection
+//! chaos and storms), the delivery checker, and the server's own figures from its admin endpoint.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,7 +9,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, bail, ensure};
 use bytes::{BufMut as _, Bytes, BytesMut};
 use songbird_client::{Client, ClientConfig, ClientError, DeviceKey, Event, ResumeState, State};
-use songbird_proto::frame::{Recipient, SendStatus};
+use songbird_proto::frame::{Recipient, SendPayload, SendStatus};
 use songbird_types::DeviceId;
 use tokio::sync::watch;
 
@@ -32,6 +33,15 @@ pub(crate) enum Scenario {
     /// store generation grows, and the checker allows what a restore legitimately causes
     /// (numbering restarts, repeats dropped by message ID) but never a lost message.
     Restore,
+    /// Connections held open with no traffic: memory per idle connection (with `--admin`).
+    Idle,
+    /// Steady traffic; halfway through, every connection is dropped at once. Reports the time
+    /// until every device is connected again (beta target: 60 s, zero loss).
+    Storm,
+    /// Group traffic: devices form groups of `--group-size`; each send is one shared body for
+    /// the rest of the sender's group, stored once (`SendPayload::Shared`), fanned out by the
+    /// server.
+    Group,
 }
 
 #[derive(Debug, clap::Args)]
@@ -82,6 +92,13 @@ pub(crate) struct Args {
     /// the restore and the checker must report lost messages.
     #[arg(long)]
     no_resend: bool,
+    /// Delivery admin endpoints `host:port` (comma-separated): resident memory, CPU and
+    /// descriptors before connecting, once connected and at the end (Linux servers).
+    #[arg(long)]
+    admin: Option<String>,
+    /// Group scenario: members per group (the sender and the devices it sends to).
+    #[arg(long, default_value_t = 256)]
+    group_size: usize,
 }
 
 pub(crate) fn main(a: &Args) -> anyhow::Result<bool> {
@@ -169,8 +186,42 @@ enum Device {
     Late(Box<(DeviceKey, ClientConfig)>),
 }
 
+/// When the storm dropped every connection, and when the last device was connected again
+/// (nanoseconds since the run's epoch; 0: not yet).
+#[derive(Default)]
+struct StormClock {
+    at: AtomicU64,
+    reconnected: AtomicU64,
+    done: AtomicU64,
+}
+
+impl StormClock {
+    fn start(&self, epoch: Instant) {
+        self.at.store(ns_since(epoch).max(1), Ordering::Release);
+    }
+
+    /// A device connected: after the storm, the last of `online` to do so stops the clock.
+    fn reconnected(&self, epoch: Instant, online: u64) {
+        if self.at.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        if self.reconnected.fetch_add(1, Ordering::AcqRel) + 1 == online {
+            self.done.store(ns_since(epoch), Ordering::Release);
+        }
+    }
+
+    fn recovery(&self) -> Option<Duration> {
+        let (at, done) = (
+            self.at.load(Ordering::Acquire),
+            self.done.load(Ordering::Acquire),
+        );
+        (at != 0 && done != 0).then(|| Duration::from_nanos(done.saturating_sub(at)))
+    }
+}
+
 struct SenderOut {
     accepted: Vec<(usize, MsgId)>,
+    sends: u64,
     rejected: u64,
     retries: u64,
 }
@@ -206,6 +257,12 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
             cfg
         })
         .collect();
+
+    ensure!(a.group_size >= 2, "--group-size must be at least 2");
+    let fig_start = match &a.admin {
+        Some(addrs) => crate::admin::scrape(addrs).await?,
+        None => None,
+    };
 
     // Ramp up.
     let t_connect = Instant::now();
@@ -244,6 +301,13 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
     }
     let connect_secs = t_connect.elapsed().as_secs_f64();
     let clients: Vec<Arc<Client>> = clients.into_iter().map(Arc::new).collect();
+    let fig_connected = match &a.admin {
+        Some(addrs) => crate::admin::scrape(addrs).await?,
+        None => None,
+    };
+    // Storm scenario: when every connection was dropped, and when the last one came back.
+    let storm = Arc::new(StormClock::default());
+    let online_count = u64::try_from(clients.len()).unwrap_or(u64::MAX);
 
     let epoch = Instant::now();
     let send_until = epoch + Duration::from_secs(a.secs);
@@ -264,6 +328,7 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
         let total = Arc::clone(&delivered_total);
         let mut stop = stop_recv.clone();
         let all_clients = Arc::clone(&all_clients);
+        let storm = Arc::clone(&storm);
         receivers.push(tokio::spawn(async move {
             let (c, mut ev) = match device {
                 Device::Online(c, ev) => (c, ev),
@@ -309,6 +374,7 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
                         Some(Event::StoreGenerationChanged { .. }) => {
                             got.restores.push(got.items.len());
                         }
+                        Some(Event::Connected { .. }) => storm.reconnected(epoch, online_count),
                         Some(_) => {}
                         None => break,
                     }
@@ -328,17 +394,32 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
     .max(1e-3);
     let period = Duration::from_secs_f64(1.0 / per_device);
     let mut senders = Vec::with_capacity(n);
-    for (i, c) in clients.iter().cloned().enumerate() {
+    // Group scenario: consecutive online devices form groups of `group_size`.
+    let group_size = (a.scenario == Scenario::Group).then_some(a.group_size);
+    let sending = a.scenario != Scenario::Idle;
+    for (i, c) in clients.iter().cloned().enumerate().filter(|_| sending) {
         let ids = Arc::clone(&ids);
         let size = a.size;
+        let online = clients.len();
         senders.push(tokio::spawn(async move {
             let me = u32::try_from(i).unwrap_or(u32::MAX);
             let mut rng = Rng::new();
             let mut out = SenderOut {
                 accepted: Vec::new(),
+                sends: 0,
                 rejected: 0,
                 retries: 0,
             };
+            // This sender's group: the other members (Group scenario).
+            let group: Vec<usize> = group_size.map_or_else(Vec::new, |g| {
+                let start = i / g * g;
+                (start..(start + g).min(online))
+                    .filter(|&m| m != i)
+                    .collect()
+            });
+            if group_size.is_some() && group.is_empty() {
+                return out;
+            }
             // Spread the first sends over one period.
             let first =
                 Duration::from_nanos(rng.below(u64::try_from(period.as_nanos()).unwrap_or(1)));
@@ -354,27 +435,37 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
                 if Instant::now() >= send_until {
                     break;
                 }
-                let to = {
-                    let r = usize::try_from(rng.below(u64::try_from(ids.len() - 1).unwrap_or(1)))
-                        .unwrap_or(0);
-                    if r >= i { r + 1 } else { r }
-                };
                 let mut key = [0u8; 16];
                 key[..8].copy_from_slice(&rng.next().to_be_bytes());
                 key[8..].copy_from_slice(&rng.next().to_be_bytes());
-                let Some(&dev) = ids.get(to) else { break };
                 let body = payload(run_id, me, counter, ns_since(epoch), &key, size);
-                let rcpt = vec![Recipient {
-                    device: dev,
-                    envelope: body,
-                }];
+                let (to, send): (Vec<usize>, SendPayload) = if group.is_empty() {
+                    let to = {
+                        let r =
+                            usize::try_from(rng.below(u64::try_from(ids.len() - 1).unwrap_or(1)))
+                                .unwrap_or(0);
+                        if r >= i { r + 1 } else { r }
+                    };
+                    let Some(&dev) = ids.get(to) else { break };
+                    (
+                        vec![to],
+                        SendPayload::PerDevice(vec![Recipient {
+                            device: dev,
+                            envelope: body,
+                        }]),
+                    )
+                } else {
+                    let devices = group.iter().filter_map(|&m| ids.get(m).copied()).collect();
+                    (group.clone(), SendPayload::Shared { devices, body })
+                };
                 // Retry with the same idempotency key until the server answers: a send that
                 // failed with Disconnected may or may not have been stored; the key makes the
                 // retry safe either way.
                 loop {
-                    match c.send(key, rcpt.clone()).await {
+                    match c.send_with(key, None, send.clone()).await {
                         Ok(SendStatus::Accepted) => {
-                            out.accepted.push((to, (me, counter)));
+                            out.sends += 1;
+                            out.accepted.extend(to.iter().map(|&t| (t, (me, counter))));
                             break;
                         }
                         Ok(SendStatus::Rejected {
@@ -410,9 +501,11 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
 
     // Chaos.
     let aborts = Arc::new(AtomicU64::new(0));
-    let chaos = (a.scenario == Scenario::Reconnect).then(|| {
+    let chaos = matches!(a.scenario, Scenario::Reconnect | Scenario::Storm).then(|| {
         let clients = clients.clone();
         let aborts = Arc::clone(&aborts);
+        let storm = Arc::clone(&storm);
+        let only_storm = a.scenario == Scenario::Storm;
         let every = Duration::from_millis(a.chaos_every_ms.max(1));
         let storm_at = epoch + Duration::from_secs(a.secs) / 2;
         tokio::spawn(async move {
@@ -422,11 +515,12 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
                 tokio::time::sleep(every).await;
                 if !stormed && Instant::now() >= storm_at {
                     stormed = true;
+                    storm.start(epoch);
                     for c in &clients {
                         let _ = c.abort_connection().await;
                         aborts.fetch_add(1, Ordering::Relaxed);
                     }
-                } else {
+                } else if !only_storm {
                     let i = usize::try_from(rng.below(u64::try_from(clients.len()).unwrap_or(1)))
                         .unwrap_or(0);
                     if let Some(c) = clients.get(i) {
@@ -439,9 +533,13 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
     });
 
     let mut expected: Vec<Vec<MsgId>> = vec![Vec::new(); n];
-    let (mut accepted, mut rejected, mut retries) = (0u64, 0u64, 0u64);
+    let (mut accepted, mut rejected, mut retries, mut sends) = (0u64, 0u64, 0u64, 0u64);
+    if !sending {
+        tokio::time::sleep_until(send_until.into()).await;
+    }
     for s in senders {
         let out = s.await?;
+        sends += out.sends;
         rejected += out.rejected;
         retries += out.retries;
         for (to, id) in out.accepted {
@@ -452,6 +550,10 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
         }
     }
     let send_secs = epoch.elapsed().as_secs_f64();
+    let fig_end = match &a.admin {
+        Some(addrs) => crate::admin::scrape(addrs).await?,
+        None => None,
+    };
     if let Some(c) = chaos {
         c.await?;
     }
@@ -483,11 +585,38 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
         a.scenario, a.secs, a.rate, a.size, a.threads
     );
     println!("connect: {n} devices in {connect_secs:.2}s");
-    let achieved = crate::as_f64(accepted) / send_secs;
+    let achieved = crate::as_f64(sends) / send_secs;
+    let deliveries = crate::as_f64(accepted) / send_secs;
     println!(
-        "sends: accepted={accepted} rejected={rejected} retries={retries} achieved_rate={achieved:.0}/s aborts={} failed_clients={failed}",
+        "sends: accepted={sends} deliveries_expected={accepted} rejected={rejected} retries={retries} achieved_rate={achieved:.0}/s deliveries_rate={deliveries:.0}/s aborts={} failed_clients={failed}",
         aborts.load(Ordering::Relaxed)
     );
+    if a.scenario == Scenario::Storm {
+        match storm.recovery() {
+            Some(d) => println!(
+                "storm: every one of {online_count} devices connected again {:.2}s after the storm",
+                d.as_secs_f64()
+            ),
+            None => println!("storm: NOT every device reconnected before the run ended"),
+        }
+    }
+    if let (Some(s0), Some(s1), Some(s2)) = (fig_start, fig_connected, fig_end) {
+        let per_conn = (s1.resident_bytes - s0.resident_bytes) / crate::as_f64(online_count);
+        let cpu = s2.cpu_seconds - s1.cpu_seconds;
+        let per_10k = if accepted > 0 {
+            cpu / (crate::as_f64(accepted) / 10_000.0)
+        } else {
+            0.0
+        };
+        println!(
+            "server: rss_idle={:.1}MiB rss_connected={:.1}MiB rss_end={:.1}MiB per_connection={:.1}KiB open_fds={:.0} cpu_send_phase={cpu:.2}s cpu_per_10k_deliveries={per_10k:.3}s",
+            s0.resident_bytes / 1_048_576.0,
+            s1.resident_bytes / 1_048_576.0,
+            s2.resident_bytes / 1_048_576.0,
+            per_conn / 1024.0,
+            s1.open_fds
+        );
+    }
     println!("settle: {settle_secs:.2}s");
     println!("latency send->deliver (client-observed): {s}");
     println!(

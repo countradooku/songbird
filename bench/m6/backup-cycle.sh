@@ -3,6 +3,8 @@
 set -euo pipefail
 cd /Users/radudiaconu/Desktop/Code/Rust/songbird
 set -a; . ./.env; set +a
+# The deletion journal key (D-0041): restores refuse to run without it.
+DELETION_JOURNAL_KEY=$(openssl rand -hex 32); export DELETION_JOURNAL_KEY
 # Usage: bench/m6/backup-cycle.sh <work dir> [age dir]: age and age-keygen from [age dir] or PATH.
 S=$1; AGEDIR=${2:-}; AGE=${AGEDIR:+$AGEDIR/}age; KEYGEN=${AGEDIR:+$AGEDIR/}age-keygen; W=$S/bk; A=target/debug/songbird-admin
 rm -rf "$W"; mkdir -p "$W"; chmod 700 "$W"

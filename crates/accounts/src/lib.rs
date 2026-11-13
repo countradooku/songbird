@@ -27,6 +27,7 @@ use songbird_jobs::{Job, ObjectKey};
 use songbird_surreal::Value;
 use songbird_types::{AccountId, DeviceId, JobId};
 
+pub mod journal;
 pub use db::{Db, DbError, SurrealSettings};
 
 /// Ed25519 public key length.
@@ -360,6 +361,35 @@ impl Registry {
             .map(|d| {
                 id16(d)
                     .map(DeviceId::from_bytes)
+                    .ok_or(RegistryError::Shape)
+            })
+            .collect()
+    }
+
+    /// A page of account IDs in ID order (the restore runbook's deletion journal pass).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn accounts_page(
+        &self,
+        start: usize,
+        limit: usize,
+    ) -> Result<Vec<AccountId>, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "SELECT VALUE meta::id(id)[0] FROM account ORDER BY id START $s LIMIT $n;",
+                vec![
+                    var("s", Value::from(i64::try_from(start).unwrap_or(i64::MAX))),
+                    var("n", Value::from(i64::try_from(limit).unwrap_or(i64::MAX))),
+                ],
+            )
+            .await?;
+        rows(v)
+            .iter()
+            .map(|d| {
+                id16(d)
+                    .map(AccountId::from_bytes)
                     .ok_or(RegistryError::Shape)
             })
             .collect()

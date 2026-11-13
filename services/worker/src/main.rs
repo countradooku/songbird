@@ -48,6 +48,11 @@ impl Validate for WorkerConfig {
         v.section("worker", w);
         if deployed {
             v.check(
+                w.deletion_journal.as_ref().is_some_and(|j| j.tls),
+                "worker.deletion_journal",
+                "is required in staging and production, over TLS (D-0041)",
+            );
+            v.check(
                 w.s3.tls_ca.is_some() && w.surrealdb.tls_ca.is_some() && w.jobs.valkey.tls(),
                 "worker.s3.tls_ca",
                 "worker.surrealdb.tls_ca and worker.jobs.valkey.tls_ca are required in staging and production",
@@ -65,6 +70,9 @@ struct WorkerSettings {
     s3: S3Settings,
     push_index_secret: SecretRef,
     delivery: DeliverySettings,
+    /// The deletion journal in the off-site backup bucket (D-0041); development may omit it.
+    #[serde(default)]
+    deletion_journal: Option<JournalSettings>,
     /// Milliseconds for every delivery node to drop a disabled device (its directory poll
     /// interval with a margin).
     #[serde(default = "default_propagation_ms")]
@@ -118,6 +126,62 @@ struct S3Settings {
     bucket: String,
     access_key: SecretRef,
     secret_key: SecretRef,
+}
+
+/// `[worker.deletion_journal]`: where tombstones go (the backup bucket) and the journal key.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JournalSettings {
+    /// S3 `host:port`, e.g. `s3.fr-par.scw.cloud:443`.
+    addr: String,
+    bucket: String,
+    #[serde(default = "default_region")]
+    region: String,
+    /// TLS with the public web roots (the off-site provider); off only for a local `RustFS`.
+    #[serde(default = "default_true")]
+    tls: bool,
+    /// The journal's put-only key (it can write `deletions/` and nothing else).
+    access_key: SecretRef,
+    secret_key: SecretRef,
+    /// 64 hex characters.
+    key: SecretRef,
+}
+
+fn default_region() -> String {
+    "fr-par".into()
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+fn journal(s: &JournalSettings) -> Result<songbird_worker::Journal, BoxError> {
+    let mut cfg = songbird_s3::Config::new(
+        s.addr.clone(),
+        s.bucket.clone(),
+        s.access_key.resolve()?,
+        s.secret_key.resolve()?,
+    );
+    cfg.region.clone_from(&s.region);
+    if s.tls {
+        let host = s.addr.rsplit_once(':').map_or(s.addr.as_str(), |(h, _)| h);
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13])?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        host.clone_into(&mut cfg.host);
+        cfg.tls = Some(songbird_s3::Tls {
+            config: Arc::new(config),
+            server_name: host.to_owned(),
+        });
+    }
+    Ok(songbird_worker::Journal {
+        s3: songbird_s3::Client::new(cfg)?,
+        key: *s.key.resolve_key32()?,
+    })
 }
 
 /// `[worker.delivery]`: the delivery nodes' device links, and this worker's identity.
@@ -242,6 +306,7 @@ impl Service for WorkerService {
             queue: Arc::clone(&queue),
             delivery: DeliveryLink::Nodes(nodes),
             push_index_secret: *s.push_index_secret.resolve_key32()?,
+            journal: s.deletion_journal.as_ref().map(journal).transpose()?,
             propagation: Duration::from_millis(s.propagation_ms),
             metrics: self.metrics,
         });

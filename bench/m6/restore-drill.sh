@@ -25,6 +25,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 set -a; . ./.env; set +a
+# The deletion journal key (D-0041): restores refuse to run without it.
+DELETION_JOURNAL_KEY=$(openssl rand -hex 32); export DELETION_JOURNAL_KEY
 W=$1; AGEDIR=${2:-}; DEVICES=${3:-1000}; RATE=${4:-2000}; SECS=${5:-60}; AT=${6:-20}
 OFFLINE=${OFFLINE:-$((DEVICES / 10))}
 # NO_RESEND=1: negative control (clients keep no send log); the checker must FAIL with losses.

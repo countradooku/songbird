@@ -81,9 +81,15 @@ async fn registry(e: &Env) -> Arc<Registry> {
 }
 
 fn s3(e: &Env) -> songbird_s3::Client {
+    s3_bucket(e, "songbird-gate")
+}
+
+const JOURNAL_KEY: [u8; 32] = [0x6a; 32];
+
+fn s3_bucket(e: &Env, bucket: &str) -> songbird_s3::Client {
     songbird_s3::Client::new(songbird_s3::Config::new(
         e.s3.clone(),
-        "songbird-gate".into(),
+        bucket.into(),
         Secret::new(std::env::var("SONGBIRD_TEST_RUSTFS_ACCESS_KEY").unwrap()),
         Secret::new(std::env::var("SONGBIRD_TEST_RUSTFS_SECRET_KEY").unwrap()),
     ))
@@ -344,12 +350,19 @@ async fn account_deletion_is_verified_across_every_store() {
 
     // The worker runs the deletion job (delivery reached in process; the node link with
     // mutual TLS is covered by crates/link's tests).
+    // The deletion journal (D-0041) in a write-once bucket standing in for the backup bucket.
+    let journal_s3 = s3_bucket(&e, "songbird-gate-journal");
+    journal_s3.create_bucket_locked().await.unwrap();
     let worker = Worker {
         registry: Arc::clone(&registry),
         s3: s3.clone(),
         queue: queue(&e, "gate-worker").await,
         delivery: DeliveryLink::Direct(songbird_delivery::internal::handler(Arc::clone(&shared))),
         push_index_secret: PUSH_INDEX,
+        journal: Some(songbird_worker::Journal {
+            s3: journal_s3.clone(),
+            key: JOURNAL_KEY,
+        }),
         propagation: Duration::from_millis(400),
         metrics: WorkerMetrics::default(),
     };
@@ -374,6 +387,29 @@ async fn account_deletion_is_verified_across_every_store() {
     }
     assert!(done, "deletion job ran");
     assert_eq!(worker.metrics.deletions_verified.get(), 1);
+
+    // The deletion journal holds Alice's tombstone (so a restore deletes her again), named by a
+    // keyed tag: neither her account ID nor her devices', raw or hex.
+    let tag = songbird_accounts::journal::tag(&JOURNAL_KEY, &alice);
+    let listed = journal_s3
+        .list_objects_v2(songbird_accounts::journal::PREFIX, None, 1000)
+        .await
+        .unwrap();
+    assert!(
+        listed
+            .objects
+            .iter()
+            .any(|o| songbird_accounts::journal::parse_tombstone(&o.key) == Some(tag)),
+        "a tombstone for the deleted account"
+    );
+    for o in &listed.objects {
+        for id in [a1.id.as_bytes(), a2.id.as_bytes(), alice.as_bytes()] {
+            assert!(
+                !contains_id(o.key.as_bytes(), id),
+                "an identifier in a tombstone"
+            );
+        }
+    }
 
     // ---- Every store, inspected directly ----
     // SurrealDB: no account, device, push or grant row of Alice.

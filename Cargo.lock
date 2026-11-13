@@ -3047,6 +3047,7 @@ dependencies = [
  "serde",
  "serde_json",
  "songbird-accounts",
+ "songbird-jobs",
  "songbird-s3",
  "songbird-surreal",
  "songbird-types",
@@ -3473,7 +3474,9 @@ dependencies = [
 name = "songbird-worker"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "bytes",
+ "futures-util",
  "mimalloc",
  "rustls",
  "rustls-pki-types",
@@ -3487,6 +3490,7 @@ dependencies = [
  "songbird-valkey",
  "tokio",
  "tracing",
+ "webpki-roots 1.0.12",
 ]
 
 [[package]]

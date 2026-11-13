@@ -90,6 +90,8 @@ enum BackupCmd {
         load: backup::LoadArgs,
         #[command(flatten)]
         guard: audit::Guard,
+        #[command(flatten)]
+        journal: backup::JournalArgs,
     },
 }
 
@@ -274,21 +276,43 @@ fn backup_cmd(cmd: BackupCmd) -> anyhow::Result<()> {
                 }
                 println!("verified");
             }
-            BackupCmd::Restore { load: a, guard } => {
+            BackupCmd::Restore {
+                load: a,
+                guard,
+                journal,
+            } => {
                 let object = a.object.clone().unwrap_or_else(|| "newest".into());
-                let entry = guard.begin("backup restore", &target(&a.store), &object)?;
+                let detail = if journal.no_journal {
+                    format!("{object}; WITHOUT the deletion journal")
+                } else {
+                    object
+                };
+                let key = if journal.no_journal {
+                    None
+                } else {
+                    Some(journal.key()?)
+                };
+                let entry = guard.begin("backup restore", &target(&a.store), &detail)?;
                 let r = async {
                     let r = backup::load(&a).await?;
                     print_report(&r);
+                    let redeleted = if let Some(key) = &key {
+                        let n = backup::reapply_deletions(&a, key).await?;
+                        println!("deletion journal: {n} restored accounts with a tombstone are being deleted again");
+                        n
+                    } else {
+                        println!("WARNING: --no-journal: accounts deleted after this backup are back");
+                        0
+                    };
                     let g = store::bump(&a.store).await?;
-                    Ok::<_, anyhow::Error>((r, g))
+                    Ok::<_, anyhow::Error>((r, g, redeleted))
                 }
                 .await;
                 entry.end(
                     &r,
-                    &r.as_ref().map_or(String::new(), |(rep, g)| {
+                    &r.as_ref().map_or(String::new(), |(rep, g, redeleted)| {
                         format!(
-                            "{}: {} accounts, {} devices; generation {g}; names written twice {}, misdated {}",
+                            "{}: {} accounts, {} devices; generation {g}; re-deleted {redeleted}; names written twice {}, misdated {}",
                             rep.object,
                             rep.accounts,
                             rep.devices,
@@ -297,7 +321,7 @@ fn backup_cmd(cmd: BackupCmd) -> anyhow::Result<()> {
                         )
                     }),
                 )?;
-                let (_, g) = r?;
+                let (_, g, _) = r?;
                 println!(
                     "restored; store generation is now {g}: clients resend what has no receipt"
                 );

@@ -574,6 +574,104 @@ pub(crate) async fn load(a: &LoadArgs) -> Result<Report> {
     Ok(report)
 }
 
+/// `backup restore`: the deletion journal (D-0041).
+#[derive(Debug, Clone, Args)]
+pub(crate) struct JournalArgs {
+    /// Environment variable holding the journal key (64 hex characters).
+    #[arg(long, default_value = "DELETION_JOURNAL_KEY")]
+    pub(crate) journal_key_env: String,
+    /// Restore without re-deleting journaled accounts (audit-logged; only when the journal is
+    /// lost or untrusted).
+    #[arg(long)]
+    pub(crate) no_journal: bool,
+}
+
+/// The tags of every tombstone (stored before `before`, by the server's time on S3). Their age
+/// does not matter: account IDs are random and never reused, so a restored account with a
+/// tombstone is one whose deletion the restore undid, or one still being deleted at the backup.
+async fn tombstones(
+    dest: &Dest,
+    before: Option<u64>,
+) -> Result<std::collections::HashSet<[u8; 32]>> {
+    use songbird_accounts::journal;
+    let mut stamped: Vec<(String, u64)> = Vec::new();
+    match dest {
+        Dest::Dir(root) => {
+            if let Ok(rd) = std::fs::read_dir(root.join("deletions")) {
+                for e in rd.flatten() {
+                    if let Some(n) = e.file_name().to_str() {
+                        let name = format!("{}{n}", journal::PREFIX);
+                        if let Some(t) = n.get(..16).and_then(parse_amz_date) {
+                            stamped.push((name, t));
+                        }
+                    }
+                }
+            }
+        }
+        Dest::S3(_) => {
+            for (name, _, t) in listing(dest, journal::PREFIX).await? {
+                stamped.push((name, t));
+            }
+        }
+    }
+    Ok(stamped
+        .into_iter()
+        .filter(|(_, t)| before.is_none_or(|b| *t < b))
+        .filter_map(|(n, _)| journal::parse_tombstone(&n))
+        .collect())
+}
+
+/// Starts the deletion again (through the outbox, so the worker clears every store) of every
+/// restored account with a tombstone. Returns how many.
+impl JournalArgs {
+    /// The journal key, read before anything is restored (a restore that cannot re-delete must
+    /// not start).
+    pub(crate) fn key(&self) -> Result<[u8; 32]> {
+        let hex_key = std::env::var(&self.journal_key_env).with_context(|| {
+            format!(
+                "{} is not set: the journal key is needed so deleted accounts stay deleted \
+                 (or --no-journal)",
+                self.journal_key_env
+            )
+        })?;
+        let mut key = [0u8; 32];
+        hex::decode_to_slice(hex_key.trim(), &mut key).context("journal key: 64 hex characters")?;
+        Ok(key)
+    }
+}
+
+pub(crate) async fn reapply_deletions(a: &LoadArgs, key: &[u8; 32]) -> Result<usize> {
+    let before = a
+        .before
+        .as_deref()
+        .map(|b| parse_amz_date(b).context("--before is YYYYMMDDTHHMMSSZ"))
+        .transpose()?;
+    let tags = tombstones(&a.dest.open()?, before).await?;
+    if tags.is_empty() {
+        return Ok(0);
+    }
+    let registry = a.store.registry().await?;
+    let mut matched = Vec::new();
+    let mut start = 0;
+    loop {
+        let page = registry.accounts_page(start, 10_000).await?;
+        if page.is_empty() {
+            break;
+        }
+        start += page.len();
+        matched.extend(
+            page.into_iter()
+                .filter(|acc| tags.contains(&songbird_accounts::journal::tag(key, acc))),
+        );
+    }
+    for account in &matched {
+        let job =
+            songbird_jobs::Job::new(songbird_jobs::Work::DeleteAccount { account: *account })?;
+        registry.begin_account_deletion(account, &job).await?;
+    }
+    Ok(matched.len())
+}
+
 /// Creates the target database, then streams age's output into `POST /import`.
 async fn import(a: &LoadArgs, sealed: Vec<u8>) -> Result<()> {
     let db = songbird_accounts::Db::connect(a.store.config()?).await?;

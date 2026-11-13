@@ -43,6 +43,17 @@ run "write_once_and_least_privilege" {
   assert {
     condition = alltrue([
       for s in jsondecode(scaleway_object_bucket_policy.backups.policy).Statement :
+      toset(s.Action) == toset(["s3:PutObject", "s3:PutObjectRetention"]) && toset(s.Resource) == toset(["songbird-beta-backups-test/deletions/*"]) if s.Sid == "JournalPutsOnly"
+    ])
+    error_message = "the deletion journal can only put tombstones under deletions/"
+  }
+  assert {
+    condition     = length([for r in scaleway_object_bucket.backups.lifecycle_rule : r if r.prefix == "deletions/"]) == 1
+    error_message = "tombstones expire after their lock"
+  }
+  assert {
+    condition = alltrue([
+      for s in jsondecode(scaleway_object_bucket_policy.backups.policy).Statement :
       toset(s.Action) == toset(["s3:GetObject", "s3:ListBucket"]) if s.Sid == "VerifierReadsOnly"
     ])
     error_message = "the verifier can only read"

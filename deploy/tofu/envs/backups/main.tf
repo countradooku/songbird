@@ -11,6 +11,8 @@
 #             server can neither read old backups (which hold deleted accounts until retention
 #             ends) nor destroy them
 #   verifier  the verification host's key: GetObject and ListBucket only
+#   journal   the worker's key: puts deletion tombstones under deletions/ and nothing else
+#             (D-0041), so a restore deletes again what was deleted after the backup
 
 terraform {
   required_version = ">= 1.9.0"
@@ -140,6 +142,19 @@ resource "scaleway_object_bucket" "backups" {
     }
   }
 
+  # Tombstones (D-0041) are locked 93 days, as long as the oldest backup that can hold the account.
+  lifecycle_rule {
+    id      = "deletion-journal"
+    prefix  = "deletions/"
+    enabled = true
+    expiration {
+      days = 94
+    }
+    noncurrent_version_expiration {
+      noncurrent_days = 1
+    }
+  }
+
   lifecycle_rule {
     id                                     = "abort-incomplete-uploads"
     enabled                                = true
@@ -172,6 +187,11 @@ resource "scaleway_iam_application" "writer" {
   description = "Data host: puts registry backups. Cannot read, list or delete them."
 }
 
+resource "scaleway_iam_application" "journal" {
+  name        = "songbird-${var.environment}-deletion-journal"
+  description = "Worker: puts deletion tombstones. Cannot read, list or delete anything."
+}
+
 resource "scaleway_iam_application" "verifier" {
   name        = "songbird-${var.environment}-backup-verifier"
   description = "Verification host: reads registry backups. Cannot write or delete them."
@@ -182,6 +202,15 @@ resource "scaleway_iam_application" "verifier" {
 resource "scaleway_iam_policy" "writer" {
   name           = "songbird-${var.environment}-backup-writer"
   application_id = scaleway_iam_application.writer.id
+  rule {
+    project_ids          = [scaleway_account_project.backups.id]
+    permission_set_names = ["ObjectStorageObjectsWrite"]
+  }
+}
+
+resource "scaleway_iam_policy" "journal" {
+  name           = "songbird-${var.environment}-deletion-journal"
+  application_id = scaleway_iam_application.journal.id
   rule {
     project_ids          = [scaleway_account_project.backups.id]
     permission_set_names = ["ObjectStorageObjectsWrite"]
@@ -219,6 +248,13 @@ resource "scaleway_object_bucket_policy" "backups" {
         Resource  = ["${scaleway_object_bucket.backups.name}/registry/*"]
       },
       {
+        Sid       = "JournalPutsOnly"
+        Effect    = "Allow"
+        Principal = { SCW = "application_id:${scaleway_iam_application.journal.id}" }
+        Action    = ["s3:PutObject", "s3:PutObjectRetention"]
+        Resource  = ["${scaleway_object_bucket.backups.name}/deletions/*"]
+      },
+      {
         Sid       = "VerifierReadsOnly"
         Effect    = "Allow"
         Principal = { SCW = "application_id:${scaleway_iam_application.verifier.id}" }
@@ -235,6 +271,12 @@ resource "scaleway_iam_api_key" "writer" {
   application_id     = scaleway_iam_application.writer.id
   default_project_id = scaleway_account_project.backups.id
   description        = "songbird-${var.environment} data host"
+}
+
+resource "scaleway_iam_api_key" "journal" {
+  application_id     = scaleway_iam_application.journal.id
+  default_project_id = scaleway_account_project.backups.id
+  description        = "songbird-${var.environment} worker deletion journal"
 }
 
 resource "scaleway_iam_api_key" "verifier" {
@@ -266,5 +308,14 @@ output "verifier_access_key" {
 
 output "verifier_secret_key" {
   value     = scaleway_iam_api_key.verifier.secret_key
+  sensitive = true
+}
+
+output "journal_access_key" {
+  value = scaleway_iam_api_key.journal.access_key
+}
+
+output "journal_secret_key" {
+  value     = scaleway_iam_api_key.journal.secret_key
   sensitive = true
 }

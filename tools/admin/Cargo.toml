@@ -10,6 +10,7 @@ license.workspace = true
 [dependencies]
 songbird-types.workspace = true
 songbird-accounts.workspace = true
+songbird-jobs.workspace = true
 songbird-surreal.workspace = true
 rustls.workspace = true
 songbird-s3.workspace = true

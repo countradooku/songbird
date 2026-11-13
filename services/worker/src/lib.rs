@@ -170,11 +170,55 @@ pub struct Worker {
     pub delivery: DeliveryLink,
     /// Push-token row key.
     pub push_index_secret: [u8; 32],
+    /// The deletion journal (D-0041); `None` only in development.
+    pub journal: Option<Journal>,
     /// How long every delivery node takes to drop a disabled device (its directory poll
     /// interval with a margin).
     pub propagation: Duration,
     /// Metrics.
     pub metrics: WorkerMetrics,
+}
+
+/// The deletion journal's writer (D-0041): before an account is deleted, an empty, write-once
+/// tombstone named by its keyed tag goes to the off-site backup bucket, so a restore of an older
+/// backup deletes it again. Its credential can only put under `deletions/`.
+#[derive(Debug)]
+pub struct Journal {
+    /// The backup bucket (the journal's own put-only credential).
+    pub s3: songbird_s3::Client,
+    /// The journal key (tags are HMAC-SHA256 under it).
+    pub key: [u8; 32],
+}
+
+impl Journal {
+    /// Writes the account's tombstone, locked for the longest backup retention.
+    ///
+    /// # Errors
+    /// The bucket refused or was unreachable: the deletion must not proceed.
+    pub async fn record(&self, account: &AccountId) -> Result<(), songbird_s3::Error> {
+        use songbird_accounts::journal;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let name = journal::tombstone_name(
+            &songbird_s3::sigv4::amz_date(now),
+            &journal::tag(&self.key, account),
+        );
+        let mut empty_sha = [0u8; 32];
+        empty_sha
+            .copy_from_slice(aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, b"").as_ref());
+        self.s3
+            .put_object_with(
+                &name,
+                0,
+                futures_util::stream::empty::<Result<Bytes, std::convert::Infallible>>(),
+                songbird_s3::PutOptions {
+                    retain_until: Some(now + journal::RETENTION.as_secs()),
+                    sha256: Some(empty_sha),
+                },
+            )
+            .await
+    }
 }
 
 /// What a deletion step found wrong (never an identifier).
@@ -228,6 +272,10 @@ impl Worker {
     /// [`Left`]: what is still there; the job is retried.
     pub async fn delete_account(&self, account: &AccountId) -> Result<(), Left> {
         let unavailable = |_| Left::Unavailable;
+        // First, before anything is gone: the tombstone that keeps it gone after a restore.
+        if let Some(j) = &self.journal {
+            j.record(account).await.map_err(|_| Left::Unavailable)?;
+        }
         let devices = self
             .registry
             .account_devices(account)

@@ -99,6 +99,26 @@ pub(crate) struct Args {
     /// Group scenario: members per group (the sender and the devices it sends to).
     #[arg(long, default_value_t = 256)]
     group_size: usize,
+    /// PEM root to trust: connect with TLS 1.3 (as production does), each device with its own
+    /// session cache so reconnects resume like a real app's. Plain WebSocket without it.
+    #[arg(long)]
+    tls_ca: Option<PathBuf>,
+}
+
+/// A TLS 1.3 client configuration trusting `ca`, with a session cache of its own.
+fn tls_config(ca: &std::path::Path) -> anyhow::Result<Arc<rustls::ClientConfig>> {
+    use rustls_pki_types::pem::PemObject as _;
+    let mut roots = rustls::RootCertStore::empty();
+    for c in rustls_pki_types::CertificateDer::pem_file_iter(ca).context("reading --tls-ca")? {
+        roots.add(c.context("reading --tls-ca")?)?;
+    }
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let mut cfg = rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    cfg.resumption = rustls::client::Resumption::in_memory_sessions(4);
+    Ok(Arc::new(cfg))
 }
 
 pub(crate) fn main(a: &Args) -> anyhow::Result<bool> {
@@ -264,7 +284,15 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
         None => None,
     };
 
-    // Ramp up.
+    // Ramp up. With TLS each device gets a configuration (and session cache) of its own.
+    let tls_ca = a.tls_ca.clone();
+    let device_cfg = |base: ClientConfig| -> anyhow::Result<ClientConfig> {
+        let mut c = base;
+        if let Some(ca) = &tls_ca {
+            c.tls = Some(tls_config(ca)?);
+        }
+        Ok(c)
+    };
     let t_connect = Instant::now();
     let mut clients = Vec::with_capacity(n);
     let mut events = Vec::with_capacity(n);
@@ -276,7 +304,8 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
         .enumerate()
         .filter_map(|(j, k)| {
             cfgs.get((n - late + j) % cfgs.len())
-                .map(|c| (k, c.clone()))
+                .and_then(|c| device_cfg(c.clone()).ok())
+                .map(|c| (k, c))
         })
         .collect();
     let gap = Duration::from_secs_f64(
@@ -286,7 +315,7 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
         let Some(cfg) = cfgs.get(i % cfgs.len()).cloned() else {
             break;
         };
-        let (c, ev) = Client::start(cfg, key, ResumeState::default());
+        let (c, ev) = Client::start(device_cfg(cfg)?, key, ResumeState::default());
         clients.push(c);
         events.push(ev);
         tokio::time::sleep(gap).await;

@@ -3243,6 +3243,8 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "mimalloc",
+ "rustls",
+ "rustls-pki-types",
  "sockudo-ws",
  "songbird-client",
  "songbird-proto",

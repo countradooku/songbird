@@ -20,14 +20,13 @@
 - name: Backups (when configured)
   when: backup_configured is succeeded
   block:
-    - name: Backup working directories (state, encrypted temporary files)
+    - name: Backup working directory (state; the encrypted file before upload, in a private subdirectory)
       ansible.builtin.file:
-        path: "/var/lib/songbird/backup{{ item }}"
+        path: /var/lib/songbird/backup
         state: directory
         owner: "65532"
         group: "65532"
         mode: "0700"
-      loop: ["", "/tmp"]
 
     - name: Backup credentials (root-only file read by docker)
       ansible.builtin.copy:

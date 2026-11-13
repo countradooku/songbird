@@ -18,8 +18,7 @@ for _ in $(seq 1 60); do
 done
 SURREAL_PASS="$pass" docker run --rm --network host --read-only --user 65532:65532 \
   --cap-drop ALL --security-opt no-new-privileges \
-  --env-file /etc/songbird/backup-verify.env -e SURREAL_PASS -e TMPDIR=/work \
-  -v /var/lib/songbird/verify:/work \
+  --env-file /etc/songbird/backup-verify.env -e SURREAL_PASS \
   -v /etc/songbird/backup-verify.key:/key/identity:ro \
   {{ songbird_registry }}/songbird-admin:{{ songbird_version }} \
   backup verify --addr 127.0.0.1:18000 --host localhost --user root \

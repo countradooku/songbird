@@ -9,7 +9,7 @@ Type=oneshot
 TimeoutStartSec=4min
 ExecStart=/usr/bin/docker run --rm --name songbird-backup \
   --network host --read-only --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
-  --env-file /etc/songbird/backup.env -e TMPDIR=/work/tmp \
+  --env-file /etc/songbird/backup.env \
   -v /var/lib/songbird/backup:/work \
   -v {{ songbird_pki_dir }}/surrealdb/ca.crt:/tls/ca.crt:ro \
   {{ songbird_registry }}/songbird-admin:{{ songbird_version }} \

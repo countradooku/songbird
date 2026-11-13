@@ -188,9 +188,10 @@ fn write_state(p: &Path, m: (u64, u64, u64)) -> Result<()> {
     Ok(())
 }
 
-/// A private scratch directory for the encrypted file before upload: created exclusively under
-/// `TMPDIR` with a random name and mode 0700 from the start, removed when dropped. (Standard
-/// library only: no extra crate in a binary that runs on production hosts.)
+/// A private scratch directory for the encrypted file before upload, inside `base` (the state
+/// file's directory, which belongs to the backup job alone: never a shared temporary directory).
+/// Created exclusively with a random name and mode 0700 from the start, removed when dropped.
+/// (Standard library only: no extra crate in a binary that runs on production hosts.)
 struct PrivateDir(PathBuf);
 
 impl PrivateDir {
@@ -205,9 +206,9 @@ impl Drop for PrivateDir {
     }
 }
 
-fn private_dir() -> Result<PrivateDir> {
+fn private_dir(base: &Path) -> Result<PrivateDir> {
     let id = songbird_types::DeviceId::random()?;
-    let path = std::env::temp_dir().join(format!("songbird-backup-{}", hex::encode(id.as_bytes())));
+    let path = base.join(format!(".scratch-{}", hex::encode(id.as_bytes())));
     let mut b = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -225,7 +226,8 @@ mod private_dir_tests {
     #[test]
     fn private_and_removed() {
         use std::os::unix::fs::PermissionsExt as _;
-        let d = super::private_dir().unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let d = super::private_dir(base.path()).unwrap();
         let p = d.path().to_path_buf();
         let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
@@ -297,7 +299,12 @@ pub(crate) async fn run(a: &RunArgs) -> Result<String> {
     let name = format!("registry/{tier}/{stamp}-{}.surql.age", hex::encode(suffix));
 
     // Export -> age (stdin) -> encrypted file in a private directory.
-    let dir = private_dir()?;
+    let base = match a.state.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    std::fs::create_dir_all(&base).with_context(|| format!("creating {}", base.display()))?;
+    let dir = private_dir(&base)?;
     let out = dir.path().join("backup.age");
     let mut age = tokio::process::Command::new(&a.age);
     age.arg("--encrypt").arg("--output").arg(&out);

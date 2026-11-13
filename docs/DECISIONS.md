@@ -79,7 +79,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   threat-model row for backups, a deletion journal, and what going live needs.
 - Decisions:
   1. **M6 gate: approved under delegation, effective when PR #38's CI is green** (the bar the
-     owner applied to M5). An author approving their own gate is weak separation of duties; the
+     owner applied to M5). Met on 2026-11-13: 13 of 13 checks passed; merged as `d7894b5`. An author approving their own gate is weak separation of duties; the
      green CI on Linux, with the Iggy path and the new live tests, is the independent check.
   2. **D-0040's choices confirmed:**
      - RPO 5 minutes and RTO 2 hours for the registry.

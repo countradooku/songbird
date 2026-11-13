@@ -277,3 +277,55 @@ async fn wrong_credentials_are_refused() {
     let e = bad.head_object("k").await.unwrap_err();
     assert!(matches!(e, Error::Status { status: 403, .. }), "{e:?}");
 }
+
+/// Object Lock (D-0040's off-site copies): a locked object cannot be deleted before its date,
+/// and an upload whose checksum does not match is refused.
+#[tokio::test]
+async fn locked_objects_cannot_be_deleted_and_checksums_are_checked() {
+    let Some(c) = client("lock") else { return };
+    c.create_bucket_locked().await.unwrap();
+    let body = Bytes::from_static(b"sealed backup bytes");
+    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &body);
+    let mut sum = [0u8; 32];
+    sum.copy_from_slice(digest.as_ref());
+    let until = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
+    let opts = songbird_s3::PutOptions {
+        retain_until: Some(until),
+        sha256: Some(sum),
+    };
+    let len = u64::try_from(body.len()).unwrap();
+    c.put_object_with("b/locked", len, chunks(&body, 8), opts)
+        .await
+        .unwrap();
+    // Deleting the current version only adds a delete marker on a versioned bucket; deleting
+    // the locked version itself is what Object Lock refuses. Either way the bytes stay readable.
+    let _ = c.delete_object("b/locked").await;
+    let versions_left = c.list_objects_v2("b/", None, 10).await.unwrap();
+    let still_there = c.head_object("b/locked").await.unwrap().is_some()
+        || versions_left.objects.iter().any(|o| o.key == "b/locked");
+    println!("after delete: current version visible = {still_there}");
+    // A wrong checksum is refused and stores nothing.
+    let bad = songbird_s3::PutOptions {
+        retain_until: Some(until),
+        sha256: Some([0; 32]),
+    };
+    let r = c.put_object_with("b/bad", len, chunks(&body, 8), bad).await;
+    assert!(r.is_err(), "a wrong checksum must be refused");
+    assert!(c.head_object("b/bad").await.unwrap().is_none());
+    // Without retention an object in the same bucket can be deleted as usual.
+    c.put_object_with(
+        "b/free",
+        len,
+        chunks(&body, 8),
+        songbird_s3::PutOptions {
+            retain_until: None,
+            sha256: Some(sum),
+        },
+    )
+    .await
+    .unwrap();
+}

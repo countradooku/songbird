@@ -215,6 +215,18 @@ pub struct GetObject {
     pub body: ObjectBody,
 }
 
+/// Extra settings for an upload ([`Client::put_object_with`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PutOptions {
+    /// S3 Object Lock in compliance mode until this Unix time (seconds): nobody, not even the
+    /// bucket owner, can delete or overwrite the object before then. The bucket must have been
+    /// created with Object Lock ([`Client::create_bucket_locked`]).
+    pub retain_until: Option<u64>,
+    /// The body's SHA-256, sent as `x-amz-checksum-sha256` and checked by the server (Object
+    /// Lock uploads require a checksum).
+    pub sha256: Option<[u8; 32]>,
+}
+
 /// Result of [`Client::head_object`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObjectMeta {
@@ -676,13 +688,30 @@ impl Client {
     /// # Errors
     /// [`Error`]; `Status` with `BucketAlreadyExists` if another account owns the name.
     pub async fn create_bucket(&self) -> Result<(), Error> {
+        self.create_bucket_inner(false).await
+    }
+
+    /// Creates the bucket with S3 Object Lock enabled (it cannot be turned off afterwards).
+    /// Already owned: success.
+    ///
+    /// # Errors
+    /// As [`Client::create_bucket`].
+    pub async fn create_bucket_locked(&self) -> Result<(), Error> {
+        self.create_bucket_inner(true).await
+    }
+
+    async fn create_bucket_inner(&self, locked: bool) -> Result<(), Error> {
         let i = &self.inner;
+        let mut headers = vec![(CONTENT_LENGTH.as_str(), "0".to_owned())];
+        if locked {
+            headers.push(("x-amz-bucket-object-lock-enabled", "true".to_owned()));
+        }
         self.timed(i.request_timeout, async {
             let req = i.request(
                 &Method::PUT,
                 None,
                 &[],
-                &[(CONTENT_LENGTH.as_str(), "0".to_owned())],
+                &headers,
                 sigv4::EMPTY_SHA256,
                 ReqBody::Empty,
             )?;
@@ -714,6 +743,25 @@ impl Client {
         S: Stream<Item = Result<Bytes, E>> + Send + 'static,
         E: 'static,
     {
+        self.put_object_with(key, length, body, PutOptions::default())
+            .await
+    }
+
+    /// [`Client::put_object`] with Object Lock retention and a checksum.
+    ///
+    /// # Errors
+    /// As [`Client::put_object`].
+    pub async fn put_object_with<S, E>(
+        &self,
+        key: &str,
+        length: u64,
+        body: S,
+        opts: PutOptions,
+    ) -> Result<(), Error>
+    where
+        S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+        E: 'static,
+    {
         check_key(key)?;
         if length > MAX_OBJECT_BYTES {
             return Err(Error::InvalidInput("object too large"));
@@ -738,11 +786,19 @@ impl Client {
                 } else {
                     ReqBody::Exact(exact)
                 };
+                let mut headers = vec![(CONTENT_LENGTH.as_str(), length.to_string())];
+                if let Some(until) = opts.retain_until {
+                    headers.push(("x-amz-object-lock-mode", "COMPLIANCE".to_owned()));
+                    headers.push(("x-amz-object-lock-retain-until-date", sigv4::iso8601(until)));
+                }
+                if let Some(sum) = opts.sha256 {
+                    headers.push(("x-amz-checksum-sha256", sigv4::base64(&sum)));
+                }
                 let req = i.request(
                     &Method::PUT,
                     Some(key),
                     &[],
-                    &[(CONTENT_LENGTH.as_str(), length.to_string())],
+                    &headers,
                     sigv4::UNSIGNED_PAYLOAD,
                     body,
                 )?;

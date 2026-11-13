@@ -3032,16 +3032,28 @@ name = "songbird-admin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-lc-rs",
+ "bytes",
  "clap",
+ "futures-core",
+ "futures-util",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "rcgen",
  "rustls",
  "rustls-pki-types",
+ "serde_json",
  "songbird-accounts",
+ "songbird-s3",
  "songbird-surreal",
  "songbird-types",
  "tempfile",
  "time",
  "tokio",
+ "tokio-rustls",
+ "webpki-roots 1.0.12",
  "x509-parser",
 ]
 

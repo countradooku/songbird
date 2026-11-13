@@ -1,5 +1,7 @@
 //! `songbird-admin`: operator tool.
 //!
+//! - `backup`: registry backups (D-0040): `run` (export, encrypt with age, store write-once),
+//!   `verify` (restore the newest into a scratch database and check it), `restore`.
 //! - `generation`: the store generation clients see in `Hello` (D-0040): shown, or bumped after
 //!   a restore or a loss of the mailbox, so clients resend what has no delivery receipt.
 //! - `ca`: the internal mutual-TLS certificate authority.
@@ -19,6 +21,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::print_stdout, reason = "CLI output")]
 
+mod backup;
 mod ca;
 mod store;
 
@@ -35,6 +38,10 @@ struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "parsed once per process; boxing would not save anything that matters"
+)]
 enum Cmd {
     /// Internal mutual-TLS certificate authority.
     #[command(subcommand)]
@@ -42,6 +49,20 @@ enum Cmd {
     /// The store generation (D-0040).
     #[command(subcommand)]
     Generation(GenerationCmd),
+    /// Registry backups (D-0040).
+    #[command(subcommand)]
+    Backup(BackupCmd),
+}
+
+#[derive(Debug, Subcommand)]
+enum BackupCmd {
+    /// Export the registry, encrypt it with age and store it (every 5 minutes, by a timer).
+    Run(backup::RunArgs),
+    /// Restore the newest backup into a scratch database and check it; non-zero exit when it
+    /// is older than allowed or inconsistent (daily, off production).
+    Verify(backup::LoadArgs),
+    /// Restore a backup into the registry and bump the store generation (restore runbook).
+    Restore(backup::LoadArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -126,6 +147,7 @@ fn main() -> ExitCode {
             Err(e) => Err(e),
         },
         Cmd::Generation(cmd) => generation_cmd(cmd),
+        Cmd::Backup(cmd) => backup_cmd(cmd),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -182,4 +204,47 @@ fn generation_cmd(cmd: GenerationCmd) -> anyhow::Result<()> {
         }
         Ok(())
     })
+}
+
+fn backup_cmd(cmd: BackupCmd) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        match cmd {
+            BackupCmd::Run(a) => {
+                let name = backup::run(&a).await?;
+                println!("stored {name}");
+            }
+            BackupCmd::Verify(a) => {
+                let r = backup::load(&a).await?;
+                print_report(&r);
+                if r.orphan_devices > 0 || r.generation == 0 {
+                    anyhow::bail!("the restored registry is inconsistent");
+                }
+                println!("verified");
+            }
+            BackupCmd::Restore(a) => {
+                let r = backup::load(&a).await?;
+                print_report(&r);
+                let g = store::bump(&a.store).await?;
+                println!(
+                    "restored; store generation is now {g}: clients resend what has no receipt"
+                );
+            }
+        }
+        Ok(())
+    })
+}
+
+fn print_report(r: &backup::Report) {
+    println!(
+        "backup {} ({} min old): {} accounts, {} devices, {} devices without an account, generation {}",
+        r.object,
+        r.age_secs / 60,
+        r.accounts,
+        r.devices,
+        r.orphan_devices,
+        r.generation
+    );
 }

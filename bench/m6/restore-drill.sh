@@ -35,6 +35,7 @@ NS=drill; DB=registry; SURREAL=127.0.0.1:47800; IGGY=127.0.0.1:${SB_PORT_IGGY:-4
 now() { perl -MTime::HiRes=time -e 'printf "%.3f\n", time'; }
 sql() { curl -s -u "$SURREAL_USER:$SURREAL_PASS" -H "Surreal-NS: $NS" -H "Surreal-DB: $DB" -H "Accept: application/json" "http://$SURREAL/sql" -d "$1"; }
 C=(--addr "$SURREAL" --user "$SURREAL_USER" --namespace "$NS" --database "$DB")
+G=(--confirm "$NS/$DB" --audit-log "$W/admin-audit.jsonl")
 
 rm -rf "$W"; mkdir -p "$W"; chmod 700 "$W"
 umask 077
@@ -97,7 +98,7 @@ start() {
 echo "== registry: $DEVICES devices, one account each"
 sql "REMOVE DATABASE IF EXISTS $DB; DEFINE DATABASE $DB;" >/dev/null
 "$B/songbird-loadgen" keys --devices "$DEVICES" --out "$W/keys" >/dev/null
-SURREAL_PASS=$SURREAL_PASS "$B/songbird-admin" accounts import "${C[@]}" --directory "$W/keys/devices.toml"
+SURREAL_PASS=$SURREAL_PASS "$B/songbird-admin" accounts import "${C[@]}" "${G[@]}" --directory "$W/keys/devices.toml"
 echo "store generation before: $("$B/songbird-admin" generation show "${C[@]}")"
 echo "== backup (the timer's job)"
 "$B/songbird-admin" backup run "${C[@]}" --dir "$W/store" --recipient "$OWNER" --age "$AGE" --state "$W/state"
@@ -117,13 +118,14 @@ sql "REMOVE DATABASE $DB;" >/dev/null
 echo "disaster at $(date +%T): delivery killed, registry removed, mailbox lost"
 echo "== restore runbook"
 T1=$(now)
-"$B/songbird-admin" backup restore "${C[@]}" --dir "$W/store" --identity "$W/owner.key" --age "$AGE" --max-age-hours 24
+"$B/songbird-admin" backup restore "${C[@]}" "${G[@]}" --dir "$W/store" --identity "$W/owner.key" --age "$AGE" --max-age-hours 24
 conf "$STREAM2" "$W/keystore-2"; start
 T2=$(now)
 echo "restore took $(perl -e "printf '%.2f', $T2-$T1") s; outage (RTO measured) $(perl -e "printf '%.2f', $T2-$T0") s"
 
 RC=0; wait "$L" || RC=$?
 cat "$W/load.txt"
+echo "== audit log"; cat "$W/admin-audit.jsonl"
 kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null || true
 sql "REMOVE DATABASE IF EXISTS $DB;" >/dev/null
 exit "$RC"

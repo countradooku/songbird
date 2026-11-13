@@ -4,6 +4,10 @@
 //!   `verify` (restore the newest into a scratch database and check it), `restore`.
 //! - `generation`: the store generation clients see in `Hello` (D-0040): shown, or bumped after
 //!   a restore or a loss of the mailbox, so clients resend what has no delivery receipt.
+//! - `accounts import`: a static directory file as registry accounts (drills, development).
+//!
+//! Commands that change the registry (`backup restore`, `generation bump`, `accounts import`)
+//! need `--confirm <namespace>/<database>` and write an audit log (`audit.rs`).
 //! - `ca`: the internal mutual-TLS certificate authority.
 //!
 //! Every service-to-service connection on the private network uses certificates from this CA (see
@@ -21,6 +25,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::print_stdout, reason = "CLI output")]
 
+mod audit;
 mod backup;
 mod ca;
 mod store;
@@ -63,6 +68,8 @@ enum AccountsCmd {
     Import {
         #[command(flatten)]
         store: store::StoreArgs,
+        #[command(flatten)]
+        guard: audit::Guard,
         /// The directory file (`songbird-loadgen keys` writes `devices.toml`).
         #[arg(long)]
         directory: PathBuf,
@@ -76,8 +83,14 @@ enum BackupCmd {
     /// Restore the newest backup into a scratch database and check it; non-zero exit when it
     /// is older than allowed or inconsistent (daily, off production).
     Verify(backup::LoadArgs),
-    /// Restore a backup into the registry and bump the store generation (restore runbook).
-    Restore(backup::LoadArgs),
+    /// Restore a backup into an empty registry database and bump the store generation (restore
+    /// runbook). Needs `--confirm <namespace>/<database>`; audit-logged.
+    Restore {
+        #[command(flatten)]
+        load: backup::LoadArgs,
+        #[command(flatten)]
+        guard: audit::Guard,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -88,9 +101,12 @@ enum GenerationCmd {
         store: store::StoreArgs,
     },
     /// Increase it (restore runbook): every client resends what has no delivery receipt.
+    /// Needs `--confirm <namespace>/<database>`; audit-logged.
     Bump {
         #[command(flatten)]
         store: store::StoreArgs,
+        #[command(flatten)]
+        guard: audit::Guard,
     },
 }
 
@@ -163,19 +179,11 @@ fn main() -> ExitCode {
         },
         Cmd::Generation(cmd) => generation_cmd(cmd),
         Cmd::Backup(cmd) => backup_cmd(cmd),
-        Cmd::Accounts(AccountsCmd::Import { store, directory }) => {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(anyhow::Error::from)
-                .and_then(|rt| {
-                    rt.block_on(async {
-                        let n = store::import_directory(&store, &directory).await?;
-                        println!("registered {n} devices");
-                        Ok(())
-                    })
-                })
-        }
+        Cmd::Accounts(AccountsCmd::Import {
+            store,
+            guard,
+            directory,
+        }) => accounts_import(&store, &guard, &directory),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -225,9 +233,15 @@ fn generation_cmd(cmd: GenerationCmd) -> anyhow::Result<()> {
     rt.block_on(async {
         match cmd {
             GenerationCmd::Show { store } => println!("{}", store::show(&store).await?),
-            GenerationCmd::Bump { store } => {
-                let g = store::bump(&store).await?;
-                println!("store generation is now {g}");
+            GenerationCmd::Bump { store, guard } => {
+                let entry = guard.begin("generation bump", &target(&store), "")?;
+                let r = store::bump(&store).await;
+                entry.end(
+                    &r,
+                    &r.as_ref()
+                        .map_or(String::new(), |g| format!("generation {g}")),
+                )?;
+                println!("store generation is now {}", r?);
             }
         }
         Ok(())
@@ -252,15 +266,60 @@ fn backup_cmd(cmd: BackupCmd) -> anyhow::Result<()> {
                 }
                 println!("verified");
             }
-            BackupCmd::Restore(a) => {
-                let r = backup::load(&a).await?;
-                print_report(&r);
-                let g = store::bump(&a.store).await?;
+            BackupCmd::Restore { load: a, guard } => {
+                let object = a.object.clone().unwrap_or_else(|| "newest".into());
+                let entry = guard.begin("backup restore", &target(&a.store), &object)?;
+                let r = async {
+                    let r = backup::load(&a).await?;
+                    print_report(&r);
+                    let g = store::bump(&a.store).await?;
+                    Ok::<_, anyhow::Error>((r, g))
+                }
+                .await;
+                entry.end(
+                    &r,
+                    &r.as_ref().map_or(String::new(), |(rep, g)| {
+                        format!(
+                            "{}: {} accounts, {} devices; generation {g}",
+                            rep.object, rep.accounts, rep.devices
+                        )
+                    }),
+                )?;
+                let (_, g) = r?;
                 println!(
                     "restored; store generation is now {g}: clients resend what has no receipt"
                 );
             }
         }
+        Ok(())
+    })
+}
+
+/// A destructive command's target, as `--confirm` must repeat it.
+fn target(s: &store::StoreArgs) -> String {
+    format!("{}/{}", s.namespace, s.database)
+}
+
+fn accounts_import(
+    store: &store::StoreArgs,
+    guard: &audit::Guard,
+    directory: &std::path::Path,
+) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        let entry = guard.begin(
+            "accounts import",
+            &target(store),
+            &directory.display().to_string(),
+        )?;
+        let r = store::import_directory(store, directory).await;
+        entry.end(
+            &r,
+            &r.as_ref().map_or(String::new(), |n| format!("{n} devices")),
+        )?;
+        println!("registered {} devices", r?);
         Ok(())
     })
 }

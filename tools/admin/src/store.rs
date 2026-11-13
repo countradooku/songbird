@@ -33,6 +33,10 @@ pub(crate) struct StoreArgs {
     /// Database.
     #[arg(long, default_value = "songbird")]
     pub(crate) database: String,
+    /// The user is defined on the database (`DEFINE USER … ON DATABASE`), not at the root: the
+    /// backup timer's read-only `VIEWER` user. Only `backup run` accepts one.
+    #[arg(long)]
+    pub(crate) database_user: bool,
 }
 
 impl StoreArgs {
@@ -74,6 +78,10 @@ impl StoreArgs {
 
     /// Connects to the registry.
     pub(crate) async fn registry(&self) -> Result<Registry> {
+        anyhow::ensure!(
+            !self.database_user,
+            "--database-user works with `backup run` only (an export needs no more)"
+        );
         let db = Db::connect(self.config()?)
             .await
             .context("connecting to SurrealDB")?;

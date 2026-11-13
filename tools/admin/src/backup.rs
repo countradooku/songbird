@@ -213,15 +213,21 @@ async fn surreal_http(
         .await
         .context("connecting to SurrealDB")?;
     let auth = songbird_s3::sigv4::base64(format!("{}:{}", cfg.user, cfg.pass).as_bytes());
-    let req = hyper::Request::builder()
+    let mut req = hyper::Request::builder()
         .method(method)
         .uri(path)
         .header("host", &cfg.host)
         .header("authorization", format!("Basic {auth}"))
         .header("surreal-ns", &cfg.namespace)
         .header("surreal-db", &cfg.database)
-        .header("accept", "application/json")
-        .body(body)?;
+        .header("accept", "application/json");
+    if store.database_user {
+        // Where the user is defined (the selected namespace and database are separate).
+        req = req
+            .header("surreal-auth-ns", &cfg.namespace)
+            .header("surreal-auth-db", &cfg.database);
+    }
+    let req = req.body(body)?;
     let resp = if let Some(tls) = cfg.tls {
         let name = rustls_pki_types::ServerName::try_from(cfg.host.clone())?;
         let stream = tokio_rustls::TlsConnector::from(tls)
@@ -465,6 +471,19 @@ async fn import(a: &LoadArgs, sealed: Vec<u8>) -> Result<()> {
         Vec::new(),
     )
     .await?;
+    // Only into an empty database: an import over existing records has no defined result.
+    let tables = db
+        .query("RETURN object::len((INFO FOR DB).tables);", Vec::new())
+        .await?
+        .first()
+        .and_then(songbird_surreal::Value::as_i64);
+    if tables != Some(0) {
+        bail!(
+            "the database {} is not empty: restore into a removed or new database (runbook \
+             docs/RUNBOOKS/backup-and-restore.md)",
+            a.store.database
+        );
+    }
     let mut child = tokio::process::Command::new(&a.age)
         .arg("--decrypt")
         .arg("--identity")

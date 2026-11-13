@@ -18,11 +18,15 @@ echo "--- run"; "$A" backup run "${C[@]}" --database bk_src --dir "$W/store" --r
 find "$W/store" -type f | sed "s|$W/||"
 echo "plaintext markers in the stored file: $(grep -c 'DEFINE TABLE' -r "$W/store" | awk -F: '{s+=$2} END{print s+0}')"
 echo "--- verify into bk_verify with the verification identity"; "$A" backup verify "${C[@]}" --database bk_verify --dir "$W/store" --identity "$W/verify.key" --age "$AGE"
-echo "--- restore into bk_restored with the owner identity"; "$A" backup restore "${C[@]}" --database bk_restored --dir "$W/store" --identity "$W/owner.key" --age "$AGE"
+echo "--- restore into bk_restored with the owner identity"; "$A" backup restore "${C[@]}" --database bk_restored --confirm test/bk_restored --audit-log "$W/audit.jsonl" --dir "$W/store" --identity "$W/owner.key" --age "$AGE"
 echo "--- a third identity cannot decrypt"; "$KEYGEN" -o "$W/stranger.key" 2>/dev/null
 if "$A" backup verify "${C[@]}" --database bk_verify2 --dir "$W/store" --identity "$W/stranger.key" --age "$AGE" 2>&1 | tail -1; then :; fi
 echo "--- an orphaned device makes verify fail"
 sql bk_src "CREATE device:[<bytes><string>rand::uuid()] SET account = <bytes>'no-such-account!', key = <bytes>'k', disabled = false, at = time::now();" >/dev/null
 "$A" backup run "${C[@]}" --database bk_src --dir "$W/store" --recipient "$R1" --recipient "$R2" --age "$AGE" --state "$W/state"
 if "$A" backup verify "${C[@]}" --database bk_verify3 --dir "$W/store" --identity "$W/verify.key" --age "$AGE"; then echo "UNEXPECTED: verify passed"; else echo "verify failed as it should"; fi
+echo "--- restore refuses a database that is not empty, and a missing confirmation"
+"$A" backup restore "${C[@]}" --database bk_restored --confirm test/bk_restored --audit-log "$W/audit.jsonl" --dir "$W/store" --identity "$W/owner.key" --age "$AGE" 2>&1 | tail -1 || true
+"$A" backup restore "${C[@]}" --database bk_restored --audit-log "$W/audit.jsonl" --dir "$W/store" --identity "$W/owner.key" --age "$AGE" 2>&1 | tail -1 || true
+echo "--- audit log"; cat "$W/audit.jsonl"
 for db in bk_src bk_verify bk_restored bk_verify2 bk_verify3; do sql "$db" "REMOVE DATABASE IF EXISTS $db;" >/dev/null; done

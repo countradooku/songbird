@@ -254,6 +254,54 @@ impl std::fmt::Debug for ListEntry {
     }
 }
 
+/// One stored version of an object ([`Client::list_object_versions`]). `Debug` hides the key.
+#[derive(Clone, PartialEq, Eq)]
+pub struct VersionEntry {
+    /// Object key (never log it).
+    pub key: String,
+    /// The version's ID, for [`Client::get_object_version`].
+    pub version_id: String,
+    /// `LastModified` as sent (ISO 8601): when the server stored this version. The uploader
+    /// cannot choose it.
+    pub last_modified: String,
+    /// Size in bytes.
+    pub size: u64,
+    /// The version a plain `GET` returns.
+    pub is_latest: bool,
+}
+
+impl std::fmt::Debug for VersionEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VersionEntry")
+            .field("last_modified", &self.last_modified)
+            .field("size", &self.size)
+            .field("is_latest", &self.is_latest)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One page of [`Client::list_object_versions`]. `Debug` hides keys and markers.
+#[derive(Clone, PartialEq, Eq)]
+pub struct VersionPage {
+    /// Versions on this page (delete markers are left out).
+    pub versions: Vec<VersionEntry>,
+    /// More pages follow.
+    pub is_truncated: bool,
+    /// Pass to the next call when `is_truncated`.
+    pub next_key_marker: Option<String>,
+    /// Pass to the next call when `is_truncated`.
+    pub next_version_id_marker: Option<String>,
+}
+
+impl std::fmt::Debug for VersionPage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VersionPage")
+            .field("versions", &self.versions)
+            .field("is_truncated", &self.is_truncated)
+            .finish_non_exhaustive()
+    }
+}
+
 /// One page of [`Client::list_objects_v2`]. `Debug` hides keys and the token.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ListPage {
@@ -862,6 +910,33 @@ impl Client {
         key: &str,
         range: Option<(u64, u64)>,
     ) -> Result<GetObject, Error> {
+        self.get(key, range, None).await
+    }
+
+    /// Downloads one stored version of `key` (a bucket with versioning).
+    ///
+    /// # Errors
+    /// [`Error::NotFound`]; the others.
+    pub async fn get_object_version(
+        &self,
+        key: &str,
+        version_id: &str,
+    ) -> Result<GetObject, Error> {
+        if version_id.is_empty()
+            || version_id.len() > 1024
+            || version_id.chars().any(char::is_control)
+        {
+            return Err(Error::InvalidInput("version_id"));
+        }
+        self.get(key, None, Some(version_id)).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<(u64, u64)>,
+        version_id: Option<&str>,
+    ) -> Result<GetObject, Error> {
         check_key(key)?;
         if let Some((first, last)) = range
             && first > last
@@ -873,10 +948,13 @@ impl Client {
             let extra: Vec<(&'static str, String)> = range
                 .map(|(a, b)| vec![("range", format!("bytes={a}-{b}"))])
                 .unwrap_or_default();
+            let query: Vec<(&str, &str)> = version_id
+                .map(|v| vec![("versionId", v)])
+                .unwrap_or_default();
             let req = i.request(
                 &Method::GET,
                 Some(key),
-                &[],
+                &query,
                 &extra,
                 sigv4::EMPTY_SHA256,
                 ReqBody::Empty,
@@ -1020,6 +1098,63 @@ impl Client {
             }
             let (_, body) = i.read_body(resp, conn, i.max_list_bytes).await?;
             xml::list_objects(&body, usize::from(max_keys))
+        })
+        .await
+    }
+
+    /// One page of up to `max_keys` (1–1000) object versions whose keys start with `prefix`,
+    /// after the markers of the previous page (delete markers are left out).
+    ///
+    /// # Errors
+    /// As [`Client::list_objects_v2`].
+    pub async fn list_object_versions(
+        &self,
+        prefix: &str,
+        key_marker: Option<&str>,
+        version_id_marker: Option<&str>,
+        max_keys: u16,
+    ) -> Result<VersionPage, Error> {
+        if prefix.len() > MAX_KEY_BYTES || prefix.chars().any(char::is_control) {
+            return Err(Error::InvalidInput("prefix"));
+        }
+        if !(1..=1000).contains(&max_keys) {
+            return Err(Error::InvalidInput("max_keys"));
+        }
+        for m in [key_marker, version_id_marker].into_iter().flatten() {
+            if m.is_empty()
+                || m.len() > MAX_TOKEN_BYTES.max(MAX_KEY_BYTES)
+                || m.chars().any(char::is_control)
+            {
+                return Err(Error::InvalidInput("marker"));
+            }
+        }
+        let i = &self.inner;
+        self.timed(i.request_timeout, async {
+            let max = max_keys.to_string();
+            let mut query: Vec<(&str, &str)> = vec![("versions", ""), ("max-keys", &max)];
+            if !prefix.is_empty() {
+                query.push(("prefix", prefix));
+            }
+            if let Some(k) = key_marker {
+                query.push(("key-marker", k));
+            }
+            if let Some(v) = version_id_marker {
+                query.push(("version-id-marker", v));
+            }
+            let req = i.request(
+                &Method::GET,
+                None,
+                &query,
+                &[],
+                sigv4::EMPTY_SHA256,
+                ReqBody::Empty,
+            )?;
+            let (resp, conn) = i.send(req).await?;
+            if resp.status() != StatusCode::OK {
+                return Err(i.error_for(resp, conn).await);
+            }
+            let (_, body) = i.read_body(resp, conn, i.max_list_bytes).await?;
+            xml::list_versions(&body, usize::from(max_keys))
         })
         .await
     }

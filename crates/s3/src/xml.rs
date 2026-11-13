@@ -1,9 +1,9 @@
 //! A tiny bounded scanner for the two XML documents this client reads: S3 error bodies
-//! (`<Error><Code>…</Code>…`) and `ListObjectsV2` results. No XML crate: the caller caps the
+//! (`<Error><Code>…</Code>…`), `ListObjectsV2` and `ListObjectVersions` results. No XML crate: the caller caps the
 //! document size before reading, the scanner only looks for fixed, attribute-free element names,
 //! never recurses and never allocates more than the input it was given.
 
-use crate::{Error, ErrorCode, ListEntry, ListPage, MAX_KEY_BYTES};
+use crate::{Error, ErrorCode, ListEntry, ListPage, MAX_KEY_BYTES, VersionEntry, VersionPage};
 
 /// The text between the first `<name>` and the following `</name>`, and the rest after it.
 fn element<'a>(doc: &'a str, name: &str) -> Option<(&'a str, &'a str)> {
@@ -131,6 +131,120 @@ pub(crate) fn list_objects(body: &[u8], max_entries: usize) -> Result<ListPage, 
     })
 }
 
+fn bool_element(doc: &str, name: &'static str) -> Result<Option<bool>, Error> {
+    match element(doc, name) {
+        Some((v, _)) => match v.trim() {
+            "true" => Ok(Some(true)),
+            "false" => Ok(Some(false)),
+            _ => Err(Error::Protocol("bad boolean element")),
+        },
+        None => Ok(None),
+    }
+}
+
+fn marker(doc: &str, name: &'static str) -> Result<Option<String>, Error> {
+    match element(doc, name) {
+        Some((v, _)) => {
+            let t = unescape(v.trim())?;
+            if t.is_empty() {
+                Ok(None)
+            } else if t.len() > crate::MAX_TOKEN_BYTES.max(MAX_KEY_BYTES) {
+                Err(Error::Protocol("bad marker"))
+            } else {
+                Ok(Some(t))
+            }
+        }
+        None => Ok(None),
+    }
+}
+
+/// A `ListObjectVersions` result: object versions only (delete markers are skipped, they hold
+/// no data).
+pub(crate) fn list_versions(body: &[u8], max_entries: usize) -> Result<VersionPage, Error> {
+    let doc = std::str::from_utf8(body).map_err(|_| Error::Protocol("list result is not UTF-8"))?;
+    if !doc.contains("<ListVersionsResult") {
+        return Err(Error::Protocol("not a ListVersionsResult"));
+    }
+    // Header fields come before the entries: read them from the part before the first entry, so
+    // an entry's own elements are never taken for the page's.
+    let head_end = [doc.find("<Version>"), doc.find("<DeleteMarker>")]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(doc.len());
+    let head = doc.get(..head_end).unwrap_or(doc);
+    let tail_start = [doc.rfind("</Version>"), doc.rfind("</DeleteMarker>")]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(0);
+    let tail = doc.get(tail_start..).unwrap_or("");
+    let pick = |name: &'static str| -> Result<Option<String>, Error> {
+        match marker(head, name)? {
+            Some(v) => Ok(Some(v)),
+            None => marker(tail, name),
+        }
+    };
+    let is_truncated = match bool_element(head, "IsTruncated")? {
+        Some(b) => b,
+        None => bool_element(tail, "IsTruncated")?.unwrap_or(false),
+    };
+    let next_key_marker = pick("NextKeyMarker")?;
+    let next_version_id_marker = pick("NextVersionIdMarker")?;
+    if is_truncated && next_key_marker.is_none() {
+        return Err(Error::Protocol("truncated list without a key marker"));
+    }
+    let mut versions = Vec::new();
+    let mut rest = doc;
+    while let Some((v, after)) = element(rest, "Version") {
+        if versions.len() >= max_entries {
+            return Err(Error::Protocol("more versions than requested"));
+        }
+        let (key, _) = element(v, "Key").ok_or(Error::Protocol("version without Key"))?;
+        let key = unescape(key)?;
+        if key.is_empty() || key.len() > MAX_KEY_BYTES {
+            return Err(Error::Protocol("bad Key"));
+        }
+        let (id, _) =
+            element(v, "VersionId").ok_or(Error::Protocol("version without VersionId"))?;
+        let version_id = unescape(id.trim())?;
+        if version_id.is_empty()
+            || version_id.len() > 1024
+            || !version_id.bytes().all(|b| b.is_ascii_graphic())
+        {
+            return Err(Error::Protocol("bad VersionId"));
+        }
+        let (size, _) = element(v, "Size").ok_or(Error::Protocol("version without Size"))?;
+        let size = size
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| Error::Protocol("bad Size"))?;
+        let last_modified = match element(v, "LastModified") {
+            Some((t, _))
+                if !t.is_empty() && t.len() <= 64 && t.bytes().all(|b| b.is_ascii_graphic()) =>
+            {
+                t.to_owned()
+            }
+            _ => return Err(Error::Protocol("bad or missing LastModified")),
+        };
+        let is_latest = bool_element(v, "IsLatest")?.unwrap_or(false);
+        versions.push(VersionEntry {
+            key,
+            version_id,
+            last_modified,
+            size,
+            is_latest,
+        });
+        rest = after;
+    }
+    Ok(VersionPage {
+        versions,
+        is_truncated,
+        next_key_marker,
+        next_version_id_marker,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +292,43 @@ mod tests {
         assert!(list_objects(&[0xff, 0xfe], 10).is_err());
     }
 
+    const VERSIONS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>b</Name><Prefix>registry/</Prefix>
+<KeyMarker></KeyMarker><VersionIdMarker></VersionIdMarker><NextKeyMarker>registry/x</NextKeyMarker><NextVersionIdMarker>v9</NextVersionIdMarker>
+<MaxKeys>3</MaxKeys><IsTruncated>true</IsTruncated>
+<Version><Key>registry/a</Key><VersionId>v2</VersionId><IsLatest>true</IsLatest><LastModified>2026-11-13T10:05:00.000Z</LastModified><Size>9</Size></Version>
+<DeleteMarker><Key>registry/b</Key><VersionId>d1</VersionId><IsLatest>true</IsLatest><LastModified>2026-11-13T10:06:00.000Z</LastModified></DeleteMarker>
+<Version><Key>registry/a</Key><VersionId>v1</VersionId><IsLatest>false</IsLatest><LastModified>2026-11-13T10:00:00.000Z</LastModified><Size>7</Size></Version>
+</ListVersionsResult>"#;
+
+    #[test]
+    fn parses_versions_and_skips_delete_markers() {
+        let p = list_versions(VERSIONS.as_bytes(), 3).unwrap();
+        assert!(p.is_truncated);
+        assert_eq!(p.next_key_marker.as_deref(), Some("registry/x"));
+        assert_eq!(p.next_version_id_marker.as_deref(), Some("v9"));
+        assert_eq!(p.versions.len(), 2);
+        assert_eq!(
+            (
+                p.versions[0].version_id.as_str(),
+                p.versions[0].is_latest,
+                p.versions[0].size
+            ),
+            ("v2", true, 9)
+        );
+        assert_eq!(p.versions[1].last_modified, "2026-11-13T10:00:00.000Z");
+        assert!(list_versions(VERSIONS.as_bytes(), 1).is_err());
+        assert!(!format!("{p:?}").contains("registry/a"));
+        for bad in [
+            "<ListBucketResult/>",
+            "<ListVersionsResult><IsTruncated>true</IsTruncated></ListVersionsResult>",
+            "<ListVersionsResult><Version><Key>k</Key><Size>1</Size><LastModified>t</LastModified></Version></ListVersionsResult>",
+            "<ListVersionsResult><Version><Key>k</Key><VersionId>v</VersionId><Size>1</Size></Version></ListVersionsResult>",
+        ] {
+            assert!(list_versions(bad.as_bytes(), 10).is_err(), "{bad}");
+        }
+    }
+
     #[test]
     fn error_codes() {
         let doc = b"<?xml version=\"1.0\"?><Error><Code>BucketAlreadyOwnedByYou</Code><Message>secret/key</Message></Error>";
@@ -190,6 +341,7 @@ mod tests {
         #[test]
         fn never_panics(s in ".{0,512}") {
             let _ = list_objects(s.as_bytes(), 5);
+            let _ = list_versions(s.as_bytes(), 5);
             let _ = error_code(s.as_bytes());
             let _ = unescape(&s);
         }

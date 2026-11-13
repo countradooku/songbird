@@ -332,8 +332,11 @@ pub(crate) async fn run(a: &RunArgs) -> Result<String> {
 }
 
 /// The newest backup's name and its timestamp (Unix seconds).
-async fn newest(dest: &Dest) -> Result<(String, u64)> {
-    let mut names = Vec::new();
+/// Every stored backup: (name, stored version, when the server stored it). On S3 every version
+/// of every name is listed, with the server's own time (the uploader cannot choose it); in a
+/// directory the name's time stands in for it.
+async fn listing(dest: &Dest, prefix: &str) -> Result<Vec<(String, Option<String>, u64)>> {
+    let mut out = Vec::new();
     match dest {
         Dest::Dir(root) => {
             for tier in TIERS.map(|(t, _)| t) {
@@ -342,32 +345,133 @@ async fn newest(dest: &Dest) -> Result<(String, u64)> {
                     continue;
                 };
                 for e in rd.flatten() {
-                    if let Some(n) = e.file_name().to_str() {
-                        names.push(format!("registry/{tier}/{n}"));
+                    let Some(n) = e
+                        .file_name()
+                        .to_str()
+                        .map(|n| format!("registry/{tier}/{n}"))
+                    else {
+                        continue;
+                    };
+                    if let Some(t) = name_secs(&n).filter(|_| n.starts_with(prefix)) {
+                        out.push((n, None, t));
                     }
                 }
             }
         }
         Dest::S3(c) => {
-            let mut token: Option<String> = None;
+            let (mut key, mut version): (Option<String>, Option<String>) = (None, None);
             loop {
                 let page = c
-                    .list_objects_v2("registry/", token.as_deref(), 1000)
+                    .list_object_versions(prefix, key.as_deref(), version.as_deref(), 1000)
                     .await?;
-                names.extend(page.objects.into_iter().map(|o| o.key));
+                for v in page.versions {
+                    let t = parse_iso8601(&v.last_modified)
+                        .context("a stored version has no usable LastModified")?;
+                    out.push((v.key, Some(v.version_id), t));
+                }
                 if !page.is_truncated {
                     break;
                 }
-                token = page.next_continuation_token;
+                key = page.next_key_marker;
+                version = page.next_version_id_marker;
             }
         }
     }
-    let stamped = names.into_iter().filter_map(|n| {
-        let file = n.rsplit('/').next()?;
-        let secs = parse_amz_date(file.get(..16)?)?;
-        Some((n, secs))
-    });
-    stamped.max_by_key(|(_, s)| *s).context("no backup found")
+    Ok(out)
+}
+
+/// Greatest distance between the time in a backup's name and the time the server stored it.
+const MAX_SKEW_SECS: u64 = 600;
+
+/// The backup a restore reads.
+#[derive(Debug, PartialEq, Eq)]
+struct Chosen {
+    name: String,
+    version: Option<String>,
+    stamp: u64,
+}
+
+/// Signs of tampering in the listing (D-0040): the writer key can put but not delete, so a name
+/// written twice, or a backup whose name claims another time than the server's, was not written
+/// by the backup timer.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Integrity {
+    /// Names with more than one stored version: only the earliest is ever read.
+    pub(crate) overwritten: usize,
+    /// Backups whose name and stored time differ by more than `MAX_SKEW_SECS`: never read.
+    pub(crate) misdated: usize,
+}
+
+/// Picks the newest trustworthy backup stored before `before`: for each name its earliest
+/// version, then the latest of those by the server's time.
+fn select(
+    entries: Vec<(String, Option<String>, u64)>,
+    before: Option<u64>,
+) -> Result<(Chosen, Integrity)> {
+    let mut by_name: std::collections::BTreeMap<String, Vec<(Option<String>, u64)>> =
+        std::collections::BTreeMap::new();
+    for (name, version, t) in entries {
+        by_name.entry(name).or_default().push((version, t));
+    }
+    let mut integrity = Integrity::default();
+    let mut best: Option<Chosen> = None;
+    for (name, mut versions) in by_name {
+        versions.sort_by_key(|(_, t)| *t);
+        if versions.len() > 1 {
+            integrity.overwritten += 1;
+        }
+        let Some((version, stored)) = versions.into_iter().next() else {
+            continue;
+        };
+        match name_secs(&name) {
+            Some(n) if n.abs_diff(stored) <= MAX_SKEW_SECS => {}
+            _ => {
+                integrity.misdated += 1;
+                continue;
+            }
+        }
+        if before.is_some_and(|b| stored >= b) {
+            continue;
+        }
+        if best.as_ref().is_none_or(|c| stored > c.stamp) {
+            best = Some(Chosen {
+                name,
+                version,
+                stamp: stored,
+            });
+        }
+    }
+    Ok((best.context("no backup found")?, integrity))
+}
+
+/// The time in a backup's name (`registry/<tier>/<YYYYMMDDTHHMMSSZ>-<id>.surql.age`).
+fn name_secs(name: &str) -> Option<u64> {
+    name.rsplit('/').next()?.get(..16).and_then(parse_amz_date)
+}
+
+/// Parses S3's `LastModified` (`2026-11-13T10:05:00.000Z`) to Unix seconds.
+fn parse_iso8601(s: &str) -> Option<u64> {
+    let b = s.as_bytes();
+    let ok = b.len() >= 20
+        && b.get(4) == Some(&b'-')
+        && b.get(7) == Some(&b'-')
+        && b.get(10) == Some(&b'T')
+        && b.get(13) == Some(&b':')
+        && b.get(16) == Some(&b':')
+        && s.ends_with('Z');
+    if !ok {
+        return None;
+    }
+    let compact = format!(
+        "{}{}{}T{}{}{}Z",
+        s.get(0..4)?,
+        s.get(5..7)?,
+        s.get(8..10)?,
+        s.get(11..13)?,
+        s.get(14..16)?,
+        s.get(17..19)?
+    );
+    parse_amz_date(&compact)
 }
 
 /// Parses `YYYYMMDDTHHMMSSZ`.
@@ -389,11 +493,15 @@ fn parse_amz_date(s: &str) -> Option<u64> {
     Some(days * 86_400 + hh * 3600 + mm * 60 + ss)
 }
 
-async fn fetch(dest: &Dest, name: &str) -> Result<Vec<u8>> {
+async fn fetch(dest: &Dest, chosen: &Chosen) -> Result<Vec<u8>> {
     match dest {
-        Dest::Dir(root) => Ok(tokio::fs::read(root.join(name)).await?),
+        Dest::Dir(root) => Ok(tokio::fs::read(root.join(&chosen.name)).await?),
         Dest::S3(c) => {
-            let mut obj = c.get_object(name, None).await?;
+            let version = chosen
+                .version
+                .as_deref()
+                .context("a stored backup without a version")?;
+            let mut obj = c.get_object_version(&chosen.name, version).await?;
             let mut out = Vec::with_capacity(usize::try_from(obj.length).unwrap_or(0));
             while let Some(chunk) = obj.body.chunk().await {
                 out.extend_from_slice(&chunk?);
@@ -423,6 +531,10 @@ pub(crate) struct LoadArgs {
     /// Fail when the backup is older than this many hours.
     #[arg(long, default_value_t = 24)]
     pub(crate) max_age_hours: u64,
+    /// Only backups stored before this time (`YYYYMMDDTHHMMSSZ`): restore from before a mistake
+    /// or a compromise.
+    #[arg(long)]
+    pub(crate) before: Option<String>,
 }
 
 /// What a restored database holds (consistency checks).
@@ -434,30 +546,32 @@ pub(crate) struct Report {
     pub(crate) devices: u64,
     pub(crate) orphan_devices: u64,
     pub(crate) generation: u64,
+    pub(crate) integrity: Integrity,
 }
 
 /// Decrypts a backup and streams it into `POST /import` of `a.store`'s database (created
 /// first); returns the consistency report.
 pub(crate) async fn load(a: &LoadArgs) -> Result<Report> {
     let dest = a.dest.open()?;
-    let (object, stamp) = match &a.object {
-        Some(o) => {
-            let file = o.rsplit('/').next().unwrap_or(o);
-            let secs = file
-                .get(..16)
-                .and_then(parse_amz_date)
-                .context("backup name has no timestamp")?;
-            (o.clone(), secs)
-        }
-        None => newest(&dest).await?,
-    };
-    let age_secs = now_secs().saturating_sub(stamp);
+    let before = a
+        .before
+        .as_deref()
+        .map(|b| parse_amz_date(b).context("--before is YYYYMMDDTHHMMSSZ"))
+        .transpose()?;
+    let prefix = a.object.as_deref().unwrap_or("registry/");
+    let (chosen, integrity) = select(listing(&dest, prefix).await?, before)?;
+    if a.object.as_deref().is_some_and(|o| o != chosen.name) {
+        bail!("no such backup");
+    }
+    let age_secs = now_secs().saturating_sub(chosen.stamp);
     if age_secs > a.max_age_hours * 3600 {
         bail!("the newest backup is {} hours old", age_secs / 3600);
     }
-    let sealed = fetch(&dest, &object).await?;
+    let sealed = fetch(&dest, &chosen).await?;
     import(a, sealed).await?;
-    check(&a.store, object, age_secs).await
+    let mut report = check(&a.store, chosen.name, age_secs).await?;
+    report.integrity = integrity;
+    Ok(report)
 }
 
 /// Creates the target database, then streams age's output into `POST /import`.
@@ -569,6 +683,7 @@ async fn check(store: &StoreArgs, object: String, age_secs: u64) -> Result<Repor
         devices: n(1),
         orphan_devices: n(2),
         generation: registry.store_generation().await?,
+        integrity: Integrity::default(),
     })
 }
 
@@ -607,6 +722,44 @@ mod tests {
         assert_eq!(next_mon.0, "weekly");
         let dec = tier_for(parse_amz_date("20261201T000000Z").unwrap(), next_mon.2);
         assert_eq!(dec.0, "monthly");
+    }
+
+    #[test]
+    fn restores_read_the_earliest_version_and_skip_forgeries() {
+        let t = parse_amz_date("20261113T100000Z").unwrap();
+        let name = |secs: u64| {
+            format!(
+                "registry/frequent/{}-00000000.surql.age",
+                songbird_s3::sigv4::amz_date(secs)
+            )
+        };
+        let v = |s: &str| Some(s.to_owned());
+        let entries = vec![
+            (name(t), v("a1"), t + 2),
+            // Overwritten later by someone holding the put-only key: the original is read.
+            (name(t + 300), v("b1"), t + 301),
+            (name(t + 300), v("b2-forged"), t + 4000),
+            // Named for a time it was not stored at: never read.
+            (name(t + 9000), v("c1"), t + 600),
+        ];
+        let (c, i) = select(entries.clone(), None).unwrap();
+        assert_eq!(
+            (c.name, c.version, c.stamp),
+            (name(t + 300), v("b1"), t + 301)
+        );
+        assert_eq!(
+            i,
+            Integrity {
+                overwritten: 1,
+                misdated: 1
+            }
+        );
+        // Before a compromise at t + 100: the earlier one.
+        let (c, _) = select(entries, Some(t + 100)).unwrap();
+        assert_eq!(c.version, v("a1"));
+        assert!(select(Vec::new(), None).is_err());
+        assert_eq!(parse_iso8601("2026-11-13T10:00:00.000Z"), Some(t));
+        assert_eq!(parse_iso8601("2026-11-13 10:00:00"), None);
     }
 
     #[test]

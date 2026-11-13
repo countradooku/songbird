@@ -329,3 +329,57 @@ async fn locked_objects_cannot_be_deleted_and_checksums_are_checked() {
     .await
     .unwrap();
 }
+
+/// D-0040: a holder of a put-only key can overwrite a backup's name, which on a versioned
+/// bucket makes a new current version. The original stays, as the earliest version, and can be
+/// read by its version ID: restores read that one.
+#[tokio::test]
+async fn an_overwrite_leaves_the_original_as_the_earliest_version() {
+    let Some(c) = client("versions") else { return };
+    c.create_bucket_locked().await.unwrap();
+    let put = |body: &'static [u8]| {
+        let b = Bytes::from_static(body);
+        let d = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &b);
+        let mut sum = [0u8; 32];
+        sum.copy_from_slice(d.as_ref());
+        let len = u64::try_from(b.len()).unwrap();
+        let c = c.clone();
+        async move {
+            c.put_object_with(
+                "registry/frequent/x",
+                len,
+                chunks(&b, 4),
+                songbird_s3::PutOptions {
+                    retain_until: None,
+                    sha256: Some(sum),
+                },
+            )
+            .await
+            .unwrap();
+        }
+    };
+    put(b"the real backup").await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    put(b"a forgery").await;
+    let page = c
+        .list_object_versions("registry/", None, None, 100)
+        .await
+        .unwrap();
+    let mut mine: Vec<_> = page
+        .versions
+        .iter()
+        .filter(|v| v.key == "registry/frequent/x")
+        .collect();
+    assert_eq!(mine.len(), 2, "both versions are listed");
+    mine.sort_by(|a, b| a.last_modified.cmp(&b.last_modified));
+    assert!(mine[1].is_latest && !mine[0].is_latest);
+    let mut first = c
+        .get_object_version("registry/frequent/x", &mine[0].version_id)
+        .await
+        .unwrap();
+    let mut got = Vec::new();
+    while let Some(ch) = first.body.chunk().await {
+        got.extend_from_slice(&ch.unwrap());
+    }
+    assert_eq!(got, b"the real backup");
+}

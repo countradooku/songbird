@@ -264,6 +264,14 @@ fn backup_cmd(cmd: BackupCmd) -> anyhow::Result<()> {
                 if r.orphan_devices > 0 || r.generation == 0 {
                     anyhow::bail!("the restored registry is inconsistent");
                 }
+                if r.integrity != backup::Integrity::default() {
+                    anyhow::bail!(
+                        "the bucket shows tampering: {} names written twice, {} misdated backups \
+                         (runbook backup-and-restore.md, compromise)",
+                        r.integrity.overwritten,
+                        r.integrity.misdated
+                    );
+                }
                 println!("verified");
             }
             BackupCmd::Restore { load: a, guard } => {
@@ -280,8 +288,12 @@ fn backup_cmd(cmd: BackupCmd) -> anyhow::Result<()> {
                     &r,
                     &r.as_ref().map_or(String::new(), |(rep, g)| {
                         format!(
-                            "{}: {} accounts, {} devices; generation {g}",
-                            rep.object, rep.accounts, rep.devices
+                            "{}: {} accounts, {} devices; generation {g}; names written twice {}, misdated {}",
+                            rep.object,
+                            rep.accounts,
+                            rep.devices,
+                            rep.integrity.overwritten,
+                            rep.integrity.misdated
                         )
                     }),
                 )?;
@@ -325,6 +337,13 @@ fn accounts_import(
 }
 
 fn print_report(r: &backup::Report) {
+    if r.integrity != backup::Integrity::default() {
+        println!(
+            "WARNING: the bucket shows tampering: {} names written twice (only their first version \
+             is read), {} misdated backups (never read)",
+            r.integrity.overwritten, r.integrity.misdated
+        );
+    }
     println!(
         "backup {} ({} min old): {} accounts, {} devices, {} devices without an account, generation {}",
         r.object,

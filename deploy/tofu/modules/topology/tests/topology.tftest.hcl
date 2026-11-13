@@ -90,3 +90,23 @@ run "rejects_duplicate_indices" {
   }
   expect_failures = [var.hosts]
 }
+
+run "verify_in_an_environment_of_its_own" {
+  command = plan
+  variables {
+    environment = "beta-verify"
+    hosts       = { verify-1 = { roles = ["bastion", "verify"], class = "small", index = 0 } }
+  }
+  assert {
+    condition     = length(output.hosts["verify-1"].rules) == 1
+    error_message = "the verification host opens nothing but SSH from the admin range"
+  }
+}
+
+run "rejects_verify_beside_production" {
+  command = plan
+  variables {
+    hosts = { core-1 = { roles = ["bastion", "data", "verify"], class = "large", index = 0 } }
+  }
+  expect_failures = [var.hosts]
+}

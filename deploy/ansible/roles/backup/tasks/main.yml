@@ -1,0 +1,110 @@
+---
+# Registry backups (D-0040), on the data host: every 5 minutes `songbird-admin backup run` exports
+# SurrealDB as a read-only VIEWER user, encrypts the export with age to the owner's offline
+# identity and the verification identity, and puts it in the off-site bucket with Object Lock
+# (compliance mode, retention by tier). The plaintext never touches disk; this host holds no key
+# that can decrypt a backup and an S3 key that can only put. The mailbox is never backed up.
+- name: Off-site backups are configured (staging may run without)
+  ansible.builtin.assert:
+    that:
+      - (secrets.backup_s3_access_key | default('CHANGE_ME')) not in ['', 'CHANGE_ME']
+      - (secrets.backup_s3_bucket | default('CHANGE_ME')) not in ['', 'CHANGE_ME']
+      - (secrets.backup_age_recipients | default([]) | select('match', '^age1[02-9ac-hj-np-z]{58}$') | list | length) >= 2
+    fail_msg: >-
+      backups are not configured for {{ songbird_env }}: run deploy/bin/backups-up {{ songbird_env }}
+      and set backup_* in its SOPS file (docs/RUNBOOKS/backup-and-restore.md)
+    quiet: true
+  register: backup_configured
+  ignore_errors: "{{ songbird_env_kind == 'staging' }}"
+
+- name: Backups (when configured)
+  when: backup_configured is succeeded
+  block:
+    - name: Backup working directories (state, encrypted temporary files)
+      ansible.builtin.file:
+        path: "/var/lib/songbird/backup{{ item }}"
+        state: directory
+        owner: "65532"
+        group: "65532"
+        mode: "0700"
+      loop: ["", "/tmp"]
+
+    - name: Backup credentials (root-only file read by docker)
+      ansible.builtin.copy:
+        dest: /etc/songbird/backup.env
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          SURREAL_BACKUP_PASS={{ secrets.backup_surreal_password }}
+          BACKUP_S3_ACCESS_KEY={{ secrets.backup_s3_access_key }}
+          BACKUP_S3_SECRET_KEY={{ secrets.backup_s3_secret_key }}
+      no_log: true
+
+    - name: Wait until SurrealDB answers
+      ansible.builtin.uri:
+        url: "https://{{ private_ip }}:8000/health"
+        ca_path: "{{ songbird_pki_dir }}/surrealdb/ca.crt"
+      register: surreal_health
+      until: surreal_health.status == 200
+      retries: 30
+      delay: 2
+
+    # A database user with the VIEWER role: it can export and read, never write. Defined with
+    # OVERWRITE so a rotated password takes effect; the export carries it, so a restore keeps it.
+    - name: Read-only SurrealDB user for exports
+      ansible.builtin.uri:
+        url: "https://{{ private_ip }}:8000/sql"
+        method: POST
+        ca_path: "{{ songbird_pki_dir }}/surrealdb/ca.crt"
+        url_username: "{{ secrets.surrealdb_user }}"
+        url_password: "{{ secrets.surrealdb_password }}"
+        force_basic_auth: true
+        headers:
+          Accept: application/json
+        body_format: raw
+        body: >-
+          DEFINE NAMESPACE IF NOT EXISTS songbird; USE NS songbird;
+          DEFINE DATABASE IF NOT EXISTS songbird; USE DB songbird;
+          DEFINE USER OVERWRITE backup ON DATABASE
+          PASSWORD {{ secrets.backup_surreal_password | to_json }} ROLES VIEWER;
+        return_content: true
+      register: viewer
+      changed_when: false
+      failed_when: viewer.status != 200 or (viewer.json | rejectattr('status', 'equalto', 'OK') | list | length) > 0
+      no_log: true
+
+    - name: Log in to the image registry (read-only token; skipped when the packages are public)
+      community.docker.docker_login:
+        registry_url: "{{ songbird_registry.split('/')[0] }}"
+        username: "{{ secrets.ghcr_username }}"
+        password: "{{ secrets.ghcr_read_token }}"
+      when: (secrets.ghcr_read_token | default('')) not in ['', 'CHANGE_ME', 'public']
+      no_log: true
+
+    - name: Admin image (songbird-admin with the pinned age tool)
+      community.docker.docker_image:
+        name: "{{ songbird_registry }}/songbird-admin:{{ songbird_version }}"
+        source: pull
+
+    - name: Backup service and its 5-minute timer
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "/etc/systemd/system/{{ item }}"
+        mode: "0644"
+      loop: [songbird-backup.service, songbird-backup.timer]
+
+    - name: Timer enabled
+      ansible.builtin.systemd_service:
+        name: songbird-backup.timer
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    # Proves the whole path (export, encryption, upload with a lock) before the play reports
+    # success; a failure here is a deploy failure.
+    - name: One backup now
+      ansible.builtin.systemd_service:
+        name: songbird-backup.service
+        state: started
+      changed_when: false

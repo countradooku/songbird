@@ -1,0 +1,11 @@
+# Managed by Ansible (roles/backup). RPO 5 minutes (D-0040).
+[Unit]
+Description=Songbird registry backup every 5 minutes
+
+[Timer]
+OnCalendar=*:0/5
+AccuracySec=10s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

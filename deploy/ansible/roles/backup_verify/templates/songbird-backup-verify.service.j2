@@ -1,0 +1,10 @@
+# Managed by Ansible (roles/backup_verify). D-0040; runbook docs/RUNBOOKS/backup-and-restore.md.
+[Unit]
+Description=Songbird backup restore verification ({{ verified_env }})
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=2h
+ExecStart=/usr/local/sbin/songbird-backup-verify

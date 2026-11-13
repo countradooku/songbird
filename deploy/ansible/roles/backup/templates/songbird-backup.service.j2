@@ -1,0 +1,25 @@
+# Managed by Ansible (roles/backup). Registry backup, D-0040; runbook docs/RUNBOOKS/backup-and-restore.md.
+[Unit]
+Description=Songbird registry backup (export, age, off-site with Object Lock)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=4min
+ExecStart=/usr/bin/docker run --rm --name songbird-backup \
+  --network host --read-only --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+  --env-file /etc/songbird/backup.env -e TMPDIR=/work/tmp \
+  -v /var/lib/songbird/backup:/work \
+  -v {{ songbird_pki_dir }}/surrealdb/ca.crt:/tls/ca.crt:ro \
+  {{ songbird_registry }}/songbird-admin:{{ songbird_version }} \
+  backup run \
+  --addr {{ private_ip }}:8000 --host surrealdb.{{ fqdn }} --tls-ca /tls/ca.crt \
+  --namespace songbird --database songbird \
+  --user backup --pass-env SURREAL_BACKUP_PASS --database-user \
+  --s3-addr {{ backup_s3_endpoint }} --s3-tls --s3-region {{ backup_s3_region }} \
+  --s3-bucket {{ secrets.backup_s3_bucket }} --lock \
+{% for r in secrets.backup_age_recipients %}
+  --recipient {{ r }} \
+{% endfor %}
+  --age /usr/local/bin/age --state /work/state

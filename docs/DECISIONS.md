@@ -72,7 +72,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0043 — Milestone 7: the beta's load profile, how the targets are measured, where
 
 - Date: 2026-11-13
-- Status: accepted (method); results in report P02-M7
+- Status: accepted; results in report P02-M7. The owner approved the M7 gate on 2026-11-13,
+  accepting this profile and the soak's move to the beta server.
 - Decided by: agent, under the owner's delegation (D-0041: "think like someone from Proton or a
   big corp"); the master prompt leaves the targets to "validate and adjust with the owner"
 - Context: M7's gate is "targets met, or gaps documented and accepted by the owner". The prompt
@@ -116,8 +117,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     **mimalloc stays.**
   - **ACK checkpoints** no longer take an Iggy write of their own under traffic; the beta's p99
     store latency dropped from ≤3 ms to ≤2 ms.
-  - The 24-hour soak did not run (the owner's Mac cannot stay up a day). Proposed: on the beta
-    server before launch, or on an hourly Hetzner server.
+  - The 24-hour soak did not run (the owner's Mac cannot stay up a day). **The owner accepted the
+    gap: the soak (`bench/m7/soak.sh`) runs on the beta server before launch**, a go-live check
+    beside the durable-latency run of `bench/m7/suite.sh`.
 - Consequences: the targets can be checked against definitions that are written down; the
   reference-hardware run (durable storage, x86) remains a go-live step.
 

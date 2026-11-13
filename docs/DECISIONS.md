@@ -69,6 +69,58 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0043 — Milestone 7: the beta's load profile, how the targets are measured, where
+
+- Date: 2026-11-13
+- Status: accepted (method); results in report P02-M7
+- Decided by: agent, under the owner's delegation (D-0041: "think like someone from Proton or a
+  big corp"); the master prompt leaves the targets to "validate and adjust with the owner"
+- Context: M7's gate is "targets met, or gaps documented and accepted by the owner". The prompt
+  states targets "at the beta's peak load" without defining that load, and the reference
+  hardware (the beta server, a Hetzner `ccx33`: 8 dedicated vCPUs, 32 GB) does not exist yet.
+- Decision:
+  - **The beta's peak, defined.** 20,000 accounts at about 1.5 devices each: **30,000
+    connections**, every one online at once (the worst case, not the average). **1,000 sends a
+    second** 1:1 (about 4 messages a second for every 100 online people, several times a
+    messaging app's evening peak) and **20 group sends a second** to 256-member groups (5,100
+    deliveries a second). All with TLS 1.3 and the production session limits.
+  - **What each target means, and how it is measured:**
+    - *Server-side p99 send-to-deliver under 2 ms* is measured where it arises: from a `Send`
+      frame read to the send durably stored, group commit included
+      (`songbird_delivery_store_seconds`, a lock-free per-core histogram). Routing and the
+      socket write add tens of microseconds. The load generator's client-observed latency is
+      reported beside it as an upper bound.
+    - *Recovery from a reconnect storm of every beta connection within 60 s, zero loss*:
+      `loadgen --scenario storm` drops all 30,000 connections at once under peak traffic and
+      times until the last device is connected again; the checker must pass.
+    - *No allocation per message*: the M3 gate test stays (routing, writes and ACKs allocate
+      nothing; the send path's five allocations are budgeted at 5.5).
+    - *Cross-node p99 under 5 ms*: measured in M4 (cluster mode); not repeated unless the code
+      on that path changes.
+  - **Where:** a Linux VM on the owner's Mac (VMPal; Apple Silicon, arm64, 12 vCPUs, 32 GB,
+    Ubuntu 26.04, kernel 7.0) runs the whole suite (`bench/m7/suite.sh`). It is not the
+    reference hardware: an arm64 VM and a laptop. Its virtual disk takes about 9 ms per fsync
+    (macOS flushes to its SSD on every one), so durable latency on it says nothing about a
+    server's NVMe. The suite therefore runs Iggy's data in memory (`IGGY_TMPFS=1`) to measure
+    the software path, as P02-M3 did, and the durable figure is a go-live check on the `ccx33`
+    with the same command.
+  - **Baselines:** each host class keeps its own baseline file; the suite fails when a tracked
+    figure is more than 10 % worse. CI keeps the deterministic gates (allocations per message,
+    the checker in every live test); timing gates need a quiet, fixed machine, so they run where
+    the suite runs, not on shared CI runners.
+- Results (report P02-M7):
+  - **io_uring against epoll, measured again** (kernel 7.0, arm64, `bench/runtime-echo`): epoll
+    9% faster on 1 core and 16% on 4, with lower p99. **epoll stays** (D-0028); io_uring adds
+    kernel attack surface for a gain that is, at best, a few percent on other machines.
+  - **mimalloc against glibc:** equal at light load, mimalloc's p99 27% lower at 80,000/s.
+    **mimalloc stays.**
+  - **ACK checkpoints** no longer take an Iggy write of their own under traffic; the beta's p99
+    store latency dropped from ≤3 ms to ≤2 ms.
+  - The 24-hour soak did not run (the owner's Mac cannot stay up a day). Proposed: on the beta
+    server before launch, or on an hourly Hetzner server.
+- Consequences: the targets can be checked against definitions that are written down; the
+  reference-hardware run (durable storage, x86) remains a go-live step.
+
 ## D-0042 — Hetzner only: off-site backups and OpenTofu state at Hetzner Object Storage
 
 - Date: 2026-11-13

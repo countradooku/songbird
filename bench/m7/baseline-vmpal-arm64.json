@@ -1,0 +1,18 @@
+{
+  "_about": "bench/m7/suite.sh baseline: VMPal Linux VM on the owner's Mac (Apple Silicon, arm64, 12 vCPUs, 32 GB), Ubuntu 26.04, kernel 7.0; IGGY_TMPFS=1; 30,000 TLS devices; 2026-11-13 after the ACK-checkpoint fix (report P02-M7). Not the reference hardware: compare like with like.",
+  "host": "songbird-m7",
+  "machine": "aarch64",
+  "kernel": "7.0.0-43-generic",
+  "cpus": 12,
+  "checker_passed": true,
+  "idle_bytes_per_connection": 33360,
+  "steady_p99_us": 2431,
+  "steady_p999_us": 5115,
+  "steady_cpu_per_10k_secs": 3.389,
+  "steady_store_p99_le_secs": 0.002,
+  "group_p99_us": 9984,
+  "group_delivery_rate": 7509,
+  "storm_recovery_secs": 15.52,
+  "max_delivery_rate": 79910,
+  "max_p99_us": 3421
+}

@@ -1222,6 +1222,10 @@ struct Writer {
     relocate_after: Duration,
     key_window_ms: u64,
     pending_acks: HashMap<DeviceId, u64>,
+    /// When a store batch last carried the pending ACKs: the ACK tick writes them on its own only
+    /// when none has for a whole interval (M7: an ACK write of its own delays every store that
+    /// arrives while it is in flight by one Iggy round trip, which set the p99 under steady load).
+    acks_carried_at: tokio::time::Instant,
     /// Tag of a multi-partition send -> (home record offset, accepted at, remote partitions not
     /// yet confirmed with their part slots).
     incomplete: HashMap<[u8; 32], Incomplete>,
@@ -1258,6 +1262,7 @@ impl Writer {
             relocate_after: cfg.relocate_after,
             key_window_ms: ms(cfg.key_window),
             pending_acks: HashMap::new(),
+            acks_carried_at: tokio::time::Instant::now(),
             incomplete: HashMap::new(),
             parts,
             tag_window_ms: ms(IDEMPOTENCY_RETENTION),
@@ -1435,8 +1440,14 @@ impl Writer {
             }
             tokio::select! {
                 biased;
-                // ACK checkpoints ride with store batches; this writes them when no send does.
-                _ = ack_tick.tick() => self.flush_acks().await,
+                // ACK checkpoints ride with store batches; this writes them only when no batch
+                // has carried them for a whole interval (an idle partition), so under traffic
+                // no store ever waits behind an ACK write.
+                _ = ack_tick.tick() => {
+                    if self.acks_carried_at.elapsed() >= self.ack_interval {
+                        self.flush_acks().await;
+                    }
+                }
                 _ = compact_tick.tick() => { self.start_compaction(None).await; }
                 _ = redrive_tick.tick() => self.redrive_stale(),
                 job = rx.recv() => {
@@ -1595,7 +1606,9 @@ impl Writer {
             records.push(Record::Ack(acks.clone()));
         }
         let ok = records.is_empty() || self.commit_records(&records, now).await;
-        if !ok {
+        if ok {
+            self.acks_carried_at = tokio::time::Instant::now();
+        } else {
             for (d, s) in acks {
                 let e = self.pending_acks.entry(d).or_default();
                 *e = (*e).max(s);

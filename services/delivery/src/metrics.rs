@@ -2,7 +2,9 @@
 //! (invariant 6). Per-core shards summed at scrape time (M3): cores counting the same event never
 //! contend for a cache line.
 
-use songbird_service::telemetry::sharded::{ShardedCounter as Counter, ShardedGauge as Gauge};
+use songbird_service::telemetry::sharded::{
+    ShardedCounter as Counter, ShardedGauge as Gauge, ShardedHistogram,
+};
 use songbird_service::telemetry::{Metrics, TelemetryError};
 
 /// Every delivery metric.
@@ -65,6 +67,9 @@ pub struct DeliveryMetrics {
     /// Push wake-ups dropped (buffer full or job queue unreachable; the message is safe in the
     /// mailbox).
     pub push_dropped: Counter,
+    /// From a `Send` frame read to the send durably stored (group commit included): the
+    /// server-side part of send-to-deliver that the 2 ms target is about (master prompt §8).
+    pub store_seconds: ShardedHistogram,
 }
 
 impl DeliveryMetrics {
@@ -215,6 +220,11 @@ impl DeliveryMetrics {
         for (name, help, c) in counters {
             m.register(name, help, c.clone())?;
         }
+        m.register(
+            "delivery_store_seconds",
+            "From a Send frame read to the send durably stored, group commit included",
+            self.store_seconds.clone(),
+        )?;
         Ok(())
     }
 }

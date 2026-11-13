@@ -8,6 +8,7 @@
 use prometheus_client::collector::Collector;
 use prometheus_client::encoding::{DescriptorEncoder, EncodeMetric};
 use prometheus_client::metrics::counter::ConstCounter;
+use prometheus_client::metrics::gauge::ConstGauge;
 use prometheus_client::metrics::info::Info;
 use prometheus_client::registry::{Metric, Registry};
 use tracing_appender::non_blocking::ErrorCounter;
@@ -92,7 +93,87 @@ impl Collector for SelfMetrics {
                 c.metric_type(),
             )?)?;
         }
+        // The process's own memory, CPU and descriptors (Linux, read at scrape: nothing on the
+        // hot path). Benchmarks derive memory per idle connection and CPU per message from them.
+        if let Some(p) = Process::read() {
+            let rss = ConstGauge::new(i64::try_from(p.resident_bytes).unwrap_or(i64::MAX));
+            rss.encode(encoder.encode_descriptor(
+                "process_resident_memory_bytes",
+                "Resident memory of this process",
+                None,
+                rss.metric_type(),
+            )?)?;
+            let cpu = ConstCounter::new(p.cpu_seconds);
+            cpu.encode(encoder.encode_descriptor(
+                "process_cpu_seconds",
+                "CPU time of this process, user and system, in seconds",
+                None,
+                cpu.metric_type(),
+            )?)?;
+            let fds = ConstGauge::new(i64::try_from(p.open_fds).unwrap_or(i64::MAX));
+            fds.encode(encoder.encode_descriptor(
+                "process_open_fds",
+                "Open file descriptors of this process (connections among them)",
+                None,
+                fds.metric_type(),
+            )?)?;
+        }
         Ok(())
+    }
+}
+
+/// What `/proc/self` says about this process (Linux).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Process {
+    resident_bytes: u64,
+    cpu_seconds: f64,
+    open_fds: u64,
+}
+
+impl Process {
+    #[cfg(target_os = "linux")]
+    fn read() -> Option<Self> {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+        let open_fds = std::fs::read_dir("/proc/self/fd").ok()?.count();
+        Self::parse(&status, &stat, u64::try_from(open_fds).unwrap_or(u64::MAX))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn read() -> Option<Self> {
+        None
+    }
+
+    /// `VmRSS` (kB) from `status`; `utime` + `stime` (fields 14 and 15, in `USER_HZ` = 100 ticks
+    /// per second, fixed in Linux's user ABI) from `stat`, read after the command name's closing
+    /// parenthesis, which may itself contain spaces.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(dead_code, reason = "tested on every platform")
+    )]
+    fn parse(status: &str, stat: &str, open_fds: u64) -> Option<Self> {
+        let rss_kb: u64 = status
+            .lines()
+            .find_map(|l| l.strip_prefix("VmRSS:"))?
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()?;
+        let after = stat.rsplit_once(')')?.1;
+        let mut fields = after.split_whitespace();
+        // After ")": state is field 3, so utime (14) is the 12th and stime (15) the 13th.
+        let utime: u64 = fields.nth(11)?.parse().ok()?;
+        let stime: u64 = fields.next()?.parse().ok()?;
+        let ticks = utime.saturating_add(stime);
+        // Whole seconds and hundredths, each exact in an f64 (u32 seconds: 136 years of CPU).
+        let whole = f64::from(u32::try_from(ticks / 100).unwrap_or(u32::MAX));
+        let hundredths = f64::from(u32::try_from(ticks % 100).unwrap_or(0));
+        let cpu_seconds = whole + hundredths / 100.0;
+        Some(Self {
+            resident_bytes: rss_kb.saturating_mul(1024),
+            cpu_seconds,
+            open_fds,
+        })
     }
 }
 
@@ -126,6 +207,19 @@ pub fn audit_exposition(text: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use prometheus_client::metrics::counter::Counter;
+
+    #[test]
+    fn reads_process_figures_from_proc_formats() {
+        let status = "Name:\tdelivery\nVmPeak:\t  900 kB\nVmRSS:\t  51200 kB\nThreads:\t9\n";
+        // A command name with spaces and parentheses must not shift the fields.
+        let stat = "4242 (songbird (x) y) S 1 4242 4242 0 -1 4194560 100 0 0 0 250 50 0 0 20 0 9";
+        let p = Process::parse(status, stat, 17).unwrap();
+        assert_eq!(p.resident_bytes, 51_200 * 1024);
+        assert!((p.cpu_seconds - 3.0).abs() < 1e-9, "{}", p.cpu_seconds);
+        assert_eq!(p.open_fds, 17);
+        assert!(Process::parse("VmRSS: x kB", stat, 0).is_none());
+        assert!(Process::parse(status, "garbage", 0).is_none());
+    }
 
     #[test]
     fn encodes_build_info_and_self_metrics() {

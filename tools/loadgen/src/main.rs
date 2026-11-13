@@ -20,6 +20,7 @@
     reason = "a CLI: stdout is its report"
 )]
 
+mod admin;
 mod checker;
 mod echo;
 mod pusher;

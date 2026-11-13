@@ -130,6 +130,15 @@ One subsection per component. Each threat names its mitigation and the test or p
 | Malformed SurrealDB responses | T, D | Compromised database, network | Bounded CBOR decoder (depth, lengths before allocation), fuzzed; TLS with the internal CA outside development | `cbor.rs` tests; `surreal_cbor` fuzz target |
 | A compromised database reads metadata | I | Insider, attacker on the data host | Holds only ciphertext and the metadata listed in §1; idempotency keys only as keyed hashes; no sender stored with envelopes | §1; D-0024 |
 
+### 3.5.1 Delivery at scale (Prompt 2, milestone 7)
+
+| Threat | STRIDE | Attacker | Mitigation | Test or proof |
+| --- | --- | --- | --- | --- |
+| Exhausting memory with many idle connections | D | Botnet, a client opening sockets and never sending | About 33 KiB per idle TLS connection (measured); connection cap (100,000: about 3.3 GB) and accept-rate limit per core; handshake and authentication deadlines (5 s each) drop unauthenticated sockets | `loadgen --scenario idle` (32.5 KiB per connection at 30,000, P02-M7); `bench/m7/suite.sh` |
+| A reconnect storm after an outage melting the node | D | Every client at once (an outage, a network flap) | Per-core accept-rate token buckets with retry hints in the close; clients back off with jitter; sessions resume their mailbox position, so nothing is lost or re-sent | `loadgen --scenario storm` at the beta's size: checker PASS, recovery time in P02-M7 |
+| Linking a device's sessions through TLS resumption | I | Network observer | TLS 1.3 resumption tickets are encrypted by the server and change with each issue; the device authenticates again inside every session (channel binding, D-0018), so a resumed session proves nothing by itself | rustls defaults (aws-lc-rs ticketer, rotating keys); `services/delivery/src/server.rs` |
+| A benchmark build reaching production | T | Operator error | The system-allocator switch is a cargo feature off by default; release builds and images never enable it | `services/delivery/Cargo.toml`; `cargo xtask release` builds default features |
+
 ### 3.6 Jobs, push, api, worker (Prompt 2, milestone 5)
 
 | Threat | STRIDE | Attacker | Mitigation | Test or proof |

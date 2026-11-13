@@ -3245,6 +3245,7 @@ dependencies = [
  "mimalloc",
  "rustls",
  "rustls-pki-types",
+ "serde_json",
  "sockudo-ws",
  "songbird-client",
  "songbird-proto",

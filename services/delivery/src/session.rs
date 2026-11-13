@@ -649,6 +649,8 @@ impl<M: Mailbox, R: Router> Session<M, R> {
             }
         };
         let m = &self.shared.metrics;
+        // `now` is when the frame was read: this is the server's store latency (no allocation).
+        m.store_seconds.observe(now.elapsed());
         if outcome.replayed {
             m.sends_replayed.inc();
         } else {
@@ -664,17 +666,24 @@ impl<M: Mailbox, R: Router> Session<M, R> {
             Ok(Err(_)) => return Err(Exit::Gone),
             Err(_) => return Err(Exit::Close(CloseCode::SlowConsumer, Some(RETRY_MS))),
         }
+        self.route_stored(s.payload, outcome.seqs).await;
+        self.flush(ws, t).await
+    }
+
+    /// Routes a stored send to its recipients' sessions, wherever they are.
+    async fn route_stored(&self, payload: SendPayload, seqs: Vec<u64>) {
+        let m = &self.shared.metrics;
         // Route even a replayed send: if the original route was lost (crash between store and
         // route), this retry delivers it now instead of at the next safety sweep; a duplicate
         // is dropped by the recipient session's cursor.
-        let routes: Vec<(DeviceId, Bytes)> = match s.payload {
+        let routes: Vec<(DeviceId, Bytes)> = match payload {
             SendPayload::PerDevice(rs) => rs.into_iter().map(|r| (r.device, r.envelope)).collect(),
             // One buffer for every recipient: `Bytes` clones share it (no copy per device).
             SendPayload::Shared { devices, body } => {
                 devices.into_iter().map(|d| (d, body.clone())).collect()
             }
         };
-        for ((device, envelope), seq) in routes.into_iter().zip(outcome.seqs) {
+        for ((device, envelope), seq) in routes.into_iter().zip(seqs) {
             // `seq` 0: a replayed send already acknowledged by this device (the mailbox can no
             // longer read it, D-0031); nothing to route.
             if seq == 0 {
@@ -693,7 +702,6 @@ impl<M: Mailbox, R: Router> Session<M, R> {
                 }
             }
         }
-        self.flush(ws, t).await
     }
 }
 

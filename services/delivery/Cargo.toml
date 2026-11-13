@@ -55,5 +55,9 @@ tracing.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 
+[features]
+# Benchmark only (D-0043): the system allocator in place of mimalloc.
+system-allocator = []
+
 [lints]
 workspace = true

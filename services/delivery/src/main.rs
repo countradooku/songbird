@@ -25,6 +25,9 @@ use songbird_service::telemetry::Metrics;
 use songbird_service::{BoxError, Ctx, Service};
 use tokio::sync::watch;
 
+// mimalloc (master prompt §4). `--features system-allocator` builds with the system allocator
+// instead, only to measure the two against each other (M7, D-0043).
+#[cfg(not(feature = "system-allocator"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

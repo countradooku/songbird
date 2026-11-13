@@ -1,7 +1,7 @@
 //! Per-core metrics (master prompt §4: "metrics use per-core counters that are summed only when
 //! scraped").
 //!
-//! A [`ShardedCounter`] or [`ShardedGauge`] keeps one value per core, each on its own cache line,
+//! A [`ShardedCounter`], [`ShardedGauge`] or [`ShardedHistogram`] keeps one value per core, each on its own cache line,
 //! so cores counting the same event never contend for a line; a scrape sums them. A thread says
 //! which shard it writes with [`set_core_shard`] (the thread-per-core runtime's workers do this at
 //! start); any other thread writes the last shard.
@@ -152,9 +152,143 @@ impl EncodeMetric for ShardedGauge {
     }
 }
 
+/// Bucket upper bounds of [`ShardedHistogram`], in seconds: latencies from 50 µs to 1 s, dense
+/// around the 2 ms target (master prompt §8).
+pub const LATENCY_BUCKETS: [f64; 14] = [
+    0.000_05, 0.000_1, 0.000_25, 0.000_5, 0.001, 0.002, 0.003, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
+    1.0,
+];
+const BUCKETS: usize = LATENCY_BUCKETS.len() + 1;
+/// The bucket bounds in nanoseconds, for the hot path (no float maths per observation).
+const BOUNDS_NS: [u64; 14] = [
+    50_000,
+    100_000,
+    250_000,
+    500_000,
+    1_000_000,
+    2_000_000,
+    3_000_000,
+    5_000_000,
+    10_000_000,
+    25_000_000,
+    50_000_000,
+    100_000_000,
+    250_000_000,
+    1_000_000_000,
+];
+
+/// One core's counts: per bucket (the last is +Inf), then the total in nanoseconds.
+#[derive(Debug, Default)]
+#[repr(align(128))]
+struct HistShard {
+    buckets: [AtomicU64; BUCKETS],
+    sum_ns: AtomicU64,
+}
+
+/// A latency histogram with one shard per core (fixed [`LATENCY_BUCKETS`]): recording is a
+/// bucket search over 14 bounds and two relaxed atomic adds on this core's own lines, no lock and
+/// no allocation; a scrape sums the shards.
+#[derive(Debug, Clone)]
+pub struct ShardedHistogram {
+    shards: Arc<[HistShard]>,
+}
+
+impl Default for ShardedHistogram {
+    fn default() -> Self {
+        Self {
+            shards: (0..shard_count()).map(|_| HistShard::default()).collect(),
+        }
+    }
+}
+
+impl ShardedHistogram {
+    /// Records one duration on this thread's shard.
+    pub fn observe(&self, d: std::time::Duration) {
+        let ns = u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
+        let i = BOUNDS_NS.partition_point(|&b| b < ns);
+        if let Some(s) = self.shards.get(shard(self.shards.len())) {
+            if let Some(b) = s.buckets.get(i) {
+                b.fetch_add(1, Ordering::Relaxed);
+            }
+            s.sum_ns.fetch_add(ns, Ordering::Relaxed);
+        }
+    }
+
+    /// Per-bucket counts (not cumulative; the last is +Inf), the count and the sum in seconds.
+    #[must_use]
+    pub fn snapshot(&self) -> ([u64; BUCKETS], u64, f64) {
+        let mut counts = [0u64; BUCKETS];
+        let mut sum_ns = 0u64;
+        for s in self.shards.iter() {
+            for (c, b) in counts.iter_mut().zip(&s.buckets) {
+                *c = c.wrapping_add(b.load(Ordering::Relaxed));
+            }
+            sum_ns = sum_ns.wrapping_add(s.sum_ns.load(Ordering::Relaxed));
+        }
+        let count = counts.iter().fold(0u64, |a, &c| a.wrapping_add(c));
+        // Whole seconds and the rest, each exact in an f64.
+        let secs = f64::from(u32::try_from(sum_ns / 1_000_000_000).unwrap_or(u32::MAX))
+            + f64::from(u32::try_from(sum_ns % 1_000_000_000).unwrap_or(0)) / 1e9;
+        (counts, count, secs)
+    }
+}
+
+impl TypedMetric for ShardedHistogram {
+    const TYPE: MetricType = MetricType::Histogram;
+}
+
+impl EncodeMetric for ShardedHistogram {
+    fn encode(&self, mut encoder: MetricEncoder) -> Result<(), std::fmt::Error> {
+        let (counts, count, sum) = self.snapshot();
+        let mut buckets = [(0.0, 0u64); BUCKETS];
+        for (i, (b, c)) in buckets.iter_mut().zip(counts).enumerate() {
+            *b = (LATENCY_BUCKETS.get(i).copied().unwrap_or(f64::MAX), c);
+        }
+        encoder.encode_histogram::<NoLabelSet>(sum, count, &buckets, None)
+    }
+
+    fn metric_type(&self) -> MetricType {
+        Self::TYPE
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn histogram_buckets_and_sums_across_shards() {
+        let h = ShardedHistogram::default();
+        let threads: Vec<_> = (0..3)
+            .map(|i| {
+                let h = h.clone();
+                std::thread::spawn(move || {
+                    set_core_shard(i);
+                    h.observe(std::time::Duration::from_micros(40)); // <= 50 us
+                    h.observe(std::time::Duration::from_micros(1500)); // <= 2 ms
+                    h.observe(std::time::Duration::from_secs(3)); // +Inf
+                })
+            })
+            .collect();
+        for t in threads {
+            assert!(t.join().is_ok());
+        }
+        // Exactly on a bound goes in that bucket (Prometheus `le`).
+        h.observe(std::time::Duration::from_millis(1));
+        let (counts, count, sum) = h.snapshot();
+        assert_eq!(count, 10);
+        assert_eq!(counts[0], 3);
+        assert_eq!(counts[4], 1);
+        assert_eq!(counts[5], 3);
+        assert_eq!(counts[BUCKETS - 1], 3);
+        assert!((sum - (3.0 * (0.000_04 + 0.0015 + 3.0) + 0.001)).abs() < 1e-9, "{sum}");
+        let mut registry = prometheus_client::registry::Registry::default();
+        registry.register("lat", "lat", h);
+        let mut out = String::new();
+        assert!(prometheus_client::encoding::text::encode(&mut out, &registry).is_ok());
+        assert!(out.contains("lat_bucket{le=\"0.002\"} 7"), "{out}");
+        assert!(out.contains("lat_count 10"), "{out}");
+    }
 
     #[test]
     fn shards_sum_across_threads() {

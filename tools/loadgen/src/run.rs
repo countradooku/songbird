@@ -103,19 +103,28 @@ pub(crate) struct Args {
     /// session cache so reconnects resume like a real app's. Plain WebSocket without it.
     #[arg(long)]
     tls_ca: Option<PathBuf>,
+    /// Also write the results as one JSON object to this file (`bench/m7/suite.sh` compares
+    /// them against a stored baseline).
+    #[arg(long)]
+    json_out: Option<PathBuf>,
 }
 
-/// A TLS 1.3 client configuration trusting `ca`, with a session cache of its own.
-fn tls_config(ca: &std::path::Path) -> anyhow::Result<Arc<rustls::ClientConfig>> {
+/// The roots in `ca` (read once for every device).
+fn tls_roots(ca: &std::path::Path) -> anyhow::Result<Arc<rustls::RootCertStore>> {
     use rustls_pki_types::pem::PemObject as _;
     let mut roots = rustls::RootCertStore::empty();
     for c in rustls_pki_types::CertificateDer::pem_file_iter(ca).context("reading --tls-ca")? {
         roots.add(c.context("reading --tls-ca")?)?;
     }
+    Ok(Arc::new(roots))
+}
+
+/// A TLS 1.3 client configuration trusting `roots`, with a session cache of its own.
+fn tls_config(roots: &Arc<rustls::RootCertStore>) -> anyhow::Result<Arc<rustls::ClientConfig>> {
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let mut cfg = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])?
-        .with_root_certificates(roots)
+        .with_root_certificates(Arc::clone(roots))
         .with_no_client_auth();
     cfg.resumption = rustls::client::Resumption::in_memory_sessions(4);
     Ok(Arc::new(cfg))
@@ -285,11 +294,11 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
     };
 
     // Ramp up. With TLS each device gets a configuration (and session cache) of its own.
-    let tls_ca = a.tls_ca.clone();
+    let roots = a.tls_ca.as_deref().map(tls_roots).transpose()?;
     let device_cfg = |base: ClientConfig| -> anyhow::Result<ClientConfig> {
         let mut c = base;
-        if let Some(ca) = &tls_ca {
-            c.tls = Some(tls_config(ca)?);
+        if let Some(r) = &roots {
+            c.tls = Some(tls_config(r)?);
         }
         Ok(c)
     };
@@ -620,8 +629,9 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
         "sends: accepted={sends} deliveries_expected={accepted} rejected={rejected} retries={retries} achieved_rate={achieved:.0}/s deliveries_rate={deliveries:.0}/s aborts={} failed_clients={failed}",
         aborts.load(Ordering::Relaxed)
     );
+    let storm_recovery = storm.recovery();
     if a.scenario == Scenario::Storm {
-        match storm.recovery() {
+        match storm_recovery {
             Some(d) => println!(
                 "storm: every one of {online_count} devices connected again {:.2}s after the storm",
                 d.as_secs_f64()
@@ -629,6 +639,7 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
             None => println!("storm: NOT every device reconnected before the run ended"),
         }
     }
+    let mut server = serde_json::Value::Null;
     if let (Some(s0), Some(s1), Some(s2)) = (fig_start, fig_connected, fig_end) {
         let per_conn = (s1.resident_bytes - s0.resident_bytes) / crate::as_f64(online_count);
         let cpu = s2.cpu_seconds - s1.cpu_seconds;
@@ -645,6 +656,15 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
             per_conn / 1024.0,
             s1.open_fds
         );
+        server = serde_json::json!({
+            "rss_idle_bytes": s0.resident_bytes,
+            "rss_connected_bytes": s1.resident_bytes,
+            "rss_end_bytes": s2.resident_bytes,
+            "bytes_per_connection": per_conn,
+            "open_fds": s1.open_fds,
+            "cpu_send_phase_secs": cpu,
+            "cpu_per_10k_deliveries_secs": per_10k,
+        });
     }
     println!("settle: {settle_secs:.2}s");
     println!("latency send->deliver (client-observed): {s}");
@@ -661,5 +681,37 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
         report.stale,
         report.deduplicated
     );
+    if let Some(path) = &a.json_out {
+        let j = serde_json::json!({
+            "scenario": format!("{:?}", a.scenario).to_lowercase(),
+            "devices": n,
+            "secs": a.secs,
+            "target_rate": a.rate,
+            "size": a.size,
+            "group_size": group_size,
+            "tls": a.tls_ca.is_some(),
+            "connect_secs": connect_secs,
+            "sends": sends,
+            "deliveries_expected": accepted,
+            "rejected": rejected,
+            "retries": retries,
+            "send_rate": achieved,
+            "delivery_rate": deliveries,
+            "settle_secs": settle_secs,
+            "latency_us": {"count": s.count, "p50": s.p50, "p99": s.p99, "p999": s.p999, "max": s.max},
+            "storm_recovery_secs": storm_recovery.map(|d| d.as_secs_f64()),
+            "server": server,
+            "checker": {
+                "passed": report.passed(),
+                "expected": report.expected,
+                "delivered": report.delivered,
+                "lost": report.lost,
+                "duplicates": report.duplicates,
+                "seq_violations": report.seq_violations,
+                "fifo_violations": report.fifo_violations,
+            },
+        });
+        std::fs::write(path, format!("{j:#}\n")).context("writing --json-out")?;
+    }
     Ok(report.passed() && rejected == 0)
 }

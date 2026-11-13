@@ -46,6 +46,9 @@ pub struct Shared<M, R> {
     pub metrics: DeliveryMetrics,
     /// Push jobs for offline devices (disabled unless configured).
     pub push: Pusher,
+    /// The store generation from the registry (D-0040); 0 until known, then the mailbox's
+    /// configured value is not used.
+    pub generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl<M, R> Shared<M, R> {
@@ -66,6 +69,7 @@ impl<M, R> Shared<M, R> {
             router,
             metrics,
             push: Pusher::disabled(),
+            generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 

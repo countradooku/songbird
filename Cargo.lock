@@ -3036,9 +3036,12 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-pki-types",
+ "songbird-accounts",
+ "songbird-surreal",
  "songbird-types",
  "tempfile",
  "time",
+ "tokio",
  "x509-parser",
 ]
 

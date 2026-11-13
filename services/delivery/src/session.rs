@@ -163,11 +163,15 @@ where
     let cfg = &shared.config;
     let mut nonce = [0u8; NONCE_LEN];
     getrandom::fill(&mut nonce).map_err(|_| Exit::Close(CloseCode::Unavailable, Some(RETRY_MS)))?;
-    let store_generation = shared
-        .mailbox
-        .store_generation()
-        .await
-        .map_err(|_| Exit::Close(CloseCode::Unavailable, Some(RETRY_MS)))?;
+    // The registry's generation when known (D-0040), else the mailbox's configured one.
+    let store_generation = match shared.generation.load(std::sync::atomic::Ordering::Acquire) {
+        0 => shared
+            .mailbox
+            .store_generation()
+            .await
+            .map_err(|_| Exit::Close(CloseCode::Unavailable, Some(RETRY_MS)))?,
+        g => g,
+    };
     let hello = ServerFrame::Hello(control::Hello {
         nonce: nonce.to_vec(),
         server_time_ms: now_ms(),

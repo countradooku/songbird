@@ -219,6 +219,7 @@ async fn account_deletion_is_verified_across_every_store() {
     tokio::spawn(songbird_delivery::directory::follow_registry(
         Arc::clone(&registry),
         Arc::clone(&shared.directory),
+        Arc::clone(&shared.generation),
         registry.directory_version().await.unwrap(),
         Duration::from_millis(100),
         stop_rx.clone(),

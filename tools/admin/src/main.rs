@@ -1,7 +1,11 @@
 //! `songbird-admin`: operator tool.
 //!
-//! Today it is the internal mutual-TLS certificate authority. Every service-to-service connection
-//! on the private network uses certificates from this CA (see `docs/RUNBOOKS/mtls-rotation.md`):
+//! - `generation`: the store generation clients see in `Hello` (D-0040): shown, or bumped after
+//!   a restore or a loss of the mailbox, so clients resend what has no delivery receipt.
+//! - `ca`: the internal mutual-TLS certificate authority.
+//!
+//! Every service-to-service connection on the private network uses certificates from this CA (see
+//! `docs/RUNBOOKS/mtls-rotation.md`):
 //!
 //! ```text
 //! root CA (10 y, offline, key only ever in SOPS)
@@ -16,6 +20,7 @@
 #![allow(clippy::print_stdout, reason = "CLI output")]
 
 mod ca;
+mod store;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -34,6 +39,23 @@ enum Cmd {
     /// Internal mutual-TLS certificate authority.
     #[command(subcommand)]
     Ca(CaCmd),
+    /// The store generation (D-0040).
+    #[command(subcommand)]
+    Generation(GenerationCmd),
+}
+
+#[derive(Debug, Subcommand)]
+enum GenerationCmd {
+    /// Print the store generation.
+    Show {
+        #[command(flatten)]
+        store: store::StoreArgs,
+    },
+    /// Increase it (restore runbook): every client resends what has no delivery receipt.
+    Bump {
+        #[command(flatten)]
+        store: store::StoreArgs,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -97,33 +119,13 @@ enum CaCmd {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let Cmd::Ca(cmd) = cli.cmd;
-    let result = match cmd {
-        CaCmd::InitRoot { out, env, days } => ca::init_root(&out, &env, days),
-        CaCmd::InitIntermediate {
-            root,
-            out,
-            env,
-            days,
-        } => ca::init_intermediate(&root, &out, &env, days),
-        CaCmd::Issue {
-            ca,
-            name,
-            sans,
-            out,
-            days,
-        } => ca::issue(&ca, &name, &sans, &out, days),
-        CaCmd::Check { cert, renew_within } => match ca::days_left(&cert) {
-            Ok(days) => {
-                println!("{days}");
-                return if days > renew_within {
-                    ExitCode::SUCCESS
-                } else {
-                    ExitCode::from(1)
-                };
-            }
+    let result = match cli.cmd {
+        Cmd::Ca(cmd) => match ca_cmd(cmd) {
+            Ok(Some(code)) => return code,
+            Ok(None) => Ok(()),
             Err(e) => Err(e),
         },
+        Cmd::Generation(cmd) => generation_cmd(cmd),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -135,4 +137,49 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// Runs a CA command; `Some` carries an exit code of its own (`check`).
+fn ca_cmd(cmd: CaCmd) -> anyhow::Result<Option<ExitCode>> {
+    match cmd {
+        CaCmd::InitRoot { out, env, days } => ca::init_root(&out, &env, days).map(|()| None),
+        CaCmd::InitIntermediate {
+            root,
+            out,
+            env,
+            days,
+        } => ca::init_intermediate(&root, &out, &env, days).map(|()| None),
+        CaCmd::Issue {
+            ca,
+            name,
+            sans,
+            out,
+            days,
+        } => ca::issue(&ca, &name, &sans, &out, days).map(|()| None),
+        CaCmd::Check { cert, renew_within } => {
+            let days = ca::days_left(&cert)?;
+            println!("{days}");
+            Ok(Some(if days > renew_within {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }))
+        }
+    }
+}
+
+fn generation_cmd(cmd: GenerationCmd) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        match cmd {
+            GenerationCmd::Show { store } => println!("{}", store::show(&store).await?),
+            GenerationCmd::Bump { store } => {
+                let g = store::bump(&store).await?;
+                println!("store generation is now {g}");
+            }
+        }
+        Ok(())
+    })
 }

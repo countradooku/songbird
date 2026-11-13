@@ -9,6 +9,10 @@ license.workspace = true
 
 [dependencies]
 songbird-types.workspace = true
+songbird-accounts.workspace = true
+songbird-surreal.workspace = true
+rustls.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "time", "macros"] }
 anyhow.workspace = true
 clap.workspace = true
 rcgen = { workspace = true, features = ["x509-parser"] }
@@ -17,7 +21,6 @@ rustls-pki-types.workspace = true
 time.workspace = true
 
 [dev-dependencies]
-rustls.workspace = true
 tempfile.workspace = true
 
 [lints]

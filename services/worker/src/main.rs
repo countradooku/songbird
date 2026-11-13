@@ -132,7 +132,7 @@ struct S3Settings {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct JournalSettings {
-    /// S3 `host:port`, e.g. `s3.fr-par.scw.cloud:443`.
+    /// S3 `host:port`, e.g. `hel1.your-objectstorage.com:443` (D-0042).
     addr: String,
     bucket: String,
     #[serde(default = "default_region")]
@@ -148,7 +148,7 @@ struct JournalSettings {
 }
 
 fn default_region() -> String {
-    "fr-par".into()
+    "hel1".into()
 }
 
 const fn default_true() -> bool {

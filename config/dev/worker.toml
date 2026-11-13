@@ -41,7 +41,7 @@ filter = "info"
 # Deletion journal (D-0041): required in staging and production, over TLS. In development a
 # locked RustFS bucket can stand in for the off-site backup bucket.
 # [worker.deletion_journal]
-# addr = "127.0.0.1:47900"        # production: "s3.fr-par.scw.cloud:443"
+# addr = "127.0.0.1:47900"        # production: "hel1.your-objectstorage.com:443"
 # bucket = "songbird-backups-dev" # created with Object Lock
 # tls = false                     # production: true (the default)
 # access_key = { env = "RUSTFS_ACCESS_KEY" }

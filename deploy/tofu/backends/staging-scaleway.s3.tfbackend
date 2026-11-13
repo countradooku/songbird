@@ -1,8 +1,8 @@
-# State for staging@scaleway, stored at Hetzner Object Storage (the other provider).
+# State for staging@scaleway, stored at Hetzner Object Storage (Helsinki, the state project).
 bucket                      = "songbird-tofu-state"
 key                         = "staging/scaleway.tfstate"
-region                      = "fsn1"
-endpoints                   = { s3 = "https://fsn1.your-objectstorage.com" }
+region                      = "hel1"
+endpoints                   = { s3 = "https://hel1.your-objectstorage.com" }
 skip_credentials_validation = true
 skip_region_validation      = true
 skip_requesting_account_id  = true

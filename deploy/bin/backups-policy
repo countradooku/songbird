@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Bucket configuration of the off-site backup bucket at Hetzner Object Storage (D-0040, D-0042).
+
+  backups-policy policy    <bucket> <keys-project-id> <writer-ak> <journal-ak> <verifier-ak>
+  backups-policy lifecycle
+  backups-policy lock
+  backups-policy selftest
+
+Prints JSON for `aws s3api put-bucket-policy | put-bucket-lifecycle-configuration |
+put-object-lock-configuration`. The keys live in a project of their own (no buckets), the bucket
+in another; Hetzner keys reach nothing in another project unless a bucket policy grants it
+(docs.hetzner.com, Object Storage FAQ "How do I restrict access per key?", option 2), so each
+statement below is the whole of what that key can do:
+
+  writer    (data host)          PutObject, PutObjectRetention under registry/
+  journal   (worker)             PutObject, PutObjectRetention under deletions/
+  verifier  (verification host)  read and list, including versions
+
+None can delete, read what it writes, list, or change the bucket. Retention is compliance mode, so
+nobody can delete a locked version before its date, the owner included.
+"""
+import json
+import re
+import sys
+
+# Days after creation each prefix expires: one more than the lock songbird-admin sets
+# (tools/admin/src/backup.rs TIERS) or the worker sets on tombstones (93 days, D-0041).
+EXPIRY = {"registry/frequent/": 2, "registry/daily/": 9, "registry/weekly/": 30,
+          "registry/monthly/": 94, "deletions/": 94}
+
+
+def user(project, key):
+    return {"AWS": f"arn:aws:iam:::user/p{project}:{key}"}
+
+
+def policy(bucket, project, writer, journal, verifier):
+    for name, v in [("bucket", bucket), ("keys project", project), ("writer key", writer),
+                    ("journal key", journal), ("verifier key", verifier)]:
+        if not re.fullmatch(r"[A-Za-z0-9-]{3,128}", v):
+            sys.exit(f"backups-policy: bad {name}")
+    arn = f"arn:aws:s3:::{bucket}"
+    return {
+        "Version": "2012-10-17",
+        "Statement": [
+            {"Sid": "WriterPutsOnly", "Effect": "Allow", "Principal": user(project, writer),
+             "Action": ["s3:PutObject", "s3:PutObjectRetention"],
+             "Resource": [f"{arn}/registry/*"]},
+            {"Sid": "JournalPutsOnly", "Effect": "Allow", "Principal": user(project, journal),
+             "Action": ["s3:PutObject", "s3:PutObjectRetention"],
+             "Resource": [f"{arn}/deletions/*"]},
+            {"Sid": "VerifierReadsOnly", "Effect": "Allow", "Principal": user(project, verifier),
+             "Action": ["s3:GetObject", "s3:GetObjectVersion", "s3:ListBucket",
+                        "s3:ListBucketVersions"],
+             "Resource": [arn, f"{arn}/*"]},
+        ],
+    }
+
+
+def lifecycle():
+    rules = [{"ID": p.strip("/").replace("/", "-"), "Status": "Enabled", "Filter": {"Prefix": p},
+              "Expiration": {"Days": d}, "NoncurrentVersionExpiration": {"NoncurrentDays": 1}}
+             for p, d in EXPIRY.items()]
+    rules.append({"ID": "abort-incomplete-uploads", "Status": "Enabled", "Filter": {"Prefix": ""},
+                  "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1}})
+    return {"Rules": rules}
+
+
+def lock():
+    return {"ObjectLockEnabled": "Enabled",
+            "Rule": {"DefaultRetention": {"Mode": "COMPLIANCE", "Days": 1}}}
+
+
+def selftest():
+    p = policy("songbird-beta-backups-x", "1234567", "WRITERKEY", "JOURNALKEY", "VERIFIERKEY")
+    by = {s["Sid"]: s for s in p["Statement"]}
+    assert set(by) == {"WriterPutsOnly", "JournalPutsOnly", "VerifierReadsOnly"}
+    assert all(s["Effect"] == "Allow" for s in p["Statement"]), "no wildcard grants"
+    put = {"s3:PutObject", "s3:PutObjectRetention"}
+    assert set(by["WriterPutsOnly"]["Action"]) == put
+    assert by["WriterPutsOnly"]["Resource"] == ["arn:aws:s3:::songbird-beta-backups-x/registry/*"]
+    assert set(by["JournalPutsOnly"]["Action"]) == put
+    assert by["JournalPutsOnly"]["Resource"] == ["arn:aws:s3:::songbird-beta-backups-x/deletions/*"]
+    reads = set(by["VerifierReadsOnly"]["Action"])
+    assert reads <= {"s3:GetObject", "s3:GetObjectVersion", "s3:ListBucket", "s3:ListBucketVersions"}
+    for s in p["Statement"]:
+        assert not any("Delete" in a or a.endswith("*") or "Policy" in a or "Lifecycle" in a
+                       or "Acl" in a or "LockConfiguration" in a for a in s["Action"]), s["Sid"]
+    rules = {r["Filter"]["Prefix"]: r for r in lifecycle()["Rules"]}
+    for prefix, days in EXPIRY.items():
+        assert rules[prefix]["Expiration"]["Days"] == days
+    assert lock()["Rule"]["DefaultRetention"]["Mode"] == "COMPLIANCE"
+    try:
+        policy("bad bucket!", "1", "a", "b", "c")
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("a bad name must be refused")
+    print("backups-policy: selftest ok")
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else ""
+    if cmd == "policy" and len(argv) == 7:
+        print(json.dumps(policy(*argv[2:7]), indent=2))
+    elif cmd == "lifecycle" and len(argv) == 2:
+        print(json.dumps(lifecycle(), indent=2))
+    elif cmd == "lock" and len(argv) == 2:
+        print(json.dumps(lock(), indent=2))
+    elif cmd == "selftest" and len(argv) == 2:
+        selftest()
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main(sys.argv)

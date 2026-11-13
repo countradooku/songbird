@@ -13,10 +13,8 @@ if [ "$what" = tofu ] || [ "$what" = all ]; then
     tofu -chdir="$TOFU_DIR/envs/$cloud" validate
     tofu -chdir="$TOFU_DIR/envs/$cloud" test   # plans both topologies against a mocked provider
   done
-  # Off-site backups (D-0040): write-once and least-privilege properties, mocked provider.
-  tofu -chdir="$TOFU_DIR/envs/backups" init -input=false -backend=false -lockfile=readonly >/dev/null
-  tofu -chdir="$TOFU_DIR/envs/backups" validate
-  tofu -chdir="$TOFU_DIR/envs/backups" test
+  # Off-site backups (D-0042): least-privilege bucket policy, lock and lifecycle.
+  python3 -I "$DEPLOY_DIR/bin/backups-policy" selftest
 fi
 if [ "$what" = ansible ] || [ "$what" = all ]; then
   need ansible-playbook ansible-lint

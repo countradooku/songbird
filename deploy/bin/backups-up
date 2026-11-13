@@ -1,31 +1,80 @@
 #!/usr/bin/env bash
-# Creates or converges the off-site, write-once backup bucket of one environment (D-0040).
-#   deploy/bin/backups-up <env>
-# Owner only: the credentials are in deploy/secrets/backups.sops.yaml, readable by the owner's
-# age identities and nobody else (not the deploy pipeline): tofu_state_passphrase,
-# state_access_key_hetzner, state_secret_key_hetzner (state at the other provider),
-# scw_access_key, scw_secret_key, scw_organization_id (an Organization-level key), and
-# admin_principal ("user_id:<uuid>"). Afterwards, put the printed writer key into the
-# environment's SOPS file as backup_s3_access_key / backup_s3_secret_key and the verifier key as
-# backup_verify_s3_access_key / backup_verify_s3_secret_key (runbook backup-and-restore.md).
+# Creates or converges the off-site, write-once backup bucket of one environment at Hetzner
+# Object Storage (D-0040, D-0042), then checks that Hetzner enforces it.
+#   deploy/bin/backups-up <env> apply   # bucket with Object Lock, retention, lifecycle, policy
+#   deploy/bin/backups-up <env> check   # 15+ minutes later: each key can do its job and no more
+#
+# Owner only. Two Hetzner projects, neither of which holds production: "songbird-<env>-backups"
+# holds the bucket and one admin key (only it can change the bucket), and
+# "songbird-<env>-backup-keys" holds the writer, journal and verifier keys and nothing else.
+# Hetzner creates keys in the console only. deploy/secrets/backups.sops.yaml (owner-only
+# recipients) holds, per environment <env>:
+#   <env>_bucket, <env>_location (e.g. hel1: not production's location),
+#   <env>_admin_access_key, <env>_admin_secret_key   (backups project)
+#   <env>_keys_project_id                            (backup-keys project)
+#   <env>_writer_access_key, <env>_writer_secret_key, <env>_journal_access_key,
+#   <env>_journal_secret_key, <env>_verifier_access_key, <env>_verifier_secret_key
+# Needs the AWS CLI (any S3 tool would do; this one computes the Content-MD5 the bucket
+# configuration calls need).
 source "$(dirname "$0")/lib.sh"
-[ $# -eq 1 ] || die "usage: backups-up <env>"
-env=$1
+[ $# -eq 2 ] || die "usage: backups-up <env> apply|check"
+env=$1; what=$2
 [[ "$env" =~ ^[a-z][a-z0-9-]{1,20}$ ]] || die "bad environment name: $env"
-vars="$TOFU_DIR/environments/$env.backups.tfvars"
-[ -f "$vars" ] || die "no $vars"
-need sops tofu
-s() { sops -d --extract "[\"$1\"]" "$DEPLOY_DIR/secrets/backups.sops.yaml"; }
-TF_VAR_state_passphrase=$(s tofu_state_passphrase); export TF_VAR_state_passphrase
-TF_VAR_admin_principal=$(s admin_principal); export TF_VAR_admin_principal
-AWS_ACCESS_KEY_ID=$(s state_access_key_hetzner); export AWS_ACCESS_KEY_ID
-AWS_SECRET_ACCESS_KEY=$(s state_secret_key_hetzner); export AWS_SECRET_ACCESS_KEY
-SCW_ACCESS_KEY=$(s scw_access_key); export SCW_ACCESS_KEY
-SCW_SECRET_KEY=$(s scw_secret_key); export SCW_SECRET_KEY
-SCW_DEFAULT_ORGANIZATION_ID=$(s scw_organization_id); export SCW_DEFAULT_ORGANIZATION_ID
-dir="$TOFU_DIR/envs/backups"
-tofu -chdir="$dir" init -input=false -reconfigure \
-  -backend-config="$TOFU_DIR/backends/$env-backups.s3.tfbackend" >/dev/null
-tofu -chdir="$dir" apply -input=false -var="environment=$env" -var-file="$vars"
-log "bucket $(tofu -chdir="$dir" output -raw bucket) at $(tofu -chdir="$dir" output -raw endpoint)"
-log "keys: tofu -chdir=$dir output -raw writer_secret_key (and verifier_*); into SOPS, never a file"
+need sops aws python3
+s() { sops -d --extract "[\"${env}_$1\"]" "$DEPLOY_DIR/secrets/backups.sops.yaml"; }
+bucket=$(s bucket); loc=$(s location)
+endpoint="https://${loc}.your-objectstorage.com"
+as() { # <role> aws s3api ... with that role's key
+  local role=$1; shift
+  AWS_ACCESS_KEY_ID=$(s "${role}_access_key") AWS_SECRET_ACCESS_KEY=$(s "${role}_secret_key") \
+    AWS_DEFAULT_REGION="$loc" aws --endpoint-url "$endpoint" "$@"
+}
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+policy() { "$DEPLOY_DIR/bin/backups-policy" "$@"; }
+
+case "$what" in
+apply)
+  if ! as admin s3api head-bucket --bucket "$bucket" 2>/dev/null; then
+    log "creating $bucket in $loc with Object Lock (it cannot be added later)"
+    as admin s3api create-bucket --bucket "$bucket" --object-lock-enabled-for-bucket >/dev/null
+  fi
+  policy lock > "$tmp/lock.json"
+  policy lifecycle > "$tmp/lifecycle.json"
+  policy policy "$bucket" "$(s keys_project_id)" "$(s writer_access_key)" \
+    "$(s journal_access_key)" "$(s verifier_access_key)" > "$tmp/policy.json"
+  as admin s3api put-object-lock-configuration --bucket "$bucket" \
+    --object-lock-configuration "file://$tmp/lock.json"
+  as admin s3api put-bucket-lifecycle-configuration --bucket "$bucket" \
+    --lifecycle-configuration "file://$tmp/lifecycle.json"
+  as admin s3api put-bucket-policy --bucket "$bucket" --policy "file://$tmp/policy.json"
+  log "applied. Hetzner takes up to 15 minutes to apply bucket settings everywhere:"
+  log "run 'deploy/bin/backups-up $env check' after that, and protect the bucket in the console"
+  ;;
+check)
+  fail=0
+  ok()  { if "$@" >/dev/null 2>&1; then log "ok: ${*: -1}"; else log "FAIL (refused): $*"; fail=1; fi; }
+  no()  { if "$@" >/dev/null 2>&1; then log "FAIL (allowed): $*"; fail=1; else log "ok, refused"; fi; }
+  probe="registry/frequent/00000000T000000Z-check.surql.age"
+  printf 'check\n' > "$tmp/probe"
+  ok as writer s3api put-object --bucket "$bucket" --key "$probe" --body "$tmp/probe" \
+    --object-lock-mode COMPLIANCE --object-lock-retain-until-date "$(date -u -d '+1 day' +%FT%TZ 2>/dev/null || date -u -v+1d +%FT%TZ)"
+  no as writer s3api get-object --bucket "$bucket" --key "$probe" "$tmp/out"
+  no as writer s3api list-objects-v2 --bucket "$bucket"
+  no as writer s3api delete-object --bucket "$bucket" --key "$probe"
+  no as writer s3api put-object --bucket "$bucket" --key "deletions/check" --body "$tmp/probe"
+  no as writer s3api put-object --bucket "$bucket" --key "registry/frequent/x" --body "$tmp/probe" --acl public-read
+  no as writer s3api put-bucket-policy --bucket "$bucket" --policy '{"Version":"2012-10-17","Statement":[]}'
+  no as journal s3api put-object --bucket "$bucket" --key "registry/frequent/x" --body "$tmp/probe"
+  no as journal s3api list-objects-v2 --bucket "$bucket"
+  ok as verifier s3api list-object-versions --bucket "$bucket" --prefix registry/
+  ok as verifier s3api get-object --bucket "$bucket" --key "$probe" "$tmp/out"
+  no as verifier s3api put-object --bucket "$bucket" --key "registry/frequent/y" --body "$tmp/probe"
+  # The locked version cannot be deleted, not even by the bucket's own admin key.
+  vid=$(as verifier s3api list-object-versions --bucket "$bucket" --prefix "$probe" \
+    --query 'Versions[0].VersionId' --output text)
+  no as admin s3api delete-object --bucket "$bucket" --key "$probe" --version-id "$vid"
+  [ "$fail" = 0 ] || die "the bucket does not enforce what D-0040 needs: do not use it"
+  log "every key is limited as designed; the probe object expires with the frequent tier"
+  ;;
+*) die "usage: backups-up <env> apply|check" ;;
+esac

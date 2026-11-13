@@ -1,8 +1,9 @@
-# State for beta@hetzner, stored at Scaleway Object Storage (the other provider).
+# State for beta@hetzner, at Hetzner Object Storage in Helsinki, in a project that holds only
+# OpenTofu state (D-0042): another location than the servers, and keys that reach nothing else.
 bucket                      = "songbird-tofu-state"
 key                         = "beta/hetzner.tfstate"
-region                      = "fr-par"
-endpoints                   = { s3 = "https://s3.fr-par.scw.cloud" }
+region                      = "hel1"
+endpoints                   = { s3 = "https://hel1.your-objectstorage.com" }
 skip_credentials_validation = true
 skip_region_validation      = true
 skip_requesting_account_id  = true

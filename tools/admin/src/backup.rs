@@ -55,8 +55,8 @@ pub(crate) struct DestArgs {
     /// Environment variable holding the secret key.
     #[arg(long, default_value = "BACKUP_S3_SECRET_KEY")]
     pub(crate) s3_secret_key_env: String,
-    /// S3 signing region.
-    #[arg(long, default_value = "fr-par")]
+    /// S3 signing region (the Hetzner location, D-0042).
+    #[arg(long, default_value = "hel1")]
     pub(crate) s3_region: String,
     /// Use TLS with the system's roots (the off-site provider).
     #[arg(long)]

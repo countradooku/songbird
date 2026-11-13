@@ -90,3 +90,35 @@ pub(crate) async fn show(store: &StoreArgs) -> Result<u64> {
 pub(crate) async fn bump(store: &StoreArgs) -> Result<u64> {
     Ok(store.registry().await?.bump_store_generation().await?)
 }
+
+/// Registers every device of a static directory file (`[[devices]] id, auth_key`, as
+/// `songbird-loadgen keys` writes it) as an account of its own: development and drills only,
+/// until Prompt 3's registration. Returns how many were created (existing ones are skipped).
+pub(crate) async fn import_directory(store: &StoreArgs, file: &std::path::Path) -> Result<usize> {
+    #[derive(serde::Deserialize)]
+    struct Dir {
+        devices: Vec<Entry>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        id: String,
+        auth_key: String,
+    }
+    let text = std::fs::read_to_string(file).context("reading the directory")?;
+    let dir: Dir = toml::from_str(&text).context("parsing the directory")?;
+    let registry = store.registry().await?;
+    let mut created = 0;
+    for e in dir.devices {
+        let device = songbird_types::DeviceId::parse_hex(&e.id).context("device id")?;
+        let mut key = [0u8; 32];
+        hex::decode_to_slice(&e.auth_key, &mut key).context("auth key")?;
+        // The device forms an account of its own (as the static directory does).
+        let account = songbird_types::AccountId::from_bytes(*device.as_bytes());
+        match registry.create_account(&account, &[(device, key)]).await {
+            Ok(()) => created += 1,
+            Err(songbird_accounts::RegistryError::Exists) => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(created)
+}

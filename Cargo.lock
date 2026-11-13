@@ -3044,6 +3044,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-pki-types",
+ "serde",
  "serde_json",
  "songbird-accounts",
  "songbird-s3",
@@ -3053,6 +3054,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-rustls",
+ "toml",
  "webpki-roots 1.0.12",
  "x509-parser",
 ]

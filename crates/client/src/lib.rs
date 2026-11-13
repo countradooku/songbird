@@ -29,7 +29,7 @@ mod backoff;
 mod key;
 mod ws;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -70,7 +70,8 @@ pub struct ClientConfig {
     pub event_capacity: usize,
     /// Reported in `Auth.client_version`.
     pub client_version: String,
-    /// Most messages kept in the send log (the oldest go first when full).
+    /// Most messages kept in the send log (the oldest go first when full); 0 keeps no log, so
+    /// nothing is resent after a restore (tests and drills only: messages can be lost).
     pub send_log_capacity: usize,
     /// How long a message stays in the send log without a delivery receipt.
     pub send_log_max_age: Duration,
@@ -419,7 +420,16 @@ struct SendLog {
     entries: HashMap<[u8; 16], Logged>,
     /// Insertion order, for dropping the oldest; stale keys are skipped.
     order: VecDeque<([u8; 16], Instant)>,
+    /// Receipts that arrived before their send was logged: the recipient can confirm before
+    /// this client has read its own `SendResult`, or between a disconnect and the app's retry.
+    /// Bounded; the oldest are forgotten first.
+    early: HashSet<[u8; 16]>,
+    early_order: VecDeque<[u8; 16]>,
 }
+
+/// How many early receipts are remembered (a few seconds of sends; more only costs a resend
+/// the recipient drops by message ID).
+const EARLY_RECEIPTS: usize = 4096;
 
 impl SendLog {
     fn insert(
@@ -431,11 +441,13 @@ impl SendLog {
     ) {
         let now = Instant::now();
         self.prune(now, cfg);
-        // A retried send replayed by the server keeps its first entry (and evicts nothing).
-        if self.entries.contains_key(&key) {
+        // A retried send replayed by the server keeps its first entry (and evicts nothing); a
+        // send already confirmed by its recipient needs no entry.
+        if cfg.send_log_capacity == 0 || self.entries.contains_key(&key) || self.early.remove(&key)
+        {
             return;
         }
-        while self.entries.len() >= cfg.send_log_capacity.max(1) {
+        while self.entries.len() >= cfg.send_log_capacity {
             match self.order.pop_front() {
                 Some((k, at)) => {
                     if self.entries.get(&k).is_some_and(|e| e.at == at) {
@@ -456,8 +468,22 @@ impl SendLog {
         self.order.push_back((key, now));
     }
 
+    /// Drops a refused resend.
     fn remove(&mut self, key: &[u8; 16]) {
         self.entries.remove(key);
+    }
+
+    /// A delivery receipt: the entry goes; a receipt for a send not logged yet is remembered.
+    fn confirm(&mut self, key: [u8; 16]) {
+        if self.entries.remove(&key).is_some() || !self.early.insert(key) {
+            return;
+        }
+        self.early_order.push_back(key);
+        while self.early_order.len() > EARLY_RECEIPTS {
+            if let Some(old) = self.early_order.pop_front() {
+                self.early.remove(&old);
+            }
+        }
     }
 
     /// Drops entries older than the maximum age.
@@ -542,7 +568,7 @@ impl Task {
                         let _ = reply.send(Err(ClientError::NotConnected));
                     }
                     Some(Command::Ack(seq)) => self.record_ack(seq),
-                    Some(Command::Confirm(key)) => self.log.remove(&key),
+                    Some(Command::Confirm(key)) => self.log.confirm(key),
                     Some(Command::Ephemeral { .. } | Command::Abort) => {}
                 },
             }
@@ -837,7 +863,7 @@ impl Task {
                             self.write(&mut ws, &ClientFrame::Ephemeral { to, payload }).await
                         }
                         Some(Command::Confirm(key)) => {
-                            self.log.remove(&key);
+                            self.log.confirm(key);
                             Ok(())
                         }
                         Some(Command::Send { idempotency_key, mls, payload, reply }) => {
@@ -957,7 +983,7 @@ mod send_log_tests {
         assert_eq!(log.len(), 3);
         assert!(!log.entries.contains_key(&[1; 16]));
         // A receipt removes one.
-        log.remove(&[2; 16]);
+        log.confirm([2; 16]);
         assert_eq!(log.len(), 2);
         // Past the maximum age everything goes.
         log.prune(Instant::now() + Duration::from_secs(61), &c);
@@ -965,5 +991,26 @@ mod send_log_tests {
         // A removed key re-sent later is logged again.
         log.insert([2; 16], None, empty(), &c);
         assert_eq!(log.len(), 1);
+    }
+
+    #[test]
+    fn a_receipt_before_the_send_result_keeps_the_send_out_of_the_log() {
+        let c = cfg(10, Duration::from_secs(60));
+        let mut log = SendLog::default();
+        // The recipient confirmed before this client read its `SendResult`.
+        log.confirm([7; 16]);
+        log.insert([7; 16], None, empty(), &c);
+        assert_eq!(log.len(), 0);
+        // Remembered once: a later send with that key is logged as usual.
+        log.insert([7; 16], None, empty(), &c);
+        assert_eq!(log.len(), 1);
+        // Early receipts are bounded.
+        for i in 0..=EARLY_RECEIPTS {
+            let mut k = [0u8; 16];
+            k[..8].copy_from_slice(&i.to_be_bytes());
+            log.confirm(k);
+        }
+        assert_eq!(log.early.len(), EARLY_RECEIPTS);
+        assert_eq!(log.early_order.len(), EARLY_RECEIPTS);
     }
 }

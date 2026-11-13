@@ -52,6 +52,21 @@ enum Cmd {
     /// Registry backups (D-0040).
     #[command(subcommand)]
     Backup(BackupCmd),
+    /// Accounts (development and drills until Prompt 3's registration).
+    #[command(subcommand)]
+    Accounts(AccountsCmd),
+}
+
+#[derive(Debug, Subcommand)]
+enum AccountsCmd {
+    /// Register every device of a static directory file as an account of its own.
+    Import {
+        #[command(flatten)]
+        store: store::StoreArgs,
+        /// The directory file (`songbird-loadgen keys` writes `devices.toml`).
+        #[arg(long)]
+        directory: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -148,6 +163,19 @@ fn main() -> ExitCode {
         },
         Cmd::Generation(cmd) => generation_cmd(cmd),
         Cmd::Backup(cmd) => backup_cmd(cmd),
+        Cmd::Accounts(AccountsCmd::Import { store, directory }) => {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(anyhow::Error::from)
+                .and_then(|rt| {
+                    rt.block_on(async {
+                        let n = store::import_directory(&store, &directory).await?;
+                        println!("registered {n} devices");
+                        Ok(())
+                    })
+                })
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

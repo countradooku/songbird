@@ -24,10 +24,13 @@ and metrics, and drain; Prompt 2 builds the realtime delivery core.
 
 ```bash
 cargo xtask ci            # the full fast quality bar, as CI runs it
-cargo xtask compose up    # SurrealDB, valkey-hot, valkey-jobs, RustFS, LiveKit on localhost
+cargo xtask compose up    # SurrealDB, Iggy, valkey-hot, valkey-jobs, RustFS, LiveKit on localhost
 cargo xtask smoke         # start every service, check health and metrics, stop cleanly
 cargo xtask help          # everything else (fuzz, bench, release, sanitize, miri)
 ```
+
+Docker or Podman both work. With Podman (for example on macOS), `compose up` adds
+`deploy/compose/compose.podman.yaml` so Iggy can use io_uring (development only; D-0029).
 
 Infrastructure and operations: [deploy/](deploy/README.md). Running a censorship-resistant proxy:
 [deploy/proxy](deploy/proxy/README.md).

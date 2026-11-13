@@ -648,6 +648,14 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
         } else {
             0.0
         };
+        let store_p50 = s2.store_quantile(&s1, 0.5);
+        let store_p99 = s2.store_quantile(&s1, 0.99);
+        let ms = |v: Option<f64>| v.map_or_else(|| "-".into(), |s| format!("<={}ms", s * 1e3));
+        println!(
+            "server store latency (read to durably stored, bucket bound): p50 {} p99 {}",
+            ms(store_p50),
+            ms(store_p99)
+        );
         println!(
             "server: rss_idle={:.1}MiB rss_connected={:.1}MiB rss_end={:.1}MiB per_connection={:.1}KiB open_fds={:.0} cpu_send_phase={cpu:.2}s cpu_per_10k_deliveries={per_10k:.3}s",
             s0.resident_bytes / 1_048_576.0,
@@ -664,6 +672,8 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
             "open_fds": s1.open_fds,
             "cpu_send_phase_secs": cpu,
             "cpu_per_10k_deliveries_secs": per_10k,
+            "store_p50_le_secs": store_p50.filter(|v| v.is_finite()),
+            "store_p99_le_secs": store_p99.filter(|v| v.is_finite()),
         });
     }
     println!("settle: {settle_secs:.2}s");

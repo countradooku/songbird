@@ -27,6 +27,7 @@ server in plaintext. Adding to this list requires the owner's approval.
 | Attachment ciphertext in RustFS (client-encrypted, opaque), named by the object ID | Relay to recipients | As the attachment record | Prompt 2 (M5); the ciphertext the approved attachment row describes |
 | Jobs in `valkey-jobs` (push wake-ups, deletions, cleanups): IDs only, **sealed** (AES-256-GCM-SIV, bound to their stream); the outbox row (account ID) in SurrealDB until relayed | Run background work exactly when needed | Until done (deleted at once); dead letters capped at 100,000 | Prompt 2 (M5), D-0036; sealed form of rows above, **awaiting owner approval** |
 | Hash of a request's (device, nonce) in `valkey-hot` | Refuse replayed `api` requests | 2 minutes | Prompt 2 (M5), D-0036; hashed form of the device ID, **awaiting owner approval** |
+| Registry backups off-site (Scaleway, EU): every registry row above as it was at the export (accounts, devices and their public keys, sealed push registrations, attachment records, grants, outbox, store generation), **age-encrypted** to the owner's offline identity and the verification identity; never the mailbox, its keys or the jobs | Recover accounts after losing the database (RPO 5 minutes) | Write-once: 25 hours (5-minute exports), 8 days (daily), 29 days (weekly), 93 days (monthly). **A deleted account stays in older backups until they expire, at most 93 days** | Prompt 2 (M6), D-0040; **awaiting owner approval** |
 
 Prompt 1 adds two operational views, neither of which is user data on the server:
 
@@ -145,6 +146,19 @@ One subsection per component. Each threat names its mitigation and the test or p
 | A deleted account surviving in some store | I | Insider, legal request, the user's own GDPR right | Outbox job written with the deletion; worker forgets mailboxes (keys punctured, counters dropped, `Forget` record replayed on restart), closes sessions everywhere, deletes push tokens, grants and objects, repeats after directory propagation, then verifies mailbox, object store and registry before finishing (else retried, then dead-lettered) | gate `account_deletion_is_verified_across_every_store`; `forgotten_devices_leave_nothing_readable_and_no_counters` (Iggy) |
 | A compromised internal service deleting other users' data | E | Compromised `api`, `push` | The device link accepts only `worker.` certificates and only Forget/Known; `api` deletes only the authenticated device's own account | `songbird_link` identity tests; `services/delivery/src/internal.rs` |
 
+### 3.7 Backups and restore (Prompt 2, milestone 6)
+
+| Threat | STRIDE | Attacker | Mitigation | Test or proof |
+| --- | --- | --- | --- | --- |
+| The backup provider, a thief of its disks or a legal request reads the registry | I | Storage provider, legal compulsion of the provider | age encryption before upload (the plaintext export is piped into `age` and never touches disk); the two identities that decrypt are offline (owner) or on a host outside production (verification) | `bench/m6/backup-cycle.sh` (no plaintext marker in stored files; a third identity cannot decrypt) |
+| A compromised production server reads old backups (deleted accounts) | I | Attacker on the data host | Its key can only `PutObject`/`PutObjectRetention` under `registry/` (IAM permission set narrowed by the bucket policy); it holds no identity that decrypts | `deploy/tofu/envs/backups/tests/plan.tftest.hcl` (a widened writer fails it); provider enforcement checked at setup (runbook step 8) |
+| Ransomware or a compromised server destroys the backups | D, T | Attacker on any production host, a rogue operator | Object Lock in compliance mode (nobody can shorten a retention, the owner included), versioned bucket, writer cannot delete; bucket administration only with the owner's Organization key, not the deploy pipeline's | `locked_objects_cannot_be_deleted_and_checksums_are_checked` (RustFS); tofu test (compliance mode, no `force_destroy`, `prevent_destroy`) |
+| A forged backup restored: an attacker with the put-only key writes a backup of their own (the recipients are public keys) over an older name, adding devices to impersonate users | S, T | Attacker on the data host | Restores read the **first** stored version of each name, chosen by the server's `LastModified`; a name written twice or a misdated backup counts as tampering: verification fails, restore warns and audit-logs; `--before` restores from before a compromise | `an_overwritten_backup_is_never_restored_and_verify_reports_it` (RustFS, SurrealDB, age); `restores_read_the_earliest_version_and_skip_forgeries` |
+| A corrupted or truncated backup goes unnoticed until it is needed | T, D | Bug, storage fault | SHA-256 checked by the server at upload (`x-amz-checksum-sha256`); age's authenticated encryption; daily restore into a throwaway database with consistency checks; a backup older than 1 hour fails verification | `bench/m6/backup-cycle.sh` (an orphaned device fails verification); `songbird-backup-verify` |
+| An operator restores over a live registry, or the wrong one | T, D | Operator error | `--confirm <namespace>/<database>`; restore only into an empty database; append-only audit log written before and after (fails closed) | `a_missing_or_wrong_confirmation_is_refused_and_logs_nothing`; `an_unwritable_log_stops_the_action`; `bench/m6/backup-cycle.sh` |
+| Messages lost with the mailbox (never backed up) | D | Disaster, operator error | Store generation bumped by every restore; clients resend everything without an end-to-end delivery receipt with the original idempotency keys; recipients drop repeats | `a_lost_mailbox_is_refilled_by_senders`, `a_surviving_mailbox_stores_nothing_twice` (Iggy in CI); `bench/m6/restore-drill.sh` (checker PASS; without resend 11,581 lost) |
+| The backup timer's database user writes to the registry | E | Attacker on the data host using the backup credential | A database user with the `VIEWER` role (export and read only) | Checked by hand against SurrealDB 4.0.1 (a `CREATE` as that user is refused); `deploy/ansible/roles/backup` |
+
 ## 4. Server-enforced settings
 
 ## 5. Compliance notes (GDPR, age of digital consent per EU country)
@@ -175,7 +189,15 @@ One subsection per component. Each threat names its mitigation and the test or p
   A deleted device can authenticate for up to the registry poll interval (1 s) if SurrealDB is
   unreachable during that window (its sessions are closed by the deletion itself).
 - Attachments already sent stay (opaque, unlinked to the account) until fetched or 30 days after
-  their sender's account is deleted; backups are M6's.
+  their sender's account is deleted.
+- Backups (D-0040): a deleted account stays in older encrypted backups for up to 93 days; a
+  restore brings back accounts deleted after the backup it reads (at most 5 minutes of them for
+  the newest backup; deletion journal: owner decision, report P02-M6). Whoever holds the
+  verification identity and the verifier key (the verification host, the owner-only SOPS file)
+  can read every retained backup. Backups stored after a data host is compromised are
+  untrusted (restore with `--before`). Until the observability work adds alerting, a failed
+  backup timer is noticed by the daily verification (newest older than 1 hour), so the RPO
+  can silently grow to a day.
 - Every service uses one RustFS credential in development; per-service least-privilege users
   and bucket policies are configured at deployment (Prompt 13), not yet automated.
 - The delivery service connects to Iggy as the root user; a least-privilege user is Prompt 12's.

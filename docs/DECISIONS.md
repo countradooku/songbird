@@ -72,8 +72,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0040 — Milestone 6: backups that hold no messages, age-encrypted off-site copies, store generation with client resend
 
 - Date: 2026-11-13
-- Status: proposed (design); the four owner choices below are the agent's recommendations,
-  **awaiting owner confirmation**; built and measured in M6
+- Status: built and measured in M6 (report P02-M6); the four owner choices below are the agent's
+  recommendations, **awaiting owner confirmation**
 - Decided by: agent under the owner's standing instruction ("think like a Proton founder")
 - Context: master prompt §6 and milestone M6. What holds state that cannot be rebuilt changed
   since the prompt was written: the mailbox is Apache Iggy (D-0029) with per-message keys that are
@@ -105,12 +105,13 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     only put objects: it can neither read, list nor delete them, so a compromised server can
     neither read old backups (which hold deleted accounts until retention ends) nor destroy them.
   - **Daily restore verification:** not on production (a decryption key there would let an
-    attacker recover deleted accounts from backups). A separate verification job with its own
+    attacker recover deleted accounts from backups). This departs from the master prompt's
+    "daily `worker` job" on purpose: the `worker` runs on production hosts. A separate verification job with its own
     read-only credential and its own age identity restores the latest export into a scratch
     SurrealDB, runs consistency checks (counts, references between devices and accounts, a sample
     of reads), and alerts when the latest verified backup is older than 24 hours. Its identity is
     rotated by re-encrypting nothing: new exports use the new recipient; old ones age out.
-  - **Store generation:** stored in SurrealDB (`meta:generation`), read by delivery at startup
+  - **Store generation:** stored in SurrealDB (`store:g`), read by delivery at startup
     and followed like the directory; every restore, and every loss of the mailbox, increments it
     (`songbird-admin generation bump`, part of the restore runbook). Clients that see it grow
     reset their cursor (built in M1) and resend every message without a delivery receipt from the
@@ -119,6 +120,30 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   - **Drills:** `bench/m6/restore-drill.sh` times a full restore on the compose stack under load:
     back up, destroy SurrealDB and Iggy data, restore, bump the generation, let clients resend;
     the delivery checker must pass. The gate's timed drill runs it.
+- Implementation (M6):
+  - `songbird-admin backup run|verify|restore`, `generation show|bump`, `accounts import`;
+    restore, bump and import need `--confirm <namespace>/<database>` and write an append-only
+    audit log; restore only into an empty database.
+  - **Restores trust the server's records, not the uploader's:** the writer key can put, and a
+    put to an existing name makes a new current version on a versioned bucket, while the age
+    recipients are public. So a compromised data host could replace an older backup with one
+    of its own. Restores read the first stored version of each name, chosen by the server's
+    `LastModified`; a name written twice, or a backup named for another time than it was
+    stored at, fails verification and is never restored; `--before` restores from before a
+    compromise.
+  - The backup timer exports as a SurrealDB database user with the `VIEWER` role.
+  - Off-site: `deploy/tofu/envs/backups`, an owner-only root (its own state and an
+    Organization-level key, not the deploy pipeline's): a dedicated Scaleway project, a
+    versioned bucket with compliance-mode Object Lock, expiry per tier one day after its lock, a
+    writer limited to `PutObject`/`PutObjectRetention` and a verifier limited to reading.
+  - Verification runs on a host in an environment of its own (topology role `verify`, which the
+    topology module refuses beside production roles), set up by the owner with
+    `backup-verify.yml`; its identity and read key are in an owner-only SOPS file.
+  - The client keeps a bounded send log (100,000 messages, 30 days) and remembers receipts that
+    arrive before its own `SendResult`, so a confirmed message is never resent.
+- Evidence: report P02-M6; `bench/m6/restore-drill.sh` (3,000 devices at 5,000/s: outage 1.23 s,
+  checker PASS; without resend 11,581 lost); `an_overwritten_backup_is_never_restored_and_verify_reports_it`;
+  the tofu test of the backups root.
 - Consequences: backups contain account and device metadata only (encrypted, write-once,
   unreadable from production); recovery of undelivered messages depends on clients (Prompt 4's
   delivery receipts make it complete; until then the Rust client keeps its own send log). Needs

@@ -188,17 +188,51 @@ fn write_state(p: &Path, m: (u64, u64, u64)) -> Result<()> {
     Ok(())
 }
 
-/// A private scratch directory (mode 0700) for the encrypted file before upload.
-fn private_dir() -> Result<tempfile::TempDir> {
-    let d = tempfile::Builder::new()
-        .prefix("songbird-backup")
-        .tempdir()?;
+/// A private scratch directory for the encrypted file before upload: created exclusively under
+/// `TMPDIR` with a random name and mode 0700 from the start, removed when dropped. (Standard
+/// library only: no extra crate in a binary that runs on production hosts.)
+struct PrivateDir(PathBuf);
+
+impl PrivateDir {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for PrivateDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn private_dir() -> Result<PrivateDir> {
+    let id = songbird_types::DeviceId::random()?;
+    let path = std::env::temp_dir().join(format!("songbird-backup-{}", hex::encode(id.as_bytes())));
+    let mut b = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700))?;
+        use std::os::unix::fs::DirBuilderExt as _;
+        b.mode(0o700);
     }
-    Ok(d)
+    // `create`, not `create_all`: fails if the name exists (never reuses another's directory).
+    b.create(&path)
+        .with_context(|| format!("creating {}", path.display()))?;
+    Ok(PrivateDir(path))
+}
+
+#[cfg(all(test, unix))]
+mod private_dir_tests {
+    #[test]
+    fn private_and_removed() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let d = super::private_dir().unwrap();
+        let p = d.path().to_path_buf();
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        std::fs::write(p.join("x"), b"y").unwrap();
+        drop(d);
+        assert!(!p.exists());
+    }
 }
 
 /// An HTTP/1.1 request to SurrealDB's HTTP endpoint (same host and port as RPC).

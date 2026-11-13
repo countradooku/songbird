@@ -12,6 +12,7 @@ Every degraded mode is explicit, tested and has a runbook (constitution, invaria
 | Provider loss, rebuild at the second provider | [provider-switch.md](provider-switch.md) | not yet (Prompt 1 gate drill) |
 | Delivery: overload, slow consumers, store unavailable, auth failures, deploy drain | [delivery.md](delivery.md) | load-generator runs and e2e tests (P02-M1) |
 | Jobs, push, attachments, account deletion | [jobs-push-api-worker.md](jobs-push-api-worker.md) | live tests and M5 gate tests only |
+| Registry loss or corruption, mailbox loss, backups or verification failing, compromise | [backup-and-restore.md](backup-and-restore.md) | 2026-11-13: restore under load on compose ([drills.md](drills.md)); off-site path not yet (needs the Scaleway project) |
 
 ## Runbook template
 
@@ -28,4 +29,4 @@ Every degraded mode is explicit, tested and has a runbook (constitution, invaria
 
 ## Drills
 
-Results of monthly restores and quarterly game days go in `drills.md` (Prompt 13).
+Results of monthly restores and quarterly game days go in [drills.md](drills.md).

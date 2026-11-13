@@ -67,7 +67,7 @@ jobs:
       attestations: write
     strategy:
       matrix:
-        bin: [songbird-delivery, songbird-api, songbird-push, songbird-worker, songbird-calls, songbird-proxy]
+        bin: [songbird-delivery, songbird-api, songbird-push, songbird-worker, songbird-calls, songbird-proxy, songbird-admin]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -86,7 +86,8 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: dist
-          file: deploy/docker/runtime.Dockerfile
+          # songbird-admin carries the pinned age tool (backups, D-0040).
+          file: ${{ matrix.bin == 'songbird-admin' && 'deploy/docker/admin.Dockerfile' || 'deploy/docker/runtime.Dockerfile' }}
           build-args: BIN=${{ matrix.bin }}
           push: true
           provenance: false

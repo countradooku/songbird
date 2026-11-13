@@ -1,7 +1,17 @@
 //! `songbird-admin`: operator tool.
 //!
-//! Today it is the internal mutual-TLS certificate authority. Every service-to-service connection
-//! on the private network uses certificates from this CA (see `docs/RUNBOOKS/mtls-rotation.md`):
+//! - `backup`: registry backups (D-0040): `run` (export, encrypt with age, store write-once),
+//!   `verify` (restore the newest into a scratch database and check it), `restore`.
+//! - `generation`: the store generation clients see in `Hello` (D-0040): shown, or bumped after
+//!   a restore or a loss of the mailbox, so clients resend what has no delivery receipt.
+//! - `accounts import`: a static directory file as registry accounts (drills, development).
+//!
+//! Commands that change the registry (`backup restore`, `generation bump`, `accounts import`)
+//! need `--confirm <namespace>/<database>` and write an audit log (`audit.rs`).
+//! - `ca`: the internal mutual-TLS certificate authority.
+//!
+//! Every service-to-service connection on the private network uses certificates from this CA (see
+//! `docs/RUNBOOKS/mtls-rotation.md`):
 //!
 //! ```text
 //! root CA (10 y, offline, key only ever in SOPS)
@@ -15,7 +25,10 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::print_stdout, reason = "CLI output")]
 
+mod audit;
+mod backup;
 mod ca;
+mod store;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -30,10 +43,73 @@ struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "parsed once per process; boxing would not save anything that matters"
+)]
 enum Cmd {
     /// Internal mutual-TLS certificate authority.
     #[command(subcommand)]
     Ca(CaCmd),
+    /// The store generation (D-0040).
+    #[command(subcommand)]
+    Generation(GenerationCmd),
+    /// Registry backups (D-0040).
+    #[command(subcommand)]
+    Backup(BackupCmd),
+    /// Accounts (development and drills until Prompt 3's registration).
+    #[command(subcommand)]
+    Accounts(AccountsCmd),
+}
+
+#[derive(Debug, Subcommand)]
+enum AccountsCmd {
+    /// Register every device of a static directory file as an account of its own.
+    Import {
+        #[command(flatten)]
+        store: store::StoreArgs,
+        #[command(flatten)]
+        guard: audit::Guard,
+        /// The directory file (`songbird-loadgen keys` writes `devices.toml`).
+        #[arg(long)]
+        directory: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BackupCmd {
+    /// Export the registry, encrypt it with age and store it (every 5 minutes, by a timer).
+    Run(backup::RunArgs),
+    /// Restore the newest backup into a scratch database and check it; non-zero exit when it
+    /// is older than allowed or inconsistent (daily, off production).
+    Verify(backup::LoadArgs),
+    /// Restore a backup into an empty registry database and bump the store generation (restore
+    /// runbook). Needs `--confirm <namespace>/<database>`; audit-logged.
+    Restore {
+        #[command(flatten)]
+        load: backup::LoadArgs,
+        #[command(flatten)]
+        guard: audit::Guard,
+        #[command(flatten)]
+        journal: backup::JournalArgs,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GenerationCmd {
+    /// Print the store generation.
+    Show {
+        #[command(flatten)]
+        store: store::StoreArgs,
+    },
+    /// Increase it (restore runbook): every client resends what has no delivery receipt.
+    /// Needs `--confirm <namespace>/<database>`; audit-logged.
+    Bump {
+        #[command(flatten)]
+        store: store::StoreArgs,
+        #[command(flatten)]
+        guard: audit::Guard,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -97,33 +173,19 @@ enum CaCmd {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let Cmd::Ca(cmd) = cli.cmd;
-    let result = match cmd {
-        CaCmd::InitRoot { out, env, days } => ca::init_root(&out, &env, days),
-        CaCmd::InitIntermediate {
-            root,
-            out,
-            env,
-            days,
-        } => ca::init_intermediate(&root, &out, &env, days),
-        CaCmd::Issue {
-            ca,
-            name,
-            sans,
-            out,
-            days,
-        } => ca::issue(&ca, &name, &sans, &out, days),
-        CaCmd::Check { cert, renew_within } => match ca::days_left(&cert) {
-            Ok(days) => {
-                println!("{days}");
-                return if days > renew_within {
-                    ExitCode::SUCCESS
-                } else {
-                    ExitCode::from(1)
-                };
-            }
+    let result = match cli.cmd {
+        Cmd::Ca(cmd) => match ca_cmd(cmd) {
+            Ok(Some(code)) => return code,
+            Ok(None) => Ok(()),
             Err(e) => Err(e),
         },
+        Cmd::Generation(cmd) => generation_cmd(cmd),
+        Cmd::Backup(cmd) => backup_cmd(cmd),
+        Cmd::Accounts(AccountsCmd::Import {
+            store,
+            guard,
+            directory,
+        }) => accounts_import(&store, &guard, &directory),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -135,4 +197,184 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// Runs a CA command; `Some` carries an exit code of its own (`check`).
+fn ca_cmd(cmd: CaCmd) -> anyhow::Result<Option<ExitCode>> {
+    match cmd {
+        CaCmd::InitRoot { out, env, days } => ca::init_root(&out, &env, days).map(|()| None),
+        CaCmd::InitIntermediate {
+            root,
+            out,
+            env,
+            days,
+        } => ca::init_intermediate(&root, &out, &env, days).map(|()| None),
+        CaCmd::Issue {
+            ca,
+            name,
+            sans,
+            out,
+            days,
+        } => ca::issue(&ca, &name, &sans, &out, days).map(|()| None),
+        CaCmd::Check { cert, renew_within } => {
+            let days = ca::days_left(&cert)?;
+            println!("{days}");
+            Ok(Some(if days > renew_within {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }))
+        }
+    }
+}
+
+fn generation_cmd(cmd: GenerationCmd) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        match cmd {
+            GenerationCmd::Show { store } => println!("{}", store::show(&store).await?),
+            GenerationCmd::Bump { store, guard } => {
+                let entry = guard.begin("generation bump", &target(&store), "")?;
+                let r = store::bump(&store).await;
+                entry.end(
+                    &r,
+                    &r.as_ref()
+                        .map_or(String::new(), |g| format!("generation {g}")),
+                )?;
+                println!("store generation is now {}", r?);
+            }
+        }
+        Ok(())
+    })
+}
+
+fn backup_cmd(cmd: BackupCmd) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        match cmd {
+            BackupCmd::Run(a) => {
+                let name = backup::run(&a).await?;
+                println!("stored {name}");
+            }
+            BackupCmd::Verify(a) => {
+                let r = backup::load(&a).await?;
+                print_report(&r);
+                if r.orphans > 0 || r.generation == 0 {
+                    anyhow::bail!("the restored registry is inconsistent");
+                }
+                if r.integrity != backup::Integrity::default() {
+                    anyhow::bail!(
+                        "the bucket shows tampering: {} names written twice, {} misdated backups \
+                         (runbook backup-and-restore.md, compromise)",
+                        r.integrity.overwritten,
+                        r.integrity.misdated
+                    );
+                }
+                println!("verified");
+            }
+            BackupCmd::Restore {
+                load: a,
+                guard,
+                journal,
+            } => {
+                let object = a.object.clone().unwrap_or_else(|| "newest".into());
+                let detail = if journal.no_journal {
+                    format!("{object}; WITHOUT the deletion journal")
+                } else {
+                    object
+                };
+                let key = if journal.no_journal {
+                    None
+                } else {
+                    Some(journal.key()?)
+                };
+                let entry = guard.begin("backup restore", &target(&a.store), &detail)?;
+                let r = async {
+                    let r = backup::load(&a).await?;
+                    print_report(&r);
+                    let redeleted = if let Some(key) = &key {
+                        let n = backup::reapply_deletions(&a, key).await?;
+                        println!("deletion journal: {n} restored accounts with a tombstone are being deleted again");
+                        n
+                    } else {
+                        println!("WARNING: --no-journal: accounts deleted after this backup are back");
+                        0
+                    };
+                    let g = store::bump(&a.store).await?;
+                    Ok::<_, anyhow::Error>((r, g, redeleted))
+                }
+                .await;
+                entry.end(
+                    &r,
+                    &r.as_ref().map_or(String::new(), |(rep, g, redeleted)| {
+                        format!(
+                            "{}: {} accounts, {} devices; generation {g}; re-deleted {redeleted}; names written twice {}, misdated {}",
+                            rep.object,
+                            rep.registered,
+                            rep.device_rows,
+                            rep.integrity.overwritten,
+                            rep.integrity.misdated
+                        )
+                    }),
+                )?;
+                let (_, g, _) = r?;
+                println!(
+                    "restored; store generation is now {g}: clients resend what has no receipt"
+                );
+            }
+        }
+        Ok(())
+    })
+}
+
+/// A destructive command's target, as `--confirm` must repeat it.
+fn target(s: &store::StoreArgs) -> String {
+    format!("{}/{}", s.namespace, s.database)
+}
+
+fn accounts_import(
+    store: &store::StoreArgs,
+    guard: &audit::Guard,
+    directory: &std::path::Path,
+) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        let entry = guard.begin(
+            "accounts import",
+            &target(store),
+            &directory.display().to_string(),
+        )?;
+        let r = store::import_directory(store, directory).await;
+        entry.end(
+            &r,
+            &r.as_ref().map_or(String::new(), |n| format!("{n} devices")),
+        )?;
+        println!("registered {} devices", r?);
+        Ok(())
+    })
+}
+
+fn print_report(r: &backup::Report) {
+    if r.integrity != backup::Integrity::default() {
+        println!(
+            "WARNING: the bucket shows tampering: {} names written twice (only their first version \
+             is read), {} misdated backups (never read)",
+            r.integrity.overwritten, r.integrity.misdated
+        );
+    }
+    println!(
+        "backup {} ({} min old): {} accounts, {} devices, {} devices without an account, generation {}",
+        r.object,
+        r.age_secs / 60,
+        r.registered,
+        r.device_rows,
+        r.orphans,
+        r.generation
+    );
 }

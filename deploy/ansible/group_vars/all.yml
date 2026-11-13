@@ -79,3 +79,9 @@ iggy_memory_pool: "1 GiB"
 valkey_hot_maxmemory: 2gb
 valkey_jobs_maxmemory: 2gb
 admin_cidrs: "{{ (lookup('community.sops.sops', songbird_secrets_file) | from_yaml).admin_cidrs_json | from_json }}"
+
+# Off-site registry backups (D-0040; bucket, keys and age recipients per environment in SOPS:
+# backup_s3_bucket, backup_s3_access_key, backup_s3_secret_key, backup_surreal_password,
+# backup_age_recipients). The bucket and its keys come from deploy/bin/backups-up.
+backup_s3_endpoint: "s3.fr-par.scw.cloud:443"
+backup_s3_region: fr-par

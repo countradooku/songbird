@@ -199,3 +199,29 @@ async fn grants_become_attachments_and_fetches_count_down() {
     assert!(r.grant(&old).await.unwrap().is_none());
     assert_eq!(r.expired_grants(10).await.unwrap(), vec![old]);
 }
+
+#[tokio::test]
+async fn store_generation_only_grows_past_anything_issued() {
+    let Some(r) = registry().await else { return };
+    assert_eq!(r.store_generation().await.unwrap(), 1);
+    let now = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let g1 = r.bump_store_generation().await.unwrap();
+    assert!(g1 >= now, "jumps to at least the current time");
+    let g2 = r.bump_store_generation().await.unwrap();
+    assert!(g2 > g1);
+    assert_eq!(r.store_generation().await.unwrap(), g2);
+    // A restore (later than a millisecond) brings back an older value; the next bump still
+    // passes every value issued.
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    r.db()
+        .exec("UPDATE store:g SET generation = 5 RETURN NONE;", Vec::new())
+        .await
+        .unwrap();
+    assert!(r.bump_store_generation().await.unwrap() > g2);
+}

@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Creates or converges the off-site, write-once backup bucket of one environment (D-0040).
+#   deploy/bin/backups-up <env>
+# Owner only: the credentials are in deploy/secrets/backups.sops.yaml, readable by the owner's
+# age identities and nobody else (not the deploy pipeline): tofu_state_passphrase,
+# state_access_key_hetzner, state_secret_key_hetzner (state at the other provider),
+# scw_access_key, scw_secret_key, scw_organization_id (an Organization-level key), and
+# admin_principal ("user_id:<uuid>"). Afterwards, put the printed writer key into the
+# environment's SOPS file as backup_s3_access_key / backup_s3_secret_key and the verifier key as
+# backup_verify_s3_access_key / backup_verify_s3_secret_key (runbook backup-and-restore.md).
+source "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: backups-up <env>"
+env=$1
+[[ "$env" =~ ^[a-z][a-z0-9-]{1,20}$ ]] || die "bad environment name: $env"
+vars="$TOFU_DIR/environments/$env.backups.tfvars"
+[ -f "$vars" ] || die "no $vars"
+need sops tofu
+s() { sops -d --extract "[\"$1\"]" "$DEPLOY_DIR/secrets/backups.sops.yaml"; }
+TF_VAR_state_passphrase=$(s tofu_state_passphrase); export TF_VAR_state_passphrase
+TF_VAR_admin_principal=$(s admin_principal); export TF_VAR_admin_principal
+AWS_ACCESS_KEY_ID=$(s state_access_key_hetzner); export AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY=$(s state_secret_key_hetzner); export AWS_SECRET_ACCESS_KEY
+SCW_ACCESS_KEY=$(s scw_access_key); export SCW_ACCESS_KEY
+SCW_SECRET_KEY=$(s scw_secret_key); export SCW_SECRET_KEY
+SCW_DEFAULT_ORGANIZATION_ID=$(s scw_organization_id); export SCW_DEFAULT_ORGANIZATION_ID
+dir="$TOFU_DIR/envs/backups"
+tofu -chdir="$dir" init -input=false -reconfigure \
+  -backend-config="$TOFU_DIR/backends/$env-backups.s3.tfbackend" >/dev/null
+tofu -chdir="$dir" apply -input=false -var="environment=$env" -var-file="$vars"
+log "bucket $(tofu -chdir="$dir" output -raw bucket) at $(tofu -chdir="$dir" output -raw endpoint)"
+log "keys: tofu -chdir=$dir output -raw writer_secret_key (and verifier_*); into SOPS, never a file"

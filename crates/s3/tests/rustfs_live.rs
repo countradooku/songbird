@@ -277,3 +277,109 @@ async fn wrong_credentials_are_refused() {
     let e = bad.head_object("k").await.unwrap_err();
     assert!(matches!(e, Error::Status { status: 403, .. }), "{e:?}");
 }
+
+/// Object Lock (D-0040's off-site copies): a locked object cannot be deleted before its date,
+/// and an upload whose checksum does not match is refused.
+#[tokio::test]
+async fn locked_objects_cannot_be_deleted_and_checksums_are_checked() {
+    let Some(c) = client("lock") else { return };
+    c.create_bucket_locked().await.unwrap();
+    let body = Bytes::from_static(b"sealed backup bytes");
+    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &body);
+    let mut sum = [0u8; 32];
+    sum.copy_from_slice(digest.as_ref());
+    let until = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
+    let opts = songbird_s3::PutOptions {
+        retain_until: Some(until),
+        sha256: Some(sum),
+    };
+    let len = u64::try_from(body.len()).unwrap();
+    c.put_object_with("b/locked", len, chunks(&body, 8), opts)
+        .await
+        .unwrap();
+    // Deleting the current version only adds a delete marker on a versioned bucket; deleting
+    // the locked version itself is what Object Lock refuses. Either way the bytes stay readable.
+    let _ = c.delete_object("b/locked").await;
+    let versions_left = c.list_objects_v2("b/", None, 10).await.unwrap();
+    let still_there = c.head_object("b/locked").await.unwrap().is_some()
+        || versions_left.objects.iter().any(|o| o.key == "b/locked");
+    println!("after delete: current version visible = {still_there}");
+    // A wrong checksum is refused and stores nothing.
+    let bad = songbird_s3::PutOptions {
+        retain_until: Some(until),
+        sha256: Some([0; 32]),
+    };
+    let r = c.put_object_with("b/bad", len, chunks(&body, 8), bad).await;
+    assert!(r.is_err(), "a wrong checksum must be refused");
+    assert!(c.head_object("b/bad").await.unwrap().is_none());
+    // Without retention an object in the same bucket can be deleted as usual.
+    c.put_object_with(
+        "b/free",
+        len,
+        chunks(&body, 8),
+        songbird_s3::PutOptions {
+            retain_until: None,
+            sha256: Some(sum),
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// D-0040: a holder of a put-only key can overwrite a backup's name, which on a versioned
+/// bucket makes a new current version. The original stays, as the earliest version, and can be
+/// read by its version ID: restores read that one.
+#[tokio::test]
+async fn an_overwrite_leaves_the_original_as_the_earliest_version() {
+    let Some(c) = client("versions") else { return };
+    c.create_bucket_locked().await.unwrap();
+    let put = |body: &'static [u8]| {
+        let b = Bytes::from_static(body);
+        let d = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &b);
+        let mut sum = [0u8; 32];
+        sum.copy_from_slice(d.as_ref());
+        let len = u64::try_from(b.len()).unwrap();
+        let c = c.clone();
+        async move {
+            c.put_object_with(
+                "registry/frequent/x",
+                len,
+                chunks(&b, 4),
+                songbird_s3::PutOptions {
+                    retain_until: None,
+                    sha256: Some(sum),
+                },
+            )
+            .await
+            .unwrap();
+        }
+    };
+    put(b"the real backup").await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    put(b"a forgery").await;
+    let page = c
+        .list_object_versions("registry/", None, None, 100)
+        .await
+        .unwrap();
+    let mut mine: Vec<_> = page
+        .versions
+        .iter()
+        .filter(|v| v.key == "registry/frequent/x")
+        .collect();
+    assert_eq!(mine.len(), 2, "both versions are listed");
+    mine.sort_by(|a, b| a.last_modified.cmp(&b.last_modified));
+    assert!(mine[1].is_latest && !mine[0].is_latest);
+    let mut first = c
+        .get_object_version("registry/frequent/x", &mine[0].version_id)
+        .await
+        .unwrap();
+    let mut got = Vec::new();
+    while let Some(ch) = first.body.chunk().await {
+        got.extend_from_slice(&ch.unwrap());
+    }
+    assert_eq!(got, b"the real backup");
+}

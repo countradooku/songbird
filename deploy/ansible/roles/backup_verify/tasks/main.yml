@@ -1,0 +1,64 @@
+---
+# Daily restore verification (D-0040), on a host in an environment of its own: the newest backup
+# is fetched with a read-only key, decrypted with the verification identity and restored into a
+# throwaway in-memory SurrealDB on loopback, then checked (counts, devices without an account,
+# the store generation) and its age (a backup older than an hour means the 5-minute timer has
+# stopped). Production holds neither this identity nor this key.
+- name: Verification directories
+  ansible.builtin.file:
+    path: /var/lib/songbird/verify
+    state: directory
+    owner: "65532"
+    group: "65532"
+    mode: "0700"
+
+- name: Verification identity (decrypts backups; never on a production host)
+  ansible.builtin.copy:
+    dest: /etc/songbird/backup-verify.key
+    owner: "65532"
+    group: "65532"
+    mode: "0400"
+    content: "{{ verify_secrets.backup_verify_identity }}\n"
+  no_log: true
+
+- name: Read-only S3 key
+  ansible.builtin.copy:
+    dest: /etc/songbird/backup-verify.env
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      BACKUP_S3_ACCESS_KEY={{ verify_secrets.backup_verify_s3_access_key }}
+      BACKUP_S3_SECRET_KEY={{ verify_secrets.backup_verify_s3_secret_key }}
+  no_log: true
+
+- name: Images
+  community.docker.docker_image:
+    name: "{{ item }}"
+    source: pull
+  loop:
+    - "{{ images.surrealdb }}"
+    - "{{ songbird_registry }}/songbird-admin:{{ songbird_version }}"
+
+- name: Verification script, service and daily timer
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { src: songbird-backup-verify.j2, dest: /usr/local/sbin/songbird-backup-verify, mode: "0755" }
+    - { src: songbird-backup-verify.service.j2, dest: /etc/systemd/system/songbird-backup-verify.service, mode: "0644" }
+    - { src: songbird-backup-verify.timer.j2, dest: /etc/systemd/system/songbird-backup-verify.timer, mode: "0644" }
+
+- name: Timer enabled
+  ansible.builtin.systemd_service:
+    name: songbird-backup-verify.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: One verification now
+  ansible.builtin.systemd_service:
+    name: songbird-backup-verify.service
+    state: started
+  changed_when: false

@@ -1,0 +1,22 @@
+---
+# Daily restore verification of another environment's backups (D-0040). Owner only: the identity
+# that decrypts backups and the read-only S3 key are in deploy/secrets/<env>.backup-verify.sops.yaml,
+# which no CI key can read. Run against the verification environment's inventory:
+#   ansible-playbook -i inventory/generated/beta-verify.yml backup-verify.yml -e verified_env=beta
+- name: Backup restore verification
+  hosts: verify
+  become: true
+  pre_tasks:
+    - name: The environment whose backups are verified
+      ansible.builtin.assert:
+        that:
+          - verified_env is defined
+          - verified_env is match('^[a-z][a-z0-9-]{1,20}$')
+        fail_msg: "pass -e verified_env=<env>"
+        quiet: true
+    - name: Verification secrets (decrypted on the controller only)
+      ansible.builtin.set_fact:
+        verify_secrets: "{{ lookup('community.sops.sops', playbook_dir ~ '/../secrets/' ~ verified_env ~ '.backup-verify.sops.yaml') | from_yaml }}"
+      no_log: true
+  roles:
+    - backup_verify

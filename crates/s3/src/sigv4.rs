@@ -231,6 +231,44 @@ pub fn amz_date(unix_secs: u64) -> String {
     )
 }
 
+/// An ISO 8601 UTC timestamp (`2026-11-14T08:00:00Z`), as S3 Object Lock's retain-until date.
+#[must_use]
+pub fn iso8601(unix_secs: u64) -> String {
+    let days = unix_secs / 86_400;
+    let rem = unix_secs % 86_400;
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+/// Standard base64 with padding (the `x-amz-checksum-sha256` header).
+#[must_use]
+pub fn base64(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let b = [
+            c.first().copied().unwrap_or(0),
+            c.get(1).copied().unwrap_or(0),
+            c.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for i in 0..4 {
+            if i <= c.len() {
+                let idx = usize::try_from((n >> (18 - 6 * i)) & 63).unwrap_or(0);
+                out.push(char::from(T.get(idx).copied().unwrap_or(b'A')));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 /// Gregorian date from days since 1970-01-01 (Howard Hinnant's `civil_from_days`, for
 /// non-negative day counts).
 fn civil_from_days(days: u64) -> (u64, u64, u64) {
@@ -462,5 +500,23 @@ mod tests {
         assert_eq!(amz_date(1_440_938_160), "20150830T123600Z");
         assert_eq!(amz_date(951_782_400), "20000229T000000Z");
         assert_eq!(amz_date(4_107_542_399), "21000228T235959Z");
+    }
+
+    #[test]
+    fn base64_and_iso8601() {
+        // RFC 4648 §10 vectors.
+        for (raw, enc) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(raw.as_bytes()), enc);
+        }
+        assert_eq!(iso8601(0), "1970-01-01T00:00:00Z");
+        assert_eq!(iso8601(1_700_000_000), "2023-11-14T22:13:20Z");
     }
 }

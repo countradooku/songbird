@@ -13,12 +13,16 @@ if [ "$what" = tofu ] || [ "$what" = all ]; then
     tofu -chdir="$TOFU_DIR/envs/$cloud" validate
     tofu -chdir="$TOFU_DIR/envs/$cloud" test   # plans both topologies against a mocked provider
   done
+  # Off-site backups (D-0040): write-once and least-privilege properties, mocked provider.
+  tofu -chdir="$TOFU_DIR/envs/backups" init -input=false -backend=false -lockfile=readonly >/dev/null
+  tofu -chdir="$TOFU_DIR/envs/backups" validate
+  tofu -chdir="$TOFU_DIR/envs/backups" test
 fi
 if [ "$what" = ansible ] || [ "$what" = all ]; then
   need ansible-playbook ansible-lint
   cd "$ANSIBLE_DIR"
   ansible_prepare
-  for p in site.yml rollout.yml rotate-certs.yml; do
+  for p in site.yml rollout.yml rotate-certs.yml backup-verify.yml; do
     ansible-playbook -i inventory/example --syntax-check "$p" >/dev/null
   done
   ANSIBLE_COLLECTIONS_PATH=.collections ansible-lint -q

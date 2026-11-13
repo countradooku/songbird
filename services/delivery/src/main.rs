@@ -358,10 +358,14 @@ impl Service for Delivery {
             pusher_task = Some(task);
         }
         let shared = Arc::new(shared);
-        let follower = follow.map(|(registry, version, every)| {
+        let follower = follow.map(|(registry, version, generation, every)| {
+            shared
+                .generation
+                .store(generation, std::sync::atomic::Ordering::Release);
             tokio::spawn(songbird_delivery::directory::follow_registry(
                 registry,
                 Arc::clone(&shared.directory),
+                Arc::clone(&shared.generation),
                 version,
                 every,
                 stop_rx.clone(),
@@ -438,7 +442,7 @@ impl Service for Delivery {
     }
 }
 
-type Follow = (Arc<songbird_accounts::Registry>, i64, Duration);
+type Follow = (Arc<songbird_accounts::Registry>, i64, u64, Duration);
 
 /// The directory: from the registry when configured (D-0036), else the static file.
 async fn load_directory(
@@ -451,6 +455,7 @@ async fn load_directory(
     let db = songbird_accounts::Db::connect(cfg).await?;
     let registry = Arc::new(songbird_accounts::Registry::connect(db).await?);
     let version = registry.directory_version().await?;
+    let generation = registry.store_generation().await?;
     let directory = Directory::from_accounts(
         registry
             .load_directory()
@@ -462,7 +467,8 @@ async fn load_directory(
         devices = directory.len(),
         "device directory loaded from the registry"
     );
-    Ok((directory, Some((registry, version, every))))
+    tracing::info!(generation, "store generation from the registry");
+    Ok((directory, Some((registry, version, generation, every))))
 }
 
 /// Push jobs for offline devices (D-0036).

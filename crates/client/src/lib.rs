@@ -16,15 +16,20 @@
 //!   app are dropped (they arrive again after a reconnect until the app's ACK reaches the server).
 //! - **ACKs:** cumulative, sent only for what the app confirmed it stored durably
 //!   ([`Client::ack`]), coalesced for `ack_delay`.
-//! - **Store generation:** reported in [`Event::StoreGenerationChanged`] when it grows; the app
-//!   then resends every message without a delivery receipt (`PROTOCOL.md` §3.6).
+//! - **Store generation and resend (D-0040):** every accepted send is kept in a send log until the
+//!   app confirms its end-to-end delivery receipt ([`Client::confirm_delivered`]) or 30 days
+//!   pass. When the store generation grows (the server was restored), the client reports
+//!   [`Event::StoreGenerationChanged`] and resends every logged message with its original
+//!   idempotency key: a mailbox that survived replays it, a lost one stores it again; recipients
+//!   drop repeats by the message ID inside the envelope (`PROTOCOL.md` §3.6). The log lives in
+//!   memory: surviving the app's own restart is the app core's job (Prompt 4).
 #![forbid(unsafe_code)]
 
 mod backoff;
 mod key;
 mod ws;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -65,6 +70,11 @@ pub struct ClientConfig {
     pub event_capacity: usize,
     /// Reported in `Auth.client_version`.
     pub client_version: String,
+    /// Most messages kept in the send log (the oldest go first when full); 0 keeps no log, so
+    /// nothing is resent after a restore (tests and drills only: messages can be lost).
+    pub send_log_capacity: usize,
+    /// How long a message stays in the send log without a delivery receipt.
+    pub send_log_max_age: Duration,
 }
 
 impl ClientConfig {
@@ -81,6 +91,8 @@ impl ClientConfig {
             handshake_timeout: Duration::from_secs(10),
             event_capacity: 1024,
             client_version: concat!("songbird-client/", env!("CARGO_PKG_VERSION")).into(),
+            send_log_capacity: 100_000,
+            send_log_max_age: Duration::from_hours(30 * 24),
         }
     }
 }
@@ -129,12 +141,21 @@ pub enum Event {
         /// Opaque payload.
         payload: Bytes,
     },
-    /// The server's data was restored from a backup: resend unreceipted messages.
+    /// The server's data was restored from a backup: the client resends every message in its
+    /// send log.
     StoreGenerationChanged {
         /// Generation before.
         previous: u64,
         /// Generation now.
         current: u64,
+    },
+    /// A resent message was refused (a device list changed, an MLS epoch moved on, a reused
+    /// key): it left the send log, and the app re-encrypts and sends it anew.
+    ResendRefused {
+        /// Its idempotency key.
+        idempotency_key: [u8; 16],
+        /// The server's answer.
+        status: SendStatus,
     },
     /// The connection ended; a reconnect follows after `retry_in`.
     Disconnected {
@@ -176,6 +197,8 @@ enum Command {
         payload: Bytes,
     },
     Ack(u64),
+    /// The message's end-to-end delivery receipt arrived.
+    Confirm([u8; 16]),
     /// Drop the socket without a close frame (tests and chaos runs).
     Abort,
     Close,
@@ -213,6 +236,8 @@ impl Client {
             store_generation: resume.store_generation,
             next_req: 1,
             pending: HashMap::new(),
+            log: SendLog::default(),
+            resend_due: false,
             buf: BytesMut::with_capacity(1024),
             channel_binding: songbird_proto::auth::NO_CHANNEL_BINDING,
         };
@@ -303,6 +328,18 @@ impl Client {
             .map_err(|_| ClientError::Stopped)
     }
 
+    /// The end-to-end delivery receipt of the message sent with `idempotency_key` arrived: it
+    /// leaves the send log and will not be resent after a restore.
+    ///
+    /// # Errors
+    /// [`ClientError::Stopped`].
+    pub async fn confirm_delivered(&self, idempotency_key: [u8; 16]) -> Result<(), ClientError> {
+        self.cmds
+            .send(Command::Confirm(idempotency_key))
+            .await
+            .map_err(|_| ClientError::Stopped)
+    }
+
     /// Drops the current socket without a close frame, as a network failure would.
     ///
     /// # Errors
@@ -346,7 +383,11 @@ struct Task {
     delivered: u64,
     store_generation: u64,
     next_req: u32,
-    pending: HashMap<u32, oneshot::Sender<Result<SendStatus, ClientError>>>,
+    pending: HashMap<u32, Pending>,
+    /// Accepted messages without a delivery receipt (D-0040).
+    log: SendLog,
+    /// The server was restored: resend the log once authenticated.
+    resend_due: bool,
     buf: BytesMut,
     /// TLS exporter of the current connection (zeros without TLS).
     channel_binding: [u8; songbird_proto::auth::CHANNEL_BINDING_LEN],
@@ -355,6 +396,113 @@ struct Task {
 enum Conn {
     Plain(Box<WebSocketStream<TcpStream>>),
     Tls(Box<WebSocketStream<tokio_rustls::client::TlsStream<TcpStream>>>),
+}
+
+/// A send waiting for its result.
+struct Pending {
+    key: [u8; 16],
+    mls: Option<MlsCommitRef>,
+    payload: SendPayload,
+    /// The app's waiter; `None` for a resend after a restore.
+    reply: Option<oneshot::Sender<Result<SendStatus, ClientError>>>,
+}
+
+/// One logged message.
+struct Logged {
+    mls: Option<MlsCommitRef>,
+    payload: SendPayload,
+    at: Instant,
+}
+
+/// Accepted messages without a delivery receipt, bounded in number and age (D-0040).
+#[derive(Default)]
+struct SendLog {
+    entries: HashMap<[u8; 16], Logged>,
+    /// Insertion order, for dropping the oldest; stale keys are skipped.
+    order: VecDeque<([u8; 16], Instant)>,
+    /// Receipts that arrived before their send was logged: the recipient can confirm before
+    /// this client has read its own `SendResult`, or between a disconnect and the app's retry.
+    /// Bounded; the oldest are forgotten first.
+    early: HashSet<[u8; 16]>,
+    early_order: VecDeque<[u8; 16]>,
+}
+
+/// How many early receipts are remembered (a few seconds of sends; more only costs a resend
+/// the recipient drops by message ID).
+const EARLY_RECEIPTS: usize = 4096;
+
+impl SendLog {
+    fn insert(
+        &mut self,
+        key: [u8; 16],
+        mls: Option<MlsCommitRef>,
+        payload: SendPayload,
+        cfg: &ClientConfig,
+    ) {
+        let now = Instant::now();
+        self.prune(now, cfg);
+        // A retried send replayed by the server keeps its first entry (and evicts nothing); a
+        // send already confirmed by its recipient needs no entry.
+        if cfg.send_log_capacity == 0 || self.entries.contains_key(&key) || self.early.remove(&key)
+        {
+            return;
+        }
+        while self.entries.len() >= cfg.send_log_capacity {
+            match self.order.pop_front() {
+                Some((k, at)) => {
+                    if self.entries.get(&k).is_some_and(|e| e.at == at) {
+                        self.entries.remove(&k);
+                    }
+                }
+                None => break,
+            }
+        }
+        self.entries.insert(
+            key,
+            Logged {
+                mls,
+                payload,
+                at: now,
+            },
+        );
+        self.order.push_back((key, now));
+    }
+
+    /// Drops a refused resend.
+    fn remove(&mut self, key: &[u8; 16]) {
+        self.entries.remove(key);
+    }
+
+    /// A delivery receipt: the entry goes; a receipt for a send not logged yet is remembered.
+    fn confirm(&mut self, key: [u8; 16]) {
+        if self.entries.remove(&key).is_some() || !self.early.insert(key) {
+            return;
+        }
+        self.early_order.push_back(key);
+        while self.early_order.len() > EARLY_RECEIPTS {
+            if let Some(old) = self.early_order.pop_front() {
+                self.early.remove(&old);
+            }
+        }
+    }
+
+    /// Drops entries older than the maximum age.
+    fn prune(&mut self, now: Instant, cfg: &ClientConfig) {
+        while let Some((k, at)) = self.order.front().copied() {
+            if now.saturating_duration_since(at) < cfg.send_log_max_age {
+                break;
+            }
+            self.order.pop_front();
+            if self.entries.get(&k).is_some_and(|e| e.at == at) {
+                self.entries.remove(&k);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 impl Task {
@@ -366,8 +514,14 @@ impl Task {
                 Ok(Conn::Tls(ws)) => self.session(*ws).await,
                 Err(()) => Outcome::Error,
             };
-            for (_, reply) in self.pending.drain() {
-                let _ = reply.send(Err(ClientError::Disconnected));
+            for (_, p) in self.pending.drain() {
+                match p.reply {
+                    Some(reply) => {
+                        let _ = reply.send(Err(ClientError::Disconnected));
+                    }
+                    // A resend cut off by the disconnect: resend again on the next connection.
+                    None => self.resend_due = true,
+                }
             }
             let (code, wait) = match outcome {
                 Outcome::Shutdown => break,
@@ -414,6 +568,7 @@ impl Task {
                         let _ = reply.send(Err(ClientError::NotConnected));
                     }
                     Some(Command::Ack(seq)) => self.record_ack(seq),
+                    Some(Command::Confirm(key)) => self.log.confirm(key),
                     Some(Command::Ephemeral { .. } | Command::Abort) => {}
                 },
             }
@@ -490,6 +645,57 @@ impl Task {
     fn encode(&mut self, f: &ClientFrame) -> Bytes {
         f.encode(&mut self.buf);
         self.buf.split().freeze()
+    }
+
+    /// Writes a `Send` and records it as pending.
+    async fn send_frame<S>(
+        &mut self,
+        ws: &mut WebSocketStream<S>,
+        idempotency_key: [u8; 16],
+        mls: Option<MlsCommitRef>,
+        payload: SendPayload,
+        reply: Option<oneshot::Sender<Result<SendStatus, ClientError>>>,
+    ) -> Result<(), ()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let req_id = self.next_req;
+        self.next_req = self.next_req.wrapping_add(1);
+        let f = ClientFrame::Send(SendFrame {
+            req_id,
+            idempotency_key,
+            mls,
+            payload: payload.clone(),
+        });
+        self.pending.insert(
+            req_id,
+            Pending {
+                key: idempotency_key,
+                mls,
+                payload,
+                reply,
+            },
+        );
+        self.write(ws, &f).await
+    }
+
+    /// Resends every logged message after a restore, oldest first, with its original key.
+    async fn resend<S>(&mut self, ws: &mut WebSocketStream<S>) -> Result<(), ()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.log.prune(Instant::now(), &self.cfg);
+        let mut todo: Vec<([u8; 16], Instant)> =
+            self.log.entries.iter().map(|(k, e)| (*k, e.at)).collect();
+        todo.sort_by_key(|(_, at)| *at);
+        for (key, _) in todo {
+            let Some(e) = self.log.entries.get(&key) else {
+                continue;
+            };
+            let (mls, payload) = (e.mls, e.payload.clone());
+            self.send_frame(ws, key, mls, payload, None).await?;
+        }
+        Ok(())
     }
 
     async fn write<S>(&mut self, ws: &mut WebSocketStream<S>, f: &ClientFrame) -> Result<(), ()>
@@ -573,6 +779,7 @@ impl Task {
             }
         };
         if restored {
+            self.resend_due = true;
             let _ = self
                 .events
                 .send(Event::StoreGenerationChanged {
@@ -604,6 +811,12 @@ impl Task {
             .is_err()
         {
             return Outcome::Shutdown;
+        }
+        if self.resend_due {
+            self.resend_due = false;
+            if self.resend(&mut ws).await.is_err() {
+                return Outcome::Error;
+            }
         }
         let mut ack_deadline: Option<Instant> = None;
         loop {
@@ -649,12 +862,12 @@ impl Task {
                         Some(Command::Ephemeral { to, payload }) => {
                             self.write(&mut ws, &ClientFrame::Ephemeral { to, payload }).await
                         }
+                        Some(Command::Confirm(key)) => {
+                            self.log.confirm(key);
+                            Ok(())
+                        }
                         Some(Command::Send { idempotency_key, mls, payload, reply }) => {
-                            let req_id = self.next_req;
-                            self.next_req = self.next_req.wrapping_add(1);
-                            self.pending.insert(req_id, reply);
-                            let f = ClientFrame::Send(SendFrame { req_id, idempotency_key, mls, payload });
-                            self.write(&mut ws, &f).await
+                            self.send_frame(&mut ws, idempotency_key, mls, payload, Some(reply)).await
                         }
                     };
                     if r.is_err() {
@@ -688,8 +901,32 @@ impl Task {
                     .map_err(|_| Outcome::Shutdown)
             }
             ServerFrame::SendResult { req_id, status } => {
-                if let Some(reply) = self.pending.remove(&req_id) {
-                    let _ = reply.send(Ok(status));
+                let Some(p) = self.pending.remove(&req_id) else {
+                    return Ok(());
+                };
+                match (&status, p.reply) {
+                    // A first send: logged once accepted, then answered.
+                    (SendStatus::Accepted, Some(reply)) => {
+                        self.log.insert(p.key, p.mls, p.payload, &self.cfg);
+                        let _ = reply.send(Ok(status));
+                    }
+                    (_, Some(reply)) => {
+                        let _ = reply.send(Ok(status));
+                    }
+                    // A resend: stays in the log when accepted or worth retrying at the next
+                    // restore; anything else needs the app (new device list, new epoch).
+                    (SendStatus::Accepted, None) => {}
+                    (SendStatus::Rejected { reason, .. }, None) if reason.is_retryable() => {}
+                    (_, None) => {
+                        self.log.remove(&p.key);
+                        let _ = self
+                            .events
+                            .send(Event::ResendRefused {
+                                idempotency_key: p.key,
+                                status,
+                            })
+                            .await;
+                    }
                 }
                 Ok(())
             }
@@ -714,4 +951,66 @@ fn check_protocol(p: Option<&str>) -> Result<(), ()> {
 
 fn closed(r: Option<sockudo_ws::error::CloseReason>) -> Outcome {
     r.map_or(Outcome::Error, |r| Outcome::Closed(r.code, r.reason))
+}
+
+#[cfg(test)]
+mod send_log_tests {
+    use super::*;
+
+    fn cfg(capacity: usize, max_age: Duration) -> ClientConfig {
+        let mut c = ClientConfig::new("127.0.0.1:1", "localhost");
+        c.send_log_capacity = capacity;
+        c.send_log_max_age = max_age;
+        c
+    }
+
+    fn empty() -> SendPayload {
+        SendPayload::PerDevice(Vec::new())
+    }
+
+    #[test]
+    fn the_log_is_bounded_by_count_and_age_and_keeps_first_entries() {
+        let c = cfg(3, Duration::from_secs(60));
+        let mut log = SendLog::default();
+        for k in 1..=3u8 {
+            log.insert([k; 16], None, empty(), &c);
+        }
+        // A replayed send keeps its entry (and its place).
+        log.insert([1; 16], None, empty(), &c);
+        assert_eq!(log.len(), 3);
+        // Full: the oldest goes.
+        log.insert([4; 16], None, empty(), &c);
+        assert_eq!(log.len(), 3);
+        assert!(!log.entries.contains_key(&[1; 16]));
+        // A receipt removes one.
+        log.confirm([2; 16]);
+        assert_eq!(log.len(), 2);
+        // Past the maximum age everything goes.
+        log.prune(Instant::now() + Duration::from_secs(61), &c);
+        assert_eq!(log.len(), 0);
+        // A removed key re-sent later is logged again.
+        log.insert([2; 16], None, empty(), &c);
+        assert_eq!(log.len(), 1);
+    }
+
+    #[test]
+    fn a_receipt_before_the_send_result_keeps_the_send_out_of_the_log() {
+        let c = cfg(10, Duration::from_secs(60));
+        let mut log = SendLog::default();
+        // The recipient confirmed before this client read its `SendResult`.
+        log.confirm([7; 16]);
+        log.insert([7; 16], None, empty(), &c);
+        assert_eq!(log.len(), 0);
+        // Remembered once: a later send with that key is logged as usual.
+        log.insert([7; 16], None, empty(), &c);
+        assert_eq!(log.len(), 1);
+        // Early receipts are bounded.
+        for i in 0..=EARLY_RECEIPTS {
+            let mut k = [0u8; 16];
+            k[..8].copy_from_slice(&i.to_be_bytes());
+            log.confirm(k);
+        }
+        assert_eq!(log.early.len(), EARLY_RECEIPTS);
+        assert_eq!(log.early_order.len(), EARLY_RECEIPTS);
+    }
 }

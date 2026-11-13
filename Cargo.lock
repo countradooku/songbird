@@ -3032,13 +3032,31 @@ name = "songbird-admin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-lc-rs",
+ "bytes",
  "clap",
+ "futures-core",
+ "futures-util",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "rcgen",
  "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "songbird-accounts",
+ "songbird-jobs",
+ "songbird-s3",
+ "songbird-surreal",
  "songbird-types",
  "tempfile",
  "time",
+ "tokio",
+ "tokio-rustls",
+ "toml",
+ "webpki-roots 1.0.12",
  "x509-parser",
 ]
 
@@ -3456,7 +3474,9 @@ dependencies = [
 name = "songbird-worker"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "bytes",
+ "futures-util",
  "mimalloc",
  "rustls",
  "rustls-pki-types",
@@ -3470,6 +3490,7 @@ dependencies = [
  "songbird-valkey",
  "tokio",
  "tracing",
+ "webpki-roots 1.0.12",
 ]
 
 [[package]]

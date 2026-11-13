@@ -38,3 +38,12 @@ filter = "info"
 # key = { file = "/path/to/worker.key" }
 # ca = "/path/to/ca.pem"
 # nodes = [{ addr = "127.0.0.1:47950", name = "delivery.dev.songbird.internal" }]
+# Deletion journal (D-0041): required in staging and production, over TLS. In development a
+# locked RustFS bucket can stand in for the off-site backup bucket.
+# [worker.deletion_journal]
+# addr = "127.0.0.1:47900"        # production: "s3.fr-par.scw.cloud:443"
+# bucket = "songbird-backups-dev" # created with Object Lock
+# tls = false                     # production: true (the default)
+# access_key = { env = "RUSTFS_ACCESS_KEY" }
+# secret_key = { env = "RUSTFS_SECRET_KEY" }
+# key = { file = "/path/to/deletion-journal-key.hex" }

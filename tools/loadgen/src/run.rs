@@ -15,9 +15,10 @@ use tokio::sync::watch;
 use crate::checker::{self, MsgId, Received};
 use crate::stats;
 
-/// Payload header: run ID u32, sender u32, counter u64, send time u64 (ns since run epoch).
-/// The run ID tells this run's messages from ones an earlier run left in a mailbox.
-const HEADER: usize = 4 + 4 + 8 + 8;
+/// Payload header: run ID u32, sender u32, counter u64, send time u64 (ns since run epoch),
+/// idempotency key (16 bytes, so the recipient can confirm a delivery receipt; D-0040). The run ID
+/// tells this run's messages from ones an earlier run left in a mailbox.
+const HEADER: usize = 4 + 4 + 8 + 8 + 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Scenario {
@@ -26,6 +27,11 @@ pub(crate) enum Scenario {
     /// Steady traffic while connections are dropped at random, plus one storm that drops every
     /// connection at once halfway through.
     Reconnect,
+    /// Steady traffic across a restore done from outside (`bench/m6/restore-drill.sh`, D-0040):
+    /// recipients confirm delivery receipts to senders, senders resend what has none when the
+    /// store generation grows, and the checker allows what a restore legitimately causes
+    /// (numbering restarts, repeats dropped by message ID) but never a lost message.
+    Restore,
 }
 
 #[derive(Debug, clap::Args)]
@@ -67,6 +73,15 @@ pub(crate) struct Args {
     /// Reconnect scenario: one random connection is dropped every this many milliseconds.
     #[arg(long, default_value_t = 200)]
     chaos_every_ms: u64,
+    /// Restore scenario: the last N devices only receive and come online only after sending
+    /// stops, so a restore during the run loses their whole mailbox and everything they get
+    /// from before it comes from senders' resends.
+    #[arg(long, default_value_t = 0)]
+    offline_recipients: usize,
+    /// Restore scenario, negative control: clients keep no send log, so nothing is resent after
+    /// the restore and the checker must report lost messages.
+    #[arg(long)]
+    no_resend: bool,
 }
 
 pub(crate) fn main(a: &Args) -> anyhow::Result<bool> {
@@ -113,12 +128,13 @@ impl Rng {
     }
 }
 
-fn payload(run: u32, sender: u32, n: u64, sent_ns: u64, size: usize) -> Bytes {
+fn payload(run: u32, sender: u32, n: u64, sent_ns: u64, key: &[u8; 16], size: usize) -> Bytes {
     let mut b = BytesMut::with_capacity(size.max(HEADER));
     b.put_u32(run);
     b.put_u32(sender);
     b.put_u64(n);
     b.put_u64(sent_ns);
+    b.put_slice(key);
     // Padding that does not compress, like the ciphertext real envelopes are (a compressing file
     // system under the store must not flatter it).
     let mut x = ((u64::from(run) << 32) | u64::from(sender)) ^ n.rotate_left(17) ^ sent_ns | 1;
@@ -133,17 +149,24 @@ fn payload(run: u32, sender: u32, n: u64, sent_ns: u64, size: usize) -> Bytes {
 }
 
 /// `None` for a message of another run (or not a load generator message at all).
-fn parse(run: u32, body: &[u8]) -> Option<(MsgId, u64)> {
+fn parse(run: u32, body: &[u8]) -> Option<(MsgId, u64, [u8; 16])> {
     let field = |at: std::ops::Range<usize>| body.get(at);
     let msg_run = u32::from_be_bytes(field(0..4)?.try_into().ok()?);
     let sender = u32::from_be_bytes(field(4..8)?.try_into().ok()?);
     let counter = u64::from_be_bytes(field(8..16)?.try_into().ok()?);
     let sent = u64::from_be_bytes(field(16..24)?.try_into().ok()?);
-    (msg_run == run).then_some(((sender, counter), sent))
+    let key: [u8; 16] = field(24..40)?.try_into().ok()?;
+    (msg_run == run).then_some(((sender, counter), sent, key))
 }
 
 fn ns_since(epoch: Instant) -> u64 {
     u64::try_from(epoch.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// A device's receiving side: connected from the start, or coming online after sending stops.
+enum Device {
+    Online(Arc<Client>, tokio::sync::mpsc::Receiver<Event>),
+    Late(Box<(DeviceKey, ClientConfig)>),
 }
 
 struct SenderOut {
@@ -158,6 +181,15 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
     let keys = load_seeds(&a.seeds, a.devices)?;
     let n = keys.len();
     ensure!(n >= 2, "need at least 2 devices");
+    let late = if a.scenario == Scenario::Restore {
+        a.offline_recipients
+    } else {
+        0
+    };
+    ensure!(
+        late + 2 <= n,
+        "--offline-recipients leaves fewer than 2 senders"
+    );
     let ids: Arc<Vec<DeviceId>> = Arc::new(keys.iter().map(DeviceKey::device).collect());
     let addrs: Vec<&str> = a.addr.split(',').filter(|s| !s.is_empty()).collect();
     ensure!(!addrs.is_empty(), "--addr is empty");
@@ -168,6 +200,9 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
             cfg.backoff.initial = Duration::from_millis(100);
             cfg.backoff.max = Duration::from_secs(5);
             cfg.event_capacity = 4096;
+            if a.no_resend {
+                cfg.send_log_capacity = 0;
+            }
             cfg
         })
         .collect();
@@ -176,6 +211,17 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
     let t_connect = Instant::now();
     let mut clients = Vec::with_capacity(n);
     let mut events = Vec::with_capacity(n);
+    let mut keys = keys;
+    // Offline recipients start later, from their own receiver task.
+    let late_keys: Vec<(DeviceKey, ClientConfig)> = keys
+        .split_off(n - late)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(j, k)| {
+            cfgs.get((n - late + j) % cfgs.len())
+                .map(|c| (k, c.clone()))
+        })
+        .collect();
     let gap = Duration::from_secs_f64(
         1.0 / f64::from(u32::try_from(a.connect_rate.max(1)).unwrap_or(u32::MAX)),
     );
@@ -200,15 +246,36 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
     let clients: Vec<Arc<Client>> = clients.into_iter().map(Arc::new).collect();
 
     let epoch = Instant::now();
+    let send_until = epoch + Duration::from_secs(a.secs);
+    let settle_until = send_until + Duration::from_secs(a.settle_secs);
     let run_id = getrandom::u32()?;
     let delivered_total = Arc::new(AtomicU64::new(0));
     let (stop_recv_tx, stop_recv) = watch::channel(false);
     let mut receivers = Vec::with_capacity(n);
-    for (c, mut ev) in clients.iter().cloned().zip(events) {
+    let receipts = a.scenario == Scenario::Restore;
+    let all_clients = Arc::new(clients.clone());
+    let online = clients
+        .iter()
+        .cloned()
+        .zip(events)
+        .map(|(c, ev)| Device::Online(c, ev));
+    let offline = late_keys.into_iter().map(|kc| Device::Late(Box::new(kc)));
+    for device in online.chain(offline) {
         let total = Arc::clone(&delivered_total);
         let mut stop = stop_recv.clone();
+        let all_clients = Arc::clone(&all_clients);
         receivers.push(tokio::spawn(async move {
+            let (c, mut ev) = match device {
+                Device::Online(c, ev) => (c, ev),
+                Device::Late(kc) => {
+                    let (key, cfg) = *kc;
+                    tokio::time::sleep_until(send_until.into()).await;
+                    let (c, ev) = Client::start(cfg, key, ResumeState::default());
+                    (Arc::new(c), ev)
+                }
+            };
             let mut got = Received::default();
+            let mut seen = std::collections::HashSet::new();
             let mut lat: Vec<u32> = Vec::new();
             let mut failed = None;
             loop {
@@ -216,11 +283,22 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
                     _ = async { stop.wait_for(|s| *s).await.is_ok() } => break,
                     e = ev.recv() => match e {
                         Some(Event::Deliver { seq, envelope }) => {
-                            if let Some((id, sent)) = parse(run_id, &envelope) {
+                            if let Some((id, sent, key)) = parse(run_id, &envelope) {
                                 got.items.push((seq, Some(id)));
                                 let us = ns_since(epoch).saturating_sub(sent) / 1_000;
                                 lat.push(u32::try_from(us).unwrap_or(u32::MAX));
-                                total.fetch_add(1, Ordering::Relaxed);
+                                // Distinct messages: repeats after a restore do not count.
+                                if seen.insert(id) {
+                                    total.fetch_add(1, Ordering::Relaxed);
+                                }
+                                // The end-to-end delivery receipt, straight to the sender's
+                                // client (in a real app it is a message of its own).
+                                if receipts {
+                                    let sender = usize::try_from(id.0).unwrap_or(usize::MAX);
+                                    if let Some(s) = all_clients.get(sender) {
+                                        let _ = s.confirm_delivered(key).await;
+                                    }
+                                }
                             } else {
                                 got.items.push((seq, None));
                             }
@@ -228,20 +306,25 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
                             let _ = c.ack(seq).await;
                         }
                         Some(Event::Failed { code }) => failed = Some(code),
+                        Some(Event::StoreGenerationChanged { .. }) => {
+                            got.restores.push(got.items.len());
+                        }
                         Some(_) => {}
                         None => break,
                     }
                 }
+            }
+            // A late device's client is this task's own (an online one is shared: kept).
+            if let Ok(c) = Arc::try_unwrap(c) {
+                c.close().await;
             }
             (got, lat, failed)
         }));
     }
 
     // Senders.
-    let send_until = epoch + Duration::from_secs(a.secs);
-    let settle_until = send_until + Duration::from_secs(a.settle_secs);
     let per_device = (f64::from(u32::try_from(a.rate).unwrap_or(u32::MAX))
-        / f64::from(u32::try_from(n).unwrap_or(u32::MAX)))
+        / f64::from(u32::try_from(clients.len()).unwrap_or(u32::MAX)))
     .max(1e-3);
     let period = Duration::from_secs_f64(1.0 / per_device);
     let mut senders = Vec::with_capacity(n);
@@ -280,7 +363,7 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
                 key[..8].copy_from_slice(&rng.next().to_be_bytes());
                 key[8..].copy_from_slice(&rng.next().to_be_bytes());
                 let Some(&dev) = ids.get(to) else { break };
-                let body = payload(run_id, me, counter, ns_since(epoch), size);
+                let body = payload(run_id, me, counter, ns_since(epoch), &key, size);
                 let rcpt = vec![Recipient {
                     device: dev,
                     envelope: body,
@@ -408,7 +491,7 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
     println!("settle: {settle_secs:.2}s");
     println!("latency send->deliver (client-observed): {s}");
     println!(
-        "checker: {} expected={} delivered={} lost={} duplicates={} seq_violations={} fifo_violations={} unexpected={} stale_from_earlier_runs={}",
+        "checker: {} expected={} delivered={} lost={} duplicates={} seq_violations={} fifo_violations={} unexpected={} stale_from_earlier_runs={} deduplicated_after_restore={}",
         if report.passed() { "PASS" } else { "FAIL" },
         report.expected,
         report.delivered,
@@ -417,7 +500,8 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
         report.seq_violations,
         report.fifo_violations,
         report.unexpected,
-        report.stale
+        report.stale,
+        report.deduplicated
     );
     Ok(report.passed() && rejected == 0)
 }

@@ -10,7 +10,7 @@ import pathlib
 import re
 import sys
 
-ROLES = ["bastion", "edge", "calls", "data", "worker"]
+ROLES = ["bastion", "edge", "calls", "data", "worker", "verify"]
 
 def main() -> None:
     env = sys.argv[1]

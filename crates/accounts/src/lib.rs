@@ -27,6 +27,7 @@ use songbird_jobs::{Job, ObjectKey};
 use songbird_surreal::Value;
 use songbird_types::{AccountId, DeviceId, JobId};
 
+pub mod journal;
 pub use db::{Db, DbError, SurrealSettings};
 
 /// Ed25519 public key length.
@@ -67,6 +68,9 @@ DEFINE FIELD IF NOT EXISTS job ON outbox TYPE bytes;
 DEFINE FIELD IF NOT EXISTS at ON outbox TYPE datetime;
 DEFINE INDEX IF NOT EXISTS outbox_at ON outbox FIELDS at;
 UPSERT directory:v SET version = version ?? 1 RETURN NONE;
+DEFINE TABLE IF NOT EXISTS store SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS generation ON store TYPE int;
+UPSERT store:g SET generation = generation ?? 1 RETURN NONE;
 ";
 
 /// Registry failures. They carry no identifiers.
@@ -242,6 +246,44 @@ impl Registry {
         first_int(&v).ok_or(RegistryError::Shape)
     }
 
+    /// The store generation sent to clients in `Hello` (PROTOCOL.md §3.6, D-0040).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn store_generation(&self) -> Result<u64, RegistryError> {
+        let v = self
+            .db
+            .query1("SELECT VALUE generation FROM ONLY store:g;", Vec::new())
+            .await?;
+        first_int(&v)
+            .and_then(|g| u64::try_from(g).ok())
+            .ok_or(RegistryError::Shape)
+    }
+
+    /// Increments the store generation after a restore or a loss of the mailbox, to at least the
+    /// current Unix time in milliseconds: a restored registry carries the generation of its
+    /// backup, which can be below one clients have already seen, and `+1` alone could land on it.
+    /// Every value issued is at most the wall clock plus the bumps made within one millisecond,
+    /// so a bump a millisecond later passes all of them. Returns the new generation.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn bump_store_generation(&self) -> Result<u64, RegistryError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let v = self
+            .db
+            .query1(
+                "UPDATE ONLY store:g SET generation = math::max([generation + 1, $now]) RETURN VALUE generation;",
+                vec![var("now", int(now))],
+            )
+            .await?;
+        first_int(&v)
+            .and_then(|g| u64::try_from(g).ok())
+            .ok_or(RegistryError::Shape)
+    }
+
     /// Every enabled device: (device, account, key). Delivery's directory.
     ///
     /// # Errors
@@ -319,6 +361,35 @@ impl Registry {
             .map(|d| {
                 id16(d)
                     .map(DeviceId::from_bytes)
+                    .ok_or(RegistryError::Shape)
+            })
+            .collect()
+    }
+
+    /// A page of account IDs in ID order (the restore runbook's deletion journal pass).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn accounts_page(
+        &self,
+        start: usize,
+        limit: usize,
+    ) -> Result<Vec<AccountId>, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "SELECT VALUE meta::id(id)[0] FROM account ORDER BY id START $s LIMIT $n;",
+                vec![
+                    var("s", Value::from(i64::try_from(start).unwrap_or(i64::MAX))),
+                    var("n", Value::from(i64::try_from(limit).unwrap_or(i64::MAX))),
+                ],
+            )
+            .await?;
+        rows(v)
+            .iter()
+            .map(|d| {
+                id16(d)
+                    .map(AccountId::from_bytes)
                     .ok_or(RegistryError::Shape)
             })
             .collect()

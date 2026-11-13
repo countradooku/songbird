@@ -18,6 +18,7 @@
   roles:
     - secrets
     - data
+    - backup
 
 - name: Calls SFU
   hosts: calls

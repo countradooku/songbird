@@ -272,12 +272,13 @@ impl LiveDirectory {
     }
 }
 
-/// Keeps a [`LiveDirectory`] in step with the registry: polls its version every `every` and
-/// reloads on a change. A failed poll keeps the last snapshot (sessions keep working; a
+/// Keeps a [`LiveDirectory`] and the store generation in step with the registry: polls them
+/// every `every` and reloads the directory on a change. A failed poll keeps the last snapshot (sessions keep working; a
 /// deleted device stays authenticated until the registry is back, which the runbook covers).
 pub async fn follow_registry(
     registry: std::sync::Arc<songbird_accounts::Registry>,
     live: std::sync::Arc<LiveDirectory>,
+    generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
     mut version: i64,
     every: std::time::Duration,
     mut stop: tokio::sync::watch::Receiver<bool>,
@@ -288,6 +289,13 @@ pub async fn follow_registry(
         tokio::select! {
             _ = tick.tick() => {}
             _ = stop.changed() => return,
+        }
+        // The store generation (D-0040): it only ever grows.
+        match registry.store_generation().await {
+            Ok(g) => {
+                generation.fetch_max(g, std::sync::atomic::Ordering::AcqRel);
+            }
+            Err(e) => tracing::warn!(error = %e, "store generation poll failed"),
         }
         let v = match registry.directory_version().await {
             Ok(v) => v,

@@ -14,7 +14,8 @@ variable "environment" {
 
 variable "hosts" {
   description = <<-EOT
-    Host name => roles, size class and address index. Roles: bastion, edge, calls, data, worker.
+    Host name => roles, size class and address index. Roles: bastion, edge, calls, data, worker,
+    verify (backup verification, D-0040: only ever in an environment of its own).
     `index` fixes the host's private address (subnet host number 10 + index). It must never change
     for an existing host: a new address replaces the server. Give new hosts unused indices.
   EOT
@@ -36,14 +37,22 @@ variable "hosts" {
   validation {
     condition = alltrue([
       for h in values(var.hosts) : alltrue([
-        for r in h.roles : contains(["bastion", "edge", "calls", "data", "worker"], r)
+        for r in h.roles : contains(["bastion", "edge", "calls", "data", "worker", "verify"], r)
       ])
     ])
-    error_message = "Unknown role. Allowed: bastion, edge, calls, data, worker."
+    error_message = "Unknown role. Allowed: bastion, edge, calls, data, worker, verify."
   }
   validation {
     condition     = alltrue([for h in values(var.hosts) : contains(["small", "medium", "large"], h.class)])
     error_message = "class must be small, medium or large."
+  }
+  validation {
+    # The verification host holds an identity that decrypts backups: never next to production.
+    condition = (
+      length([for h in values(var.hosts) : h if contains(h.roles, "verify")]) == 0 ||
+      alltrue([for h in values(var.hosts) : length(setintersection(h.roles, ["edge", "calls", "data", "worker"])) == 0])
+    )
+    error_message = "verify runs in an environment of its own: no edge, calls, data or worker hosts beside it."
   }
   validation {
     condition     = length([for h in values(var.hosts) : h if contains(h.roles, "bastion")]) == 1
@@ -91,6 +100,7 @@ locals {
     ]
     data   = []
     worker = []
+    verify = []
   }
 
   hosts = {

@@ -263,7 +263,7 @@ fn backup_cmd(cmd: BackupCmd) -> anyhow::Result<()> {
             BackupCmd::Verify(a) => {
                 let r = backup::load(&a).await?;
                 print_report(&r);
-                if r.orphan_devices > 0 || r.generation == 0 {
+                if r.orphans > 0 || r.generation == 0 {
                     anyhow::bail!("the restored registry is inconsistent");
                 }
                 if r.integrity != backup::Integrity::default() {
@@ -314,8 +314,8 @@ fn backup_cmd(cmd: BackupCmd) -> anyhow::Result<()> {
                         format!(
                             "{}: {} accounts, {} devices; generation {g}; re-deleted {redeleted}; names written twice {}, misdated {}",
                             rep.object,
-                            rep.accounts,
-                            rep.devices,
+                            rep.registered,
+                            rep.device_rows,
                             rep.integrity.overwritten,
                             rep.integrity.misdated
                         )
@@ -372,9 +372,9 @@ fn print_report(r: &backup::Report) {
         "backup {} ({} min old): {} accounts, {} devices, {} devices without an account, generation {}",
         r.object,
         r.age_secs / 60,
-        r.accounts,
-        r.devices,
-        r.orphan_devices,
+        r.registered,
+        r.device_rows,
+        r.orphans,
         r.generation
     );
 }

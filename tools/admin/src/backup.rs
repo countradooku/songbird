@@ -583,9 +583,12 @@ pub(crate) struct LoadArgs {
 pub(crate) struct Report {
     pub(crate) object: String,
     pub(crate) age_secs: u64,
-    pub(crate) accounts: u64,
-    pub(crate) devices: u64,
-    pub(crate) orphan_devices: u64,
+    /// How many account rows were restored (a count, never an identifier).
+    pub(crate) registered: u64,
+    /// How many device rows were restored.
+    pub(crate) device_rows: u64,
+    /// Device rows whose account row is missing (must be 0).
+    pub(crate) orphans: u64,
     pub(crate) generation: u64,
     pub(crate) integrity: Integrity,
 }
@@ -818,9 +821,9 @@ async fn check(store: &StoreArgs, object: String, age_secs: u64) -> Result<Repor
     Ok(Report {
         object,
         age_secs,
-        accounts: n(0),
-        devices: n(1),
-        orphan_devices: n(2),
+        registered: n(0),
+        device_rows: n(1),
+        orphans: n(2),
         generation: registry.store_generation().await?,
         integrity: Integrity::default(),
     })

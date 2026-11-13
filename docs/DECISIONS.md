@@ -100,6 +100,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     GitHub-hosted runners (rare; they sign and attest releases). Docs-only pull requests skip
     `ci` and `codeql`.
   - Reproducible: `deploy/ci-runner/provision.sh` and `add-runner.sh` (idempotent).
+  - Runner units use `KillMode=mixed`, not GitHub's suggested `process`: with a private `/tmp`, a
+    listener that outlived a restart kept taking jobs in a namespace whose `/tmp` was gone (the
+    first CI run's CodeQL and Ansible jobs failed on it).
 - Consequences: no minute limits; CI depends on one VPS (a dead VPS means local checks until it is
   rebuilt from the scripts). The host's other workloads share the kernel. Next: Forgejo
   (self-hosted forge and Forgejo Actions), with GitHub kept as a private mirror; that move is

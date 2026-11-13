@@ -61,7 +61,9 @@ EnvironmentFile=$dir/.env
 ExecStart=$dir/run.sh
 Restart=always
 RestartSec=5
-KillMode=process
+# mixed, not GitHub's suggested `process`: with a private /tmp, a listener that outlives a
+# restart keeps taking jobs in a namespace whose /tmp is gone (found on the first CI run).
+KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=5min
 Slice=ci-runners.slice

@@ -69,11 +69,70 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0041 — Owner delegation of the M6 decisions; the deletion journal
+
+- Date: 2026-11-13
+- Status: accepted
+- Decided by: agent, under the owner's explicit delegation ("i let you chose. think like someone
+  from proton or a big corp"); the owner stated they have only a Hetzner VPS
+- Context: report P02-M6 left five decisions to the owner: the gate, D-0040's four choices, the
+  threat-model row for backups, a deletion journal, and what going live needs.
+- Decisions:
+  1. **M6 gate: approved under delegation, effective when PR #38's CI is green** (the bar the
+     owner applied to M5). An author approving their own gate is weak separation of duties; the
+     green CI on Linux, with the Iggy path and the new live tests, is the independent check.
+  2. **D-0040's choices confirmed:**
+     - RPO 5 minutes and RTO 2 hours for the registry.
+     - **Off-site at a different company from production.** Production is at Hetzner, so the
+       backups go to Scaleway (EU, Object Lock in compliance mode, cents a month at this size).
+       Backups at the production provider fail exactly when they are needed: account suspension,
+       a legal order against the provider, a provider-wide incident. Hetzner Object Storage was
+       not chosen even as a stopgap: nothing is deployed yet, so there is no gap to fill, and a
+       stopgap tends to stay. If production ever moves to Scaleway, the backups move to the
+       other provider (to build then).
+     - The mailbox is never backed up.
+     - The owner's identity is offline. A hardware key is not required: one paper copy in a
+       safe, and one passphrase-encrypted copy (`age -p`) on a USB stick at a second place, the
+       passphrase in the owner's password manager.
+  3. **The threat-model row (deleted accounts in encrypted backups up to 93 days) is approved.**
+     The master prompt's retention (7 daily, 4 weekly, 3 monthly) needs it; what makes it
+     acceptable is that a restore can no longer bring a deleted account back (4).
+  4. **The deletion journal is built.** Erasure (GDPR Art. 17, and the product's promise) must
+     survive a restore.
+     - Before deleting anything, the worker puts an empty tombstone in the backup bucket:
+       `deletions/<time>-<HMAC-SHA256(journal key, account ID)>`, locked in compliance mode for 93
+       days (as long as the oldest backup that can hold the account), expired the day after.
+     - The worker's credential can only put under `deletions/` (bucket policy); it is required
+       in staging and production (configuration validation), so no deployed worker deletes
+       without a tombstone.
+     - `songbird-admin backup restore` reads the journal key **before** restoring (no key: it
+       refuses, unless `--no-journal`, which is audit-logged), then, after the import, starts the
+       deletion again, through the outbox, of every restored account with a tombstone. The
+       worker then clears every store again. Account IDs are random and never reused, so a
+       tombstone's age does not matter; only `--before` (after a compromise) limits which count.
+     - A tombstone holds no account ID: without the journal key a reader of the bucket learns
+       only that some account was deleted at some time. That is a new §1 row, approved here.
+  5. **Going live** needs, from the owner: a Scaleway account (already needed for the OpenTofu
+     state, D-0009), the owner's age public key, and a second small Hetzner server for the
+     verification environment (about EUR 4 a month). Nothing is deployed yet, so nothing is
+     needed now.
+- Evidence: `a_deletion_after_the_backup_survives_the_restore` (RustFS, SurrealDB, age: the
+  account deleted after the backup comes back disabled with its deletion queued, the others
+  untouched; a restore without the key refuses before touching anything);
+  `account_deletion_is_verified_across_every_store` now also checks the tombstone and that it
+  holds no identifier; the backups root's `tofu test` (journal writer limited to
+  `deletions/*`).
+- Consequences: the worker needs the journal's put-only key and the journal key; restores need
+  the journal key (environment SOPS). A restore after a compromise uses `--before` for the
+  journal too: tombstones written by an attacker holding the worker's key could otherwise
+  delete accounts. Deployment templates for the services' own sections (the worker's included)
+  are still to write; until then the validation refuses a deployed worker without the journal.
+
 ## D-0040 — Milestone 6: backups that hold no messages, age-encrypted off-site copies, store generation with client resend
 
 - Date: 2026-11-13
-- Status: built and measured in M6 (report P02-M6); the four owner choices below are the agent's
-  recommendations, **awaiting owner confirmation**
+- Status: accepted; built and measured in M6 (report P02-M6); the four choices below confirmed
+  under the owner's delegation (D-0041)
 - Decided by: agent under the owner's standing instruction ("think like a Proton founder")
 - Context: master prompt §6 and milestone M6. What holds state that cannot be rebuilt changed
   since the prompt was written: the mailbox is Apache Iggy (D-0029) with per-message keys that are

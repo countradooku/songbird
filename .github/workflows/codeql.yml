@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    paths-ignore: ["docs/**", "**/*.md"]
   schedule:
     - cron: "41 3 * * 1"
 
@@ -12,7 +13,7 @@ permissions:
 
 jobs:
   analyze:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, songbird]
     timeout-minutes: 45
     permissions:
       # codeql-action reads the workflow run to build the analysis key; private repositories

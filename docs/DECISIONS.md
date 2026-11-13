@@ -69,6 +69,62 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0040 — Milestone 6: backups that hold no messages, age-encrypted off-site copies, store generation with client resend
+
+- Date: 2026-11-13
+- Status: proposed (design); the four owner choices below are the agent's recommendations,
+  **awaiting owner confirmation**; built and measured in M6
+- Decided by: agent under the owner's standing instruction ("think like a Proton founder")
+- Context: master prompt §6 and milestone M6. What holds state that cannot be rebuilt changed
+  since the prompt was written: the mailbox is Apache Iggy (D-0029) with per-message keys that are
+  never backed up (D-0031); SurrealDB holds the account registry (D-0036); RustFS holds
+  attachments (30 days at most) and, from Prompt 10, users' backup vaults.
+- SurrealDB 4's recommended method (read 2026-11-13 in SurrealDB's "Backups & recovery" and
+  `surreal db export` documentation): logical export (`surreal db export`, restored with
+  `surreal db import`), optionally with volume snapshots; no point-in-time recovery or incremental
+  backups (each export is one moment); copying SurrealKV files is safe only with the datastore
+  closed; a dump holds no access signing keys and no record history (Songbird uses neither).
+- Owner choices (recommendations, awaiting confirmation):
+  1. Targets as proposed in §6: registry RPO ≤ 5 min, RTO ≤ 2 h; vaults RPO ≤ 24 h.
+  2. Off-site, write-once copies at Scaleway Object Storage (Object Lock, EU), confirming D-0009.
+  3. **The mailbox is never backed up.** Its envelopes could not be opened anyway (D-0031: keys
+     never backed up); after a restore clients resend what has no delivery receipt (store
+     generation). No message ciphertext outlives its delivery or 30 days in a backup.
+  4. The age identity that can decrypt backups is held offline by the owner, in two places
+     (a hardware key and a paper copy); never on a server.
+- Decision (design):
+  - **What is backed up:** the SurrealDB registry, by `surreal db export` every 5 minutes, through
+    `songbird-admin backup`. Not backed up: the mailbox (above), Valkey (rebuilds itself; the
+    outbox re-creates critical jobs), attachments (transient ciphertext; a resend after a restore
+    re-uploads), secrets (SOPS in the repository already). Vaults join when Prompt 10 builds them.
+  - **Encryption:** with the reference `age` tool (pinned, checksum-verified), to two recipients:
+    the owner's offline identity and the restore-verification identity (below). No custom crypto.
+  - **Off-site and immutable:** uploaded with S3 Object Lock in compliance mode, retention set
+    per object (5-minute exports 24 h; the first export of each day 7 days, of each week 4 weeks,
+    of each month 3 months), expiry by the bucket's lifecycle rule. The production credential can
+    only put objects: it can neither read, list nor delete them, so a compromised server can
+    neither read old backups (which hold deleted accounts until retention ends) nor destroy them.
+  - **Daily restore verification:** not on production (a decryption key there would let an
+    attacker recover deleted accounts from backups). A separate verification job with its own
+    read-only credential and its own age identity restores the latest export into a scratch
+    SurrealDB, runs consistency checks (counts, references between devices and accounts, a sample
+    of reads), and alerts when the latest verified backup is older than 24 hours. Its identity is
+    rotated by re-encrypting nothing: new exports use the new recipient; old ones age out.
+  - **Store generation:** stored in SurrealDB (`meta:generation`), read by delivery at startup
+    and followed like the directory; every restore, and every loss of the mailbox, increments it
+    (`songbird-admin generation bump`, part of the restore runbook). Clients that see it grow
+    reset their cursor (built in M1) and resend every message without a delivery receipt from the
+    last 30 days, reusing each message's idempotency key (a mailbox that survived replays it; a
+    lost one stores it again); recipients drop repeats by the message ID inside the envelope.
+  - **Drills:** `bench/m6/restore-drill.sh` times a full restore on the compose stack under load:
+    back up, destroy SurrealDB and Iggy data, restore, bump the generation, let clients resend;
+    the delivery checker must pass. The gate's timed drill runs it.
+- Consequences: backups contain account and device metadata only (encrypted, write-once,
+  unreadable from production); recovery of undelivered messages depends on clients (Prompt 4's
+  delivery receipts make it complete; until then the Rust client keeps its own send log). Needs
+  from the owner: confirmation of the four choices, a Scaleway project with Object Storage, and
+  the age identity's public key.
+
 ## D-0038 — Prompt 3 amendment: invite-only registration
 
 - Date: 2026-11-13

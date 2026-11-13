@@ -29,6 +29,8 @@ B=target/release; NAME=delivery.bench.songbird.internal
 # Where the mailbox key stores go (production: the host's persistent disk). KEY_DIR=/dev/shm/...
 # separates the key persister's flushes from the measurement on hosts with slow disk flushes.
 KEY_DIR=${KEY_DIR:-$W}
+# Another delivery build to compare (for example one with --features system-allocator).
+DELIVERY_BIN=${DELIVERY_BIN:-$B/songbird-delivery}
 mkdir -p "$W/results"; chmod 700 "$W"
 # One descriptor per connection on both sides: well above the default 1024.
 ulimit -n 1048576 2>/dev/null || ulimit -n "$(ulimit -Hn)"
@@ -122,7 +124,7 @@ idempotency_secret = { file = "$W/idem-secret" }
 key_dir = "$KEY_DIR/keystore-$1"
 master_key = { file = "$W/master-key" }
 CONF
-  taskset -c "$DELIVERY_CPUS" "$B/songbird-delivery" --config "$W/delivery.toml" >> "$W/delivery.log" 2>&1 &
+  taskset -c "$DELIVERY_CPUS" "$DELIVERY_BIN" --config "$W/delivery.toml" >> "$W/delivery.log" 2>&1 &
   PID=$!
   for _ in $(seq 1 600); do curl -sf http://127.0.0.1:9191/readyz >/dev/null && return 0; sleep 0.1; done
   echo "delivery not ready"; tail -5 "$W/delivery.log"; exit 1

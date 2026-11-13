@@ -6,7 +6,8 @@
 # Uses the node bench/m7/suite.sh set up in <suite work dir> (certificates, devices, its last
 # delivery.toml, Iggy still running). Builds delivery with the `profiling` profile (release with
 # symbols), runs the given load (default: steady at 1,000/s for 40 s), records perf with call
-# stacks for 15 s from second 12, and writes <out prefix>.folded (stacks with counts) and
+# stacks for 15 s from second PROFILE_DELAY (default 12; past the connection ramp-up, which takes
+# about 1.5 s per 1,000 TLS devices), and writes <out prefix>.folded (stacks with counts) and
 # <out prefix>.svg (inferno's flamegraph, when `inferno-flamegraph` is on the PATH).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -24,7 +25,7 @@ taskset -c "$LOADGEN_CPUS" target/release/songbird-loadgen run --addr 127.0.0.1:
   --seeds "$W/keys/seeds.txt" --threads 4 --connect-rate 4000 --admin 127.0.0.1:9191 "$@" \
   > "$OUT.load.txt" 2>&1 &
 L=$!
-sleep 12
+sleep "${PROFILE_DELAY:-12}"
 sudo -n perf record -F 499 --call-graph dwarf,32768 -p "$P" -o "$OUT.perf" -- sleep 15 2>&1 | tail -1
 wait "$L" || true
 grep -E "connect:|sends:|server:|latency|checker:" "$OUT.load.txt"

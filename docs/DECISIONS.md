@@ -108,6 +108,16 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     figure is more than 10 % worse. CI keeps the deterministic gates (allocations per message,
     the checker in every live test); timing gates need a quiet, fixed machine, so they run where
     the suite runs, not on shared CI runners.
+- Results (report P02-M7):
+  - **io_uring against epoll, measured again** (kernel 7.0, arm64, `bench/runtime-echo`): epoll
+    9% faster on 1 core and 16% on 4, with lower p99. **epoll stays** (D-0028); io_uring adds
+    kernel attack surface for a gain that is, at best, a few percent on other machines.
+  - **mimalloc against glibc:** equal at light load, mimalloc's p99 27% lower at 80,000/s.
+    **mimalloc stays.**
+  - **ACK checkpoints** no longer take an Iggy write of their own under traffic; the beta's p99
+    store latency dropped from ≤3 ms to ≤2 ms.
+  - The 24-hour soak did not run (the owner's Mac cannot stay up a day). Proposed: on the beta
+    server before launch, or on an hourly Hetzner server.
 - Consequences: the targets can be checked against definitions that are written down; the
   reference-hardware run (durable storage, x86) remains a go-live step.
 

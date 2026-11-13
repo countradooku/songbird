@@ -11,7 +11,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 W=$(realpath "$1"); HOURS=${2:-24}
-SECS=$(( HOURS * 3600 )); PEAK_RATE=${PEAK_RATE:-1000}
+SECS=${SOAK_SECS:-$(( HOURS * 3600 ))}; PEAK_RATE=${PEAK_RATE:-1000}
 DELIVERY_CPUS=${DELIVERY_CPUS:-0-5}; LOADGEN_CPUS=${LOADGEN_CPUS:-8-11}
 B=target/release; NAME=delivery.bench.songbird.internal
 ulimit -n 1048576 2>/dev/null || ulimit -n "$(ulimit -Hn)"

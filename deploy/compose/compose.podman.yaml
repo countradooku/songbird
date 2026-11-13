@@ -1,0 +1,12 @@
+# Development only, applied by `cargo xtask compose` when the container engine is Podman (never
+# on servers: Ansible runs Iggy under Docker with iggy-seccomp.json, D-0029).
+#
+# Iggy 0.10 needs io_uring. Under Podman two things block it:
+#   - SELinux (Fedora's podman machine) denies io_uring to container_t: `label=disable` turns
+#     SELinux labelling off for this one container;
+#   - compose sends the seccomp profile's contents where Podman's compatibility API expects a
+#     path ("file name too long"), so iggy-seccomp.json cannot be applied: seccomp is unconfined.
+# Everything else stays: no-new-privileges, published on 127.0.0.1 only.
+services:
+  iggy:
+    security_opt: !override ["no-new-privileges:true", "seccomp=unconfined", "label=disable"]

@@ -721,6 +721,16 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     has no client certificates).
   - SurrealDB keeps its mailbox backend for development and comparison; deployments require Iggy
     (configuration validation).
+  - **Amendment (2026-11-13, owner): Podman for development.** Under Podman (the macOS development
+    machine's engine) Iggy could not start: Fedora's SELinux policy denies io_uring to containers,
+    and compose sends `iggy-seccomp.json`'s contents where Podman's compatibility API expects a
+    path. `cargo xtask compose` detects Podman (`docker version` names the Podman Engine;
+    `SONGBIRD_COMPOSE_PODMAN=0|1` forces it) and adds `deploy/compose/compose.podman.yaml`, which
+    runs the Iggy container alone with `label=disable` and `seccomp=unconfined`, keeping
+    `no-new-privileges` and the loopback-only port. Development only: servers run Iggy under
+    Docker with the strict profile (Ansible, unchanged). Evidence: on Podman 6.1.4 (Fedora CoreOS
+    VM, kernel 7.2.7) all six compose services healthy; the Iggy mailbox suite (16), the M5 gate
+    on Iggy (2) and the invariant tests on Iggy (16) pass.
 - Evidence (correctness): `crates/mailbox/tests/iggy_live.rs` (10 tests: seq rules, idempotency
   across partitions, 1,000-device shared body, MLS ordering, 32 concurrent senders gap-free,
   restart rebuilds state and fences the old writer, compaction keeps counters across a restart,

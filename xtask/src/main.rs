@@ -620,36 +620,49 @@ fn dev_env(force: bool) -> Result {
     Ok(())
 }
 
+/// Development override for Podman (`deploy/compose/compose.podman.yaml`, D-0029).
+const COMPOSE_PODMAN: &str = "deploy/compose/compose.podman.yaml";
+
+/// Whether `docker` is Podman's (its `docker version` names the Podman Engine).
+/// `SONGBIRD_COMPOSE_PODMAN=1` or `=0` forces the answer.
+fn engine_is_podman() -> bool {
+    match std::env::var("SONGBIRD_COMPOSE_PODMAN").as_deref() {
+        Ok("1") => return true,
+        Ok("0") => return false,
+        _ => {}
+    }
+    Command::new("docker")
+        .arg("version")
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("Podman Engine"))
+}
+
+/// `docker compose` with the compose file(s) and `.env`.
+fn compose_cmd() -> Command {
+    let mut c = Command::new("docker");
+    c.args(["compose", "-f", "deploy/compose/compose.yaml"]);
+    if engine_is_podman() {
+        c.args(["-f", COMPOSE_PODMAN]);
+    }
+    c.args(["--env-file", ".env"]);
+    c
+}
+
 fn compose(args: &[String]) -> Result {
-    let file = "deploy/compose/compose.yaml";
     match args.first().map(String::as_str) {
         Some("up") => {
             dev_env(false)?;
-            run(Command::new("docker").args([
-                "compose",
-                "-f",
-                file,
-                "--env-file",
-                ".env",
-                "up",
-                "-d",
-                "--wait",
-                "--wait-timeout",
-                "180",
-            ]))
+            if engine_is_podman() {
+                eprintln!(
+                    "podman detected: Iggy runs without SELinux labelling and unconfined seccomp \
+                     (development only, {COMPOSE_PODMAN})"
+                );
+            }
+            run(compose_cmd().args(["up", "-d", "--wait", "--wait-timeout", "180"]))
         }
-        Some("down") => run(Command::new("docker").args([
-            "compose",
-            "-f",
-            file,
-            "--env-file",
-            ".env",
-            "down",
-            "-v",
-        ])),
-        Some("ps") => {
-            run(Command::new("docker").args(["compose", "-f", file, "--env-file", ".env", "ps"]))
-        }
+        Some("down") => run(compose_cmd().args(["down", "-v"])),
+        Some("ps") => run(compose_cmd().arg("ps")),
         _ => Err("usage: cargo xtask compose up|down|ps".into()),
     }
 }

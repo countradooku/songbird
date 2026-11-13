@@ -220,11 +220,22 @@ envelopes per device by default; sends to a full mailbox are rejected with reaso
 
 ### 3.6 Store generation
 
-`Hello.store_generation` grows by one at every restore from backup. A client that sees it grow
-resends every message from the last 30 days that has no end-to-end delivery receipt yet, and
-re-asserts its device registration and keys; recipients drop duplicates by the message ID inside
-the encrypted payload (milestone 6 implements the resend; the Rust client already reports the
-change as `StoreGenerationChanged`).
+`Hello.store_generation` grows at every restore from backup and at every loss of the mailbox
+(D-0040: it jumps to at least the restore time in milliseconds, so it always exceeds every value
+clients have seen, even when the registry itself was restored from an older backup). A client
+that sees it grow:
+
+1. resets its delivery cursor to 0 (the mailbox's `seq` counters may restart);
+2. resends every message from its send log, in the order first sent, with each message's original
+   idempotency key. A mailbox that survived the restore recognises the key and stores nothing
+   twice; a lost one stores the message again. The log holds every accepted send until the
+   message's end-to-end delivery receipt arrives (`Client::confirm_delivered`) or 30 days pass;
+3. re-asserts its device registration and keys (Prompt 3).
+
+Recipients drop repeats by the message ID inside the encrypted payload. A resend the server
+refuses for a reason that needs the app (a changed device list, an MLS epoch that moved on) leaves
+the log and is reported (`ResendRefused`), so the app re-encrypts it. The mailbox itself is never
+backed up (D-0040). Tests: `tests/e2e/tests/restore.rs`.
 
 ### 3.7 Ephemeral events
 

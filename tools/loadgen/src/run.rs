@@ -16,7 +16,7 @@ use crate::checker::{self, MsgId, Received};
 use crate::stats;
 
 /// Payload header: run ID u32, sender u32, counter u64, send time u64 (ns since run epoch),
-/// idempotency key [16] (so the recipient can confirm a delivery receipt, D-0040). The run ID
+/// idempotency key (16 bytes, so the recipient can confirm a delivery receipt; D-0040). The run ID
 /// tells this run's messages from ones an earlier run left in a mailbox.
 const HEADER: usize = 4 + 4 + 8 + 8 + 16;
 

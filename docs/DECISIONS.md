@@ -24,7 +24,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 - Public channels: build or not (Prompt 5).
 - Inactivity deletion period (Prompt 3).
 - WhatsApp interop legal gate (Prompt 14).
-- Second EU provider: Scaleway proposed (D-0009). Confirm, or name another.
+- Second EU provider (D-0009): Hetzner only for now (D-0042); the Scaleway code stays dormant.
 - Public domains: Songbird's client endpoints and the web domain for proxy links (D-0011). The
   upstream names in `deploy/proxy/proxy.example.toml` are placeholders until then.
 - Licence for the repository (README says all rights reserved until chosen).
@@ -69,6 +69,49 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0042 — Hetzner only: off-site backups and OpenTofu state at Hetzner Object Storage
+
+- Date: 2026-11-13
+- Status: accepted (supersedes the provider choice in D-0040 and D-0041)
+- Decided by: owner ("we dont use scaleway. only hetzner for now"); the agent designed the
+  Hetzner setup
+- Context: D-0040 and D-0041 put the off-site backups, and D-0009 the OpenTofu state of Hetzner
+  environments, at Scaleway. The owner uses Hetzner only.
+- Evidence (Hetzner's documentation, read 2026-11-13: Object Storage FAQ "Buckets & objects" and
+  "S3 credentials"):
+  - Object Lock with retention in **compliance mode**, set at bucket creation; versioning;
+    lifecycle policies; console "Protection" against bucket deletion.
+  - A key reaches every bucket **of its own project**; across projects, a bucket policy grants
+    individual keys specific actions (`arn:aws:iam:::user/p<project>:<access key>`; `NotAction`
+    is not supported). Keys are created in the console only.
+  - Bucket settings take up to 15 minutes to apply everywhere.
+- Decision:
+  - **Backups:** Hetzner Object Storage in **Helsinki** (`hel1`), another location than the
+    servers, so a site loss cannot take both.
+    - Project `songbird-<env>-backups`: the bucket, and one key, the owner's admin key.
+    - Project `songbird-<env>-backup-keys`: the writer, journal and verifier keys, and nothing
+      else. The bucket policy grants writer and journal only `PutObject`/`PutObjectRetention`
+      under `registry/` and `deletions/`, the verifier only reads and lists. So the data host and
+      the worker still cannot read, list, delete or reconfigure, as in D-0040 and D-0041.
+    - Compliance-mode Object Lock, versioned, expiry per prefix one day after its lock, console
+      Protection on.
+    - `deploy/bin/backups-up <env> apply` configures it (owner-run, AWS CLI against Hetzner's S3
+      API; Hetzner Object Storage has no OpenTofu resources), and `check` proves with each key
+      that Hetzner enforces every limit, the admin key unable to delete a locked version
+      included, before the bucket is used. `deploy/bin/backups-policy selftest` runs in
+      `validate-iac`. The Scaleway OpenTofu root is removed.
+  - **OpenTofu state** of every environment: Hetzner Object Storage in Helsinki, in a project
+    that holds only state.
+  - **Code defaults:** `hel1.your-objectstorage.com:443`, region `hel1` (Ansible, `songbird-admin`,
+    the worker's journal).
+  - The Scaleway environment code (D-0009) stays, dormant, for a second provider later.
+- Consequences: backups, state and servers share one provider and account. Different projects,
+  keys and locations cover a compromised server, a lost location and operator error; they do not
+  cover losing the Hetzner account itself (suspension, a legal order against Hetzner). Accepted by
+  the owner for now. Cheap cover, optional: the owner downloads the newest monthly backup with the
+  verifier key to an encrypted offline disk once a month (runbook step 10). Revisit when a second
+  provider is added.
+
 ## D-0041 — Owner delegation of the M6 decisions; the deletion journal
 
 - Date: 2026-11-13
@@ -83,8 +126,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
      green CI on Linux, with the Iggy path and the new live tests, is the independent check.
   2. **D-0040's choices confirmed:**
      - RPO 5 minutes and RTO 2 hours for the registry.
-     - **Off-site at a different company from production.** Production is at Hetzner, so the
-       backups go to Scaleway (EU, Object Lock in compliance mode, cents a month at this size).
+     - **Superseded by D-0042 (owner: Hetzner only).** ~~Off-site at a different company from
+       production.~~ Production is at Hetzner, so the backups go to Scaleway (EU, Object Lock in compliance mode, cents a month at this size).
        Backups at the production provider fail exactly when they are needed: account suspension,
        a legal order against the provider, a provider-wide incident. Hetzner Object Storage was
        not chosen even as a stopgap: nothing is deployed yet, so there is no gap to fill, and a
@@ -112,8 +155,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
        tombstone's age does not matter; only `--before` (after a compromise) limits which count.
      - A tombstone holds no account ID: without the journal key a reader of the bucket learns
        only that some account was deleted at some time. That is a new §1 row, approved here.
-  5. **Going live** needs, from the owner: a Scaleway account (already needed for the OpenTofu
-     state, D-0009), the owner's age public key, and a second small Hetzner server for the
+  5. **Going live** needs, from the owner (provider per D-0042): the Hetzner backup projects
+     and keys, the owner's age public key, and a second small Hetzner server for the
      verification environment (about EUR 4 a month). Nothing is deployed yet, so nothing is
      needed now.
 - Evidence: `a_deletion_after_the_backup_survives_the_restore` (RustFS, SurrealDB, age: the
@@ -146,6 +189,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 - Owner choices (recommendations, awaiting confirmation):
   1. Targets as proposed in §6: registry RPO ≤ 5 min, RTO ≤ 2 h; vaults RPO ≤ 24 h.
   2. Off-site, write-once copies at Scaleway Object Storage (Object Lock, EU), confirming D-0009.
+     **Superseded by D-0042: Hetzner Object Storage, another project and location.**
   3. **The mailbox is never backed up.** Its envelopes could not be opened anyway (D-0031: keys
      never backed up); after a restore clients resend what has no delivery receipt (store
      generation). No message ciphertext outlives its delivery or 30 days in a backup.

@@ -10,8 +10,8 @@ how long the recovery took against the target, and the delivery checker's verdic
 
 ## Not drilled yet
 
-- The off-site path end to end (Scaleway bucket, Object Lock enforcement, put-only key): needs the
-  owner's Scaleway project (`deploy/bin/backups-up`).
+- The off-site path end to end at Hetzner (Object Lock enforcement, put-only keys):
+  `deploy/bin/backups-up <env> apply`, then `check`, once the backup projects exist.
 - A whole-environment rebuild at the second provider plus restore, timed against the 2-hour RTO
   (provider-switch.md; Prompt 1's drill did not include a restore).
 - The daily verification on a real verification host.

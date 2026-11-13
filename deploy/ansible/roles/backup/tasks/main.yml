@@ -11,7 +11,7 @@
       - (secrets.backup_s3_bucket | default('CHANGE_ME')) not in ['', 'CHANGE_ME']
       - (secrets.backup_age_recipients | default([]) | select('match', '^age1[02-9ac-hj-np-z]{58}$') | list | length) >= 2
     fail_msg: >-
-      backups are not configured for {{ songbird_env }}: run deploy/bin/backups-up {{ songbird_env }}
+      backups are not configured for {{ songbird_env }}: run deploy/bin/backups-up {{ songbird_env }} apply
       and set backup_* in its SOPS file (docs/RUNBOOKS/backup-and-restore.md)
     quiet: true
   register: backup_configured

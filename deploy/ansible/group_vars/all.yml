@@ -83,5 +83,6 @@ admin_cidrs: "{{ (lookup('community.sops.sops', songbird_secrets_file) | from_ya
 # Off-site registry backups (D-0040; bucket, keys and age recipients per environment in SOPS:
 # backup_s3_bucket, backup_s3_access_key, backup_s3_secret_key, backup_surreal_password,
 # backup_age_recipients). The bucket and its keys come from deploy/bin/backups-up.
-backup_s3_endpoint: "s3.fr-par.scw.cloud:443"
-backup_s3_region: fr-par
+# Hetzner Object Storage in Helsinki: another location than the servers (D-0042).
+backup_s3_endpoint: "hel1.your-objectstorage.com:443"
+backup_s3_region: hel1

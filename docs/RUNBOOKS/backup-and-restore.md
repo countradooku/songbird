@@ -1,13 +1,14 @@
 # Backups, restore and the store generation
 
-Design: D-0040. Targets: registry RPO ≤ 5 minutes, RTO ≤ 2 hours. Tools: `songbird-admin backup`,
+Design: D-0040, D-0041 (deletion journal), D-0042 (Hetzner). Targets: registry RPO ≤ 5 minutes, RTO ≤ 2 hours. Tools: `songbird-admin backup`,
 `songbird-admin generation`, `deploy/bin/backups-up`, `deploy/ansible/backup-verify.yml`.
 Drill: `bench/m6/restore-drill.sh` (results in [drills.md](drills.md)).
 
 What exists, in one paragraph: every 5 minutes the data host exports the SurrealDB registry as a
 read-only `VIEWER` user, encrypts the export with age to two recipients (the owner's offline
-identity, the verification identity) and puts it in the environment's off-site bucket at Scaleway
-with Object Lock in compliance mode (frequent exports 25 h, the first of each day 8 days, of each
+identity, the verification identity) and puts it in the environment's off-site bucket at Hetzner
+Object Storage in Helsinki (another location than the servers, a project of its own) with Object
+Lock in compliance mode (frequent exports 25 h, the first of each day 8 days, of each
 week 29 days, of each month 93 days). The data host can only put: it cannot read, list or delete a
 backup and holds no key that decrypts one. A host in an environment of its own restores the newest
 backup daily into a throwaway database and checks it. **The mailbox is never backed up**: after a
@@ -20,9 +21,8 @@ lines of an incident into its report.
 
 ## Setup (once per environment, owner)
 
-Before going live (D-0041): a Scaleway account (backups live at a different company from
-production, Hetzner; the account also holds the OpenTofu state, D-0009), and a second small
-Hetzner server for the verification environment. Nothing else needs buying.
+Everything is at Hetzner (D-0042). Before going live: a second small Hetzner server for the
+verification environment. Nothing else needs buying.
 
 1. Create the age identities, offline, on a machine that is not a server:
    - the **owner identity**: `age-keygen -o owner.key` on an offline machine. Keep two copies in
@@ -32,29 +32,42 @@ Hetzner server for the verification environment. Nothing else needs buying.
      to a server; at a restore, decrypt it on the operator's machine only for the duration.
    - the **verification identity**: `age-keygen -o verify.key`; it goes only into
      `deploy/secrets/<env>.backup-verify.sops.yaml` (owner-only recipients, `deploy/bin/sops-config`).
-2. `deploy/secrets/backups.sops.yaml` (owner-only): `tofu_state_passphrase`,
-   `state_access_key_hetzner`, `state_secret_key_hetzner`, `scw_access_key`, `scw_secret_key`,
-   `scw_organization_id` (an Organization-level key) and `admin_principal` (`user_id:<uuid>`).
-3. Choose the bucket name in `deploy/tofu/environments/<env>.backups.tfvars`, then
-   `deploy/bin/backups-up <env>`. It creates the project, bucket, lock, lifecycle, both
-   applications and their keys.
-4. Into `deploy/secrets/<env>.sops.yaml`: `backup_s3_bucket`, the **writer** key as
+2. In the Hetzner Console, create two projects that hold nothing of production:
+   - `songbird-<env>-backups`: one S3 key pair, the **admin** key (the only key that can change
+     the bucket);
+   - `songbird-<env>-backup-keys`: three S3 key pairs, **writer**, **journal** and **verifier**,
+     and nothing else. A key reaches no bucket of another project unless that bucket's policy
+     grants it, and the policy grants each only its job.
+3. `deploy/secrets/backups.sops.yaml` (owner-only), for `<env>`: `<env>_bucket` (a name of your
+   choice, global at Hetzner), `<env>_location` (`hel1`, not the servers' location), the four key
+   pairs (`<env>_admin_access_key` / `_secret_key`, and the same for `writer`, `journal`,
+   `verifier`) and `<env>_keys_project_id` (from the backup-keys project's console URL).
+4. `deploy/bin/backups-up <env> apply`: creates the bucket with Object Lock, sets compliance-mode
+   retention (1 day by default; `songbird-admin` sets each object's by tier), the lifecycle
+   (each prefix expires a day after its lock) and the bucket policy
+   (`deploy/bin/backups-policy`). Then, in the console, turn on the bucket's **Protection**.
+5. Wait 15 minutes (Hetzner applies bucket settings gradually), then
+   `deploy/bin/backups-up <env> check`. It proves with each key that the writer can put but not
+   read, list, delete, make public or change the policy; the journal can put only under
+   `deletions/`; the verifier can read and list but not write; and that even the admin key cannot
+   delete a locked version. **Do not use the bucket until it passes.**
+6. Into `deploy/secrets/<env>.sops.yaml`: `backup_s3_bucket`, the **writer** key as
    `backup_s3_access_key` / `backup_s3_secret_key`, the **journal** key as
    `journal_s3_access_key` / `journal_s3_secret_key` (the worker's `[worker.deletion_journal]`),
    and `backup_age_recipients: [<owner age1…>, <verify age1…>]`. `backup_surreal_password` and
    `deletion_journal_key` were generated by `secrets-init`.
-5. Into `deploy/secrets/<env>.backup-verify.sops.yaml`: `backup_s3_bucket`,
+7. Into `deploy/secrets/<env>.backup-verify.sops.yaml`: `backup_s3_bucket`,
    `backup_verify_identity` (the `AGE-SECRET-KEY-…` line), and the **verifier** key as
    `backup_verify_s3_access_key` / `backup_verify_s3_secret_key`.
-6. Deploy the environment (`env-up` or `rollout`): the `backup` role creates the read-only user,
+8. Deploy the environment (`env-up` or `rollout`): the `backup` role creates the read-only user,
    installs the timer and runs one backup; the play fails if that backup fails.
-7. Build the verification environment (`deploy/bin/env-up <env>-verify <cloud>`; it has one host
-   with the `bastion` and `verify` roles), then as the owner:
+9. Build the verification environment (`deploy/bin/env-up <env>-verify hetzner`; one host with
+   the `bastion` and `verify` roles), then as the owner:
    `ansible-playbook -i inventory/generated/<env>-verify.yml backup-verify.yml -e verified_env=<env>`.
    It runs one verification at the end.
-8. Check that the provider enforces what tofu configured, once, with the writer key: a `GET`, a
-   `LIST`, a `DELETE` and a `PUT` with `x-amz-acl: public-read` are all refused; a `DELETE` with the
-   owner's key on a locked version is refused until its retention date.
+10. Optional, and cheap: once a month, download the newest monthly backup with the verifier key to
+    an encrypted disk you keep offline. It is the copy that survives losing the Hetzner account
+    itself (D-0042).
 
 ## Backups failing (timer)
 
@@ -65,8 +78,8 @@ Hetzner server for the verification environment. Nothing else needs buying.
   1. `journalctl -u songbird-backup.service -n 50` on the data host.
   2. SurrealDB refused: check the `backup` user (re-run the `backup` role; it redefines the user
      with `OVERWRITE`).
-  3. S3 refused: key revoked or bucket policy changed: compare with `deploy/tofu/envs/backups`
-     (`backups-up` re-applies it).
+  3. S3 refused: key revoked or bucket policy changed: `deploy/bin/backups-up <env> apply`
+     re-applies it, then `check`.
   4. `systemctl start songbird-backup.service` and wait for success.
 - Verification: a new object under `registry/frequent/`, then the next verification passes.
 
@@ -102,7 +115,7 @@ Hetzner server for the verification environment. Nothing else needs buying.
   2. Note the time. Save the audit log and `journalctl -u songbird-surrealdb` for the report.
 - Recovery (about 10 minutes plus 1 minute per million accounts; measured in drills.md):
   1. Fetch the backup to the operator machine with the verifier key, or with the owner's key if
-     the verification host is unavailable (`aws s3 cp` against `s3.fr-par.scw.cloud`, or
+     the verification host is unavailable (`aws s3 cp --endpoint-url https://hel1.your-objectstorage.com`, or
      `songbird-admin backup restore … --s3-addr … --s3-tls` with `BACKUP_S3_*` set to a reading
      key). For operator error, restore from **before** the mistake: `--before
      <YYYYMMDDTHHMMSSZ>` (by the time the server stored each backup, which the uploader cannot
@@ -116,7 +129,7 @@ Hetzner server for the verification environment. Nothing else needs buying.
      ```bash
      SURREAL_PASS=… DELETION_JOURNAL_KEY=… songbird-admin backup restore --addr <data>:8000 --host surrealdb.<fqdn> \
        --tls-ca ca.crt --namespace songbird --database songbird \
-       --s3-addr s3.fr-par.scw.cloud:443 --s3-tls --s3-bucket <bucket> \
+       --s3-addr hel1.your-objectstorage.com:443 --s3-tls --s3-region hel1 --s3-bucket <bucket> \
        --identity owner.key --age age --max-age-hours 2160 \
        --confirm songbird/songbird --audit-log ./admin-audit.jsonl
      ```
@@ -170,7 +183,8 @@ Hetzner server for the verification environment. Nothing else needs buying.
   the originals (restores read the first version; verification reports them).
 - If the verification host or its SOPS file is compromised: the attacker can read every backup
   still retained (registry metadata of up to 93 days, including deleted accounts). Revoke the
-  verifier key (`backups-up` after deleting the key in the console), create a new verification
+  verifier key (delete it in the backup-keys project, create a new one, update
+  `backups.sops.yaml`, `backups-up <env> apply` and `check`), create a new verification
   identity, replace it in `backup_age_recipients`, redeploy. Old backups stay readable to the old
   identity until they expire; record the exposure.
 

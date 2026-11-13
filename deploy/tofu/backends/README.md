@@ -7,5 +7,7 @@ keys `state_access_key` and `state_secret_key`) and are exported by `deploy/bin/
 State is also encrypted client-side by OpenTofu (`encryption` block, passphrase in SOPS), so the
 storage provider cannot read it.
 
-Keep state for an environment at a *different* provider from the one it describes, so losing a
-provider never loses the state needed to rebuild elsewhere.
+All state is at Hetzner Object Storage in Helsinki (`hel1`), in a Hetzner project that holds
+nothing but OpenTofu state, so its keys reach nothing else and a server project's keys cannot
+reach it (D-0042: Hetzner only for now). Servers run in other locations, so losing a location
+never loses the state needed to rebuild in another.

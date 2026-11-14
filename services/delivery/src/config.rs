@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Deserialize;
-use songbird_proto::Limits;
 use songbird_service::HasCommon;
 use songbird_types::SecretRef;
 use songbird_types::config::{CommonConfig, Validate, Validator};
@@ -245,7 +244,15 @@ pub struct ClusterSettings {
     /// is in. Empty: no zones.
     #[serde(default)]
     pub zone: String,
+    /// Services that only send, admitted to the node link for the store of a send and nothing
+    /// else (D-0044): `["api."]` when `api` serves `PUT /v1/messages`. Default: none.
+    #[serde(default)]
+    pub senders: Vec<String>,
 }
+
+/// Prefixes that may be listed in `[delivery.cluster] senders` (D-0044): services that link the
+/// send path. Never `delivery.` (those are full members) or `push.`, `admin.` (they never send).
+pub const SENDER_PREFIXES: [&str; 3] = ["api.", "calls.", "worker."];
 
 const fn default_lease_ttl_ms() -> u64 {
     3_000
@@ -272,6 +279,13 @@ impl Validate for ClusterSettings {
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
             "zone",
             "must be [a-z0-9-], at most 32 bytes",
+        );
+        v.check(
+            self.senders
+                .iter()
+                .all(|p| SENDER_PREFIXES.contains(&p.as_str())),
+            "senders",
+            "may list only api., calls. and worker.",
         );
     }
 }
@@ -808,78 +822,8 @@ impl Validate for IggySettings {
     }
 }
 
-/// `[delivery.limits]`: frame limits (see `songbird_proto::Limits`).
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct LimitsConfig {
-    /// Largest envelope.
-    pub max_envelope_bytes: usize,
-    /// Most recipients per send.
-    pub max_recipients: usize,
-    /// Largest `Send` frame.
-    pub max_send_bytes: usize,
-    /// Largest ephemeral payload.
-    pub max_ephemeral_bytes: usize,
-    /// Largest control-frame body.
-    pub max_control_bytes: usize,
-}
-
-impl Default for LimitsConfig {
-    fn default() -> Self {
-        let l = Limits::DEFAULT;
-        Self {
-            max_envelope_bytes: l.max_envelope_bytes,
-            max_recipients: l.max_recipients,
-            max_send_bytes: l.max_send_bytes,
-            max_ephemeral_bytes: l.max_ephemeral_bytes,
-            max_control_bytes: l.max_control_bytes,
-        }
-    }
-}
-
-impl LimitsConfig {
-    /// As protocol limits.
-    #[must_use]
-    pub const fn limits(&self) -> Limits {
-        Limits {
-            max_envelope_bytes: self.max_envelope_bytes,
-            max_recipients: self.max_recipients,
-            max_send_bytes: self.max_send_bytes,
-            max_ephemeral_bytes: self.max_ephemeral_bytes,
-            max_control_bytes: self.max_control_bytes,
-        }
-    }
-}
-
-impl Validate for LimitsConfig {
-    fn validate(&self, v: &mut Validator) {
-        v.check(
-            (1..=1024 * 1024).contains(&self.max_envelope_bytes),
-            "max_envelope_bytes",
-            "must be in 1..=1048576",
-        );
-        v.check(
-            (1..=u16::MAX.into()).contains(&self.max_recipients),
-            "max_recipients",
-            "must be in 1..=65535",
-        );
-        v.check(
-            (64..=16 * 1024 * 1024).contains(&self.max_send_bytes),
-            "max_send_bytes",
-            "must be in 64..=16777216",
-        );
-        v.check(
-            (1..=64 * 1024).contains(&self.max_ephemeral_bytes),
-            "max_ephemeral_bytes",
-            "must be in 1..=65536",
-        );
-        v.check(
-            (256..=64 * 1024).contains(&self.max_control_bytes),
-            "max_control_bytes",
-            "must be in 256..=65536",
-        );
-    }
-}
+/// `[delivery.limits]`: frame limits (the send path's, shared with `api`).
+pub use songbird_send::LimitsConfig;
 
 /// `[delivery.session]`.
 #[derive(Debug, Clone, Deserialize)]
@@ -1078,10 +1022,37 @@ impl Validate for SessionConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use songbird_proto::Limits;
 
     fn load(text: &str) -> Result<DeliveryConfig, String> {
         songbird_types::config::load_from_parts(text, Vec::<(String, String)>::new(), "SONGBIRD")
             .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn cluster_senders_admit_only_services_that_send() {
+        let cluster = |senders: &[&str]| ClusterSettings {
+            node_name: "delivery.a.songbird.internal".into(),
+            link_listen: "127.0.0.1:7000".parse().unwrap(),
+            link_advertise: "127.0.0.1:7000".parse().unwrap(),
+            cert_chain: "chain.pem".into(),
+            key: SecretRef::Env("KEY".into()),
+            ca: "ca.pem".into(),
+            lease_ttl_ms: 3_000,
+            zone: String::new(),
+            senders: senders.iter().map(|s| (*s).to_owned()).collect(),
+        };
+        let violations = |c: &ClusterSettings| {
+            let mut v = Validator::default();
+            c.validate(&mut v);
+            v.violations().len()
+        };
+        assert_eq!(violations(&cluster(&[])), 0);
+        assert_eq!(violations(&cluster(&["api.", "worker."])), 0);
+        // A full member, a service that never sends, or a prefix without its dot: refused.
+        for bad in ["delivery.", "push.", "admin.", "api", ""] {
+            assert_eq!(violations(&cluster(&[bad])), 1, "{bad}");
+        }
     }
 
     const DEV: &str = r#"

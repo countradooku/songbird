@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use rustls_pki_types::pem::PemObject as _;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
-use songbird_api::config::{ApiConfig, ApiSettings, S3Settings, TlsSettings};
+use songbird_api::config::{ApiConfig, ApiSettings, S3Settings, SendSettings, TlsSettings};
+use songbird_api::messages::{Messages, SendStack};
 use songbird_api::{ApiMetrics, App};
 use songbird_service::telemetry::Metrics;
 use songbird_service::{BoxError, Ctx, Service};
@@ -69,11 +70,99 @@ fn s3_config(s: &S3Settings) -> Result<songbird_s3::Config, BoxError> {
     Ok(cfg)
 }
 
+/// `PUT /v1/messages`: the send path over a send-only mailbox client (stores on the partition
+/// owners over node links, D-0044), a publish-only router, the registry's directory and push
+/// jobs. Returns the endpoint and its background tasks (directory follower, push batcher).
+async fn build_messages(
+    s: &SendSettings,
+    registry: &Arc<songbird_accounts::Registry>,
+    queue: &Arc<songbird_jobs::Queue>,
+    metrics: &ApiMetrics,
+    stop: &watch::Receiver<bool>,
+) -> Result<(Messages, Vec<tokio::task::JoinHandle<()>>), BoxError> {
+    let chain = std::fs::read(&s.cert_chain)?;
+    let key = s.key.resolve()?;
+    let ca = std::fs::read(&s.ca)?;
+    let link_tls =
+        songbird_link::LinkTls::from_pem(&chain, key.expose().as_bytes(), &ca, &s.node_name)?;
+    let mailbox =
+        songbird_mailbox::iggy::IggySender::connect(songbird_mailbox::iggy::IggySenderConfig {
+            stream: s.stream.clone(),
+            topic: s.topic.clone(),
+            partitions: s.partitions,
+            idempotency_secret: *s.idempotency_secret.resolve_key32()?,
+            timeout: Duration::from_millis(s.timeout_ms),
+            link_tls,
+            valkey: s.valkey.client()?,
+            refresh: Duration::from_millis(s.lease_ttl_ms / 3),
+        })
+        .await
+        .map_err(|_| "mailbox partition owners unreachable (Valkey)")?;
+    tracing::info!(
+        known = mailbox.known(),
+        partitions = s.partitions,
+        "send path: partition owners read"
+    );
+    let cluster_secret = *s.cluster_secret.resolve_key32()?;
+    let router =
+        songbird_router::valkey::ValkeyRouter::publisher(s.valkey.client()?, &cluster_secret)
+            .await?;
+    // The directory, followed like the delivery nodes follow it.
+    let version = registry.directory_version().await?;
+    let directory = Arc::new(songbird_send::LiveDirectory::from(
+        songbird_send::Directory::from_accounts(
+            registry
+                .load_directory()
+                .await?
+                .into_iter()
+                .map(|(d, a, k)| (d, k, a)),
+        ),
+    ));
+    let follower = tokio::spawn(songbird_send::directory::follow_registry(
+        Arc::clone(registry),
+        Arc::clone(&directory),
+        // The store generation is the delivery nodes' business; followed here only because the
+        // follower updates both.
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        version,
+        Duration::from_millis(s.directory_poll_ms),
+        stop.clone(),
+    ));
+    let (push, rx) = songbird_send::Pusher::new(metrics.push.clone());
+    let pusher = tokio::spawn(songbird_send::push::run(
+        Arc::clone(queue),
+        rx,
+        Duration::from_millis(s.push_debounce_ms),
+        metrics.push.clone(),
+        stop.clone(),
+    ));
+    let messages = Messages {
+        path: Box::new(SendStack {
+            directory,
+            mailbox,
+            router,
+            push,
+            metrics: metrics.send.clone(),
+        }),
+        limits: s.limits.limits(),
+        sends_per_sec: s.sends_per_sec,
+        send_burst: s.send_burst,
+        rate_key: songbird_api::messages::rate_key(&cluster_secret)
+            .map_err(|_| "rate-limit key derivation failed")?,
+        metrics: metrics.send.clone(),
+    };
+    Ok((messages, vec![follower, pusher]))
+}
+
 /// Builds the application from settings (connects to every store).
 ///
 /// # Errors
 /// A store is unreachable or a secret unreadable.
-async fn build(s: &ApiSettings, metrics: ApiMetrics) -> Result<Arc<App>, BoxError> {
+async fn build(
+    s: &ApiSettings,
+    metrics: ApiMetrics,
+    stop: &watch::Receiver<bool>,
+) -> Result<(Arc<App>, Vec<tokio::task::JoinHandle<()>>), BoxError> {
     let db = songbird_accounts::Db::connect(s.surrealdb.config()?).await?;
     let registry = Arc::new(songbird_accounts::Registry::connect(db).await?);
     let s3 = songbird_s3::Client::new(s3_config(&s.s3)?)?;
@@ -87,17 +176,27 @@ async fn build(s: &ApiSettings, metrics: ApiMetrics) -> Result<Arc<App>, BoxErro
     let hot = songbird_valkey::ValkeyConn::connect(s.valkey_hot.client()?).await?;
     let mut push_public = [0u8; 32];
     hex::decode_to_slice(&s.push_public_key, &mut push_public)?;
-    Ok(Arc::new(App {
+    let queue = Arc::new(queue);
+    let (messages, tasks) = match &s.send {
+        Some(send) => {
+            let (m, t) = build_messages(send, &registry, &queue, &metrics, stop).await?;
+            (Some(m), t)
+        }
+        None => (None, Vec::new()),
+    };
+    let app = Arc::new(App {
         server_name: s.server_name.clone(),
         registry,
         s3,
-        queue: Arc::new(queue),
+        queue,
         hot,
         push_public,
         push_index_secret: *s.push_index_secret.resolve_key32()?,
         limits: s.attachments,
         metrics,
-    }))
+        messages,
+    });
+    Ok((app, tasks))
 }
 
 impl Service for Api {
@@ -125,8 +224,8 @@ impl Service for Api {
             tracing::info!("no [api] section: idle (development)");
             return songbird_service::idle_until_shutdown(ctx).await;
         };
-        let app = build(&settings, self.metrics).await?;
         let (stop_tx, stop_rx) = watch::channel(false);
+        let (app, send_tasks) = build(&settings, self.metrics, &stop_rx).await?;
         let listener = tokio::net::TcpListener::bind(settings.listen).await?;
         tracing::info!(tls = self.tls.is_some(), "api listening");
         let server = tokio::spawn(songbird_api::server::serve(
@@ -179,6 +278,9 @@ impl Service for Api {
         let _ = stop_tx.send(true);
         let _ = server.await;
         let _ = relay.await;
+        for t in send_tasks {
+            let _ = t.await;
+        }
         if let Some(a) = admin {
             let _ = a.await;
         }

@@ -8,6 +8,7 @@
 //! | `PUT /v1/attachments/<id>` | The upload, streamed to `RustFS`; exactly the granted size |
 //! | `GET /v1/attachments/<id>` | A download; each completed one counts a fetch, the last deletes |
 //! | `DELETE /v1/account` | Deletes the device's account from every store (outbox job) |
+//! | `PUT /v1/messages` | A WebSocket `Send` frame, for clients with no open socket; answers its `SendResult` ([`messages`]) |
 //!
 //! Every request is signed by the device ([`auth`]); there are no tokens or cookies. Bodies are
 //! bounded before they are read. Responses carry status codes and small JSON; errors say nothing
@@ -19,6 +20,7 @@ pub mod admin;
 pub mod auth;
 pub mod client;
 pub mod config;
+pub mod messages;
 pub mod server;
 
 use std::pin::Pin;
@@ -66,6 +68,10 @@ pub struct ApiMetrics {
     pub deletions: Counter,
     /// Requests that failed on a dependency (database, Valkey, object store).
     pub errors: Counter,
+    /// The send path's counters (`PUT /v1/messages`), registered as `api_*`.
+    pub send: songbird_send::SendMetrics,
+    /// Push wake-ups from `PUT /v1/messages`.
+    pub push: songbird_send::PushMetrics,
 }
 
 impl ApiMetrics {
@@ -105,10 +111,20 @@ impl ApiMetrics {
                 "Requests failed on a dependency",
                 &self.errors,
             ),
+            (
+                "api_push_jobs",
+                "Push jobs enqueued for offline devices",
+                &self.push.jobs,
+            ),
+            (
+                "api_push_dropped",
+                "Push wake-ups dropped (the message stays in the mailbox)",
+                &self.push.dropped,
+            ),
         ] {
             m.register(name, help, c.clone())?;
         }
-        Ok(())
+        self.send.register(m, "api")
     }
 }
 
@@ -132,6 +148,8 @@ pub struct App {
     pub limits: config::AttachmentLimits,
     /// Metrics.
     pub metrics: ApiMetrics,
+    /// `PUT /v1/messages` (absent: the endpoint answers 503).
+    pub messages: Option<messages::Messages>,
 }
 
 impl std::fmt::Debug for App {
@@ -313,6 +331,7 @@ impl App {
                 let (device, _) = self.authenticate_json(req).await?;
                 self.delete_account(device).await
             }
+            (&Method::PUT, "/v1/messages", None) => self.put_message(req).await,
             _ => Err(Refusal::Status(StatusCode::NOT_FOUND)),
         }
     }
@@ -349,6 +368,103 @@ impl App {
             .verify(&parts.method, parts.uri.path(), &parts.headers, &hash)
             .await?;
         Ok((device, body))
+    }
+
+    /// A signed body read only after its signature verified: the signature covers the declared
+    /// digest, so the headers alone authenticate the request (time, nonce, key, not disabled);
+    /// then at most the declared `Content-Length` (itself at most `max`) is read and must match
+    /// the digest.
+    async fn authenticate_body(
+        &self,
+        req: Request<Incoming>,
+        max: usize,
+    ) -> Result<(DeviceId, Bytes), Refusal> {
+        let (parts, body) = req.into_parts();
+        let length = parts
+            .headers
+            .get(CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<usize>().ok())
+            .ok_or(Refusal::Status(StatusCode::LENGTH_REQUIRED))?;
+        if length == 0 || length > max {
+            return Err(Refusal::Status(StatusCode::PAYLOAD_TOO_LARGE));
+        }
+        let mut declared = [0u8; 32];
+        parts
+            .headers
+            .get(auth::CONTENT_SHA256)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| hex::decode_to_slice(v, &mut declared).ok())
+            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+        let device = self
+            .verify(&parts.method, parts.uri.path(), &parts.headers, &declared)
+            .await?;
+        let body = Limited::new(body, length)
+            .collect()
+            .await
+            .map_err(|_| Refusal::Status(StatusCode::PAYLOAD_TOO_LARGE))?
+            .to_bytes();
+        if body.len() != length || auth::body_sha256(&body) != declared {
+            return Err(Refusal::Status(StatusCode::UNAUTHORIZED));
+        }
+        Ok((device, body))
+    }
+
+    /// `PUT /v1/messages` ([`messages`]).
+    async fn put_message(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let received = std::time::Instant::now();
+        let m = self
+            .messages
+            .as_ref()
+            .ok_or(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
+        let (device, body) = self.authenticate_body(req, m.limits.max_send_bytes).await?;
+        let frame =
+            messages::decode(&body, &m.limits).ok_or(Refusal::Status(StatusCode::BAD_REQUEST))?;
+        let req_id = frame.req_id;
+        let status = match self.rate(m, &device).await {
+            Ok(0) => m.path.submit(&device, frame, received).await,
+            Ok(wait_us) => {
+                m.metrics.sends_rejected.inc();
+                messages::rate_limited(wait_us)
+            }
+            Err(()) => {
+                // Fail closed: without the limiter, nothing is sent.
+                self.metrics.errors.inc();
+                m.metrics.sends_rejected.inc();
+                songbird_proto::frame::SendStatus::Rejected {
+                    reason: songbird_proto::frame::RejectReason::Unavailable,
+                    retry_after_ms: songbird_send::RETRY_MS,
+                }
+            }
+        };
+        let mut r = Response::new(
+            Full::new(messages::result_frame(req_id, status))
+                .map_err(|e| match e {})
+                .boxed_unsync(),
+        );
+        r.headers_mut().insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        Ok(r)
+    }
+
+    /// The device's send rate (GCRA in `valkey-hot`): 0 if allowed, else microseconds to wait.
+    async fn rate(&self, m: &messages::Messages, device: &DeviceId) -> Result<u64, ()> {
+        let interval_us = 1_000_000 / u64::from(m.sends_per_sec.max(1));
+        let tolerance_us = interval_us.saturating_mul(u64::from(m.send_burst.max(1)));
+        self.hot
+            .query::<i64>(
+                redis::cmd("EVAL")
+                    .arg(messages::GCRA)
+                    .arg(1)
+                    .arg(messages::rate_record(&m.rate_key, device))
+                    .arg(interval_us)
+                    .arg(tolerance_us),
+            )
+            .await
+            .map(|w| u64::try_from(w).unwrap_or(0))
+            .map_err(|_| ())
     }
 
     async fn verify(

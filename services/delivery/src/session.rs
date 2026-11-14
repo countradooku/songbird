@@ -10,8 +10,8 @@
 //! wake-up writes everything it produced and flushes once.
 //!
 //! Hot-path rules applied here:
-//! - Store before acknowledge (invariant 1): `SendResult` is written only after
-//!   `Mailbox::store_batch` returned; routing happens after that.
+//! - Store before acknowledge (invariant 1): `SendResult` is written only after the send path
+//!   (`songbird-send`) stored the send durably; routing happens after that.
 //! - The router never blocks on this session (bounded inbox, lag flag); this session never
 //!   blocks on anyone else. A socket write that makes no progress for `write_timeout` closes the
 //!   connection with 4100 (invariant 5); the device catches up from the mailbox on reconnect.
@@ -22,9 +22,9 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use sockudo_ws::{Message, WebSocketStream};
-use songbird_mailbox::{Mailbox, MailboxError, MlsCommit, NewEnvelope, Payload, StoreRequest};
+use songbird_mailbox::Mailbox;
 use songbird_proto::auth::CHANNEL_BINDING_LEN;
-use songbird_proto::frame::{self, RejectReason, SendFrame, SendPayload, SendStatus};
+use songbird_proto::frame::{self, RejectReason, SendFrame, SendStatus};
 use songbird_proto::{ClientFrame, CloseCode, NONCE_LEN, PROTOCOL_VERSION, ServerFrame, control};
 use songbird_router::{InboxSizes, Live, Routed, Router};
 use songbird_types::DeviceId;
@@ -567,15 +567,18 @@ impl<M: Mailbox, R: Router> Session<M, R> {
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        if !matches!(status, SendStatus::Accepted) {
-            self.shared.metrics.sends_rejected.inc();
-        }
         ServerFrame::SendResult { req_id, status }.encode(&mut self.buf);
         let b = self.buf.split().freeze();
         let t = self.shared.config.session.write_timeout();
         self.send_now(ws, b, t).await
     }
 
+    /// One `Send` frame through the shared send path (`songbird-send`, D-0037), in the order
+    /// the hot path needs: rate limit, check and store (durable), `SendResult` queued, route,
+    /// then one flush for both. Splitting `store` from `route` (instead of one `send` call) is
+    /// what keeps the acknowledgement ahead of routing in the same write, as before the
+    /// extraction; the path is built from borrows and the recipient scratch list is this
+    /// session's, so the M3 allocation budget is unchanged.
     async fn on_send<S>(
         &mut self,
         ws: &mut WebSocketStream<S>,
@@ -585,79 +588,24 @@ impl<M: Mailbox, R: Router> Session<M, R> {
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        let reject = |reason, retry_after_ms| SendStatus::Rejected {
-            reason,
-            retry_after_ms,
-        };
         if let Err(wait) = self.sends.take(now) {
             let ms = u32::try_from(wait.as_millis()).unwrap_or(u32::MAX).max(1);
-            return self
-                .reply(ws, s.req_id, reject(RejectReason::RateLimited, ms))
-                .await;
-        }
-        // Bounded by max_recipients (checked by the decoder).
-        let mut devices = std::mem::take(&mut self.scratch);
-        devices.clear();
-        devices.extend(s.payload.devices().copied());
-        let duplicate = has_duplicate_device(&devices);
-        // Device lists (master prompt §5, `send`): every device of each addressed account, no
-        // device that does not exist. The client re-encrypts for the corrected list.
-        let mismatch = if duplicate {
-            None
-        } else {
-            self.shared
-                .directory
-                .load()
-                .check_devices(&self.device, &devices)
-                .err()
-        };
-        self.scratch = devices;
-        if duplicate {
-            return self
-                .reply(ws, s.req_id, reject(RejectReason::DuplicateRecipient, 0))
-                .await;
-        }
-        if let Some(mm) = mismatch {
-            let ids = |v: Vec<DeviceId>| v.iter().map(|d| d.as_bytes().to_vec()).collect();
-            let status = SendStatus::DeviceMismatch(control::DeviceMismatch {
-                missing: ids(mm.missing),
-                extra: ids(mm.extra),
-                stale: Vec::new(),
-            });
+            // The path counts its own refusals; this one is the session's.
+            self.shared.metrics.sends_rejected.inc();
+            let status = SendStatus::Rejected {
+                reason: RejectReason::RateLimited,
+                retry_after_ms: ms,
+            };
             return self.reply(ws, s.req_id, status).await;
         }
-        let req = store_request(&s);
-        let recipients = req.payload.len();
+        // Borrows only (no `Arc` clone: a shared reference count touched by every core on every
+        // send would be a contended cache line).
+        let path = self.shared.send_path();
         // Invariant 1: store first; only then acknowledge and route.
-        let outcome = match self.shared.mailbox.store(req).await {
+        let outcome = match path.store(&self.device, &s, now, &mut self.scratch).await {
             Ok(o) => o,
-            Err(MailboxError::IdempotencyConflict) => {
-                return self
-                    .reply(ws, s.req_id, reject(RejectReason::IdempotencyConflict, 0))
-                    .await;
-            }
-            Err(MailboxError::StaleEpoch) => {
-                return self
-                    .reply(ws, s.req_id, reject(RejectReason::StaleEpoch, 0))
-                    .await;
-            }
-            Err(MailboxError::Full | MailboxError::Unavailable) => {
-                self.shared.metrics.mailbox_errors.inc();
-                return self
-                    .reply(ws, s.req_id, reject(RejectReason::Unavailable, RETRY_MS))
-                    .await;
-            }
+            Err(status) => return self.reply(ws, s.req_id, status).await,
         };
-        let m = &self.shared.metrics;
-        // `now` is when the frame was read: this is the server's store latency (no allocation).
-        m.store_seconds.observe(now.elapsed());
-        if outcome.replayed {
-            m.sends_replayed.inc();
-        } else {
-            m.sends_accepted.inc();
-            m.envelopes_stored
-                .inc_by(u64::try_from(recipients).unwrap_or(u64::MAX));
-        }
         frame::encode_send_accepted(&mut self.buf, s.req_id);
         let ack = self.buf.split().freeze();
         let t = self.shared.config.session.write_timeout();
@@ -666,107 +614,7 @@ impl<M: Mailbox, R: Router> Session<M, R> {
             Ok(Err(_)) => return Err(Exit::Gone),
             Err(_) => return Err(Exit::Close(CloseCode::SlowConsumer, Some(RETRY_MS))),
         }
-        self.route_stored(s.payload, outcome.seqs).await;
+        path.route(s.payload, outcome.seqs).await;
         self.flush(ws, t).await
-    }
-
-    /// Routes a stored send to its recipients' sessions, wherever they are.
-    async fn route_stored(&self, payload: SendPayload, seqs: Vec<u64>) {
-        let m = &self.shared.metrics;
-        // Route even a replayed send: if the original route was lost (crash between store and
-        // route), this retry delivers it now instead of at the next safety sweep; a duplicate
-        // is dropped by the recipient session's cursor.
-        let routes: Vec<(DeviceId, Bytes)> = match payload {
-            SendPayload::PerDevice(rs) => rs.into_iter().map(|r| (r.device, r.envelope)).collect(),
-            // One buffer for every recipient: `Bytes` clones share it (no copy per device).
-            SendPayload::Shared { devices, body } => {
-                devices.into_iter().map(|d| (d, body.clone())).collect()
-            }
-        };
-        for ((device, envelope), seq) in routes.into_iter().zip(seqs) {
-            // `seq` 0: a replayed send already acknowledged by this device (the mailbox can no
-            // longer read it, D-0031); nothing to route.
-            if seq == 0 {
-                continue;
-            }
-            let live = Live { seq, envelope };
-            match self.shared.router.route(&device, live).await {
-                Routed::Queued => {}
-                Routed::Lagged => {
-                    m.routes_lagged.inc();
-                }
-                // A wake-up for the device (debounced, never blocking this session).
-                Routed::Offline => {
-                    m.routes_offline.inc();
-                    self.shared.push.offline(device);
-                }
-            }
-        }
-    }
-}
-
-/// The mailbox request for a decoded `Send` (payload bytes are shared, not copied).
-fn store_request(s: &SendFrame) -> StoreRequest {
-    let payload = match &s.payload {
-        SendPayload::PerDevice(rs) => Payload::PerDevice(
-            rs.iter()
-                .map(|r| NewEnvelope {
-                    device: r.device,
-                    envelope: r.envelope.clone(),
-                })
-                .collect(),
-        ),
-        SendPayload::Shared { devices, body } => Payload::Shared {
-            devices: devices.clone(),
-            body: body.clone(),
-        },
-    };
-    StoreRequest {
-        idempotency_key: Some(s.idempotency_key),
-        mls: s.mls.map(|c| MlsCommit {
-            group: c.group,
-            epoch: c.epoch,
-        }),
-        payload,
-    }
-}
-
-/// Whether a device appears twice. Pairwise for the common small sends (no allocation; a
-/// per-send `HashSet` was 8 % of user CPU in the M1 flamegraph), sorting above that.
-fn has_duplicate_device(devices: &[DeviceId]) -> bool {
-    const PAIRWISE_MAX: usize = 32;
-    if devices.len() <= PAIRWISE_MAX {
-        return devices.iter().enumerate().any(|(i, d)| {
-            devices
-                .get(i + 1..)
-                .unwrap_or_default()
-                .iter()
-                .any(|o| o == d)
-        });
-    }
-    // Bounded by max_recipients (checked by the decoder).
-    let mut ids: Vec<&[u8; 16]> = devices.iter().map(DeviceId::as_bytes).collect();
-    ids.sort_unstable();
-    ids.windows(2).any(|w| w.first() == w.get(1))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn check(ids: &[u8]) -> bool {
-        let devices: Vec<DeviceId> = ids.iter().map(|b| DeviceId::from_bytes([*b; 16])).collect();
-        has_duplicate_device(&devices)
-    }
-
-    #[test]
-    fn duplicate_detection_small_and_large() {
-        assert!(!check(&[1, 2, 3]));
-        assert!(check(&[1, 2, 1]));
-        let many: Vec<u8> = (0..100).collect();
-        assert!(!check(&many));
-        let mut dup = many.clone();
-        dup.push(57);
-        assert!(check(&dup));
     }
 }

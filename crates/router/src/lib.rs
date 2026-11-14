@@ -149,6 +149,33 @@ pub trait Router: Send + Sync + 'static {
     fn close_everywhere(&self, device: &DeviceId) -> impl Future<Output = ()> + Send;
 }
 
+/// A shared router is a router (several services in one process share one in tests).
+impl<R: Router> Router for Arc<R> {
+    fn attach(&self, device: DeviceId, sizes: InboxSizes) -> impl Future<Output = Inbox> + Send {
+        R::attach(self, device, sizes)
+    }
+
+    fn detach(&self, device: &DeviceId, conn: u64) -> impl Future<Output = ()> + Send {
+        R::detach(self, device, conn)
+    }
+
+    fn route(&self, device: &DeviceId, live: Live) -> impl Future<Output = Routed> + Send {
+        R::route(self, device, live)
+    }
+
+    fn route_ephemeral(
+        &self,
+        device: &DeviceId,
+        payload: Bytes,
+    ) -> impl Future<Output = Routed> + Send {
+        R::route_ephemeral(self, device, payload)
+    }
+
+    fn close_everywhere(&self, device: &DeviceId) -> impl Future<Output = ()> + Send {
+        R::close_everywhere(self, device)
+    }
+}
+
 /// Routes within one process, across all its cores.
 ///
 /// The device directory is a lock-free concurrent map (`papaya`, D-0032: of papaya, scc and

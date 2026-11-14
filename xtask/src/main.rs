@@ -443,19 +443,24 @@ fn fuzz(args: &[String]) -> Result {
         eprintln!("--- fuzz {t} ({secs} s)");
         let corpus = format!("fuzz/corpus/{t}");
         std::fs::create_dir_all(&corpus).map_err(|e| e.to_string())?;
-        run(cargo_nightly().args([
-            "fuzz",
-            "run",
-            "--fuzz-dir",
-            "fuzz",
-            "--target",
-            &target,
-            t,
-            &corpus,
-            "--",
-            &format!("-max_total_time={secs}"),
-            "-rss_limit_mb=2048",
-        ]))?;
+        // ASan keeps every distinct allocation stack forever; the recursive decoders produce
+        // distinct stacks without end, so full-depth stacks grew a 10-minute run past 2 GiB
+        // (nightly run 43618568338, live heap 25 MB). Ten frames keep reports useful and RSS flat.
+        run(cargo_nightly()
+            .env("ASAN_OPTIONS", "malloc_context_size=10")
+            .args([
+                "fuzz",
+                "run",
+                "--fuzz-dir",
+                "fuzz",
+                "--target",
+                &target,
+                t,
+                &corpus,
+                "--",
+                &format!("-max_total_time={secs}"),
+                "-rss_limit_mb=2048",
+            ]))?;
     }
     Ok(())
 }

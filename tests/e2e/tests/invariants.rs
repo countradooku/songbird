@@ -668,7 +668,7 @@ async fn graceful_drain_closes_with_4200() {
         }
         other => panic!("unexpected {other:?}"),
     }
-    assert!(t0.elapsed() < Duration::from_secs(3));
+    assert!(t0.elapsed() < Duration::from_secs(3) * songbird_e2e::SLOW);
 }
 
 /// Overload: beyond the accept rate, connections are closed with 4101 and a retry hint.

@@ -43,6 +43,8 @@ pub(crate) const fn as_f64(x: u64) -> f64 {
     x as f64
 }
 
+// Sanitizer builds keep the system allocator: ASan and TSan see only allocations they intercept.
+#[cfg(not(songbird_sanitizer))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

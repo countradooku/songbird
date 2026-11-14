@@ -31,6 +31,11 @@ use tokio::task::JoinHandle;
 /// Server name used by every test server.
 pub const SERVER_NAME: &str = "delivery.test";
 
+/// Factor for wall-clock budgets in tests: `cargo xtask sanitize` builds (`songbird_sanitizer`)
+/// run 5-15 times slower under the sanitizers. A test keeps its meaning (well within a timeout),
+/// only the scale changes.
+pub const SLOW: u32 = if cfg!(songbird_sanitizer) { 10 } else { 1 };
+
 /// Default settings for tests (development environment, loopback, ephemeral port).
 #[must_use]
 pub fn settings() -> DeliverySettings {

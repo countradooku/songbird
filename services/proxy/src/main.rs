@@ -23,6 +23,8 @@ use songbird_proxy::config::{ENV_PREFIX, ProxyConfig};
 use songbird_proxy::link::ProxyLink;
 use songbird_proxy::relay::{Relay, tls_acceptor};
 
+// Sanitizer builds keep the system allocator: ASan and TSan see only allocations they intercept.
+#[cfg(not(songbird_sanitizer))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

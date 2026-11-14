@@ -195,6 +195,11 @@ One subsection per component. Each threat names its mitigation and the test or p
 
 ## 6. Open risks
 
+- The nightly TSan run suppresses one report inside tokio's I/O driver: `ScheduledIo::set_readiness`
+  and `ScheduledIo::wake` from `dispatch_event`, touching state that `TcpStream::new` allocated on
+  another thread and handed over through epoll (`xtask/tsan-suppressions.txt`). No Songbird frame is involved, but if it is a
+  real tokio bug the suppression hides it. Re-check on every tokio upgrade and drop it once tokio
+  or the TSan runtime models the hand-off.
 - No certificate revocation for internal leaves yet; mitigated by 30-day lifetimes and intermediate
   rotation (runbook `mtls-rotation.md`).
 - SurrealDB and Iggy have server TLS and password authentication but no client-certificate

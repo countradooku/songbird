@@ -27,7 +27,8 @@ use tokio::sync::watch;
 
 // mimalloc (master prompt §4). `--features system-allocator` builds with the system allocator
 // instead, only to measure the two against each other (M7, D-0043).
-#[cfg(not(feature = "system-allocator"))]
+// Sanitizer builds keep the system allocator too: ASan and TSan see only allocations they intercept.
+#[cfg(not(any(feature = "system-allocator", songbird_sanitizer)))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

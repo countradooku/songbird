@@ -2701,6 +2701,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rustls-webpki",
+ "songbird-types",
  "thiserror",
  "tokio",
  "tokio-rustls",
@@ -2763,6 +2764,7 @@ dependencies = [
  "papaya",
  "redis",
  "songbird-types",
+ "songbird-valkey",
  "thiserror",
  "tokio",
  "tracing",
@@ -2794,6 +2796,17 @@ dependencies = [
  "thiserror",
  "toml",
  "zeroize",
+]
+
+[[package]]
+name = "songbird-valkey"
+version = "0.1.0"
+dependencies = [
+ "redis",
+ "serde",
+ "songbird-types",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

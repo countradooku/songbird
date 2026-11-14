@@ -3,6 +3,7 @@
 #![no_main]
 use bytes::Bytes;
 use libfuzzer_sys::fuzz_target;
+use songbird_proto::frame::SendPayload;
 use songbird_proto::{ClientFrame, Limits};
 
 const SMALL: Limits = Limits {
@@ -19,8 +20,12 @@ fuzz_target!(|data: &[u8]| {
         if let Ok(f) = ClientFrame::decode(&msg, &limits) {
             assert!(msg.len() <= limits.max_message_bytes());
             if let ClientFrame::Send(s) = &f {
-                assert!(!s.recipients.is_empty() && s.recipients.len() <= limits.max_recipients);
-                assert!(s.recipients.iter().all(|r| r.envelope.len() <= limits.max_envelope_bytes));
+                assert!(!s.payload.is_empty() && s.payload.len() <= limits.max_recipients);
+                let fits = |len: usize| len > 0 && len <= limits.max_envelope_bytes;
+                match &s.payload {
+                    SendPayload::PerDevice(r) => assert!(r.iter().all(|r| fits(r.envelope.len()))),
+                    SendPayload::Shared { body, .. } => assert!(fits(body.len())),
+                }
             }
             // Protobuf bodies may have non-canonical encodings; hand-encoded frames may not.
             if !matches!(f, ClientFrame::Auth(_)) {

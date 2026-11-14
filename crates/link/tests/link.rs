@@ -22,6 +22,10 @@ use songbird_link::{
 };
 use tokio::sync::watch;
 
+/// Factor for wall-clock budgets: `cargo xtask sanitize` builds (`songbird_sanitizer`) run 5-15
+/// times slower; a test keeps its meaning, only the scale changes.
+const SLOW: u32 = if cfg!(songbird_sanitizer) { 10 } else { 1 };
+
 struct Ca {
     pem: String,
     issuer: Issuer<'static, KeyPair>,
@@ -222,9 +226,13 @@ async fn a_stopped_server_serves_nothing_more_even_on_open_connections() {
     // A stopped node (shut down, or crashed in tests) must not keep acknowledging work, such as
     // a key-store copy its owner would then count on.
     let _ = stop.send(true);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(100) * SLOW).await;
     // And the caller learns it at once, not when its timeout runs out.
     let t = std::time::Instant::now();
-    assert!(c.call(b"cd", Duration::from_secs(5)).await.is_err());
-    assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+    assert!(c.call(b"cd", Duration::from_secs(5) * SLOW).await.is_err());
+    assert!(
+        t.elapsed() < Duration::from_secs(1) * SLOW,
+        "{:?}",
+        t.elapsed()
+    );
 }

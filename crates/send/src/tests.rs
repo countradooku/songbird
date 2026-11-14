@@ -59,7 +59,8 @@ impl Fixture {
     }
 }
 
-fn to(devices: &[DeviceId], envelope: &'static [u8]) -> SendFrame {
+fn to(devices: &[DeviceId], envelope: impl Into<Bytes>) -> SendFrame {
+    let envelope = envelope.into();
     SendFrame::per_device(
         7,
         [3; 16],
@@ -67,7 +68,7 @@ fn to(devices: &[DeviceId], envelope: &'static [u8]) -> SendFrame {
             .iter()
             .map(|d| Recipient {
                 device: *d,
-                envelope: Bytes::from_static(envelope),
+                envelope: envelope.clone(),
             })
             .collect(),
     )
@@ -96,7 +97,12 @@ async fn the_send_path_checks_stores_once_and_routes() {
     // Bob's device 3 left out: device mismatch, nothing stored.
     let st = f
         .path()
-        .send(&dev(1), to(&[dev(2)], b"x"), Instant::now(), &mut scratch)
+        .send(
+            &dev(1),
+            to(&[dev(2)], &b"x"[..]),
+            Instant::now(),
+            &mut scratch,
+        )
         .await;
     assert!(matches!(st, SendStatus::DeviceMismatch(ref m) if m.missing.len() == 1));
     assert_eq!(f.mailbox.count_pending(&dev(2)).await.unwrap(), 0);
@@ -115,7 +121,7 @@ async fn the_send_path_checks_stores_once_and_routes() {
         .path()
         .send(
             &dev(1),
-            to(&[dev(2), dev(3)], b"hi"),
+            to(&[dev(2), dev(3)], &b"hi"[..]),
             Instant::now(),
             &mut scratch,
         )
@@ -128,7 +134,7 @@ async fn the_send_path_checks_stores_once_and_routes() {
         .path()
         .send(
             &dev(1),
-            to(&[dev(2), dev(3)], b"hi"),
+            to(&[dev(2), dev(3)], &b"hi"[..]),
             Instant::now(),
             &mut scratch,
         )
@@ -145,12 +151,12 @@ async fn user_envelopes_in_the_system_frame_format_are_refused() {
     let f = Fixture::new();
     let mut forged = system::MAGIC.to_vec();
     forged.extend_from_slice(&[0; 100]);
-    let forged: &'static [u8] = forged.leak();
+    let forged = Bytes::from(forged);
     let st = f
         .path()
         .send(
             &dev(1),
-            to(&[dev(2), dev(3)], forged),
+            to(&[dev(2), dev(3)], forged.clone()),
             Instant::now(),
             &mut Vec::new(),
         )
@@ -170,7 +176,7 @@ async fn user_envelopes_in_the_system_frame_format_are_refused() {
         mls: None,
         payload: SendPayload::Shared {
             devices: vec![dev(2), dev(3)],
-            body: Bytes::from_static(forged),
+            body: forged,
         },
     };
     let st = f

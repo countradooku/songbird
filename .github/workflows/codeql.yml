@@ -1,15 +1,21 @@
 name: codeql
 
+# Nightly on main and on demand, on the self-hosted runners (D-0039, D-0045); not on every pull
+# request: CodeQL on each push was nearly a third of the hosted minutes that exhausted the
+# allowance.
+# Workflow mistakes a pull request could introduce (a hosted runner, an unpinned action, a missing
+# fork guard) are caught on every pull request by `cargo xtask workflows` instead.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    paths-ignore: ["docs/**", "**/*.md"]
   schedule:
-    - cron: "41 3 * * 1"
+    - cron: "41 3 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   analyze:

@@ -18,15 +18,20 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
+mod workflows;
+
 type Result<T = ()> = std::result::Result<T, String>;
 
 const HELP: &str = "\
 cargo xtask <command>
 
   ci [fast|deep]        quality bar from the constitution (default: fast)
-                          fast: fmt, clippy -D warnings, nextest, doctests, rustdoc, deny,
-                                audit, vet, smoke
+                          fast: workflows, fmt, clippy -D warnings, nextest, doctests, rustdoc,
+                                deny, audit, vet, smoke
                           deep: fast + fuzz (10 min/target), ASan, TSan, Miri, benchmarks
+  workflows             CI policy for .github/workflows (D-0045): self-hosted runners only
+                          (release and deploy excepted), fork guard, pinned actions, read-only
+                          token, concurrency
   smoke                 start every service, check /readyz and /metrics, SIGTERM, expect exit 0
   sanitize              workspace tests under ASan and TSan (nightly, -Zbuild-std)
   miri                  Miri on the pure crates (nightly)
@@ -72,6 +77,7 @@ fn main() -> ExitCode {
         .map_or(("help", &[][..]), |(c, r)| (c.as_str(), r));
     let r = match cmd {
         "ci" => ci(rest.first().map_or("fast", String::as_str)),
+        "workflows" => workflows::check(Path::new(".github/workflows")),
         "smoke" => smoke(),
         "sanitize" => sanitizers(),
         "miri" => miri(),
@@ -169,6 +175,8 @@ fn ci(level: &str) -> Result {
         "deep" => true,
         other => return Err(format!("ci level must be fast or deep, not `{other}`")),
     };
+    step("workflow policy (self-hosted runners, fork guard, pins, D-0045)");
+    workflows::check(Path::new(".github/workflows"))?;
     step("rustfmt");
     run(cargo().args(["fmt", "--all", "--", "--check"]))?;
     step("clippy (pedantic + selected restriction lints, -D warnings)");

@@ -2,6 +2,9 @@
 # Manual and approval-gated: each GitHub environment (staging, production) has required reviewers.
 # Secrets live in the environment: SOPS_AGE_KEY (decrypts deploy/secrets/<env>), DEPLOY_SSH_KEY,
 # and the provider token for the environment's cloud. See docs/RUNBOOKS/deploy-and-rollback.md.
+# GitHub-hosted on purpose (D-0039, D-0045): production secrets never reach the shared self-hosted
+# runner host. Manual only; `cargo xtask workflows` allows hosted runners only here and in
+# release.yml.
 name: deploy
 
 on:

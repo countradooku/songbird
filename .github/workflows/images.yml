@@ -1,0 +1,57 @@
+# Container images: every service's distroless image builds, starts and runs as non-root.
+# Not on every pull request (six builds per push were the largest CI cost, D-0045): only when the
+# image definition changes, nightly on main, and on demand. Release images are built and signed by
+# release.yml.
+# Every action is pinned to a full commit SHA; the tag is in the trailing comment.
+name: images
+
+# Self-hosted runners only (D-0039, D-0045); enforced by `cargo xtask workflows`.
+on:
+  pull_request:
+    paths:
+      - "deploy/docker/**"
+      - ".github/workflows/images.yml"
+  schedule:
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  images:
+    name: container image (${{ matrix.bin }})
+    runs-on: [self-hosted, songbird]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        bin: [songbird-delivery, songbird-api, songbird-push, songbird-worker, songbird-calls, songbird-proxy]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          build-args: BIN=${{ matrix.bin }}
+          push: false
+          load: true
+          tags: ${{ matrix.bin }}:ci
+        # No Actions cache and no build-record artifact (D-0045): the layer caches held 1.6 GB in
+        # 199 entries of the 10 GB free cache; a nightly build from scratch costs nothing.
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+      - name: image starts and runs as non-root
+        env:
+          IMAGE: ${{ matrix.bin }}:ci
+        run: |
+          test "$(docker image inspect "$IMAGE" --format '{{.Config.User}}')" = "nonroot:nonroot"
+          docker run --rm "$IMAGE" --version

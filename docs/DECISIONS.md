@@ -30,6 +30,10 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 - Licence for the repository (README says all rights reserved until chosen).
 - Deployment access model: SSH as root with a key, through one bastion restricted to admin ranges
   (D-0014). Alternatives: WireGuard-only access, a non-root deploy user with sudo.
+- D-0045 (CI never spends hosted minutes): merge branch `ci/self-hosted-only` (it contains PR 37,
+  which can then be closed); register the runners again (GitHub listed none on 2026-11-14) with
+  `deploy/ci-runner/add-runner.sh`; set the Actions budget to $0 with "stop usage"; settle the
+  failed payment, without which GitHub may refuse self-hosted jobs too.
 - GitHub environments `staging` and `production` with required reviewers, and their secrets
   (`SOPS_AGE_KEY`, `DEPLOY_SSH_KEY`), must be created by the owner before `deploy.yml` can run.
 - Prompt 2, milestone 2 (report `docs/reports/P02-M2.md`):
@@ -68,6 +72,86 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0045 — CI never spends GitHub-hosted minutes: self-hosted runners only, CodeQL and images off the pull request path
+
+- Date: 2026-11-14
+- Status: proposed: implemented on branch `ci/self-hosted-only` (which also merges D-0039's
+  branch, PR 37); accepted when the owner merges it. Not pushed: GitHub refuses every job anyway.
+- Decided by: owner ("i dont have money for that, we must continue locally"); layout by agent.
+- Context: D-0039's runners were never merged into `main`, so Prompt 2's pull requests (M2 to M7
+  and the send library) ran every `ci` and `codeql` job on GitHub-hosted `ubuntu-24.04`. From
+  2026-11-12 to 2026-11-14 that billed **4,178 minutes** (job start and end times, rounded up per
+  job): `ci` on pull_request 1,881 (56 runs), `codeql` on pull_request 863, `ci` on push to main
+  770, `codeql` on push 424, `nightly` 158. The free 2,000 minutes went, then the overage; since
+  2026-11-14 every job fails before starting ("recent account payments have failed or your
+  spending limit needs to be increased", run 43571585635). Storage was heading the same way:
+  Actions cache 13.2 GB against 10 GB free (rust-cache 11.6 GB in 15 entries, 7.6 GB of it from
+  pull-request branches; image layer caches 1.6 GB in 199 entries), artifacts 142 MB of 500 MB
+  free (Autobahn reports 118 MB).
+- Options considered: keep everything and wait for the monthly reset (the same pull requests would
+  exhaust it again within days); self-hosted runners for every job, release and deploy included
+  (puts release signing and production secrets on a shared host, against D-0039); self-hosted
+  runners for everything except the two owner-triggered workflows, with less work per pull request
+  (chosen).
+- Decision:
+  - **No GitHub-hosted job runs unless the owner asks for it.** `ci`, `codeql`, `nightly` and the
+    new `images` workflow run only on `[self-hosted, songbird]` or `[self-hosted, songbird-stack]`
+    (D-0039). Only `release.yml` (a pushed version tag) and `deploy.yml` (manual, approval-gated)
+    stay hosted: release signing, provenance and production secrets never reach the shared runner
+    host. If the runners are offline, jobs wait in the queue (up to 24 hours) and then fail; they
+    never fall back to a hosted runner, so an outage costs time, not money.
+  - **Less per pull request.** `ci` (quality bar, compose integration, Autobahn, Semgrep, IaC) on
+    pull requests and pushes to `main`, docs-only changes skipped. CodeQL (Rust and Actions,
+    security-extended, gating on its SARIF as in D-0015) moves to nightly at 03:41 UTC and on
+    demand; it was 1,287 of the 4,178 minutes. Container images move out of `ci` into
+    `images.yml`: pull requests that touch `deploy/docker/**` or the workflow, nightly at 02:23 UTC,
+    and on demand (six builds on every push before).
+  - **Concurrency everywhere:** a new push to a pull request cancels its older `ci` run; every
+    commit on `main` is checked to the end; `codeql`, `images` and `nightly` runs supersede older
+    ones.
+  - **Fork code never runs on the runners.** The primary control is the repository setting:
+    workflows from fork pull requests are off (checked 2026-11-14 through
+    `GET /repos/{repo}/actions/permissions/fork-pr-workflows-private-repos`: run, write tokens and
+    secrets all `false`), and the repository is private with the owner as its only writer. Second
+    line: every job of a `pull_request` workflow carries `if: github.event_name != 'pull_request'
+    || github.event.pull_request.head.repo.full_name == github.repository`. Its limit, stated
+    plainly: a fork's pull request runs the fork's copy of the workflow, so a hostile fork could
+    delete the guard; the guard holds when fork workflows get enabled by mistake, and the policy
+    check below keeps our own pull requests from dropping it. No secret is referenced by any
+    self-hosted workflow, and the token stays `contents: read` with `persist-credentials: false`.
+  - **Storage stays inside the free allowance:** `Swatinem/rust-cache` saves only on `main`
+    (pull requests restore it); image builds use no Actions cache and upload no build record;
+    `junit` and the Autobahn reports are uploaded only when the job fails, and nightly fuzz and
+    benchmark artifacts are kept 14 days (the default was 90).
+  - **Enforced, not remembered:** `cargo xtask workflows` (the first step of `cargo xtask ci
+    fast`, `xtask/src/workflows.rs`) fails when a job outside `release.yml` and `deploy.yml` names a
+    runner that is not `self-hosted` (expressions included), when those two gain a trigger other
+    than a pushed tag or `workflow_dispatch`, when a `pull_request` job lacks the exact guard, on
+    `pull_request_target` or `workflow_run`, on an action not pinned to a full commit SHA (or a
+    docker action without a digest), on top-level permissions other than `contents: read`, and on
+    a workflow without a concurrency group (release excepted). 16 tests, one of them over the
+    repository's own workflows; run against `main`'s workflows it reports all 21 violations.
+- Evidence: `cargo nextest run -p xtask` (16 passed); `cargo xtask ci fast` on the branch
+  (macOS arm64, 2026-11-14): workflow policy, rustfmt, clippy, doctests, rustdoc, deny, audit, vet
+  and smoke pass; nextest 357 of 359, the two failures being Linux-only behaviour that fails the
+  same way on `main` on macOS (`reuseport_listeners_share_the_port_and_the_connections`: macOS
+  does not spread `SO_REUSEPORT` connections, `[0, 0, 0, 128]`; `inv7_bounded_and_validated_input`:
+  `ConnectionClosed`); the minute, cache and artifact figures above from the GitHub API on
+  2026-11-14.
+- Consequences:
+  - Pull request feedback depends on the one VPS (D-0039). On 2026-11-14 GitHub listed **no
+    runners** for the repository (`GET /repos/{repo}/actions/runners`: `total_count` 0); until the
+    owner registers them again with `deploy/ci-runner/add-runner.sh`, every job waits in the queue.
+  - GitHub may refuse self-hosted jobs too while the failed payment is outstanding; until it is
+    settled, `cargo xtask ci fast` (and `cargo xtask compose`, `cargo xtask autobahn`) run locally
+    are the CI, and the Forgejo move (D-0039) removes the dependency on GitHub billing for good.
+  - A CodeQL finding or a broken image arrives up to a day after the change; nightly failures
+    show on `main` and are fixed before the next merge.
+  - `release.yml` and `deploy.yml` (neither has run yet) still need hosted minutes from the free
+    monthly 2,000 when the owner releases; moving them to a self-hosted ephemeral VM would weaken
+    the provenance claim and is a separate decision.
+  - The owner should set the Actions budget to $0 with "stop usage" so no mistake can be billed.
 
 ## D-0043 — Milestone 7: the beta's load profile, how the targets are measured, where
 
@@ -310,7 +394,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0039 — CI on a self-hosted runner, isolated, with Forgejo to follow
 
 - Date: 2026-11-13
-- Status: accepted
+- Status: accepted; the workflows were amended by D-0045 (CodeQL nightly, images in their own
+  workflow, enforced self-hosted policy)
 - Decided by: owner (GitHub Actions minutes exhausted; "do both, runner first": a self-hosted
   runner now, a move to self-hosted Forgejo next); setup by agent.
 - Context: the private repository's 2,000 free monthly minutes ran out during M5. The nightly
@@ -1434,7 +1519,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   value use random nonces instead.
 - Consequences: no Security tab alerts or dismissal workflow; a false positive is fixed in code or
   excluded in the workflow. If code scanning is enabled later, switch back to uploading and grant
-  `security-events: write`.
+  `security-events: write`. Since D-0045 CodeQL runs nightly and on demand, not on every pull
+  request.
 
 ## D-0014 — Hosts: containers on host networking, nftables authoritative, bastion-only SSH
 
@@ -1606,7 +1692,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   v2.0.2 `a1320f89…`). Tools: cargo-nextest 0.9.151, cargo-deny 0.20.2, cargo-audit 0.22.2,
   cargo-vet 0.10.2, cargo-fuzz 0.13.2, cargo-cyclonedx 0.5.10, Semgrep 1.185.0 by digest.
 - Consequences: shared runners make nightly benchmark numbers trend-only; decisions use the
-  reference hardware (Prompt 13).
+  reference hardware (Prompt 13). Amended by D-0039 and D-0045: self-hosted runners; CodeQL and
+  container images nightly instead of on every pull request; `cargo xtask workflows` enforces the
+  pins and the runner policy.
 
 ## D-0007 — Local and CI environment: docker compose, images pinned by digest
 

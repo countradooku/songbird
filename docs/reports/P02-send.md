@@ -4,7 +4,8 @@
 - Prompt: [02-realtime.md](../prompts/02-realtime.md), "Sending from other services and clients
   without a socket" (amended by the owner on 2026-11-13, D-0037). The last item Prompt 2 needs
   before its final gate.
-- Status: **built; stopped for the owner's review.** The Prompt 2 final gate and Prompt 3 have not
+- Status: **built; approved by the owner on 2026-11-14** ("Approve both": D-0044 and its two
+  threat-model rows). The Prompt 2 final gate and Prompt 3 have not
   been started.
 - Design: D-0044, decided by the agent under the owner's standing instruction (D-0041).
 - Branch: `claude/p02-send-crate-ef39ad`, on `main` at `8d2717f` (M7 gate approved).
@@ -142,9 +143,11 @@ is still checked everywhere. `cargo xtask ci fast` on the Mac: **all checks pass
   (`cargo clean -p` for each, 31.5 GiB, dependencies kept); the main checkout rebuilds its own
   crates on its next build.
 
-## What the owner needs to decide
+## The owner's decisions (decided 2026-11-14)
 
-1. Review D-0044's routing choice (`api.` on node links, store only).
-2. Approve or refuse two threat-model rows (§1): a keyed hash of a device that sent over HTTP in
-   `valkey-hot` for at most the burst window; system notices stored as envelopes.
-3. Then the Prompt 2 final gate.
+The owner answered "Approve both":
+
+1. **Decided: D-0044's routing choice is approved** (`api.` on node links, store only).
+2. **Decided: both threat-model rows (§1) are approved**: a keyed hash of a device that sent over
+   HTTP, in `valkey-hot` for at most the burst window; system notices stored as envelopes.
+3. Next: the Prompt 2 final gate (not started).

@@ -60,12 +60,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   service account exist outside the repository and were verified against Apple and Google;
   waking a real device waits for the apps; production keys go to SOPS at deployment.
 - D-0038: whether to store who invited whom for abuse handling (default: no, only per-user counts).
-- D-0037 / D-0044 (report `docs/reports/P02-send.md`): the send library, `PUT /v1/messages` and
-  system frames are built; how `api` reaches partition owners is decided by the agent under the
-  owner's standing instruction (D-0044: `api.` admitted to node links for the store of a send
-  only). Awaiting the owner's review, and approval of two threat-model rows (a keyed hash of an
-  HTTP-sending device in `valkey-hot` for at most the burst window; system notices stored as
-  envelopes).
+- D-0037 / D-0044 (report `docs/reports/P02-send.md`): **approved by the owner on 2026-11-14**
+  ("Approve both"): D-0044's routing (`api.` admitted to node links for the store of a send
+  only) and its two threat-model rows. Next: the Prompt 2 final gate.
 - D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
   tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
   `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment
@@ -76,10 +73,11 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0044 — The send library: `api` stores on partition owners over node links, admitted for the store of a send only; system frames signed and in a reserved format
 
 - Date: 2026-11-14
-- Status: accepted; built (report P02-send). The owner may revisit the routing choice.
+- Status: accepted; built (report P02-send); **approved by the owner on 2026-11-14** ("Approve
+  both": this decision and its two threat-model rows).
 - Decided by: agent, under the owner's standing instruction (D-0041: "think like someone from
-  Proton or a big corp"); D-0037 left the route from `api` to the partition owners to decide when
-  the send crate was built.
+  Proton or a big corp"), then approved by the owner; D-0037 left the route from `api` to the
+  partition owners to decide when the send crate was built.
 - Context: D-0037 replaced the internal Send API with a `send` library linked by `delivery`,
   `api`, `calls` and `worker`, plus `PUT /v1/messages`. The mailbox is Iggy with one owner node per
   partition (D-0029, D-0034); a send must be stored by its partitions' owners. `api` is the
@@ -156,7 +154,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   delete anyone's messages; a compromised `api` can still store envelopes into mailboxes (as a
   compromised delivery node can: ciphertext recipients drop; threat model §6). `calls` and
   `worker` link the same crate and are admitted the same way when they send. Two threat-model
-  rows await the owner's approval. A device using both transports has two rate budgets (at most
+  rows, approved by the owner on 2026-11-14. A device using both transports has two rate budgets (at most
   twice the per-device rate).
 
 ## D-0043 — Milestone 7: the beta's load profile, how the targets are measured, where

@@ -360,7 +360,11 @@ mod tests {
         let counts: Vec<usize> = accepted.iter().map(|a| a.load(Ordering::Relaxed)).collect();
         assert_eq!(counts.iter().sum::<usize>(), total, "{counts:?}");
         // The kernel spread them: more than one listener accepted (all on one would be a
-        // probability of 4^-127 with a uniform hash).
-        assert!(counts.iter().filter(|c| **c > 0).count() > 1, "{counts:?}");
+        // probability of 4^-127 with a uniform hash). Linux balances `SO_REUSEPORT` listeners by
+        // hash (the deployment target); macOS hands every connection to one of them, so there
+        // only the sharing of the port, checked above, holds.
+        if cfg!(target_os = "linux") {
+            assert!(counts.iter().filter(|c| **c > 0).count() > 1, "{counts:?}");
+        }
     }
 }

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs and starts one GitHub Actions runner as the `ci` user (D-0039). Run as root after
 # provision.sh. The registration token is short-lived (one hour) and is not stored:
-#   TOKEN=$(gh api -X POST repos/countradooku/songbird/actions/runners/registration-token -q .token)
+#   TOKEN=$(gh api -X POST repos/songbirdchat/songbird/actions/runners/registration-token -q .token)
 #   ssh root@host "RUNNER_TOKEN=$TOKEN sh -s -- songbird-1 songbird,songbird-stack" < deploy/ci-runner/add-runner.sh
 #
 # Labels: every runner has `songbird`; the one runner with `songbird-stack` runs the jobs that
@@ -11,7 +11,7 @@ set -eu
 NAME=$1
 LABELS=$2
 : "${RUNNER_TOKEN:?RUNNER_TOKEN is required}"
-REPO_URL=https://github.com/countradooku/songbird
+REPO_URL=https://github.com/songbirdchat/songbird
 VERSION=2.338.2
 SHA256=baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40
 CI_USER=ci

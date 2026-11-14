@@ -1,5 +1,5 @@
 # Shared variables. Image digests match deploy/compose/compose.yaml (docs/DECISIONS.md D-0007).
-songbird_registry: "ghcr.io/countradooku"
+songbird_registry: "ghcr.io/songbirdchat"
 songbird_version: "{{ lookup('ansible.builtin.env', 'SONGBIRD_VERSION') | default('0.1.0', true) }}"
 songbird_secrets_file: "{{ playbook_dir }}/../secrets/{{ songbird_env }}.sops.yaml"
 songbird_pki_dir: "/etc/songbird/tls"

@@ -1,7 +1,7 @@
 # Run a Songbird proxy with Docker Compose. See README.md in this directory.
 services:
   songbird-proxy:
-    image: ghcr.io/countradooku/songbird-proxy:${SONGBIRD_PROXY_VERSION:?set SONGBIRD_PROXY_VERSION}
+    image: ghcr.io/songbirdchat/songbird-proxy:${SONGBIRD_PROXY_VERSION:?set SONGBIRD_PROXY_VERSION}
     restart: unless-stopped
     command: ["--config", "/etc/songbird-proxy/proxy.toml"]
     ports: ["443:443"]

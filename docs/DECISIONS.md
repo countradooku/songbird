@@ -25,8 +25,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 - Inactivity deletion period (Prompt 3).
 - WhatsApp interop legal gate (Prompt 14).
 - Second EU provider (D-0009): Hetzner only for now (D-0042); the Scaleway code stays dormant.
-- Public domains: Songbird's client endpoints and the web domain for proxy links (D-0011). The
-  upstream names in `deploy/proxy/proxy.example.toml` are placeholders until then.
+- Public domains: the owner holds `songbird.chat` (D-0046). Still to decide: which names under it
+  serve the client endpoints and the web domain for proxy links (D-0011). The upstream names in
+  `deploy/proxy/proxy.example.toml` are placeholders until then.
 - Licence for the repository (README says all rights reserved until chosen).
 - Deployment access model: SSH as root with a key, through one bastion restricted to admin ranges
   (D-0014). Alternatives: WireGuard-only access, a non-root deploy user with sudo.
@@ -34,6 +35,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   which can then be closed); register the runners again (GitHub listed none on 2026-11-14) with
   `deploy/ci-runner/add-runner.sh`; set the Actions budget to $0 with "stop usage"; settle the
   failed payment, without which GitHub may refuse self-hosted jobs too.
+- D-0046 (organization `songbirdchat`): transfer the repository to the organization; then register
+  the runners against `songbirdchat/songbird` and keep fork pull request workflows off in the
+  organization's and the repository's Actions settings.
 - GitHub environments `staging` and `production` with required reviewers, and their secrets
   (`SOPS_AGE_KEY`, `DEPLOY_SSH_KEY`), must be created by the owner before `deploy.yml` can run.
 - Prompt 2, milestone 2 (report `docs/reports/P02-M2.md`):
@@ -72,6 +76,33 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0046 — The repository moves to the `songbirdchat` organization; domain `songbird.chat`
+
+- Date: 2026-11-14
+- Status: accepted (owner); the transfer itself is pending: on 2026-11-14 the organization existed
+  (GitHub Free) and the repository was still `countradooku/songbird`.
+- Decided by: owner (created the organization `songbirdchat` and registered `songbird.chat`;
+  `songbird` and `getsongbird` were taken on GitHub). Organization name matches the domain.
+- Decision: the repository's home is `github.com/songbirdchat/songbird`; images are published to
+  `ghcr.io/songbirdchat/<service>`. Every reference in the tree points there (`Cargo.toml`
+  `repository`, `deploy/ansible/group_vars/all.yml` registry, `deploy/bin/verify-release` default,
+  `deploy/proxy` image and its cosign identity, `deploy/ci-runner` registration,
+  `scripts/github-setup`, the security-advisory link). `CODEOWNERS` keeps `@countradooku`: it names
+  the owner as a person. Reports under `docs/reports` keep the old name as history.
+- Consequences:
+  - Release signatures are keyless (D-0013): the certificate identity is the workflow path in the
+    repository, so `cosign verify` checks `https://github.com/songbirdchat/songbird/...`. No release
+    has been made yet, so no signature carries the old identity.
+  - Self-hosted runners are registered per repository: after the transfer they register again
+    against `songbirdchat/songbird` (`deploy/ci-runner/add-runner.sh`).
+  - The fork pull request setting D-0045 relies on is set at the organization level as well as the
+    repository's; it must stay off in both. A free organization has the same 2,000 hosted minutes
+    and limits as the personal account, so D-0045 still applies.
+  - `scripts/github-setup/setup.py` finds the project board through the `ProjectV2Owner` interface,
+    which matches an organization as well as a user; the board on the personal account is not
+    moved by it (a new one is created under the organization when the script runs).
+  - Which names under `songbird.chat` serve clients and proxy links is still open (D-0011).
 
 ## D-0045 — CI never spends GitHub-hosted minutes: self-hosted runners only, CodeQL and images off the pull request path
 

@@ -45,7 +45,11 @@ pub fn settings() -> DeliverySettings {
     let c: DeliveryConfig =
         songbird_types::config::load_from_parts(&text, Vec::<(String, String)>::new(), "SONGBIRD")
             .unwrap();
-    c.delivery
+    let mut d = c.delivery;
+    // Sanitizer builds are 5-15 times slower; a handshake that times out there tests nothing.
+    d.session.handshake_timeout_ms *= u64::from(SLOW);
+    d.session.auth_timeout_ms *= u64::from(SLOW);
+    d
 }
 
 /// A running server.

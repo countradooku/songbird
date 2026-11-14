@@ -307,6 +307,45 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   from the owner: confirmation of the four choices, a Scaleway project with Object Storage, and
   the age identity's public key.
 
+## D-0039 — CI on a self-hosted runner, isolated, with Forgejo to follow
+
+- Date: 2026-11-13
+- Status: accepted
+- Decided by: owner (GitHub Actions minutes exhausted; "do both, runner first": a self-hosted
+  runner now, a move to self-hosted Forgejo next); setup by agent.
+- Context: the private repository's 2,000 free monthly minutes ran out during M5. The nightly
+  workflow and six image builds per push were the largest consumers.
+- Decision:
+  - **Runners** on the owner's Hetzner VPS (`coolify.sockudo.io`, Falkenstein; 8 x86 cores,
+    16 GB, Ubuntu 24.04), which also runs Coolify and the Sockudo docs. Two runners
+    (`songbird-1` with the `songbird-stack` label for jobs that start the compose stack or bind
+    fixed ports, one at a time; `songbird-2`), as systemd services.
+  - **Isolation:** an unprivileged `ci` user with its own **rootless Docker** daemon: CI jobs
+    cannot see or reach the host's Docker (verified: `permission denied` on the host socket, zero
+    containers visible). Caps through systemd slices: runners 6 cores and 7 GB, the rootless
+    daemon and its containers 4 cores and 5 GB. Runner units with `NoNewPrivileges`,
+    `ProtectSystem=full`, private `/tmp`. No Songbird production secrets on the host.
+  - **Not ephemeral:** an ephemeral runner re-registers for every job, which needs a long-lived
+    GitHub token on the host; persistent runners on a private repository that only the owner
+    pushes to keep less on the box. Registration tokens (one hour) are fetched with `gh` and
+    passed over SSH, never stored.
+  - **Rootless details:** AppArmor profile for `rootlesskit` (Ubuntu 24.04 restricts unprivileged
+    user namespaces); containers reach the host's loopback through `10.0.2.2`, used by
+    `cargo xtask autobahn` when `SONGBIRD_AUTOBAHN_HOST` is set; rustup 1.29.3 from upstream,
+    checksum-verified (Ubuntu's 1.26 cannot install the toolchain `rust-toolchain.toml` names
+    without arguments).
+  - **Workflows:** `ci`, `codeql` and `nightly` run on the runners; `release` and `deploy` stay on
+    GitHub-hosted runners (rare; they sign and attest releases). Docs-only pull requests skip
+    `ci` and `codeql`.
+  - Reproducible: `deploy/ci-runner/provision.sh` and `add-runner.sh` (idempotent).
+  - Runner units use `KillMode=mixed`, not GitHub's suggested `process`: with a private `/tmp`, a
+    listener that outlived a restart kept taking jobs in a namespace whose `/tmp` was gone (the
+    first CI run's CodeQL and Ansible jobs failed on it).
+- Consequences: no minute limits; CI depends on one VPS (a dead VPS means local checks until it is
+  rebuilt from the scripts). The host's other workloads share the kernel. Next: Forgejo
+  (self-hosted forge and Forgejo Actions), with GitHub kept as a private mirror; that move is
+  recorded when made.
+
 ## D-0038 — Prompt 3 amendment: invite-only registration
 
 - Date: 2026-11-13

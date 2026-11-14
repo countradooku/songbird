@@ -730,8 +730,13 @@ fn autobahn_pass(
             .collect::<Vec<_>>()
             .join(", ")
     };
+    // The container reaches the echo server on the host's loopback: through the host network
+    // normally; under rootless Docker (the CI runner, D-0039) through the gateway address the
+    // runner names in SONGBIRD_AUTOBAHN_HOST (slirp4netns: 10.0.2.2), on Docker's own network.
+    let via_gateway = std::env::var("SONGBIRD_AUTOBAHN_HOST").ok();
+    let target = via_gateway.as_deref().unwrap_or("127.0.0.1");
     let spec = format!(
-        "{{\"outdir\": \"/ab/{name}\", \"servers\": [{{\"agent\": \"{name}\", \"url\": \"ws://127.0.0.1:{port}\"}}], \"cases\": [{}], \"exclude-cases\": [{}], \"exclude-agent-cases\": {{}}}}",
+        "{{\"outdir\": \"/ab/{name}\", \"servers\": [{{\"agent\": \"{name}\", \"url\": \"ws://{target}:{port}\"}}], \"cases\": [{}], \"exclude-cases\": [{}], \"exclude-agent-cases\": {{}}}}",
         quote(cases),
         quote(exclude)
     );
@@ -747,11 +752,16 @@ fn autobahn_pass(
         .map_err(|e| format!("start echo server: {e}"))?;
     std::thread::sleep(Duration::from_millis(300));
     let abs = std::fs::canonicalize(dir).map_err(|e| e.to_string())?;
+    let network = if via_gateway.is_some() {
+        "bridge"
+    } else {
+        "host"
+    };
     let r = run(Command::new(rt).args([
         "run",
         "--rm",
         "--network",
-        "host",
+        network,
         "-v",
         &format!("{}:/ab:Z", abs.display()),
         AUTOBAHN_IMAGE,

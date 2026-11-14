@@ -1,0 +1,16 @@
+# ThreadSanitizer suppressions for `cargo xtask sanitize`. Owner-approved 2026-11-14 (PR #44).
+#
+# Every entry names one frame exactly, says why it is not a Songbird race, and cites the run that
+# showed it. A pattern that stops matching (a tokio or mangling change) fails the job again, which
+# is the intent: re-check it then. Suppressions are listed per process at exit ("Matched N").
+#
+# tokio 1.54.1 I/O driver, reading a socket's readiness after epoll reports it.
+#   Write: `TcpStream::new` -> `Handle::add_source` -> `RegistrationSet::allocate` creates the
+#          `Arc<ScheduledIo>` on the registering thread and hands its address to epoll as the token.
+#   Read:  the driver thread gets the token back from `epoll_wait` and calls `set_readiness`.
+#   The hand-off goes through the kernel. No Songbird frame is in either stack, and Songbird
+#   crates forbid `unsafe`, so Songbird code cannot reach this memory. Seen in
+#   `songbird-e2e --test invariants` and `songbird-link --test link` (nightly runs 43195207467,
+#   43586736672, Linux x86_64). It does not occur on macOS (kqueue). Tracked in
+#   docs/THREAT_MODEL.md section 6: re-check on every tokio upgrade.
+race:<tokio::runtime::io::scheduled_io::ScheduledIo>::set_readiness::<tokio::runtime::io::driver::dispatch_event

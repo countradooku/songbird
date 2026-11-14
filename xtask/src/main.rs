@@ -232,6 +232,15 @@ fn host_triple() -> Result<String> {
 
 fn sanitizers() -> Result {
     let target = host_triple()?;
+    // Narrow, reviewed suppressions only (see the file); an absolute path because each test
+    // binary runs in its own crate's directory.
+    let supp = std::env::current_dir()
+        .map_err(|e| e.to_string())?
+        .join("xtask/tsan-suppressions.txt");
+    if !supp.is_file() {
+        return Err(format!("{} missing", supp.display()));
+    }
+    let tsan_options = format!("halt_on_error=1 suppressions=\"{}\"", supp.display());
     let mut failed = Vec::new();
     for san in ["address", "thread"] {
         eprintln!("--- -Zsanitizer={san}");
@@ -255,7 +264,7 @@ fn sanitizers() -> Result {
             .env("RUSTFLAGS", &flags)
             .env("RUSTDOCFLAGS", &flags)
             .env("CARGO_TARGET_DIR", &dir)
-            .env("TSAN_OPTIONS", "halt_on_error=1"))
+            .env("TSAN_OPTIONS", &tsan_options))
         {
             eprintln!("{e}");
             failed.push(san);

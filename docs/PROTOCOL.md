@@ -39,7 +39,8 @@ Rejection reasons: 1 rate limited, 2 too large, 3 too many recipients, 4 unknown
 recipient, 6 store unavailable, 7 idempotency key already used for other recipients (detected
 when the earlier send shares a mailbox partition with this one; a reuse that cannot be detected is
 stored as a new send, never dropped), 8 stale
-MLS epoch (the group moved on; process the winning commit, then retry from the new epoch).
+MLS epoch (the group moved on; process the winning commit, then retry from the new epoch), 9 an
+envelope begins with the prefix reserved for server-signed system frames (§3.8; never retryable).
 1 and 6 are retryable after `retry_after_ms`, with the
 same idempotency key. Unknown reason codes are kept (forward compatibility).
 
@@ -243,6 +244,45 @@ Typing indicators, presence pings and call signals that are only useful live use
 They are never stored, only delivered if the recipient is connected, rate limited per connection,
 and dropped first under pressure. The recipient learns the sender only from inside the encrypted
 payload.
+
+### 3.8 Sending without a WebSocket: `PUT /v1/messages`
+
+Decisions D-0037, D-0044. For a client with no open WebSocket (a notification quick-reply, a
+share extension, a socket that failed), `api` accepts the same send over HTTPS:
+
+- **Request:** `PUT /v1/messages`, body = one `Send` frame (§1.2), byte for byte as it would go
+  over the WebSocket, `Content-Length` required (at most `max_send_bytes`; otherwise 411 or 413),
+  signed like every `api` request (`authorization` over method, path, server name, time, nonce
+  and body digest; `x-songbird-content-sha256` required). The server verifies the signature from
+  the headers before it reads the body, then checks the body against the digest (401 otherwise).
+- **Response:** `200` with body = the `SendResult` frame (§1.2) the WebSocket would have sent
+  (`application/octet-stream`): accepted, rejected with a reason and retry hint, or a device
+  mismatch. Other statuses come only from before the send path: 400 (not a `Send` frame, or over
+  a limit), 401, 411, 413, 503 (no send path configured).
+- **Same rules:** the same limits, the same device-list check, the same idempotency (a retry with
+  the same key over HTTP or the WebSocket, in either order, is stored once), the same rate limit
+  per device (50 sends/s, burst 200, counted across every `api` node; reason 1 with a hint),
+  the same routing and push wake-ups. The request ID in the frame is echoed.
+
+### 3.9 System frames
+
+Decisions D-0037, D-0044. A notice from the server itself (`Kind` 1: an account's device list
+changed; body: the account ID) arrives as an ordinary stored envelope (`Deliver`, with a `seq`,
+acknowledged like any other), in a format no user can send:
+
+```
+magic F5 53 42 53 59 53 00 01 | version u8 (1) | key_id [8] | device [16] | issued_at_ms u64
+  | notice_id [16] | kind u16 | body_len u16 (<= 1024) | body | signature [64]
+```
+
+- The signature is Ed25519 by the server's system key over `songbird-system-frame-v1\0`
+  followed by every byte before the signature. Apps pin the system public key; `key_id` is the
+  first 8 bytes of its SHA-256 (rotation). A frame that does not verify, names another device, or
+  repeats a `notice_id` already seen is dropped and never shown. Unknown kinds are verified, then
+  ignored.
+- The send path refuses any user envelope that begins with the magic (reason 9), over the
+  WebSocket and HTTP alike, so a client never has to consider a forged notice.
+- Format and test vector: `crates/proto/src/system.rs`; signer: `crates/send/src/system.rs`.
 
 ## 4. Identity, devices and key directory (Prompt 3)
 

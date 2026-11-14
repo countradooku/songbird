@@ -15,6 +15,29 @@ runbooks cover wake-ups, attachments and account deletion.
 - Recovery: wake-ups resume with the next message to each device; nothing to replay.
 - Verification: `delivery_push_jobs` rises again; `push_results{result="sent"}` follows.
 
+## `PUT /v1/messages` refusing sends (`api_sends_rejected` rising, reason 6)
+
+The HTTP send path (D-0037, D-0044) answers `SendResult` reason 6 (unavailable, retry in 1 s)
+in three degraded modes. Messages are never lost: nothing is stored, and the client retries with
+the same idempotency key (or sends over its WebSocket once it reconnects).
+
+- Detection: `api_sends_rejected` rises with `api_sends_accepted` flat; `api_errors` rises when
+  the rate limiter is the cause; `api_send_mailbox_errors` when the store is.
+- Causes and actions:
+  1. **`valkey-hot` unreachable** (rate limiter and nonces): the limiter fails closed, so no send
+     passes unmetered (and authentication already fails without nonces: 503). Restore
+     `valkey-hot`; nothing to replay.
+  2. **Partition owners unknown or unreachable** (`api` reads the leases from the router's Valkey
+     every third of a lease): check the router Valkey, the delivery nodes' health, and that the
+     delivery nodes list `api.` in `[delivery.cluster] senders` (otherwise every store is refused
+     at the link handshake). During a failover expect a few seconds of reason 6.
+  3. **A delivery node refusing `api`'s requests** (`IggyMailbox::sender_requests_refused`
+     rising on the node): something in `api` asked for more than a store, which a sound `api`
+     never does. Treat it as a possible compromise of the `api` host: rotate its link certificate
+     (runbook `mtls-rotation.md`) and investigate.
+- Verification: `api_sends_accepted` rises again; `api_sends_rejected` back to its usual rate
+  (device mismatches and rate limits only).
+
 ## Push provider outage or rate limiting
 
 - Detection: `push_results{provider=…,result="retried"}` rising; a provider breaker open (logs);

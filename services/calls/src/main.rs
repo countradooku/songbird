@@ -7,6 +7,8 @@
 use songbird_service::telemetry::Metrics;
 use songbird_service::{BasicConfig, BoxError, Ctx, Service};
 
+// Sanitizer builds keep the system allocator: ASan and TSan see only allocations they intercept.
+#[cfg(not(songbird_sanitizer))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

@@ -119,6 +119,8 @@ unsafe_code = "forbid"
 missing_debug_implementations = "warn"
 unreachable_pub = "warn"
 unused_qualifications = "warn"
+# Set by `cargo xtask sanitize`: binaries keep the system allocator under ASan and TSan.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(songbird_sanitizer)"] }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

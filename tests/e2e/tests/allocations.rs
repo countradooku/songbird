@@ -103,8 +103,22 @@ fn server_allocations_per_message_stay_within_budget() {
         let (mut a, mut a_ev) = Client::start(client_config(addr), key_of(0), ResumeState::default());
         let (mut b, mut b_ev) = Client::start(client_config(addr), key_of(1), ResumeState::default());
         for (c, ev) in [(&mut a, &mut a_ev), (&mut b, &mut b_ev)] {
-            c.wait_for(songbird_client::State::Connected).await;
-            assert!(matches!(next_event(ev).await, Event::Connected { .. }));
+            assert_eq!(
+                c.wait_for(songbird_client::State::Connected).await,
+                songbird_client::State::Connected
+            );
+            // A slow build (the nightly TSan run) can lose a first attempt to a handshake or auth
+            // timeout; the client then reports `Disconnected` before the `Connected` of its retry.
+            // This test measures steady-state allocations, so it waits through that and says why.
+            loop {
+                match next_event(ev).await {
+                    Event::Connected { .. } => break,
+                    Event::Disconnected { code, .. } => {
+                        println!("connect attempt lost before steady state: {code:?}");
+                    }
+                    other => panic!("expected Connected, got {other:?}"),
+                }
+            }
         }
         let bob = seeds[1].0;
         let body = bytes::Bytes::from(vec![0x5A; 256]);

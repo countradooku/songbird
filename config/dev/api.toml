@@ -35,3 +35,19 @@ filter = "info"
 # bucket = "songbird-attachments"
 # access_key = { env = "RUSTFS_ACCESS_KEY" }
 # secret_key = { env = "RUSTFS_SECRET_KEY" }
+#
+# PUT /v1/messages (D-0037, D-0044): needs the delivery nodes in cluster mode with
+# `senders = ["api."]` in [delivery.cluster]; the values marked "as delivery" must match theirs.
+# [api.send]
+# stream = "songbird"                                            # as delivery's mailbox.iggy.stream
+# topic = "mailbox"                                              # as delivery's mailbox.iggy.topic
+# partitions = 12                                                # as delivery's mailbox.iggy.partitions
+# idempotency_secret = { file = "/path/to/idempotency-secret.hex" } # as delivery's mailbox.iggy
+# cluster_secret = { file = "/path/to/cluster-secret.hex" }      # as delivery's router.valkey
+# node_name = "api.local.songbird.internal"                      # this service's link certificate
+# cert_chain = "/path/to/api.crt"
+# key = { file = "/path/to/api.key" }
+# ca = "/path/to/ca.crt"
+# [api.send.valkey]                                              # the router's Valkey (leases too)
+# addr = "127.0.0.1:47379"
+# pass = { env = "VALKEY_HOT_PASSWORD" }

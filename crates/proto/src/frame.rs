@@ -312,6 +312,9 @@ pub enum RejectReason {
     IdempotencyConflict,
     /// An MLS commit from an epoch the group has left: process the winning commit, retry.
     StaleEpoch,
+    /// An envelope begins with the prefix reserved for server-signed system frames
+    /// ([`crate::system::MAGIC`]); system frames are never user messages.
+    ReservedEnvelope,
     /// A code this version does not know (forward compatibility).
     Other(u16),
 }
@@ -329,6 +332,7 @@ impl RejectReason {
             Self::Unavailable => 6,
             Self::IdempotencyConflict => 7,
             Self::StaleEpoch => 8,
+            Self::ReservedEnvelope => 9,
             Self::Other(c) => c,
         }
     }
@@ -345,6 +349,7 @@ impl RejectReason {
             6 => Self::Unavailable,
             7 => Self::IdempotencyConflict,
             8 => Self::StaleEpoch,
+            9 => Self::ReservedEnvelope,
             c => Self::Other(c),
         }
     }

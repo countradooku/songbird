@@ -269,6 +269,32 @@ impl ValkeyRouter {
         })
     }
 
+    /// A router that only publishes (`api`, D-0037): it holds no sessions, so it opens no
+    /// subscriber connections; [`Router::attach`] on it subscribes nothing and must not be used.
+    /// Routing seals and names channels exactly like a delivery node.
+    ///
+    /// # Errors
+    /// [`ValkeyRouterError`]: Valkey unreachable or refused, or key derivation failed.
+    pub async fn publisher(
+        client: redis::Client,
+        cluster_secret: &[u8; 32],
+    ) -> Result<Self, ValkeyRouterError> {
+        let seal = Arc::new(Seal::new(cluster_secret)?);
+        let publisher = crate::conn::ValkeyConn::connect(client)
+            .await
+            .map_err(|e| ValkeyRouterError::Valkey(format!("{:?}", e.kind())))?;
+        let mut node_id = [0u8; 8];
+        aws_lc_rs::rand::fill(&mut node_id).map_err(|_| ValkeyRouterError::Crypto)?;
+        Ok(Self {
+            local: Arc::new(LocalRouter::new()),
+            seal,
+            publisher,
+            shards: Vec::new(),
+            node_id: u64::from_be_bytes(node_id),
+            stats: Arc::new(ValkeyRouterStats::default()),
+        })
+    }
+
     /// Counters.
     #[must_use]
     pub fn stats(&self) -> Arc<ValkeyRouterStats> {

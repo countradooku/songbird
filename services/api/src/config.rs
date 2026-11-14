@@ -55,6 +55,13 @@ impl Validate for ApiConfig {
                 "api.valkey_hot.tls_ca",
                 "and api.jobs.valkey.tls_ca are required in staging and production",
             );
+            if let Some(s) = &api.send {
+                v.check(
+                    s.valkey.tls(),
+                    "api.send.valkey.tls_ca",
+                    "is required in staging and production",
+                );
+            }
         }
     }
 }
@@ -92,6 +99,9 @@ pub struct ApiSettings {
     /// Concurrent connections.
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
+    /// `PUT /v1/messages` (D-0037, D-0044); absent: the endpoint answers 503.
+    #[serde(default)]
+    pub send: Option<SendSettings>,
 }
 
 const fn default_max_connections() -> usize {
@@ -124,6 +134,9 @@ impl Validate for ApiSettings {
             "max_connections",
             "must be in 1..=1000000",
         );
+        if let Some(s) = &self.send {
+            v.section("send", s);
+        }
     }
 }
 
@@ -258,6 +271,127 @@ impl Validate for AdminSettings {
             songbird_types::config::is_internal_ip(self.listen.ip()),
             "listen",
             "must be a private or loopback address",
+        );
+    }
+}
+
+/// `[api.send]`: `PUT /v1/messages` through the shared send path (D-0037). `api` owns no mailbox
+/// partition: it stores on each partition's owner over node links, admitted there for the store
+/// of a send only (D-0044). Everything that must match the delivery nodes is named so.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SendSettings {
+    /// Frame limits: the delivery nodes' `[delivery.limits]`.
+    #[serde(default)]
+    pub limits: songbird_send::LimitsConfig,
+    /// Sustained sends per second per device: the delivery nodes' `session.sends_per_sec`.
+    #[serde(default = "default_sends_per_sec")]
+    pub sends_per_sec: u32,
+    /// Send burst: the delivery nodes' `session.send_burst`.
+    #[serde(default = "default_send_burst")]
+    pub send_burst: u32,
+    /// Iggy stream of the mailbox: the delivery nodes' `mailbox.iggy.stream`.
+    pub stream: String,
+    /// Iggy topic: the delivery nodes' `mailbox.iggy.topic`.
+    pub topic: String,
+    /// Partitions: the delivery nodes' `mailbox.iggy.partitions`.
+    pub partitions: u32,
+    /// The delivery nodes' `mailbox.iggy.idempotency_secret` (64 hex characters), so a retry
+    /// over the WebSocket after an HTTP attempt is recognised.
+    pub idempotency_secret: SecretRef,
+    /// Longest wait for a partition owner's answer, milliseconds.
+    #[serde(default = "default_send_timeout_ms")]
+    pub timeout_ms: u64,
+    /// The delivery nodes' `cluster.lease_ttl_ms`: partition owners are read every third of it.
+    #[serde(default = "default_lease_ttl_ms")]
+    pub lease_ttl_ms: u64,
+    /// This service's node-link identity (`api.<host>.songbird.internal`, internal CA).
+    pub node_name: String,
+    /// PEM chain, leaf first.
+    pub cert_chain: PathBuf,
+    /// PEM private key.
+    pub key: SecretRef,
+    /// PEM root of the internal CA.
+    pub ca: PathBuf,
+    /// The router's Valkey (`[delivery.router.valkey]`): routing and the partition leases.
+    pub valkey: songbird_valkey::ValkeySettings,
+    /// The router's cluster secret (64 hex characters).
+    pub cluster_secret: SecretRef,
+    /// How often the device directory is checked for changes, milliseconds.
+    #[serde(default = "default_directory_poll_ms")]
+    pub directory_poll_ms: u64,
+    /// At most one push job per device per this window, milliseconds.
+    #[serde(default = "default_push_debounce_ms")]
+    pub push_debounce_ms: u64,
+}
+
+const fn default_sends_per_sec() -> u32 {
+    50
+}
+const fn default_send_burst() -> u32 {
+    200
+}
+const fn default_send_timeout_ms() -> u64 {
+    5_000
+}
+const fn default_lease_ttl_ms() -> u64 {
+    3_000
+}
+const fn default_directory_poll_ms() -> u64 {
+    1_000
+}
+const fn default_push_debounce_ms() -> u64 {
+    5_000
+}
+
+impl Validate for SendSettings {
+    fn validate(&self, v: &mut Validator) {
+        v.section("limits", &self.limits);
+        v.check(
+            (1..=1_000).contains(&self.sends_per_sec),
+            "sends_per_sec",
+            "must be in 1..=1000",
+        );
+        v.check(
+            (1..=100_000).contains(&self.send_burst),
+            "send_burst",
+            "must be in 1..=100000",
+        );
+        v.check(
+            !self.stream.is_empty() && !self.topic.is_empty(),
+            "stream",
+            "and topic must be set",
+        );
+        v.check(
+            (1..=4096).contains(&self.partitions),
+            "partitions",
+            "must be in 1..=4096",
+        );
+        v.check(
+            (100..=60_000).contains(&self.timeout_ms),
+            "timeout_ms",
+            "must be in 100..=60000",
+        );
+        v.check(
+            (1_000..=60_000).contains(&self.lease_ttl_ms),
+            "lease_ttl_ms",
+            "must be in 1000..=60000",
+        );
+        v.check(
+            self.node_name.starts_with("api.") && self.node_name.ends_with(".songbird.internal"),
+            "node_name",
+            "must be api.<host>.songbird.internal",
+        );
+        v.section("valkey", &self.valkey);
+        v.check(
+            (100..=60_000).contains(&self.directory_poll_ms),
+            "directory_poll_ms",
+            "must be in 100..=60000",
+        );
+        v.check(
+            (100..=3_600_000).contains(&self.push_debounce_ms),
+            "push_debounce_ms",
+            "must be in 100..=3600000",
         );
     }
 }

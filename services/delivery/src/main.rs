@@ -114,6 +114,7 @@ fn cluster_config(
         valkey_tls_client: conn.tls_client,
         lease_ttl: Duration::from_millis(c.lease_ttl_ms),
         zone: c.zone.clone(),
+        senders: c.senders.clone(),
     })
 }
 
@@ -486,12 +487,12 @@ async fn start_pusher(
         songbird_jobs::QueueConfig::new("delivery".into()),
     )
     .await?;
-    let (pusher, rx) = Pusher::new(metrics.clone());
+    let (pusher, rx) = Pusher::new(metrics.push());
     let task = tokio::spawn(songbird_delivery::push::run(
         Arc::new(queue),
         rx,
         debounce,
-        metrics.clone(),
+        metrics.push(),
         stop,
     ));
     tracing::info!("push jobs enabled");

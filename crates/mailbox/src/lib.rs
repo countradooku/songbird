@@ -255,6 +255,82 @@ pub trait Mailbox: Send + Sync + 'static {
     fn knows(&self, device: &DeviceId) -> impl Future<Output = Result<bool, MailboxError>> + Send;
 }
 
+/// The one mailbox operation a send needs (`crates/send`, D-0037). Every [`Mailbox`] has it; a
+/// process that only sends (`api`, through [`iggy::IggySender`]) has nothing else, so it cannot
+/// read, acknowledge or forget anyone's messages even by mistake.
+pub trait StoreSend: Send + Sync + 'static {
+    /// Same contract as [`Mailbox::store`].
+    fn store_send(
+        &self,
+        req: StoreRequest,
+    ) -> impl Future<Output = Result<StoreOutcome, MailboxError>> + Send;
+}
+
+impl<M: Mailbox> StoreSend for M {
+    fn store_send(
+        &self,
+        req: StoreRequest,
+    ) -> impl Future<Output = Result<StoreOutcome, MailboxError>> + Send {
+        self.store(req)
+    }
+}
+
+/// A shared mailbox is a mailbox (several services in one process share one in tests).
+impl<M: Mailbox> Mailbox for std::sync::Arc<M> {
+    fn store(
+        &self,
+        req: StoreRequest,
+    ) -> impl Future<Output = Result<StoreOutcome, MailboxError>> + Send {
+        M::store(self, req)
+    }
+
+    fn fetch_after(
+        &self,
+        device: &DeviceId,
+        after_seq: u64,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<Stored>, MailboxError>> + Send {
+        M::fetch_after(self, device, after_seq, limit)
+    }
+
+    fn ack_up_to(
+        &self,
+        device: &DeviceId,
+        up_to_seq: u64,
+    ) -> impl Future<Output = Result<(), MailboxError>> + Send {
+        M::ack_up_to(self, device, up_to_seq)
+    }
+
+    fn expire_older_than(
+        &self,
+        age: Duration,
+    ) -> impl Future<Output = Result<u64, MailboxError>> + Send {
+        M::expire_older_than(self, age)
+    }
+
+    fn store_generation(&self) -> impl Future<Output = Result<u64, MailboxError>> + Send {
+        M::store_generation(self)
+    }
+
+    fn count_pending(
+        &self,
+        device: &DeviceId,
+    ) -> impl Future<Output = Result<u64, MailboxError>> + Send {
+        M::count_pending(self, device)
+    }
+
+    fn forget(
+        &self,
+        devices: &[DeviceId],
+    ) -> impl Future<Output = Result<(), MailboxError>> + Send {
+        M::forget(self, devices)
+    }
+
+    fn knows(&self, device: &DeviceId) -> impl Future<Output = Result<bool, MailboxError>> + Send {
+        M::knows(self, device)
+    }
+}
+
 /// The record ID of an idempotency key: HMAC-SHA256 under a server secret, so stores never hold
 /// a client's key (D-0024).
 pub(crate) fn idempotency_tag(key: &hmac::Key, k: &[u8; 16]) -> [u8; 32] {

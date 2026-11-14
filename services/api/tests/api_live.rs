@@ -90,6 +90,7 @@ async fn stack() -> Option<Stack> {
         push_index_secret: [9; 32],
         limits: songbird_api::config::AttachmentLimits::default(),
         metrics: ApiMetrics::default(),
+        messages: None,
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

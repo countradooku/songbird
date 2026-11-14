@@ -3,8 +3,10 @@
 //! - **Who may call.** Both sides present certificates from the internal CA (D-0012), TLS 1.3
 //!   only. Every component's leaf chains to that CA, so the CA alone is not enough: the client's
 //!   first frame names it, the server checks the client certificate is valid for that name and
-//!   that the name carries the allowed prefix (`delivery.`): an API or push certificate cannot
-//!   read mailboxes. The client verifies the server's certificate for the owner's name.
+//!   that the name carries an admitted prefix. **Each admitted prefix has its own handler**
+//!   ([`serve_admitting`]): delivery nodes (`delivery.`) get every mailbox operation, `api`
+//!   (`api.`, D-0044) only the store of a send, and anything else is refused at the handshake.
+//!   The client verifies the server's certificate for the owner's name.
 //! - **Framing.** `len u32 | kind u8 | id u64 | payload`, bounded by [`MAX_FRAME`] before any
 //!   allocation. Requests are multiplexed by id on one connection; the server answers each in
 //!   its own task, so a slow request does not hold the others.
@@ -171,6 +173,25 @@ fn frame(kind: u8, id: u64, payload: &[u8]) -> Option<Bytes> {
     Some(b.freeze())
 }
 
+/// One kind of peer a link server admits: certificate names starting with `prefix`, served by
+/// `handler`. A handler gets requests only from peers of its own kind, so it decides what that
+/// kind may ask for.
+#[derive(Clone)]
+pub struct Admit {
+    /// Name prefix, ending with a dot (`delivery.`, `api.`).
+    pub prefix: String,
+    /// Handler for those peers.
+    pub handler: Handler,
+}
+
+impl std::fmt::Debug for Admit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Admit")
+            .field("prefix", &self.prefix)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Serves requests on `listener` until `shutdown` turns true (then open connections close too).
 /// Peers must present a certificate from the CA valid for a name starting with `allowed_prefix`.
 pub async fn serve(
@@ -179,10 +200,31 @@ pub async fn serve(
     allowed_prefix: String,
     handler: Handler,
     stats: Arc<LinkStats>,
+    shutdown: watch::Receiver<bool>,
+) {
+    let admit = vec![Admit {
+        prefix: allowed_prefix,
+        handler,
+    }];
+    serve_admitting(listener, tls, admit, stats, shutdown).await;
+}
+
+/// Like [`serve`], with one handler per kind of peer: a peer is served by the handler of the
+/// first prefix its certificate's name carries, and refused if it carries none. Prefixes must
+/// end with a dot, so `api.` never admits `apix.`.
+pub async fn serve_admitting(
+    listener: TcpListener,
+    tls: LinkTls,
+    admit: Vec<Admit>,
+    stats: Arc<LinkStats>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let acceptor = TlsAcceptor::from(Arc::clone(&tls.server));
-    let prefix = Arc::new(allowed_prefix);
+    // A prefix without its dot would admit more names than it says: drop it (fail closed).
+    let admit: Arc<[Admit]> = admit
+        .into_iter()
+        .filter(|a| a.prefix.len() > 1 && a.prefix.ends_with('.'))
+        .collect();
     loop {
         tokio::select! {
             _ = async { shutdown.wait_for(|s| *s).await.is_ok() } => return,
@@ -192,15 +234,14 @@ pub async fn serve(
                     continue;
                 };
                 let _ = tcp.set_nodelay(true);
-                let (acceptor, prefix, handler, stats, stop) = (
+                let (acceptor, admit, stats, stop) = (
                     acceptor.clone(),
-                    Arc::clone(&prefix),
-                    Arc::clone(&handler),
+                    Arc::clone(&admit),
                     Arc::clone(&stats),
                     shutdown.clone(),
                 );
                 tokio::spawn(async move {
-                    if !serve_conn(tcp, acceptor, &prefix, handler, &stats, stop).await {
+                    if !serve_conn(tcp, acceptor, &admit, &stats, stop).await {
                         stats.refused.fetch_add(1, Ordering::Relaxed);
                     }
                 });
@@ -213,8 +254,7 @@ pub async fn serve(
 async fn serve_conn(
     tcp: TcpStream,
     acceptor: TlsAcceptor,
-    prefix: &str,
-    handler: Handler,
+    admit: &[Admit],
     stats: &Arc<LinkStats>,
     mut shutdown: watch::Receiver<bool>,
 ) -> bool {
@@ -235,9 +275,14 @@ async fn serve_conn(
         return false;
     };
     let name = String::from_utf8_lossy(&name).into_owned();
-    if !peer.is_some_and(|p| identity_ok(&p, &name, prefix)) {
+    let Some(peer) = peer else { return false };
+    let Some(handler) = admit
+        .iter()
+        .find(|a| identity_ok(&peer, &name, &a.prefix))
+        .map(|a| Arc::clone(&a.handler))
+    else {
         return false;
-    }
+    };
     let (out_tx, out_rx) = mpsc::channel::<Bytes>(1024);
     let writer = tokio::spawn(write_loop(wr, out_rx));
     loop {

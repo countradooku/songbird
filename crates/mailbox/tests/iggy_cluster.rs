@@ -20,8 +20,10 @@ use rcgen::{
     PKCS_ECDSA_P256_SHA256,
 };
 use songbird_link::LinkTls;
-use songbird_mailbox::iggy::{ClusterConfig, IggyConfig, IggyConnection, IggyMailbox};
-use songbird_mailbox::{Mailbox, NewEnvelope, Payload, StoreRequest};
+use songbird_mailbox::iggy::{
+    ClusterConfig, IggyConfig, IggyConnection, IggyMailbox, IggySender, IggySenderConfig,
+};
+use songbird_mailbox::{Mailbox, NewEnvelope, Payload, StoreRequest, StoreSend as _};
 use songbird_types::DeviceId;
 
 /// The test that drops every Valkey connection runs alone (write); the others share (read).
@@ -139,8 +141,44 @@ async fn node_with(e: &Env, n: &str, partitions: u32, key_window: Option<Duratio
         valkey_tls_client: None,
         lease_ttl: Duration::from_millis(900),
         zone: String::new(),
+        senders: vec!["api.".into()],
     });
     IggyMailbox::connect(cfg).await.unwrap()
+}
+
+/// A link identity for `name`, signed by the test CA.
+fn identity(e: &Env, name: &str) -> LinkTls {
+    let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let mut p = CertificateParams::new(vec![name.to_owned()]).unwrap();
+    p.is_ca = IsCa::ExplicitNoCa;
+    p.extended_key_usages = vec![
+        ExtendedKeyUsagePurpose::ServerAuth,
+        ExtendedKeyUsagePurpose::ClientAuth,
+    ];
+    let cert = p.signed_by(&key, &e.ca).unwrap();
+    LinkTls::from_pem(
+        cert.pem().as_bytes(),
+        key.serialize_pem().as_bytes(),
+        e.ca_pem.as_bytes(),
+        name,
+    )
+    .unwrap()
+}
+
+/// A send-only node (`api`, D-0044) under certificate name `name`.
+async fn sender(e: &Env, name: &str) -> IggySender {
+    IggySender::connect(IggySenderConfig {
+        stream: e.stream.clone(),
+        topic: "mailbox".into(),
+        partitions: 4,
+        idempotency_secret: [7; 32],
+        timeout: Duration::from_secs(10),
+        link_tls: identity(e, name),
+        valkey: redis::Client::open(e.valkey.as_str()).unwrap(),
+        refresh: Duration::from_millis(300),
+    })
+    .await
+    .unwrap()
 }
 
 fn to(d: DeviceId, body: &'static str) -> StoreRequest {
@@ -505,5 +543,68 @@ async fn a_window_seals_nothing_before_a_standby_holds_its_keys() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
     assert_eq!(seqs, vec![1]);
+    a.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_send_only_node_stores_on_the_owners_and_may_do_nothing_else() {
+    let Some(e) = env("sender") else { return };
+    let _shared = VALKEY.read().await;
+    let a = node(&e, "a").await;
+    eventually("A owns every partition", || a.owned_partitions().len() == 4).await;
+    let api = sender(&e, "api.x.songbird.internal").await;
+    eventually("the sender knows every owner", || api.known() == 4).await;
+    // Single-partition sends, stored on the owner over the node link.
+    let devs: Vec<DeviceId> = (0..8).map(|_| DeviceId::random().unwrap()).collect();
+    for d in &devs {
+        assert_eq!(
+            api.store_send(to(*d, "via-api")).await.unwrap().seqs,
+            vec![1]
+        );
+        assert_eq!(fetch_ok(&a, d, 1).await[0].1.as_ref(), b"via-api");
+    }
+    // A send across partitions, then the same send through a delivery node: the sender computes
+    // the same idempotency tag, so the retry is a replay (the WebSocket after HTTP).
+    let multi = || StoreRequest {
+        idempotency_key: Some([5; 16]),
+        mls: None,
+        payload: Payload::PerDevice(
+            devs.iter()
+                .map(|d| NewEnvelope {
+                    device: *d,
+                    envelope: Bytes::from_static(b"multi"),
+                })
+                .collect(),
+        ),
+    };
+    let first = api.store_send(multi()).await.unwrap();
+    assert_eq!(first.seqs, vec![2; 8]);
+    assert!(!first.replayed);
+    // The sender may not mark the remote parts stored; the home partition's re-driver finds them
+    // stored and completes the bookkeeping.
+    eventually("the re-driver completes the sender's remote parts", || {
+        a.stats()
+            .redriven
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= 1
+    })
+    .await;
+    let again = a.store(multi()).await.unwrap();
+    assert_eq!(again.seqs, vec![2; 8]);
+    assert!(again.replayed);
+    for d in &devs {
+        assert_eq!(a.count_pending(d).await.unwrap(), 2);
+    }
+    // Nothing but the store: fetch and ACK are refused and counted, and changed nothing.
+    let (fetched, acked) = api.try_forbidden(&devs[0]).await;
+    assert!(fetched.is_err());
+    assert!(acked.is_err());
+    assert!(a.sender_requests_refused() >= 2);
+    assert_eq!(a.count_pending(&devs[0]).await.unwrap(), 2);
+    // A certificate of a kind not admitted (push) cannot even store.
+    let push = sender(&e, "push.x.songbird.internal").await;
+    eventually("the push identity reads the owners", || push.known() == 4).await;
+    assert!(push.store_send(to(devs[0], "never")).await.is_err());
+    assert_eq!(a.count_pending(&devs[0]).await.unwrap(), 2);
     a.shutdown().await;
 }

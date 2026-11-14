@@ -37,6 +37,7 @@ mod keys;
 mod partitions;
 mod record;
 mod sealed;
+mod sender;
 mod state;
 mod wire;
 
@@ -62,6 +63,7 @@ use self::keys::KeyFile;
 use self::partitions::{Partitions, Slot};
 use self::record::{Local, Record, Remote};
 use self::sealed::{Meta, OpenError, Sealed};
+pub use self::sender::{IggySender, IggySenderConfig};
 use self::state::{Entry, Fact, Idem, State};
 use crate::{
     IDEMPOTENCY_RETENTION, MAX_ENVELOPE_AGE, Mailbox, MailboxError, MlsCommit, Payload,
@@ -886,6 +888,13 @@ impl IggyMailbox {
     #[must_use]
     pub fn standbys_synced(&self) -> bool {
         self.cluster.as_ref().is_none_or(|c| c.standbys_synced())
+    }
+
+    /// Requests from send-only nodes (`api`) refused for asking more than a store (cluster
+    /// mode, D-0044).
+    #[must_use]
+    pub fn sender_requests_refused(&self) -> u64 {
+        self.cluster.as_ref().map_or(0, |c| c.sender_refused())
     }
 
     /// Key-store writes that did not reach a standby (cluster mode).
@@ -2136,144 +2145,177 @@ async fn redrive_with(shared: &Shared, parts: &Partitions, home: &mpsc::Sender<J
     }
 }
 
-impl Mailbox for IggyMailbox {
-    #[allow(
-        clippy::too_many_lines,
-        reason = "routing of one send across partitions, kept in one place"
-    )]
-    async fn store(&self, req: StoreRequest) -> Result<StoreOutcome, MailboxError> {
-        let n = self.partitions();
-        let devices: Vec<DeviceId> = req.payload.devices().copied().collect();
-        let multi = devices
+/// What differs between a partition owner's store and a send-only node's (D-0044).
+#[derive(Debug, Clone, Copy)]
+struct StoreOpts {
+    /// Soft capacity checked where this process runs the device's partition.
+    max_per_device: u64,
+    /// Tell the home partition when a remote part is stored (node links: `PartDone`). A sender
+    /// may not; the home partition's re-driver completes the bookkeeping instead.
+    mark_done: bool,
+    /// Tests: fail after the home part, before the remote parts.
+    fault_skip_remote_parts: bool,
+}
+
+/// Stores one send across the partitions it touches: the home part first (with the other parts
+/// recorded in it), then the remote parts in parallel. Shared by [`IggyMailbox`] and
+/// [`IggySender`], so the owner and a send-only node split a send identically.
+#[allow(
+    clippy::too_many_lines,
+    reason = "routing of one send across partitions, kept in one place"
+)]
+async fn store_on(
+    parts: &Partitions,
+    idem: &hmac::Key,
+    n: u32,
+    req: StoreRequest,
+    o: StoreOpts,
+) -> Result<StoreOutcome, MailboxError> {
+    let devices: Vec<DeviceId> = req.payload.devices().copied().collect();
+    let multi = devices
+        .iter()
+        .any(|d| partition_of(d, n) != devices.first().map_or(0, |f| partition_of(f, n)));
+    // A multi-partition send always carries a tag, so its parts are stored exactly once
+    // (by this call or by the re-driver).
+    let key = match req.idempotency_key {
+        Some(k) => Some(idempotency_tag(idem, &k)),
+        None if multi => {
+            let mut t = [0u8; 32];
+            getrandom::fill(&mut t).map_err(|_| MailboxError::Unavailable)?;
+            Some(t)
+        }
+        None => None,
+    };
+    let tag = key.map(|t| (t, recipients_fingerprint(idem, &devices)));
+    // Split by partition.
+    let mut by_part: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+    for (i, d) in devices.iter().enumerate() {
+        by_part.entry(partition_of(d, n)).or_default().push(i);
+    }
+    // Home: the MLS group's partition (its epoch lives there); otherwise the partition with
+    // most recipients (the first recipient's on a tie), so that most sends are one append.
+    // Deterministic for a retried request.
+    let home = if let Some(m) = &req.mls {
+        u32::try_from(hash16(&m.group) % u64::from(n)).unwrap_or(0)
+    } else {
+        let first = devices.first().map_or(0, |d| partition_of(d, n));
+        by_part
             .iter()
-            .any(|d| partition_of(d, n) != devices.first().map_or(0, |f| partition_of(f, n)));
-        // A multi-partition send always carries a tag, so its parts are stored exactly once
-        // (by this call or by the re-driver).
-        let key = match req.idempotency_key {
-            Some(k) => Some(idempotency_tag(&self.idem, &k)),
-            None if multi => {
-                let mut t = [0u8; 32];
-                getrandom::fill(&mut t).map_err(|_| MailboxError::Unavailable)?;
-                Some(t)
-            }
-            None => None,
-        };
-        let tag = key.map(|t| (t, recipients_fingerprint(&self.idem, &devices)));
-        // Split by partition.
-        let mut by_part: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
-        for (i, d) in devices.iter().enumerate() {
-            by_part.entry(partition_of(d, n)).or_default().push(i);
+            .max_by_key(|(p, idx)| (idx.len(), **p == first))
+            .map_or(first, |(p, _)| *p)
+    };
+    let part_req = |idx: &[usize]| -> LocalReq {
+        match &req.payload {
+            Payload::PerDevice(items) => LocalReq::PerDevice(
+                idx.iter()
+                    .filter_map(|i| items.get(*i))
+                    .map(|e| (e.device, e.envelope.clone()))
+                    .collect(),
+            ),
+            Payload::Shared { devices, body } => LocalReq::Shared {
+                devices: idx
+                    .iter()
+                    .filter_map(|i| devices.get(*i))
+                    .copied()
+                    .collect(),
+                body: body.clone(),
+            },
         }
-        // Home: the MLS group's partition (its epoch lives there); otherwise the partition with
-        // most recipients (the first recipient's on a tie), so that most sends are one append.
-        // Deterministic for a retried request.
-        let home = if let Some(m) = &req.mls {
-            u32::try_from(hash16(&m.group) % u64::from(n)).unwrap_or(0)
-        } else {
-            let first = devices.first().map_or(0, |d| partition_of(d, n));
-            by_part
-                .iter()
-                .max_by_key(|(p, idx)| (idx.len(), **p == first))
-                .map_or(first, |(p, _)| *p)
-        };
-        let part_req = |idx: &[usize]| -> LocalReq {
-            match &req.payload {
-                Payload::PerDevice(items) => LocalReq::PerDevice(
-                    idx.iter()
-                        .filter_map(|i| items.get(*i))
-                        .map(|e| (e.device, e.envelope.clone()))
-                        .collect(),
-                ),
-                Payload::Shared { devices, body } => LocalReq::Shared {
-                    devices: idx
-                        .iter()
-                        .filter_map(|i| devices.get(*i))
-                        .copied()
-                        .collect(),
-                    body: body.clone(),
-                },
-            }
-        };
-        let local = by_part
-            .get(&home)
-            .map_or_else(|| part_req(&[]), |idx| part_req(idx));
-        let remote: Vec<Remote> = by_part
-            .iter()
-            .filter(|(p, _)| **p != home)
-            .map(|(p, idx)| match part_req(idx) {
-                LocalReq::PerDevice(items) => Remote {
-                    partition: *p,
-                    items,
-                    shared: None,
-                },
-                LocalReq::Shared { devices, body } => Remote {
-                    partition: *p,
-                    items: devices.into_iter().map(|d| (d, Bytes::new())).collect(),
-                    shared: Some(body),
-                },
-            })
-            .collect();
-        if local.is_empty() && remote.is_empty() {
-            return Ok(StoreOutcome {
-                seqs: vec![],
-                replayed: false,
-            });
+    };
+    let local = by_part
+        .get(&home)
+        .map_or_else(|| part_req(&[]), |idx| part_req(idx));
+    let remote: Vec<Remote> = by_part
+        .iter()
+        .filter(|(p, _)| **p != home)
+        .map(|(p, idx)| match part_req(idx) {
+            LocalReq::PerDevice(items) => Remote {
+                partition: *p,
+                items,
+                shared: None,
+            },
+            LocalReq::Shared { devices, body } => Remote {
+                partition: *p,
+                items: devices.into_iter().map(|d| (d, Bytes::new())).collect(),
+                shared: Some(body),
+            },
+        })
+        .collect();
+    if local.is_empty() && remote.is_empty() {
+        return Ok(StoreOutcome {
+            seqs: vec![],
+            replayed: false,
+        });
+    }
+    // Capacity check before anything is written (soft limit), where this node holds the
+    // device's partition; an owner elsewhere checks its own when it plans the store.
+    for d in &devices {
+        if let Some(p) = parts.local(partition_of(d, n))
+            && partitions::pending_local(&p, d) >= o.max_per_device
+        {
+            return Err(MailboxError::Full);
         }
-        // Capacity check before anything is written (soft limit), where this node holds the
-        // device's partition; an owner elsewhere checks its own when it plans the store.
-        for d in &devices {
-            if let Some(p) = self.parts.local(self.partition(d))
-                && partitions::pending_local(&p, d) >= self.max_per_device
-            {
-                return Err(MailboxError::Full);
-            }
-        }
-        let mut seq_of: HashMap<DeviceId, u64> = HashMap::with_capacity(devices.len());
+    }
+    let mut seq_of: HashMap<DeviceId, u64> = HashMap::with_capacity(devices.len());
+    let job = wire::JobData {
+        tag,
+        mls: req.mls,
+        local,
+        remote: remote.clone(),
+    };
+    let (home_seqs, mut replayed) = parts.submit(home, job).await?;
+    for (d, s) in home_seqs {
+        seq_of.insert(d, s);
+    }
+    if o.fault_skip_remote_parts && !remote.is_empty() {
+        return Err(MailboxError::Unavailable);
+    }
+    // Remote parts, in parallel (idempotent under the tag; completed by the re-driver if
+    // this fails).
+    let remote_parts = remote.into_iter().map(|r| {
+        let p = r.partition;
         let job = wire::JobData {
             tag,
-            mls: req.mls,
-            local,
-            remote: remote.clone(),
+            mls: None,
+            local: LocalReq::from_remote(r),
+            remote: vec![],
         };
-        let (home_seqs, mut replayed) = self.parts.submit(home, job).await?;
-        for (d, s) in home_seqs {
+        async move { (p, parts.submit(p, job).await) }
+    });
+    for (p, result) in futures_util::future::join_all(remote_parts).await {
+        let (part_seqs, part_replayed) = result?;
+        replayed &= part_replayed;
+        for (d, s) in part_seqs {
             seq_of.insert(d, s);
         }
-        if self.fault_skip_remote_parts && !remote.is_empty() {
-            return Err(MailboxError::Unavailable);
+        // A sender (`api`) leaves this to the home partition's re-driver: it may only store
+        // (D-0044); the re-driver finds the part stored and punctures its slot.
+        if let Some(t) = tag
+            && o.mark_done
+        {
+            parts.part_done(home, t.0, p).await;
         }
-        // Remote parts, in parallel (idempotent under the tag; completed by the re-driver if
-        // this fails).
-        let parts = remote.into_iter().map(|r| {
-            let p = r.partition;
-            let job = wire::JobData {
-                tag,
-                mls: None,
-                local: LocalReq::from_remote(r),
-                remote: vec![],
-            };
-            async move { (p, self.parts.submit(p, job).await) }
-        });
-        for (p, result) in futures_util::future::join_all(parts).await {
-            let (part_seqs, part_replayed) = result?;
-            replayed &= part_replayed;
-            for (d, s) in part_seqs {
-                seq_of.insert(d, s);
-            }
-            if let Some(t) = tag {
-                self.parts.part_done(home, t.0, p).await;
-            }
-        }
-        // A replay answers 0 for entries already acknowledged (unreadable now: nothing to route).
-        let seqs = devices
-            .iter()
-            .map(|d| match seq_of.get(d) {
-                Some(s) => Ok(*s),
-                None if replayed => Ok(0),
-                None => Err(MailboxError::Unavailable),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(StoreOutcome { seqs, replayed })
+    }
+    // A replay answers 0 for entries already acknowledged (unreadable now: nothing to route).
+    let seqs = devices
+        .iter()
+        .map(|d| match seq_of.get(d) {
+            Some(s) => Ok(*s),
+            None if replayed => Ok(0),
+            None => Err(MailboxError::Unavailable),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(StoreOutcome { seqs, replayed })
+}
+
+impl Mailbox for IggyMailbox {
+    async fn store(&self, req: StoreRequest) -> Result<StoreOutcome, MailboxError> {
+        let o = StoreOpts {
+            max_per_device: self.max_per_device,
+            mark_done: true,
+            fault_skip_remote_parts: self.fault_skip_remote_parts,
+        };
+        store_on(&self.parts, &self.idem, self.partitions(), req, o).await
     }
 
     async fn fetch_after(

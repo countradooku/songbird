@@ -69,6 +69,21 @@ async fn raw_send(ws: &mut Raw, b: Bytes) {
         .unwrap();
 }
 
+/// Sends a frame the server is expected to refuse mid-write: the write itself may fail
+/// (macOS reports the server's close as `ConnectionClosed` while the client still writes a large
+/// frame; Linux lets the write through and closes after). Either way the server's answer is
+/// checked afterwards, from what the socket reports.
+async fn raw_send_refused(ws: &mut Raw, b: Bytes) {
+    if poll_fn(|cx| Pin::new(&mut *ws).poll_ready(cx))
+        .await
+        .is_err()
+        || Pin::new(&mut *ws).start_send(Message::Binary(b)).is_err()
+    {
+        return;
+    }
+    let _ = poll_fn(|cx| Pin::new(&mut *ws).poll_flush(cx)).await;
+}
+
 async fn raw_hello(ws: &mut Raw) -> control::Hello {
     match raw_next(ws).await {
         Some(Message::Binary(b)) => match ServerFrame::decode(&b, &Limits::DEFAULT).unwrap() {
@@ -427,7 +442,7 @@ async fn inv7_bounded_and_validated_input() {
     // without a close frame, seen as 1006).
     let mut ws = raw_authenticated(&s, 0).await;
     let huge = Bytes::from(vec![0x02u8; Limits::DEFAULT.max_message_bytes() + 1]);
-    raw_send(&mut ws, huge).await;
+    raw_send_refused(&mut ws, huge).await;
     assert_eq!(raw_close_code(&mut ws).await, 1006);
     wait_until("protocol error counted", || {
         s.shared.metrics.protocol_errors.get() == 1

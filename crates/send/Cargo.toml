@@ -1,0 +1,34 @@
+[package]
+name = "songbird-send"
+description = "Songbird send path as a library (D-0037): device-list check, idempotent store through the mailbox, routing, push on offline, server-signed system frames. Linked by delivery, api, calls and worker."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+songbird-types.workspace = true
+songbird-proto.workspace = true
+songbird-mailbox.workspace = true
+songbird-router.workspace = true
+songbird-jobs.workspace = true
+songbird-accounts.workspace = true
+songbird-service.workspace = true
+arc-swap.workspace = true
+aws-lc-rs.workspace = true
+bytes.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "macros"] }
+toml.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["sync", "time", "macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true

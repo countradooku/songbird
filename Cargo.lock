@@ -3425,6 +3425,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "sockudo-ws",
+ "songbird-alloc-count",
  "songbird-types",
  "thiserror",
  "tokio",

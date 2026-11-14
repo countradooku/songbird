@@ -1,4 +1,9 @@
-# CI runner host (D-0039)
+# CI runner host (D-0039, superseded by D-0045)
+
+**Not in use.** `songbirdchat/songbird` is public, so CI runs on GitHub-hosted runners only and
+`cargo xtask workflows` rejects a self-hosted runner. Never register these runners for a public
+repository: a pull request from anyone would run on this host. The scripts stay for a private
+forge (Forgejo) later.
 
 Self-hosted GitHub Actions runners for this repository, on a Linux host shared with other
 workloads. CI runs as an unprivileged `ci` user with its own rootless Docker and CPU and memory
@@ -22,6 +27,3 @@ Remove a runner: `systemctl disable --now songbird-runner-NAME`, then
 If GitHub no longer lists a runner (Settings, Actions, Runners) but its service still exists on the
 host, its local registration is stale: stop the service, delete `~ci/runners/NAME/.runner`,
 `.credentials` and `.credentials_rsaparams`, then run `add-runner.sh` again with a fresh token.
-
-Every workflow except `release.yml` and `deploy.yml` runs only on these runners (D-0045); `cargo
-xtask workflows`, part of `cargo xtask ci fast`, fails on a job that names a GitHub-hosted runner.

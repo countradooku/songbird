@@ -1,5 +1,5 @@
 # Deep checks, nightly and on demand: long fuzzing, sanitizers, Miri, full benchmarks.
-# Self-hosted runners only (D-0039, D-0045); enforced by `cargo xtask workflows`.
+# GitHub-hosted runners only (D-0045); enforced by `cargo xtask workflows`.
 # A failure here opens no PR by itself; it fails the run and the owner is notified by GitHub.
 name: nightly
 
@@ -26,7 +26,7 @@ env:
 jobs:
   fuzz:
     name: fuzz (${{ matrix.target }})
-    runs-on: [self-hosted, songbird]
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -62,7 +62,7 @@ jobs:
 
   sanitizers:
     name: sanitizers (ASan, TSan)
-    runs-on: [self-hosted, songbird]
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -72,7 +72,7 @@ jobs:
       - run: cargo xtask sanitize
 
   miri:
-    runs-on: [self-hosted, songbird]
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -83,7 +83,7 @@ jobs:
 
   bench:
     name: benchmarks
-    runs-on: [self-hosted, songbird]
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -91,8 +91,8 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      # The runner host is shared and noisy: these numbers track trends only. Decisions use the
-      # fixed reference hardware (Prompt 13), recorded in docs/DECISIONS.md.
+      # Shared runners are noisy: these numbers track trends only. Decisions use the fixed
+      # reference hardware (Prompt 13), recorded in docs/DECISIONS.md.
       - run: cargo xtask bench
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -103,7 +103,7 @@ jobs:
 
   full-ci:
     name: fast checks on a clean cache
-    runs-on: [self-hosted, songbird]
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

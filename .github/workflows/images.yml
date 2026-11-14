@@ -1,11 +1,11 @@
 # Container images: every service's distroless image builds, starts and runs as non-root.
-# Not on every pull request (six builds per push were the largest CI cost, D-0045): only when the
+# Not on every pull request (six builds of the whole workspace per push, D-0045): only when the
 # image definition changes, nightly on main, and on demand. Release images are built and signed by
 # release.yml.
 # Every action is pinned to a full commit SHA; the tag is in the trailing comment.
 name: images
 
-# Self-hosted runners only (D-0039, D-0045); enforced by `cargo xtask workflows`.
+# GitHub-hosted runners only (D-0045); enforced by `cargo xtask workflows`.
 on:
   pull_request:
     paths:
@@ -25,8 +25,7 @@ concurrency:
 jobs:
   images:
     name: container image (${{ matrix.bin }})
-    runs-on: [self-hosted, songbird]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -46,7 +45,7 @@ jobs:
           load: true
           tags: ${{ matrix.bin }}:ci
         # No Actions cache and no build-record artifact (D-0045): the layer caches held 1.6 GB in
-        # 199 entries of the 10 GB free cache; a nightly build from scratch costs nothing.
+        # 199 entries of the 10 GB Actions cache; a nightly build from scratch costs nothing.
         env:
           DOCKER_BUILD_RECORD_UPLOAD: "false"
       - name: image starts and runs as non-root

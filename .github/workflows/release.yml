@@ -5,10 +5,8 @@
 #  3. Distroless images pushed to GHCR, signed, with provenance and SBOM attestations.
 #  4. GitHub release with binaries, SBOMs, checksums and signature bundle.
 # Deployment is a separate, approval-gated workflow (deploy.yml) with staged rollout.
-# GitHub-hosted on purpose (D-0039, D-0045): the build signs with Sigstore and attests provenance,
-# which must not come from the shared self-hosted runner host. Runs only when the owner pushes a
-# version tag, inside the free monthly allowance; `cargo xtask workflows` allows hosted runners
-# only here and in deploy.yml, and only on a pushed tag or a manual start.
+# Runs only when a version tag is pushed; it holds write scopes (contents, packages, id-token,
+# attestations), so `cargo xtask workflows` allows it no other trigger (D-0045).
 name: release
 
 on:

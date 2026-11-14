@@ -4,10 +4,9 @@
 # Every action is pinned to a full commit SHA; the tag is in the trailing comment.
 name: ci
 
-# Self-hosted runners only (D-0039, D-0045): `songbird` for everything, `songbird-stack` (one
-# runner) for jobs that start the compose stack or bind fixed ports. No job here may run on a
-# GitHub-hosted runner; `cargo xtask workflows` (part of `cargo xtask ci fast`) enforces it.
-# Every job carries the same-repository guard: code from a fork never runs on these runners.
+# GitHub-hosted runners only (D-0045): the repository is public, so they cost nothing, and every
+# job gets a fresh VM. Pull requests from forks run here too, with a read-only token and no
+# secrets; a self-hosted runner never runs this code (`cargo xtask workflows` rejects one).
 on:
   push:
     branches: [main]
@@ -33,8 +32,7 @@ env:
 jobs:
   checks:
     name: quality bar (cargo xtask ci fast)
-    runs-on: [self-hosted, songbird]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -63,8 +61,7 @@ jobs:
 
   compose:
     name: integration environment (docker compose)
-    runs-on: [self-hosted, songbird-stack]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -124,8 +121,7 @@ jobs:
 
   autobahn:
     name: WebSocket conformance (Autobahn)
-    runs-on: [self-hosted, songbird-stack]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -149,8 +145,7 @@ jobs:
 
   semgrep:
     name: semgrep
-    runs-on: [self-hosted, songbird]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     container:
       image: semgrep/semgrep:1.185.0@sha256:67518c174185a2043fdbed16c70631b79209499b3671178e7194379b48295a0d
@@ -163,8 +158,7 @@ jobs:
 
   iac:
     name: infrastructure as code (tofu, ansible)
-    runs-on: [self-hosted, songbird]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

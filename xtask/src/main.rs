@@ -29,9 +29,9 @@ cargo xtask <command>
                           fast: workflows, fmt, clippy -D warnings, nextest, doctests, rustdoc,
                                 deny, audit, vet, smoke
                           deep: fast + fuzz (10 min/target), ASan, TSan, Miri, benchmarks
-  workflows             CI policy for .github/workflows (D-0045): self-hosted runners only
-                          (release and deploy excepted), fork guard, pinned actions, read-only
-                          token, concurrency
+  workflows             CI policy for .github/workflows (D-0045): standard GitHub-hosted
+                          runners only, release and deploy on tags or by hand only, secrets
+                          only there, pinned actions, read-only token, concurrency
   smoke                 start every service, check /readyz and /metrics, SIGTERM, expect exit 0
   sanitize              workspace tests under ASan and TSan (nightly, -Zbuild-std)
   miri                  Miri on the pure crates (nightly)
@@ -175,7 +175,7 @@ fn ci(level: &str) -> Result {
         "deep" => true,
         other => return Err(format!("ci level must be fast or deep, not `{other}`")),
     };
-    step("workflow policy (self-hosted runners, fork guard, pins, D-0045)");
+    step("workflow policy (hosted runners only, pins, read-only token, D-0045)");
     workflows::check(Path::new(".github/workflows"))?;
     step("rustfmt");
     run(cargo().args(["fmt", "--all", "--", "--check"]))?;

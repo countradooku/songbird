@@ -76,9 +76,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 - Prompt 3, milestone 1 (report `docs/reports/P03-M1.md`, D-0048): gate **approved by the owner
   on 2026-11-15**, with its four threat-model §1 rows (account identity key and invite count;
   invite code hashes; keyed IP-range throttle records; used challenge nonces).
-- Prompt 3, milestone 2 (report `docs/reports/P03-M2.md`, D-0049): the gate, and four
-  threat-model §1 rows (username hashes; username key verifiers; username links; keyed
-  throttle records), await the owner.
+- Prompt 3, milestone 2 (report `docs/reports/P03-M2.md`, D-0049): gate **approved by the owner
+  on 2026-11-15** ("Approve both"), with its four threat-model §1 rows (username hashes;
+  username key verifiers; username links; keyed throttle records). Next: M3 (key directory).
 - D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
   tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
   `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment
@@ -89,7 +89,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0049 — Prompt 3, milestone 2: unique usernames as Ristretto hashes with poksho proofs, a username key that never confirms existence, resettable links
 
 - Date: 2026-11-15
-- Status: proposed; built (report P03-M2); awaiting the owner's gate approval
+- Status: accepted; built (report P03-M2); **gate approved by the owner on 2026-11-15** ("Approve
+  both"), with its four threat-model rows
 - Decided by: owner for the product choices (below); design by agent under the standing
   instruction (D-0041)
 - Context: Prompt 3: "Usernames are changeable and found only by exact match. Evaluate

@@ -3,7 +3,8 @@
 - Date: 2026-11-15
 - Prompt: [03-identity.md](../prompts/03-identity.md), amended by D-0038 (invite-only launch).
 - Status: **agreed by the owner on 2026-11-15**, with every recommended answer below (D-0047).
-  M1 built and its gate approved on 2026-11-15: report `P03-M1.md`, decision D-0048.
+  M1 and M2 built and their gates approved on 2026-11-15: reports `P03-M1.md` (D-0048) and
+  `P03-M2.md` (D-0049).
 - Base: `main` at `c377d4d` (CI on hosted runners, D-0045/D-0046).
 - Skills: the environment offers general skills only (`security-review`, `code-review`,
   `simplify`); none is specific to Rust, fuzzing or benchmarking, and the repository has no

@@ -73,9 +73,10 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   only) and its two threat-model rows. Prompt 2's final gate (report `docs/reports/P02-final.md`):
   **approved by the owner on 2026-11-15** ("Approve all four"). Prompt 2 is done; its go-live checks
   (24-hour soak, durable latency on the `ccx33`, the 2-hour RTO drill) run after every phase is finished.
-- Prompt 3, milestone 1 (report `docs/reports/P03-M1.md`, D-0048): the gate, and four
-  threat-model §1 rows (account identity key and invite count; invite code hashes; keyed IP-range
-  throttle records; used challenge nonces), await the owner.
+- Prompt 3, milestone 1 (report `docs/reports/P03-M1.md`, D-0048): gate **approved by the owner
+  on 2026-11-15**, with its four threat-model §1 rows (account identity key and invite count;
+  invite code hashes; keyed IP-range throttle records; used challenge nonces). Next: M2
+  (usernames).
 - D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
   tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
   `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment
@@ -86,7 +87,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0048 — Prompt 3, milestone 1: registration with Argon2id proof of work, honest keys only, invites that record no social graph
 
 - Date: 2026-11-15
-- Status: proposed; built (report P03-M1); awaiting the owner's gate approval
+- Status: accepted; built (report P03-M1); **gate approved by the owner on 2026-11-15**, with
+  its four threat-model rows
 - Decided by: agent, under the owner's standing instruction (D-0041) and the Prompt 3 decisions
   (D-0047)
 - Context: Prompt 3 asks for accounts without phone numbers, an Argon2id proof of work "tuned so
@@ -162,7 +164,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     talk; a stranger still stops); fuzz targets `registration_request`, `pow_challenge`,
     `ed25519_key` (60 s each: 32.5 M, 14.6 M, 3.4 M runs, nothing found).
 - Consequences: delivery is deployable without operator steps for accounts. Four threat-model §1
-  rows await the owner. Phone timing to measure when the apps exist. A registry restore revives
+  rows, approved by the owner on 2026-11-15. Phone timing to measure when the apps exist. A registry restore revives
   invite codes used after the backup until they expire. Per-range throttles count everyone
   behind one carrier NAT as one client (generous numbers, deployment-wide caps behind them).
 

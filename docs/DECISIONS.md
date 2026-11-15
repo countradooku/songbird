@@ -82,8 +82,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 - Prompt 3, milestone 3 (report `docs/reports/P03-M3.md`, D-0050): gate **approved by the owner
   on 2026-11-15** ("Approve both"), with its two threat-model §1 rows (device public keys and
   prekeys; keyed throttle records).
-- Prompt 3, milestone 3b (report `docs/reports/P03-M3b.md`, D-0051): the gate, and one
-  threat-model §1 row (KeyPackages), await the owner.
+- Prompt 3, milestone 3b (report `docs/reports/P03-M3b.md`, D-0051): gate **approved by the owner
+  on 2026-11-15** ("Approve both"), with its threat-model §1 row (KeyPackages). Next: M4
+  (devices: QR linking, the signed device list, PIN, passkeys).
 - D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
   tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
   `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment
@@ -94,7 +95,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0051 — Prompt 3, milestone 3b: MLS KeyPackages checked by Songbird's own parser, bound to the uploading device, served once
 
 - Date: 2026-11-15
-- Status: proposed; built (report P03-M3b); awaiting the owner's gate approval
+- Status: accepted; built (report P03-M3b); **gate approved by the owner on 2026-11-15** ("Approve
+  both"), with its threat-model row
 - Decided by: owner (own focused parser over OpenMLS on the server, 2026-11-15); design by agent
 - Context: Prompt 3: "Same pattern for MLS KeyPackages (single use, plus a last-resort package)";
   the plan said "parsed and signature-checked with OpenMLS", and the owner split this out of M3

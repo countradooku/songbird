@@ -51,3 +51,15 @@ filter = "info"
 # [api.send.valkey]                                              # the router's Valkey (leases too)
 # addr = "127.0.0.1:47379"
 # pass = { env = "VALKEY_HOT_PASSWORD" }
+#
+# Registration and invites (Prompt 3, D-0048). Absent: those endpoints answer 503 and accounts are
+# created only through the admin link. Every api node needs the same secret.
+# [api.registration]
+# secret = { file = "/path/to/registration-secret.hex" }         # 64 hex; same on every api node
+# invite_only = true                                             # the launch default (D-0038)
+# allowance = 5                                                  # invites per new account
+# [api.registration.pow]                                         # measured defaults (D-0048)
+# memory_kib = 16384
+# iterations = 1
+# bits = 4
+# solutions = 8

@@ -186,6 +186,18 @@ async fn build(
         }
         None => (None, Vec::new()),
     };
+    let registration = match &s.registration {
+        Some(r) => {
+            let reg = songbird_api::registration::Registration::new(
+                r.clone(),
+                &*r.secret.resolve_key32()?,
+                metrics.registration.clone(),
+            )
+            .map_err(|_| "registration key derivation failed")?;
+            Some(reg)
+        }
+        None => None,
+    };
     let app = Arc::new(App {
         server_name: s.server_name.clone(),
         registry,
@@ -197,6 +209,7 @@ async fn build(
         limits: s.attachments,
         metrics,
         messages,
+        registration,
     });
     Ok((app, tasks))
 }

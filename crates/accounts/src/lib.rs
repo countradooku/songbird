@@ -6,12 +6,13 @@
 //!
 //! | Table | Key | Holds | Gone |
 //! | --- | --- | --- | --- |
-//! | `account` | account ID | creation time, `deleting` | with the account |
+//! | `account` | account ID | creation time, `deleting`, identity key, invites left | with the account |
 //! | `device` | device ID | account ID, auth key, `disabled` | with the device |
 //! | `push_token` | keyed hash of the device ID | the token sealed to `push`'s public key | unregistered, or with the device |
 //! | `upload_grant` | object key | uploading device, exact size, fetches due, expiry | at upload, expiry, or with the device |
 //! | `attachment` | object key | size, fetches left, expiry (30 days) | at the last fetch or expiry |
 //! | `outbox` | job ID | the job (IDs only) | relayed to the queue |
+//! | `invite` | SHA-256 of the code | uses left, expiry; **no issuer** (D-0038, D-0047) | at its last use, revocation, or expiry |
 //!
 //! An attachment row has no link to the account that uploaded it (owner-approved threat-model
 //! row, D-0036).
@@ -40,6 +41,12 @@ const SCHEMA: &str = "
 DEFINE TABLE IF NOT EXISTS account SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS at ON account TYPE datetime;
 DEFINE FIELD IF NOT EXISTS deleting ON account TYPE bool;
+DEFINE FIELD IF NOT EXISTS identity ON account TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS invites ON account TYPE option<int>;
+DEFINE TABLE IF NOT EXISTS invite SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS uses ON invite TYPE int;
+DEFINE FIELD IF NOT EXISTS expires ON invite TYPE datetime;
+DEFINE INDEX IF NOT EXISTS invite_expires ON invite FIELDS expires;
 DEFINE TABLE IF NOT EXISTS device SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS account ON device TYPE bytes;
 DEFINE FIELD IF NOT EXISTS key ON device TYPE bytes;
@@ -85,6 +92,42 @@ pub enum RegistryError {
     /// A row did not have the expected shape.
     #[error("unexpected row shape")]
     Shape,
+    /// The invite code is unknown, used up or expired (one answer for all three).
+    #[error("invite refused")]
+    Invite,
+    /// The account has no invites left.
+    #[error("no invites left")]
+    Allowance,
+}
+
+/// A new account as registration creates it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NewAccount {
+    /// Server-chosen account ID.
+    pub account: AccountId,
+    /// Account identity public key (Ed25519, already checked).
+    pub identity: [u8; 32],
+    /// Server-chosen ID of the first device.
+    pub device: DeviceId,
+    /// Its authentication public key (Ed25519, already checked).
+    pub auth_key: [u8; AUTH_KEY_LEN],
+    /// Invites the account may create.
+    pub allowance: u32,
+}
+
+/// How many times a statement that conflicts with a concurrent transaction is retried.
+const CONFLICT_RETRIES: u32 = 8;
+
+/// Whether a failure is SurrealDB's "transaction conflict, retry" (as a statement kind or an RPC
+/// error code; which one depends on where the conflict is detected).
+fn is_conflict(e: &DbError) -> bool {
+    match e {
+        DbError::Rpc(songbird_surreal::RpcError::Server { code, .. }) => {
+            *code == songbird_surreal::CODE_TRANSACTION_CONFLICT
+        }
+        DbError::Statement(kind) => kind == db::TRANSACTION_CONFLICT,
+        _ => false,
+    }
 }
 
 /// A device as authentication sees it.
@@ -232,6 +275,258 @@ impl Registry {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Registers an account and its first device (`POST /v1/registration`), consuming one use of
+    /// `invite` (the SHA-256 of a code) when given, all in one transaction: two registrations
+    /// racing for a code's last use write the same invite row, so SurrealDB lets one commit and
+    /// the other retries and finds the code used up. Nothing links the account to the code or to
+    /// whoever created it (D-0038).
+    ///
+    /// # Errors
+    /// [`RegistryError::Invite`] for an unknown, used-up or expired code;
+    /// [`RegistryError::Exists`] if an ID is taken (the caller draws new ones).
+    pub async fn register(
+        &self,
+        new: &NewAccount,
+        invite: Option<&[u8; 32]>,
+    ) -> Result<(), RegistryError> {
+        let invite_sql = if invite.is_some() {
+            "LET $u = invite:[$code].uses;
+             LET $e = invite:[$code].expires;
+             IF $u == NONE OR $u < 1 OR $e <= time::now() { THROW 'invite' };
+             IF $u == 1 { DELETE invite:[$code] RETURN NONE; }
+             ELSE { UPDATE invite:[$code] SET uses -= 1 RETURN NONE; };"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "BEGIN TRANSACTION;
+             {invite_sql}
+             CREATE account:[$a] SET at = time::now(), deleting = false, identity = $identity,
+               invites = $allowance RETURN NONE;
+             CREATE device:[$d] SET account = $a, key = $k, disabled = false, at = time::now()
+               RETURN NONE;
+             UPDATE directory:v SET version += 1 RETURN NONE;
+             COMMIT TRANSACTION;"
+        );
+        let vars = || {
+            vec![
+                var("a", bytes(new.account.as_bytes())),
+                var("identity", bytes(&new.identity)),
+                var("allowance", int(u64::from(new.allowance))),
+                var("d", bytes(new.device.as_bytes())),
+                var("k", bytes(&new.auth_key)),
+                var("code", bytes(invite.map_or(&[0u8; 32][..], |c| &c[..]))),
+            ]
+        };
+        let mut attempt = 0;
+        loop {
+            match self.db.query(&sql, vars()).await {
+                Ok(_) => return Ok(()),
+                Err(DbError::Statement(kind)) if kind == "Thrown" => {
+                    return Err(RegistryError::Invite);
+                }
+                Err(DbError::Statement(kind)) if kind.contains("AlreadyExists") => {
+                    return Err(RegistryError::Exists);
+                }
+                Err(e) if is_conflict(&e) && attempt < CONFLICT_RETRIES => {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(2u64 << attempt.min(6))).await;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
+    /// A user's invite: takes one from the account's allowance and stores the code's hash, single
+    /// use, until `expires_in`. The row says nothing about who created it.
+    ///
+    /// # Errors
+    /// [`RegistryError::Allowance`] when none is left (or the account does not exist).
+    pub async fn create_user_invite(
+        &self,
+        account: &AccountId,
+        code: &[u8; 32],
+        expires_in: Duration,
+    ) -> Result<(), RegistryError> {
+        let sql = "BEGIN TRANSACTION;
+             LET $n = account:[$a].invites;
+             IF $n == NONE OR $n < 1 { THROW 'allowance' };
+             UPDATE account:[$a] SET invites -= 1 RETURN NONE;
+             CREATE invite:[$code] SET uses = 1, expires = time::now() + duration::from_secs($ttl) RETURN NONE;
+             COMMIT TRANSACTION;";
+        let vars = || {
+            vec![
+                var("a", bytes(account.as_bytes())),
+                var("code", bytes(code)),
+                var("ttl", int(expires_in.as_secs())),
+            ]
+        };
+        let mut attempt = 0;
+        loop {
+            match self.db.query(sql, vars()).await {
+                Ok(_) => return Ok(()),
+                Err(DbError::Statement(kind)) if kind == "Thrown" => {
+                    return Err(RegistryError::Allowance);
+                }
+                Err(DbError::Statement(kind)) if kind.contains("AlreadyExists") => {
+                    return Err(RegistryError::Exists);
+                }
+                Err(e) if is_conflict(&e) && attempt < CONFLICT_RETRIES => {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(2u64 << attempt.min(6))).await;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
+    /// An operator's batch of invites (`songbird-admin invites create`): each code hash with
+    /// `uses` uses until `expires_in`.
+    ///
+    /// # Errors
+    /// [`RegistryError::Exists`] if a hash is already stored (the caller draws new codes).
+    pub async fn create_invites(
+        &self,
+        codes: &[[u8; 32]],
+        uses: u32,
+        expires_in: Duration,
+    ) -> Result<(), RegistryError> {
+        let list: Vec<Value> = codes.iter().map(|c| bytes(c)).collect();
+        let r = self
+            .db
+            .query(
+                "BEGIN TRANSACTION;
+                 FOR $c IN $codes {
+                   CREATE invite:[$c] SET uses = $uses, expires = time::now() + duration::from_secs($ttl) RETURN NONE;
+                 };
+                 COMMIT TRANSACTION;",
+                vec![
+                    var("codes", Value::Array(list)),
+                    var("uses", int(u64::from(uses))),
+                    var("ttl", int(expires_in.as_secs())),
+                ],
+            )
+            .await;
+        match r {
+            Ok(_) => Ok(()),
+            Err(DbError::Statement(kind)) if kind.contains("AlreadyExists") => {
+                Err(RegistryError::Exists)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Revokes a code (whoever holds it may; nothing records who created it).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn revoke_invite(&self, code: &[u8; 32]) -> Result<(), RegistryError> {
+        self.db
+            .exec(
+                "DELETE invite:[$code] RETURN NONE;",
+                vec![var("code", bytes(code))],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Uses left on a code that has not expired (tests and operators); `None` if unknown,
+    /// used up or expired.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn invite_uses(&self, code: &[u8; 32]) -> Result<Option<u32>, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "SELECT VALUE uses FROM invite WHERE id = invite:[$code] AND expires > time::now();",
+                vec![var("code", bytes(code))],
+            )
+            .await?;
+        Ok(first_int(&v).and_then(|n| u32::try_from(n).ok()))
+    }
+
+    /// Invites an account may still create (0 for an account without an allowance).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn invite_allowance(&self, account: &AccountId) -> Result<u32, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "RETURN account:[$a].invites;",
+                vec![var("a", bytes(account.as_bytes()))],
+            )
+            .await?;
+        Ok(first_int(&v)
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(0))
+    }
+
+    /// Adds to an account's allowance (`songbird-admin invites grant`). Returns false if the
+    /// account does not exist.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn add_invite_allowance(
+        &self,
+        account: &AccountId,
+        add: u32,
+    ) -> Result<bool, RegistryError> {
+        let v = self
+            .db
+            .query(
+                "BEGIN TRANSACTION;
+                 IF !record::exists(account:[$a]) { THROW 'no_account' };
+                 UPDATE account:[$a] SET invites = (invites ?? 0) + $n RETURN NONE;
+                 COMMIT TRANSACTION;",
+                vec![
+                    var("a", bytes(account.as_bytes())),
+                    var("n", int(u64::from(add))),
+                ],
+            )
+            .await;
+        match v {
+            Ok(_) => Ok(true),
+            Err(DbError::Statement(kind)) if kind == "Thrown" => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Deletes up to `limit` expired invites (the worker's sweep); returns how many.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn delete_expired_invites(&self, limit: usize) -> Result<usize, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "DELETE (SELECT VALUE id FROM invite WHERE expires <= time::now() LIMIT $n)
+                   RETURN BEFORE;",
+                vec![var("n", int(u64::try_from(limit).unwrap_or(u64::MAX)))],
+            )
+            .await?;
+        Ok(rows(v).len())
+    }
+
+    /// An account's identity key (`None` for an account created without one by the admin link).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn identity_key(
+        &self,
+        account: &AccountId,
+    ) -> Result<Option<[u8; 32]>, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "RETURN account:[$a].identity;",
+                vec![var("a", bytes(account.as_bytes()))],
+            )
+            .await?;
+        Ok(id32(&v))
     }
 
     /// The directory version: bumped by every change to accounts or devices.
@@ -822,6 +1117,24 @@ impl songbird_jobs::Outbox for Registry {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+/// Invite code length (`songbird_proto::registration::INVITE_LEN`).
+pub const INVITE_CODE_LEN: usize = 15;
+
+/// What an invite code is stored under: `SHA-256("songbird.v1/invite\0" || code)`. A code is 120
+/// random bits, so an unkeyed hash is enough: the table alone gives no code back, and nothing
+/// can be precomputed. Comparison is by database key lookup on the hash; guessing is limited by
+/// the proof of work and the refused-invite throttles in front of it.
+#[must_use]
+pub fn invite_hash(code: &[u8; INVITE_CODE_LEN]) -> [u8; 32] {
+    let mut ctx = aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA256);
+    ctx.update(b"songbird.v1/invite\0");
+    ctx.update(code);
+    let d = ctx.finish();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(d.as_ref());
+    out
 }
 
 /// The keyed hash a push token is stored under (HMAC-SHA256 of the device ID with the

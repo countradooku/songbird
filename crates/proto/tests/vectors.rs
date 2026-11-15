@@ -120,3 +120,47 @@ fn auth_transcript() {
     );
     assert_eq!(Bytes::from(t), want);
 }
+
+/// Registration (`docs/PROTOCOL.md` §4.1–§4.2, §13).
+#[test]
+fn registration() {
+    use songbird_proto::registration::{
+        DEVICE_CONTEXT, IDENTITY_CONTEXT, RegisterRequest, invite, transcript,
+    };
+    let code: [u8; 15] = core::array::from_fn(|i| u8::try_from(i).unwrap());
+    assert_eq!(invite::format(&code), INVITE_TEXT);
+    assert_eq!(invite::parse(&INVITE_TEXT.to_lowercase()), Some(code));
+    let req = RegisterRequest {
+        challenge: [0x11; 51],
+        solutions: vec![7, 31],
+        invite: Some(code),
+        identity_key: [0x22; 32],
+        auth_key: [0x33; 32],
+        identity_sig: [0x44; 64],
+        auth_sig: [0x55; 64],
+    };
+    assert_eq!(hex::encode(req.encode()), REQUEST.replace(' ', ""));
+    let t = transcript(
+        IDENTITY_CONTEXT,
+        "chat.example",
+        &[0x11; 51],
+        &[0x22; 32],
+        &[0x33; 32],
+    )
+    .unwrap();
+    assert_eq!(hex::encode(&t), IDENTITY_TRANSCRIPT.replace(' ', ""));
+    let d = transcript(
+        DEVICE_CONTEXT,
+        "chat.example",
+        &[0x11; 51],
+        &[0x22; 32],
+        &[0x33; 32],
+    )
+    .unwrap();
+    assert_eq!(&d[..DEVICE_CONTEXT.len()], DEVICE_CONTEXT);
+    assert_eq!(&d[DEVICE_CONTEXT.len()..], &t[IDENTITY_CONTEXT.len()..]);
+}
+
+const INVITE_TEXT: &str = "000G-40R4-0M30-E209-185G-R38E";
+const REQUEST: &str = "01 111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111 02 000000070000001f 01 000102030405060708090a0b0c0d0e 2222222222222222222222222222222222222222222222222222222222222222 3333333333333333333333333333333333333333333333333333333333333333 44444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444 55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555";
+const IDENTITY_TRANSCRIPT: &str = "736f6e67626972642e76312f72656769737465722d6964656e7469747900 0c 636861742e6578616d706c65 111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111 2222222222222222222222222222222222222222222222222222222222222222 3333333333333333333333333333333333333333333333333333333333333333";

@@ -1,6 +1,6 @@
 [package]
 name = "songbird-api"
-description = "Songbird api service: push registration, attachment uploads and downloads, account deletion; signed device requests (D-0036)."
+description = "Songbird api service: registration and invites, push registration, attachment uploads and downloads, account deletion, sends without a socket; signed device requests (D-0036, D-0048)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -26,6 +26,9 @@ songbird-send.workspace = true
 songbird-proto.workspace = true
 songbird-mailbox.workspace = true
 songbird-router.workspace = true
+songbird-pow.workspace = true
+songbird-keys.workspace = true
+getrandom.workspace = true
 aws-lc-rs.workspace = true
 bytes.workspace = true
 futures-core.workspace = true

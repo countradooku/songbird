@@ -351,7 +351,8 @@ impl Worker {
         Ok(())
     }
 
-    /// One sweep: attachments past 30 days or fully fetched, expired grants, the outbox.
+    /// One sweep: attachments past 30 days or fully fetched, expired grants, expired invite
+    /// codes, the outbox.
     pub async fn sweep(&self) {
         match self.registry.expired_attachments(SWEEP_BATCH).await {
             Ok(objects) => {
@@ -372,6 +373,10 @@ impl Worker {
                 }
             }
             Err(e) => tracing::warn!(error = %e, "grant sweep failed"),
+        }
+        // Expired codes are refused already; this only stops them taking space.
+        if let Err(e) = self.registry.delete_expired_invites(SWEEP_BATCH).await {
+            tracing::warn!(error = %e, "invite sweep failed");
         }
         if let Err(e) = songbird_jobs::relay(self.registry.as_ref(), &self.queue).await {
             tracing::warn!(error = %e, "outbox relay failed");

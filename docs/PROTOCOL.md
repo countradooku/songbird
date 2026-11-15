@@ -286,6 +286,102 @@ magic F5 53 42 53 59 53 00 01 | version u8 (1) | key_id [8] | device [16] | issu
 
 ## 4. Identity, devices and key directory (Prompt 3)
 
+Decisions D-0047 (the owner's Prompt 3 choices) and D-0048 (registration).
+
+### 4.1 Registration: `POST /v1/registration`
+
+Accounts have no phone number or e-mail. An account is a random ID, an **account identity key**
+(Ed25519; it signs the device list from M4 and is what people verify) and its devices. Each
+device has its own **authentication key** (Ed25519, §2), never used for end-to-end encryption.
+The server chooses both IDs (16 random bytes, D-0003).
+
+1. `POST /v1/registration/challenge` (no body) returns a 51-byte proof-of-work challenge
+   (`application/octet-stream`):
+
+   ```
+   version u8 (1) | issued_ms u64 | memory_kib u32 | iterations u32 | bits u8 | solutions u8
+     | nonce [16] | tag [16]
+   ```
+
+   The tag is the first 16 bytes of `HMAC-SHA256(key, "songbird.v1/pow-challenge\0" || the 35
+   bytes before it)`, with a key every `api` node derives from the registration secret: no state
+   is kept until a solution arrives. A challenge is valid for 10 minutes and for one attempt.
+2. The client finds `solutions` strictly increasing `u32` counters `c`, each such that
+
+   ```
+   Argon2id(v1.3, m = memory_kib KiB, t = iterations, p = 1, 32-byte output)(
+       password = "songbird.v1/pow\0" || challenge[0..35] || c (u32 big-endian),
+       salt = nonce)
+   ```
+
+   begins with `bits` zero bits (on average `solutions × 2^bits` evaluations). A client refuses
+   parameters outside: memory 8–262,144 KiB, iterations 1–16, bits 0–24, solutions 1–64.
+   Defaults: 16 MiB, 1, 4, 8 (128 evaluations; 0.48 s median on an Apple M5 Pro core).
+3. `POST /v1/registration` with `Content-Length` and the body:
+
+   ```
+   version u8 (1) | challenge [51] | k u8 | k × solution u32 | flags u8
+     | [invite [15] if flags & 1] | identity_key [32] | auth_key [32]
+     | identity_sig [64] | auth_sig [64]
+   ```
+
+   Unknown flags, trailing bytes and `k` outside 1–64 are refused. Each key signs, with Ed25519:
+
+   ```
+   context || u8 len(server_name) || server_name || challenge [51] || identity_key [32]
+     || auth_key [32]
+   ```
+
+   with context `"songbird.v1/register-identity\0"` for the identity key and
+   `"songbird.v1/register-device\0"` for the authentication key. The two keys must differ, and
+   each must be the canonical encoding of a point of prime order (small-order and mixed-order
+   keys are refused: under the identity point, `R = sB` verifies for any message).
+
+Answers:
+
+| Status | Body | Meaning |
+| --- | --- | --- |
+| 201 | `{"account": hex, "device": hex}` | Registered |
+| 400 | `{"error": "request" \| "keys" \| "server name"}` | Does not decode; keys or signatures refused (the challenge is not spent) |
+| 403 | `{"error": "challenge"}` | Forged, expired, already used or wrongly solved: get a new challenge |
+| 403 | `{"error": "invite"}` | Invite-only mode: the code is missing, unknown, used up, expired or revoked (one answer for all) |
+| 411, 413 | none | No `Content-Length`, or longer than 518 bytes |
+| 429 | none, `Retry-After` | Throttled (per IP range or deployment-wide) |
+| 503 | none | Registration is not configured, or a store is unavailable |
+
+The server checks, cheapest first: length and decoding; throttles; the challenge's tag and age;
+both keys and signatures; then spends the challenge (single use); then verifies the work; then
+consumes the invite and creates the account in one transaction.
+
+**Right after registering**, delivery nodes may not know the new device yet: they reload the
+directory from the registry within `directory_poll_ms` (1 s by default). A client that connects
+in that window gets 4000 like any unknown device. Apps therefore treat 4000 as retryable, with
+backoff, for 10 seconds after registering (`ClientConfig::new_device_grace` in the Rust client).
+The server never looks a device up on behalf of an unauthenticated connection.
+
+### 4.2 Invites
+
+Invite-only mode is a server setting (`[api.registration] invite_only`, the launch default);
+switching it off needs no migration, and codes are then ignored.
+
+- **Codes:** 15 random bytes (120 bits), shown as 24 Crockford base32 symbols in six groups of
+  four (`0123-4567-89AB-CDEF-GHJK-MNPQ`). Parsing ignores case, hyphens and spaces and reads `O`
+  as `0`, `I` and `L` as `1`. The server stores `SHA-256("songbird.v1/invite\0" || code)` with
+  the uses left and the expiry, nothing else: **not who created the code** (D-0038, D-0047). The
+  row goes at its last use.
+- **Guessing:** a guess costs a solved challenge, and refused codes spend a per-range budget
+  (10 an hour, burst 5) and a deployment-wide one (600 an hour); once spent, registrations from
+  that range wait (429) before their challenge is even checked.
+- **Users' invites**, signed like every device request (§2 of `api`, D-0036):
+  - `POST /v1/invites`, optional body `{"ttl_days": n}` (capped at 7 by default): `201
+    {"code": "...", "expires_in_secs": n}`, single use, one taken from the account's allowance (5
+    per new account by default); `403 {"error": "allowance"}` when none is left.
+  - `GET /v1/invites`: `{"allowance": n, "invite_only": bool}`.
+  - `DELETE /v1/invites`, body `{"code": "..."}`: revokes it; `204` whether or not it existed.
+    Whoever holds a code may revoke it (nothing records who created it).
+- **Operators:** `songbird-admin invites create --count N --uses U --days D` prints codes once
+  (audit-logged without them); `songbird-admin invites grant --account <hex> --add N`.
+
 ## 5. Encrypted content schemas (Prompt 4)
 
 ## 6. Groups, roles and channels (MLS) (Prompt 5)
@@ -325,3 +421,35 @@ version 1, channel binding 32 × `33`:
 22222222222222222222222222222222 00000001
 3333333333333333333333333333333333333333333333333333333333333333
 ```
+
+Registration (Prompt 3, D-0048), from `crates/pow` and `crates/proto` tests:
+
+- Proof-of-work challenge for registration secret 32 × `42`, issued at 1,763,164,800,000 ms,
+  memory 64 KiB, 1 iteration, 4 bits, 2 solutions, nonce 16 × `11`:
+
+  ```
+  01 0000019a84cfc400 00000040 00000001 04 02 11111111111111111111111111111111
+  0062f574373fcffeceeac3d8e2446d66
+  ```
+
+  Its solutions are `[7, 31]`; the Argon2id output for counter 7 is
+  `039ed8433f9111cfc95132559389a12a974d312b0f22e013cacb546aff63fd56`, which the reference
+  `argon2` command (phc-winner-argon2) reproduces.
+- Invite code bytes `00 01 02 … 0e` (15 bytes counting up) display as
+  `000G-40R4-0M30-E209-185G-R38E` (checked independently against a Python implementation of
+  Crockford base32).
+- Registration request with challenge 51 × `11`, solutions `[7, 31]`, that invite code, identity
+  key 32 × `22`, authentication key 32 × `33`, signatures 64 × `44` and 64 × `55` (269 bytes):
+
+  ```
+  01 | 51 × 11 | 02 | 00000007 0000001f | 01 | 000102030405060708090a0b0c0d0e
+    | 32 × 22 | 32 × 33 | 64 × 44 | 64 × 55
+  ```
+- The identity key's transcript for server name `chat.example` and the same challenge and keys:
+
+  ```
+  736f6e67626972642e76312f72656769737465722d6964656e7469747900 0c 636861742e6578616d706c65
+    | 51 × 11 | 32 × 22 | 32 × 33
+  ```
+
+  The authentication key's differs only in its context, `"songbird.v1/register-device\0"`.

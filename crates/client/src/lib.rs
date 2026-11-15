@@ -75,6 +75,14 @@ pub struct ClientConfig {
     pub send_log_capacity: usize,
     /// How long a message stays in the send log without a delivery receipt.
     pub send_log_max_age: Duration,
+    /// For a device registered or linked moments ago: within this time of [`Client::start`], an
+    /// authentication failure (close 4000) is retried with backoff instead of stopping. Delivery
+    /// nodes learn new devices from the registry within their directory poll (1 s by default),
+    /// so a client that connects right after `POST /v1/registration` can arrive first. The server
+    /// never looks a device up on behalf of an unauthenticated connection (that would let anyone
+    /// turn connection attempts into database queries), so the wait is the client's
+    /// (`docs/PROTOCOL.md` §4.1; apps use 10 s after registering, zero otherwise).
+    pub new_device_grace: Duration,
 }
 
 impl ClientConfig {
@@ -93,6 +101,7 @@ impl ClientConfig {
             client_version: concat!("songbird-client/", env!("CARGO_PKG_VERSION")).into(),
             send_log_capacity: 100_000,
             send_log_max_age: Duration::from_hours(30 * 24),
+            new_device_grace: Duration::ZERO,
         }
     }
 }
@@ -224,6 +233,7 @@ impl Client {
         let (ev_tx, ev_rx) = mpsc::channel(cfg.event_capacity.max(1));
         let (state_tx, state_rx) = watch::channel(State::Connecting);
         let task = Task {
+            started: std::time::Instant::now(),
             backoff: Backoff::new(cfg.backoff),
             cfg,
             key,
@@ -391,6 +401,8 @@ struct Task {
     buf: BytesMut,
     /// TLS exporter of the current connection (zeros without TLS).
     channel_binding: [u8; songbird_proto::auth::CHANNEL_BINDING_LEN],
+    /// When [`Client::start`] ran (for [`ClientConfig::new_device_grace`]).
+    started: std::time::Instant,
 }
 
 enum Conn {
@@ -527,6 +539,13 @@ impl Task {
                 Outcome::Shutdown => break,
                 Outcome::Error => (None, self.backoff.next(None)),
                 Outcome::Closed(code, reason) => match CloseCode::reconnect(code) {
+                    // A new device the server's directory may not hold yet.
+                    Reconnect::Never
+                        if code == CloseCode::AuthFailed.code()
+                            && self.started.elapsed() < self.cfg.new_device_grace =>
+                    {
+                        (Some(code), self.backoff.next(None))
+                    }
                     Reconnect::Never => {
                         let _ = self.events.send(Event::Failed { code }).await;
                         break;

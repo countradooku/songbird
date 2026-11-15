@@ -3,7 +3,8 @@
 //! keys) is Prompt 3's; this is its stand-in, never reachable from the internet.
 //!
 //! Request: `op u8 (1) | account [16] | n u8 | n × (device [16] | Ed25519 key [32])`.
-//! Response: `status u8`: 0 created, 1 exists, 2 malformed, 3 unavailable.
+//! Response: `status u8`: 0 created, 1 exists, 2 malformed (a key of small or mixed order
+//! included, as registration refuses them), 3 unavailable.
 
 use std::sync::Arc;
 
@@ -48,7 +49,9 @@ fn decode(req: &[u8]) -> Option<NewAccount> {
         .iter()
         .map(|c| {
             let (dev, key) = c.split_at(16);
-            Some((DeviceId::from_slice(dev).ok()?, key.try_into().ok()?))
+            let key: [u8; 32] = key.try_into().ok()?;
+            songbird_keys::ed25519_public_key_ok(&key)
+                .then_some((DeviceId::from_slice(dev).ok()?, key))
         })
         .collect::<Option<Vec<_>>>()?;
     Some((AccountId::from_slice(account).ok()?, devices))
@@ -76,15 +79,26 @@ pub fn handler(registry: Arc<Registry>) -> songbird_link::Handler {
 mod tests {
     use super::*;
 
+    fn honest_key() -> [u8; 32] {
+        use aws_lc_rs::signature::KeyPair as _;
+        let k = aws_lc_rs::signature::Ed25519KeyPair::generate().unwrap();
+        k.public_key().as_ref().try_into().unwrap()
+    }
+
     #[test]
     fn requests_decode_strictly() {
         let a = AccountId::from_bytes([1; 16]);
-        let ds = vec![(DeviceId::from_bytes([2; 16]), [3; 32])];
+        let ds = vec![(DeviceId::from_bytes([2; 16]), honest_key())];
         let r = create_request(&a, &ds);
         assert_eq!(decode(&r), Some((a, ds)));
         for cut in 0..r.len() {
             assert_eq!(decode(&r[..cut]), None);
         }
         assert_eq!(decode(&create_request(&a, &[])), None);
+        // A small-order key (the identity point) is refused.
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        let weak = vec![(DeviceId::from_bytes([2; 16]), identity)];
+        assert_eq!(decode(&create_request(&a, &weak)), None);
     }
 }

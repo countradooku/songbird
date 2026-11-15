@@ -37,7 +37,7 @@ pub async fn serve(
             a = listener.accept() => a,
             _ = stop.changed() => return,
         };
-        let Ok((tcp, _)) = accepted else {
+        let Ok((tcp, peer)) = accepted else {
             tokio::time::sleep(Duration::from_millis(50)).await;
             continue;
         };
@@ -52,7 +52,10 @@ pub async fn serve(
             stop.clone(),
         );
         tokio::spawn(async move {
-            let svc = hyper::service::service_fn(move |req| {
+            let peer = crate::registration::Peer(peer.ip());
+            let svc = hyper::service::service_fn(move |mut req: hyper::Request<_>| {
+                // Registration throttles by IP range; the address goes no further than that.
+                req.extensions_mut().insert(peer);
                 let app = Arc::clone(&app);
                 async move { Ok::<_, Infallible>(app.handle(req).await) }
             });

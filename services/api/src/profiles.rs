@@ -329,14 +329,15 @@ impl Profiles {
         if getrandom::fill(&mut id).is_err() {
             return Outcome::Unavailable;
         }
-        if s3.put_object_bytes(&avatar_name(&id), body).await.is_err() {
+        // Recorded first (marked replaced), so a failed or interrupted upload is swept.
+        if registry.reserve_avatar(account, &id).await.is_err()
+            || s3.put_object_bytes(&avatar_name(&id), body).await.is_err()
+        {
             return Outcome::Unavailable;
         }
-        if registry.add_avatar(account, &id).await.is_ok() {
+        if registry.make_avatar_current(account, &id).await.is_ok() {
             Outcome::Json(serde_json::json!({ "avatar": hex::encode(id) }))
         } else {
-            // Not recorded: delete the object again (the sweep only sees recorded ones).
-            let _ = s3.delete_object(&avatar_name(&id)).await;
             Outcome::Unavailable
         }
     }

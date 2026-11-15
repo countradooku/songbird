@@ -285,12 +285,21 @@ impl Registry {
             ) else {
                 return Err(RegistryError::Shape);
             };
+            // The salt is stored before anything is logged under it.
             let salt = if let Some(s) = r.get("s").and_then(id32) {
                 s
             } else {
                 let mut s = [0u8; 32];
                 getrandom::fill(&mut s).map_err(|_| RegistryError::Shape)?;
-                s
+                let set = self
+                    .db
+                    .query(
+                        "UPDATE account:[$a] SET kt_salt = kt_salt ?? $s RETURN NONE;
+                         RETURN account:[$a].kt_salt;",
+                        vec![var("a", bytes(&a)), var("s", bytes(&s))],
+                    )
+                    .await?;
+                set.last().and_then(id32).ok_or(RegistryError::Shape)?
             };
             let subject = songbird_kt::subject(&salt, &a);
             let hash_of = |f: &str| {

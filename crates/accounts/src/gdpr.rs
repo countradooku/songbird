@@ -109,7 +109,9 @@ impl Registry {
         let base = "SELECT VALUE meta::id(id)[0] FROM account
                WHERE deleting = false AND last_seen != NONE AND last_seen < time::now()
                  - duration::from_days((inactive_months ?? 12) * 30";
-        let expired = self.inactive_ids(&format!("{base});"), limit).await?;
+        let expired = self
+            .inactive_ids(&format!("{base}) LIMIT $n;"), limit)
+            .await?;
         let mut out = Inactive {
             expired,
             ..Inactive::default()

@@ -93,7 +93,8 @@ async fn profiles_only_grow_and_access_keys_follow_devices() {
     assert_eq!(r.stale_avatars(10).await.unwrap(), Vec::<[u8; 32]>::new());
     r.db()
         .exec(
-            "UPDATE avatar SET at = time::now() - 2h RETURN NONE;",
+            "UPDATE avatar SET replaced_at = time::now() - 2h WHERE replaced_at != NONE
+               RETURN NONE;",
             Vec::new(),
         )
         .await
@@ -113,4 +114,30 @@ async fn admin_created_accounts_take_profiles_too() {
     r.create_account(&a, &[(d, [4; 32])]).await.unwrap();
     let res = r.put_profile(&a, 1, b"x", &[1; 16], false).await;
     assert!(res.is_ok(), "{res:?}");
+}
+
+/// Regression (security review): many old current avatars never hide replaced ones from the
+/// sweep, and an upload that never completed is swept.
+#[tokio::test]
+async fn current_avatars_never_block_the_sweep() {
+    let Some(r) = registry().await else { return };
+    for i in 0..5u8 {
+        let a = account(&r).await;
+        r.add_avatar(&a.account, &[i; 32]).await.unwrap();
+    }
+    let a = account(&r).await;
+    r.add_avatar(&a.account, &[0x10; 32]).await.unwrap();
+    r.add_avatar(&a.account, &[0x11; 32]).await.unwrap();
+    r.reserve_avatar(&a.account, &[0x12; 32]).await.unwrap();
+    r.db()
+        .exec(
+            "UPDATE avatar SET at = time::now() - 2h RETURN NONE;
+             UPDATE avatar SET replaced_at = time::now() - 2h WHERE replaced_at != NONE RETURN NONE;",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let mut stale = r.stale_avatars(2).await.unwrap();
+    stale.sort_unstable();
+    assert_eq!(stale, vec![[0x10; 32], [0x12; 32]]);
 }

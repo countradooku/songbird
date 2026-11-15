@@ -86,12 +86,32 @@ impl Registry {
         Ok(Some((b, n)))
     }
 
-    /// Records a new avatar object for the account and makes it the current one (earlier ones
-    /// are swept by the worker).
+    /// Records an avatar object **before** it is uploaded, already marked replaced, so an upload
+    /// that never completes (or a crash before [`Registry::make_avatar_current`]) is swept.
     ///
     /// # Errors
     /// [`RegistryError`].
-    pub async fn add_avatar(
+    pub async fn reserve_avatar(
+        &self,
+        account: &AccountId,
+        id: &[u8; 32],
+    ) -> Result<(), RegistryError> {
+        self.db
+            .query(
+                "CREATE avatar:[$i] SET account = $a, at = time::now(), replaced_at = time::now()
+                   RETURN NONE;",
+                vec![var("a", bytes(account.as_bytes())), var("i", bytes(id))],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Makes an uploaded avatar the account's current one; the previous one is marked replaced in
+    /// the same transaction (the worker deletes replaced ones after an hour).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn make_avatar_current(
         &self,
         account: &AccountId,
         id: &[u8; 32],
@@ -100,13 +120,29 @@ impl Registry {
             .query(
                 "BEGIN TRANSACTION;
                  IF account:[$a].deleting != false { THROW 'songbird:gone' };
-                 CREATE avatar:[$i] SET account = $a, at = time::now() RETURN NONE;
+                 IF avatar:[$i].account != $a { THROW 'songbird:gone' };
+                 UPDATE avatar SET replaced_at = time::now()
+                   WHERE account = $a AND replaced_at = NONE RETURN NONE;
+                 UPDATE avatar:[$i] SET replaced_at = NONE RETURN NONE;
                  UPDATE account:[$a] SET avatar = $i RETURN NONE;
                  COMMIT TRANSACTION;",
                 vec![var("a", bytes(account.as_bytes())), var("i", bytes(id))],
             )
             .await?;
         Ok(())
+    }
+
+    /// [`Registry::reserve_avatar`] then [`Registry::make_avatar_current`] (tests, tools).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn add_avatar(
+        &self,
+        account: &AccountId,
+        id: &[u8; 32],
+    ) -> Result<(), RegistryError> {
+        self.reserve_avatar(account, id).await?;
+        self.make_avatar_current(account, id).await
     }
 
     /// Whether an avatar object is an account's current one (only those are served).
@@ -144,7 +180,7 @@ impl Registry {
             .collect()
     }
 
-    /// Avatar objects older than an hour that are not their account's current one.
+    /// Avatar objects replaced (or never completed) more than an hour ago.
     ///
     /// # Errors
     /// [`RegistryError`].
@@ -152,25 +188,15 @@ impl Registry {
         let v = self
             .db
             .query1(
-                "SELECT meta::id(id)[0] AS i, account AS a FROM avatar
-                   WHERE at < time::now() - 1h LIMIT $n;",
+                "SELECT VALUE meta::id(id)[0] FROM avatar
+                   WHERE replaced_at != NONE AND replaced_at < time::now() - 1h LIMIT $n;",
                 vec![var("n", int(u64::try_from(limit).unwrap_or(u64::MAX)))],
             )
             .await?;
-        let mut out = Vec::new();
-        for r in rows(v) {
-            let (Some(i), Some(a)) = (r.get("i").and_then(id32), r.get("a").and_then(id16)) else {
-                return Err(RegistryError::Shape);
-            };
-            let cur = self
-                .db
-                .query1("RETURN account:[$a].avatar;", vec![var("a", bytes(&a))])
-                .await?;
-            if id32(&cur) != Some(i) {
-                out.push(i);
-            }
-        }
-        Ok(out)
+        rows(v)
+            .iter()
+            .map(|x| id32(x).ok_or(RegistryError::Shape))
+            .collect()
     }
 
     /// Removes an avatar record (after its object is deleted).

@@ -122,6 +122,8 @@ DEFINE FIELD IF NOT EXISTS avatar ON account TYPE option<bytes>;
 DEFINE TABLE IF NOT EXISTS avatar SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS account ON avatar TYPE bytes;
 DEFINE FIELD IF NOT EXISTS at ON avatar TYPE datetime;
+DEFINE FIELD IF NOT EXISTS replaced_at ON avatar TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS avatar_replaced ON avatar FIELDS replaced_at;
 DEFINE INDEX IF NOT EXISTS avatar_account ON avatar FIELDS account;
 DEFINE INDEX IF NOT EXISTS avatar_at ON avatar FIELDS at;
 DEFINE FIELD IF NOT EXISTS kt_gen ON account TYPE option<int>;

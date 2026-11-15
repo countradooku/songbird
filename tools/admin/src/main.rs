@@ -5,9 +5,13 @@
 //! - `generation`: the store generation clients see in `Hello` (D-0040): shown, or bumped after
 //!   a restore or a loss of the mailbox, so clients resend what has no delivery receipt.
 //! - `accounts import`: a static directory file as registry accounts (drills, development).
+//! - `invites create`: a batch of invite codes for early testers (D-0038); `invites grant`: more
+//!   invites for one account. Codes are printed once and stored only as hashes; the audit log
+//!   records how many, never the codes.
 //!
-//! Commands that change the registry (`backup restore`, `generation bump`, `accounts import`)
-//! need `--confirm <namespace>/<database>` and write an audit log (`audit.rs`).
+//! Commands that change the registry (`backup restore`, `generation bump`, `accounts import`,
+//! `invites create`, `invites grant`) need `--confirm <namespace>/<database>` and write an audit
+//! log (`audit.rs`).
 //! - `ca`: the internal mutual-TLS certificate authority.
 //!
 //! Every service-to-service connection on the private network uses certificates from this CA (see
@@ -57,9 +61,45 @@ enum Cmd {
     /// Registry backups (D-0040).
     #[command(subcommand)]
     Backup(BackupCmd),
-    /// Accounts (development and drills until Prompt 3's registration).
+    /// Accounts (development and drills).
     #[command(subcommand)]
     Accounts(AccountsCmd),
+    /// Invite codes (invite-only registration, D-0038).
+    #[command(subcommand)]
+    Invites(InvitesCmd),
+}
+
+#[derive(Debug, Subcommand)]
+enum InvitesCmd {
+    /// Create invite codes and print them (once; only their hashes are stored).
+    Create {
+        #[command(flatten)]
+        store: store::StoreArgs,
+        #[command(flatten)]
+        guard: audit::Guard,
+        /// How many codes.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=1000))]
+        count: u32,
+        /// Registrations each code allows.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+        uses: u32,
+        /// Days until the codes expire.
+        #[arg(long, default_value_t = 14, value_parser = clap::value_parser!(u32).range(1..=90))]
+        days: u32,
+    },
+    /// Give an account more invites.
+    Grant {
+        #[command(flatten)]
+        store: store::StoreArgs,
+        #[command(flatten)]
+        guard: audit::Guard,
+        /// The account ID (32 hex characters).
+        #[arg(long)]
+        account: String,
+        /// How many to add.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=1000))]
+        add: u32,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -186,6 +226,7 @@ fn main() -> ExitCode {
             guard,
             directory,
         }) => accounts_import(&store, &guard, &directory),
+        Cmd::Invites(cmd) => invites_cmd(cmd),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -377,4 +418,78 @@ fn print_report(r: &backup::Report) {
         r.orphans,
         r.generation
     );
+}
+
+fn invites_cmd(cmd: InvitesCmd) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        match cmd {
+            InvitesCmd::Create {
+                store,
+                guard,
+                count,
+                uses,
+                days,
+            } => {
+                let detail = format!("{count} codes, {uses} uses each, {days} days");
+                let entry = guard.begin("invites create", &target(&store), &detail)?;
+                let r = async {
+                    let registry = store.registry().await?;
+                    let mut codes = Vec::new();
+                    for _ in 0..count {
+                        let mut c = [0u8; songbird_accounts::INVITE_CODE_LEN];
+                        aws_lc_rs::rand::fill(&mut c)
+                            .map_err(|_| anyhow::anyhow!("random source failed"))?;
+                        codes.push(c);
+                    }
+                    let hashes: Vec<[u8; 32]> =
+                        codes.iter().map(songbird_accounts::invite_hash).collect();
+                    registry
+                        .create_invites(
+                            &hashes,
+                            uses,
+                            std::time::Duration::from_secs(u64::from(days) * 86_400),
+                        )
+                        .await?;
+                    Ok::<_, anyhow::Error>(codes)
+                }
+                .await;
+                entry.end(&r, &detail)?;
+                for c in r? {
+                    println!("{}", songbird_proto::registration::invite::format(&c));
+                }
+            }
+            InvitesCmd::Grant {
+                store,
+                guard,
+                account,
+                add,
+            } => {
+                let id = hex::decode(&account)
+                    .ok()
+                    .and_then(|b| songbird_types::AccountId::from_slice(&b).ok())
+                    .ok_or_else(|| anyhow::anyhow!("--account must be 32 hex characters"))?;
+                let entry = guard.begin("invites grant", &target(&store), &format!("+{add}"))?;
+                let r = async {
+                    let registry = store.registry().await?;
+                    let found = registry.add_invite_allowance(&id, add).await?;
+                    anyhow::ensure!(found, "no such account");
+                    registry
+                        .invite_allowance(&id)
+                        .await
+                        .map_err(anyhow::Error::from)
+                }
+                .await;
+                entry.end(
+                    &r,
+                    &r.as_ref()
+                        .map_or(String::new(), |n| format!("allowance {n}")),
+                )?;
+                println!("the account may now create {} invites", r?);
+            }
+        }
+        Ok(())
+    })
 }

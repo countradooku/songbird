@@ -14,6 +14,8 @@ songbird-proxy = { path = "../services/proxy" }
 songbird-proto = { path = "../crates/proto" }
 songbird-surreal = { path = "../crates/surreal" }
 songbird-mailbox = { path = "../crates/mailbox" }
+songbird-pow = { path = "../crates/pow" }
+songbird-keys = { path = "../crates/keys" }
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
 
@@ -72,6 +74,27 @@ bench = false
 [[bin]]
 name = "surreal_cbor"
 path = "fuzz_targets/surreal_cbor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "registration_request"
+path = "fuzz_targets/registration_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pow_challenge"
+path = "fuzz_targets/pow_challenge.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ed25519_key"
+path = "fuzz_targets/ed25519_key.rs"
 test = false
 doc = false
 bench = false

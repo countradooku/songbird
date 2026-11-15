@@ -93,3 +93,33 @@ the same idempotency key (or sends over its WebSocket once it reconnects).
 - Impact: new accounts cannot connect, and a deleted device could still authenticate until the
   registry is reachable (its open sessions were already closed by the deletion).
 - Recovery: restore SurrealDB connectivity; the directory reloads within `poll_ms`.
+
+## Registration refusing or throttling sign-ups (Prompt 3, D-0048)
+
+Registration (`POST /v1/registration`) is the only unauthenticated write. Its degraded modes are
+explicit; none affects existing accounts or messages.
+
+- Detection: `api_registration_throttled` rising (429s), `api_registrations_refused` or
+  `api_registration_invite_refused` rising, `api_registrations` flat; 503s with `api_errors`.
+- Causes and actions:
+  1. **`valkey-hot` unreachable**: throttles and challenge single-use fail closed, so every
+     registration answers 503. Restore `valkey-hot`; nothing to replay (clients ask for a new
+     challenge).
+  2. **SurrealDB unreachable**: 503 at the last step; the challenge is spent, the client asks for
+     a new one.
+  3. **Verification saturated** (503 after a 2 s wait for a slot): many registrations at once.
+     Check for a campaign (step 4) before raising `max_concurrent_verifications` (each slot holds
+     `pow.memory_kib`).
+  4. **A registration or guessing campaign**: `api_registration_invite_refused` and 429s from the
+     deployment-wide budgets mean someone is guessing codes; leave invite-only mode on, lower
+     `throttle.global_invite_failures_per_hour` if needed, and raise `pow.bits` by one (doubles the
+     work; challenges carry their parameters, so no client release is needed).
+  5. **Legitimate users throttled** (many people behind one carrier NAT range): raise
+     `throttle.registrations_per_hour` and `registration_burst`; the deployment-wide caps remain.
+- Switching invite-only mode off (owner's decision): set `[api.registration] invite_only = false`
+  on every `api` node and restart them one by one; no migration. Codes still in the database are
+  then ignored and expire.
+- Issuing codes: `songbird-admin invites create --count N --uses U --days D --confirm <ns>/<db>`
+  prints the codes once (hand them over through a channel you trust); the audit log records the
+  count only. `songbird-admin invites grant --account <hex> --add N` gives one account more.
+- Verification: `api_registrations` rising; a test registration with a fresh code answers 201.

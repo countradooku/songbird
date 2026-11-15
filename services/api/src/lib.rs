@@ -2,6 +2,9 @@
 //!
 //! | Method and path | What |
 //! | --- | --- |
+//! | `POST /v1/registration/challenge` | A proof-of-work challenge ([`registration`]; unsigned) |
+//! | `POST /v1/registration` | A new account and its first device ([`registration`]; unsigned, proof of work) |
+//! | `POST`, `GET`, `DELETE /v1/invites` | Invite codes: create from the allowance, see it, revoke ([`registration`]) |
 //! | `PUT /v1/push` | Registers the device's push channel, sealed to the push service's key |
 //! | `DELETE /v1/push` | Removes it |
 //! | `POST /v1/attachments` | An upload grant: exact (padded) size and recipient fetches due |
@@ -10,7 +13,8 @@
 //! | `DELETE /v1/account` | Deletes the device's account from every store (outbox job) |
 //! | `PUT /v1/messages` | A WebSocket `Send` frame, for clients with no open socket; answers its `SendResult` ([`messages`]) |
 //!
-//! Every request is signed by the device ([`auth`]); there are no tokens or cookies. Bodies are
+//! Every request but the two registration steps is signed by the device ([`auth`]); there are no
+//! tokens or cookies. Registration is paid for with proof of work and throttled per IP range. Bodies are
 //! bounded before they are read. Responses carry status codes and small JSON; errors say nothing
 //! about whether a device, account or object exists beyond what the caller already proved.
 //! Nothing here logs identifiers or object names (invariant 6).
@@ -21,6 +25,7 @@ pub mod auth;
 pub mod client;
 pub mod config;
 pub mod messages;
+pub mod registration;
 pub mod server;
 
 use std::pin::Pin;
@@ -72,6 +77,8 @@ pub struct ApiMetrics {
     pub send: songbird_send::SendMetrics,
     /// Push wake-ups from `PUT /v1/messages`.
     pub push: songbird_send::PushMetrics,
+    /// Registration and invites.
+    pub registration: registration::RegistrationMetrics,
 }
 
 impl ApiMetrics {
@@ -124,6 +131,7 @@ impl ApiMetrics {
         ] {
             m.register(name, help, c.clone())?;
         }
+        self.registration.register(m)?;
         self.send.register(m, "api")
     }
 }
@@ -150,6 +158,8 @@ pub struct App {
     pub metrics: ApiMetrics,
     /// `PUT /v1/messages` (absent: the endpoint answers 503).
     pub messages: Option<messages::Messages>,
+    /// Registration and invites (absent: those endpoints answer 503).
+    pub registration: Option<registration::Registration>,
 }
 
 impl std::fmt::Debug for App {
@@ -332,7 +342,98 @@ impl App {
                 self.delete_account(device).await
             }
             (&Method::PUT, "/v1/messages", None) => self.put_message(req).await,
+            (&Method::POST, "/v1/registration/challenge", None) => {
+                let (r, peer) = self.registration_and_peer(&req)?;
+                Ok(outcome(r.challenge(&self.hot, peer).await))
+            }
+            (&Method::POST, "/v1/registration", None) => {
+                let (r, peer) = self.registration_and_peer(&req)?;
+                let body = bounded_body(req, songbird_proto::registration::MAX_LEN).await?;
+                Ok(outcome(
+                    r.register(&self.registry, &self.hot, &self.server_name, peer, &body)
+                        .await,
+                ))
+            }
+            (&Method::POST | &Method::GET | &Method::DELETE, "/v1/invites", None) => {
+                self.invites(req).await
+            }
             _ => Err(Refusal::Status(StatusCode::NOT_FOUND)),
+        }
+    }
+
+    fn registration_and_peer(
+        &self,
+        req: &Request<Incoming>,
+    ) -> Result<(&registration::Registration, std::net::IpAddr), Refusal> {
+        let r = self
+            .registration
+            .as_ref()
+            .ok_or(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
+        // The listener always sets it; without it there is nothing to throttle by.
+        let peer = req
+            .extensions()
+            .get::<registration::Peer>()
+            .ok_or(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
+        Ok((r, peer.0))
+    }
+
+    /// `/v1/invites`: signed like every device request.
+    async fn invites(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let r = self.registration.as_ref().ok_or_else(unavailable)?;
+        let method = req.method().clone();
+        let (device, body) = self.authenticate_json(req).await?;
+        let parsed: registration::InviteBody = if body.is_empty() {
+            registration::InviteBody::default()
+        } else {
+            serde_json::from_slice(&body).map_err(|_| Refusal::Status(StatusCode::BAD_REQUEST))?
+        };
+        let account = self
+            .registry
+            .device(&device)
+            .await
+            .map_err(|_| unavailable())?
+            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?
+            .account;
+        match method {
+            Method::POST => match r.create_invite(&self.registry, &account, &parsed).await {
+                Ok(Some((code, ttl))) => Ok(json(
+                    StatusCode::CREATED,
+                    &serde_json::json!({ "code": code, "expires_in_secs": ttl }),
+                )),
+                Ok(None) => Ok(json(
+                    StatusCode::FORBIDDEN,
+                    &serde_json::json!({ "error": "allowance" }),
+                )),
+                Err(_) => Err(unavailable()),
+            },
+            Method::GET => {
+                let left = self
+                    .registry
+                    .invite_allowance(&account)
+                    .await
+                    .map_err(|_| unavailable())?;
+                Ok(json(
+                    StatusCode::OK,
+                    &serde_json::json!({
+                        "allowance": left,
+                        "invite_only": r.settings.invite_only,
+                    }),
+                ))
+            }
+            _ => {
+                let code = parsed
+                    .code
+                    .as_deref()
+                    .and_then(songbird_proto::registration::invite::parse)
+                    .ok_or(Refusal::Status(StatusCode::BAD_REQUEST))?;
+                self.registry
+                    .revoke_invite(&songbird_accounts::invite_hash(&code))
+                    .await
+                    .map_err(|_| unavailable())?;
+                // The same answer whether or not the code existed.
+                Ok(empty(StatusCode::NO_CONTENT))
+            }
         }
     }
 
@@ -691,6 +792,71 @@ impl App {
             tracing::warn!(error = %e, "outbox relay deferred");
         }
         Ok(empty(StatusCode::ACCEPTED))
+    }
+}
+
+/// A body of at most `max` bytes, read only after `Content-Length` says it fits.
+async fn bounded_body(req: Request<Incoming>, max: usize) -> Result<Bytes, Refusal> {
+    let length = req
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok())
+        .ok_or(Refusal::Status(StatusCode::LENGTH_REQUIRED))?;
+    if length == 0 || length > max {
+        return Err(Refusal::Status(StatusCode::PAYLOAD_TOO_LARGE));
+    }
+    let body = Limited::new(req.into_body(), length)
+        .collect()
+        .await
+        .map_err(|_| Refusal::Status(StatusCode::PAYLOAD_TOO_LARGE))?
+        .to_bytes();
+    if body.len() != length {
+        return Err(Refusal::Status(StatusCode::BAD_REQUEST));
+    }
+    Ok(body)
+}
+
+/// The HTTP answer for a registration outcome.
+fn outcome(o: registration::Outcome) -> Response<Body> {
+    use registration::Outcome;
+    match o {
+        Outcome::Challenge(b) => {
+            let mut r = Response::new(Full::new(b).map_err(|e| match e {}).boxed_unsync());
+            r.headers_mut().insert(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            );
+            r
+        }
+        Outcome::Registered { account, device } => json(
+            StatusCode::CREATED,
+            &serde_json::json!({
+                "account": account.to_hex_unredacted(),
+                "device": device.to_hex_unredacted(),
+            }),
+        ),
+        Outcome::Malformed(what) => json(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({ "error": what }),
+        ),
+        Outcome::Challenge403 => json(
+            StatusCode::FORBIDDEN,
+            &serde_json::json!({ "error": "challenge" }),
+        ),
+        Outcome::Invite403 => json(
+            StatusCode::FORBIDDEN,
+            &serde_json::json!({ "error": "invite" }),
+        ),
+        Outcome::Throttled(wait_us) => {
+            let mut r = empty(StatusCode::TOO_MANY_REQUESTS);
+            let secs = wait_us.div_ceil(1_000_000).max(1);
+            if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
+                r.headers_mut().insert(hyper::header::RETRY_AFTER, v);
+            }
+            r
+        }
+        Outcome::Unavailable => empty(StatusCode::SERVICE_UNAVAILABLE),
     }
 }
 

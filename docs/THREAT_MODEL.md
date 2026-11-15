@@ -30,6 +30,10 @@ server in plaintext. Adding to this list requires the owner's approval.
 | Registry backups off-site (Hetzner Object Storage, Helsinki; a project of its own, D-0042): every registry row above as it was at the export (accounts, devices and their public keys, sealed push registrations, attachment records, grants, outbox, store generation), **age-encrypted** to the owner's offline identity and the verification identity; never the mailbox, its keys or the jobs | Recover accounts after losing the database (RPO 5 minutes) | Write-once: 25 hours (5-minute exports), 8 days (daily), 29 days (weekly), 93 days (monthly). **A deleted account stays in older backups until they expire, at most 93 days**; a restore deletes it again (deletion journal) | Prompt 2 (M6), D-0040; **approved 2026-11-13 under the owner's delegation (D-0041)** |
 | Keyed hash (HMAC-SHA256, key derived from the router's cluster secret) of a device that sent through `PUT /v1/messages`, with its next allowed send time, in `valkey-hot`; no device ID | Hold HTTP sends to the WebSocket's rate limit across every `api` node | At most the burst window (4 s at the defaults), then expired | Prompt 2 (send, D-0044); keyed form of the device ID, **approved by the owner 2026-11-14** |
 | Server-signed system notices (recipient device, kind, the account whose device list changed, issue time, random notice ID, signature), stored and delivered as mailbox envelopes | Tell a device something only the server knows it must hear (D-0037) | As envelope rows (sealed, deleted at acknowledgement) | Prompt 2 (send, D-0044); data the server already holds (device lists), **approved by the owner 2026-11-14** |
+| Account identity public key (Ed25519), with the account's creation time and the number of invites it may still create | Verify the device list (M4) and publish it (key transparency, M6); invite quotas | Life of the account | Prompt 3 (M1), D-0047, D-0048; public key and a count, **awaiting owner approval** |
+| Invite code: SHA-256 of the code, uses left and expiry; **not who created it, nor who used it** (D-0038: per-user counts only) | Admit registrations in invite-only mode | Until its last use (deleted at once), revocation, or expiry (swept) | Prompt 3 (M1), D-0038, D-0047; **awaiting owner approval** |
+| Keyed hash (HMAC-SHA256, key from the registration secret) of a client's IP range (IPv4 `/24`, IPv6 `/48`), with the range's next allowed time for challenges, registrations and refused invite codes, in `valkey-hot`; no address | Throttle registration and invite guessing per range | At most the throttle window (about an hour at the defaults), then expired | Prompt 3 (M1), D-0048; keyed form of "connection IPs", **awaiting owner approval** |
+| A used proof-of-work challenge's random nonce in `valkey-hot` | Single use of each challenge | 10 minutes 10 seconds | Prompt 3 (M1), D-0048; random, identifies nobody, **awaiting owner approval** |
 | Deletion journal: per deleted account, an empty tombstone in the backup bucket named by the deletion time and HMAC-SHA256(journal key, account ID); no account ID | A restore must not bring a deleted account back | Write-once, 93 days (the longest backup retention) | Prompt 2 (M6), D-0041; **approved under the owner's delegation** |
 
 Prompt 1 adds two operational views, neither of which is user data on the server:
@@ -191,6 +195,27 @@ One subsection per component. Each threat names its mitigation and the test or p
 | Forged tombstones delete accounts at the next restore | T, D | Attacker holding the worker's journal key | Its credential can only put under `deletions/`; after a compromise the restore uses `--before`, which applies to tombstones too; a deletion goes through the outbox and the audit log records how many | `backups-policy selftest`; `backups-up <env> check`; D-0041 |
 | The backup timer's database user writes to the registry | E | Attacker on the data host using the backup credential | A database user with the `VIEWER` role (export and read only) | Checked by hand against SurrealDB 4.0.1 (a `CREATE` as that user is refused); `deploy/ansible/roles/backup` |
 
+### 3.8 Registration and invites (Prompt 3, milestone 1)
+
+Account takeover, enumeration and key substitution are the Prompt 3 gate's three threat classes;
+this milestone adds the registration-time rows of each. Later milestones add device linking (M4),
+the key directory (M3) and key transparency (M6).
+
+| Threat | STRIDE | Attacker | Mitigation | Test or proof |
+| --- | --- | --- | --- | --- |
+| **Takeover by squatting an ID**: registering with an account or device ID chosen to collide with someone's | S | Malicious client | The server draws both IDs (16 random bytes); the request carries none | `registration_creates_the_account_its_device_and_bumps_the_directory` (taken IDs refused, server redraws) |
+| **Takeover by a key that verifies anything**: an identity or authentication key of small order (under the identity point, `R = sB` verifies every message), or with a torsion component; aws-lc-rs alone accepts such a forgery | S, E | Malicious client, then anyone | Every registered key must be the canonical encoding of a prime-order point (`songbird-keys`), before any signature is checked; the admin link refuses them too | `every_small_order_point_is_refused` (asserts aws-lc-rs alone accepts the forgery), `mixed_order_and_non_canonical_encodings_are_refused`, `keys_must_be_distinct_honest_and_signed_for_this_server`; fuzz `ed25519_key` |
+| **Key substitution at registration**: a relay swaps the identity or authentication key, or replays signatures into another registration | T, S | Network attacker, malicious relay | Both keys sign one transcript naming the server, the single-use challenge and both keys, under different contexts; TLS | `keys_must_be_distinct_honest_and_signed_for_this_server` (swapped signatures, another server's name refused); `transcripts_differ_by_context_and_refuse_bad_names`; vector in PROTOCOL.md §13 |
+| Mass registration (spam accounts, Sybil) | D, E | Botnet | Invite-only mode (launch); Argon2id proof of work per registration (memory-hard, 16 MiB); per-range and deployment-wide throttles; per-account invite quotas | `challenges_and_registrations_are_throttled_per_range`; `user_invites_spend_a_quota_and_can_be_revoked`; D-0048 timing |
+| **Invite code guessing** | E | Anyone | 120-bit codes; a guess costs a solved challenge; refused codes spend a per-range (10/h, burst 5) and a deployment-wide (600/h) budget, after which the range waits before any work is checked | `guessing_codes_is_throttled_before_any_work`; `invite_codes_valid_expired_reused_and_guessed` |
+| A code used more often than allowed (race) | T, E | Malicious client | One transaction consumes the use and creates the account; concurrent redemptions write the same row, so SurrealDB commits one and the others retry and find it used | `racing_registrations_never_exceed_a_codes_uses` (24 racing registrations for 1 and 5 uses) |
+| **Enumeration through invite answers**: telling unknown, expired, used-up and revoked codes apart | I | Anyone | One answer (`403 invite`) for all; revocation answers `204` whether or not the code existed | `invite_codes_valid_expired_reused_and_guessed`; `user_invites_spend_a_quota_and_can_be_revoked` |
+| The invite system records the social graph | I | Compromised server, legal compulsion | Nothing links a code to its creator or its user: rows hold uses and expiry only and go at the last use; allowances are counts (owner's decision, D-0047) | `user_invites_spend_the_allowance_and_record_no_issuer` (the row's fields are exactly `expires`, `id`, `uses`) |
+| Challenge replay or forgery; work skipped | S, E | Malicious client | Stateless MAC'd challenges with a 10-minute life; the nonce is burnt before the work is verified; strictly increasing solutions | `challenges_are_authenticated_single_use_and_must_be_solved`; `forged_expired_and_malformed_challenges_are_refused`; fuzz `pow_challenge` |
+| Verification as a denial-of-service lever | D | Botnet | Throttles first; tag, age, keys and signatures before any Argon2id; the nonce burnt first, so a forged solution costs at most one evaluation per issued challenge; verifications off the runtime and bounded (half the cores) | `challenges_are_authenticated_single_use_and_must_be_solved` (a wrong solution spends the challenge) |
+| Unauthenticated connections turned into database queries (looking a just-registered device up on demand) | D | Anyone | Delivery never queries the registry for an unauthenticated connection; new clients retry 4000 for 10 s instead (§4.1) | `registered_accounts_connect_and_talk_without_an_operator` (client grace, and a stranger still stops) |
+| A malformed request crashes or exhausts `api` | D | Anyone | `Content-Length` required and at most 518 bytes before reading; strict decoder with fixed fields; fuzzed | `requests_round_trip_and_decode_strictly`, `decoding_never_panics`; fuzz `registration_request` |
+
 ## 4. Server-enforced settings
 
 ## 5. Compliance notes (GDPR, age of digital consent per EU country)
@@ -231,7 +256,8 @@ One subsection per component. Each threat names its mitigation and the test or p
 - Root SSH through the bastion (owner decision open, D-0014).
 - The proxy is identifiable by traffic analysis; it is a reachability tool, not an anonymity tool.
 - Delivery reads devices from the account registry in SurrealDB (M5, reloaded within a second of a
-  change); accounts are created only through `api`'s admin link until Prompt 3 adds registration.
+  change); accounts are created by registration (Prompt 3, M1) or by operators through `api`'s
+  admin link.
   A deleted device can authenticate for up to the registry poll interval (1 s) if SurrealDB is
   unreachable during that window (its sessions are closed by the deletion itself).
 - Attachments already sent stay (opaque, unlinked to the account) until fetched or 30 days after
@@ -254,3 +280,8 @@ One subsection per component. Each threat names its mitigation and the test or p
 - One delivery node per Iggy topic until M4 (a second one is fenced and goes unready).
 - sockudo-ws (parses every client byte, contains `unsafe` SIMD code) and quanta are exempted in
   cargo-vet, not audited (D-0017).
+- Registration (Prompt 3, M1): per-range throttles treat everyone behind one IPv4 `/24` (carrier
+  NAT, a censorship proxy relaying TCP) as one client; the numbers are generous and the
+  deployment-wide caps are the backstop. The proof of work's phone timing is an estimate from
+  the Mac measurement until the apps exist (D-0048). A registry restore brings back invite codes
+  used after the backup, valid again until they expire.

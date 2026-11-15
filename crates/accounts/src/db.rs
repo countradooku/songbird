@@ -107,6 +107,9 @@ impl SurrealSettings {
     }
 }
 
+/// The statement kind given to a transaction that lost a write conflict and may be retried.
+pub(crate) const TRANSACTION_CONFLICT: &str = "TransactionConflict";
+
 /// Database failures. Server messages can quote data: only kinds are shown.
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -203,6 +206,12 @@ impl Db {
                     // The message itself is never shown; an existing record is told apart by kind.
                     let kind = if e.message.contains("already exists") {
                         "AlreadyExists".to_owned()
+                    } else if e.message.contains("Transaction conflict")
+                        || e.message.contains("can be retried")
+                    {
+                        // SurrealDB 4 reports a write conflict at COMMIT as a `Query` error
+                        // whose message says it can be retried (found by the invite race test).
+                        TRANSACTION_CONFLICT.to_owned()
                     } else {
                         e.kind.clone()
                     };

@@ -102,6 +102,10 @@ pub struct ApiSettings {
     /// `PUT /v1/messages` (D-0037, D-0044); absent: the endpoint answers 503.
     #[serde(default)]
     pub send: Option<SendSettings>,
+    /// `[api.registration]`: public sign-up, proof of work, invites (Prompt 3, D-0048). Absent:
+    /// the registration and invite endpoints answer 503 (accounts only through the admin link).
+    #[serde(default)]
+    pub registration: Option<RegistrationSettings>,
 }
 
 const fn default_max_connections() -> usize {
@@ -136,6 +140,9 @@ impl Validate for ApiSettings {
         );
         if let Some(s) = &self.send {
             v.section("send", s);
+        }
+        if let Some(r) = &self.registration {
+            v.section("registration", r);
         }
     }
 }
@@ -392,6 +399,216 @@ impl Validate for SendSettings {
             (100..=3_600_000).contains(&self.push_debounce_ms),
             "push_debounce_ms",
             "must be in 100..=3600000",
+        );
+    }
+}
+
+/// `[api.registration]`: public sign-up (`POST /v1/registration`), its proof of work, per-range
+/// throttles and invites (Prompt 3, M1, D-0048).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistrationSettings {
+    /// 32 bytes (64 hex characters), the same on every `api` node: authenticates proof-of-work
+    /// challenges and keys the IP-range throttle records.
+    pub secret: SecretRef,
+    /// Invite-only mode (the launch default, D-0038): registration needs a valid invite code.
+    /// Switching it off needs no migration.
+    #[serde(default = "default_true")]
+    pub invite_only: bool,
+    /// Invites each new account may create.
+    #[serde(default = "default_allowance")]
+    pub allowance: u32,
+    /// Lifetime of an invite a user creates, days (at most 30).
+    #[serde(default = "default_invite_ttl_days")]
+    pub invite_ttl_days: u32,
+    /// How long a proof-of-work challenge stays valid, seconds.
+    #[serde(default = "default_challenge_ttl_secs")]
+    pub challenge_ttl_secs: u64,
+    /// Proof-of-work verifications running at once (each holds `pow.memory_kib`); 0: half the
+    /// cores, at least one.
+    #[serde(default)]
+    pub max_concurrent_verifications: usize,
+    /// The work asked of each registration.
+    #[serde(default)]
+    pub pow: PowSettings,
+    /// Throttles per IP range and across the deployment.
+    #[serde(default)]
+    pub throttle: ThrottleSettings,
+}
+
+const fn default_true() -> bool {
+    true
+}
+const fn default_allowance() -> u32 {
+    5
+}
+const fn default_invite_ttl_days() -> u32 {
+    7
+}
+const fn default_challenge_ttl_secs() -> u64 {
+    600
+}
+
+impl Validate for RegistrationSettings {
+    fn validate(&self, v: &mut Validator) {
+        v.check(self.allowance <= 1_000, "allowance", "must be at most 1000");
+        v.check(
+            (1..=30).contains(&self.invite_ttl_days),
+            "invite_ttl_days",
+            "must be in 1..=30",
+        );
+        v.check(
+            (60..=3_600).contains(&self.challenge_ttl_secs),
+            "challenge_ttl_secs",
+            "must be in 60..=3600",
+        );
+        v.check(
+            self.max_concurrent_verifications <= 1_024,
+            "max_concurrent_verifications",
+            "must be at most 1024",
+        );
+        v.section("pow", &self.pow);
+        v.section("throttle", &self.throttle);
+    }
+}
+
+/// Argon2id parameters of the registration proof of work. Defaults: 16 MiB, one pass, 8
+/// solutions of 4 zero bits (128 evaluations on average): 0.48 s median on an Apple M5 Pro core,
+/// a few seconds on a phone (D-0048). Challenges carry their parameters, so retuning needs no
+/// client release.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PowSettings {
+    /// Memory per evaluation, KiB.
+    pub memory_kib: u32,
+    /// Passes over memory.
+    pub iterations: u32,
+    /// Leading zero bits per solution.
+    pub bits: u8,
+    /// Solutions per challenge.
+    pub solutions: u8,
+}
+
+impl Default for PowSettings {
+    fn default() -> Self {
+        Self {
+            memory_kib: 16_384,
+            iterations: 1,
+            bits: 4,
+            solutions: 8,
+        }
+    }
+}
+
+impl PowSettings {
+    /// As the proof-of-work crate's parameters.
+    #[must_use]
+    pub fn params(&self) -> songbird_pow::Params {
+        songbird_pow::Params {
+            memory_kib: self.memory_kib,
+            iterations: self.iterations,
+            bits: self.bits,
+            solutions: self.solutions,
+        }
+    }
+}
+
+impl Validate for PowSettings {
+    fn validate(&self, v: &mut Validator) {
+        v.check(
+            self.params().in_bounds(),
+            "pow",
+            "memory_kib 8..=262144, iterations 1..=16, bits 0..=24, solutions 1..=64",
+        );
+    }
+}
+
+/// Generic cell rate limits in `valkey-hot`, on Valkey's clock, per IP range (IPv4 `/24` and
+/// IPv6 `/48` by default; carrier-grade NAT puts many people behind one range, so the
+/// per-range numbers are generous and the deployment-wide caps are the backstop).
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ThrottleSettings {
+    /// Challenges per hour per range.
+    pub challenges_per_hour: u32,
+    /// Challenge burst per range.
+    pub challenge_burst: u32,
+    /// Registration attempts per hour per range.
+    pub registrations_per_hour: u32,
+    /// Registration burst per range.
+    pub registration_burst: u32,
+    /// Refused invite codes per hour per range (after a valid proof of work).
+    pub invite_failures_per_hour: u32,
+    /// Refused-invite burst per range.
+    pub invite_failure_burst: u32,
+    /// Registration attempts per hour across the deployment.
+    pub global_registrations_per_hour: u32,
+    /// Refused invite codes per hour across the deployment.
+    pub global_invite_failures_per_hour: u32,
+    /// IPv4 prefix length of a range.
+    pub ipv4_prefix: u8,
+    /// IPv6 prefix length of a range.
+    pub ipv6_prefix: u8,
+}
+
+impl Default for ThrottleSettings {
+    fn default() -> Self {
+        Self {
+            challenges_per_hour: 120,
+            challenge_burst: 30,
+            registrations_per_hour: 60,
+            registration_burst: 20,
+            invite_failures_per_hour: 10,
+            invite_failure_burst: 5,
+            global_registrations_per_hour: 20_000,
+            global_invite_failures_per_hour: 600,
+            ipv4_prefix: 24,
+            ipv6_prefix: 48,
+        }
+    }
+}
+
+impl Validate for ThrottleSettings {
+    fn validate(&self, v: &mut Validator) {
+        for (name, rate) in [
+            ("challenges_per_hour", self.challenges_per_hour),
+            ("registrations_per_hour", self.registrations_per_hour),
+            ("invite_failures_per_hour", self.invite_failures_per_hour),
+            (
+                "global_registrations_per_hour",
+                self.global_registrations_per_hour,
+            ),
+            (
+                "global_invite_failures_per_hour",
+                self.global_invite_failures_per_hour,
+            ),
+        ] {
+            v.check(
+                (1..=3_600_000).contains(&rate),
+                name,
+                "must be in 1..=3600000",
+            );
+        }
+        for (name, burst) in [
+            ("challenge_burst", self.challenge_burst),
+            ("registration_burst", self.registration_burst),
+            ("invite_failure_burst", self.invite_failure_burst),
+        ] {
+            v.check(
+                (1..=100_000).contains(&burst),
+                name,
+                "must be in 1..=100000",
+            );
+        }
+        v.check(
+            (8..=32).contains(&self.ipv4_prefix),
+            "ipv4_prefix",
+            "must be in 8..=32",
+        );
+        v.check(
+            (16..=128).contains(&self.ipv6_prefix),
+            "ipv6_prefix",
+            "must be in 16..=128",
         );
     }
 }

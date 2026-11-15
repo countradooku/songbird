@@ -12,6 +12,8 @@
 //! - [`auth`]: the domain-separated transcript a device signs to authenticate.
 //! - [`system`]: server-signed system frames (notices such as "your device list changed"),
 //!   delivered as mailbox envelopes in a reserved format no user envelope may take.
+//! - [`registration`]: the registration request, the transcripts its keys sign, and invite codes
+//!   (`POST /v1/registration`, Prompt 3).
 //!
 //! Every decoder checks lengths against [`Limits`] before allocating anything proportional to
 //! its input (invariant 7) and is fuzzed (`fuzz/fuzz_targets/proto_*.rs`).
@@ -21,6 +23,7 @@ pub mod auth;
 pub mod close;
 pub mod control;
 pub mod frame;
+pub mod registration;
 pub mod system;
 
 pub use close::CloseCode;

@@ -18,6 +18,8 @@ members = [
     "crates/s3",
     "crates/push-providers",
     "crates/send",
+    "crates/pow",
+    "crates/keys",
     "services/delivery",
     "services/api",
     "services/push",
@@ -60,6 +62,8 @@ songbird-s3 = { path = "crates/s3" }
 songbird-delivery = { path = "services/delivery" }
 songbird-push-providers = { path = "crates/push-providers" }
 songbird-send = { path = "crates/send" }
+songbird-pow = { path = "crates/pow" }
+songbird-keys = { path = "crates/keys" }
 
 anyhow = "1.0.104"
 aws-lc-rs = { version = "1.19.0", default-features = false, features = ["aws-lc-sys"] }
@@ -111,6 +115,12 @@ zeroize = "1.9.1"
 # Push endpoints, already in the tree (licence exception in deny.toml).
 serde_json = "1.0.154"
 webpki-roots = "1.0.12"
+# Registration proof of work (D-0048): Argon2id as the prompt requires; aws-lc-rs has no Argon2.
+# RustCrypto, MIT OR Apache-2.0; default features (password-hash strings, getrandom) off.
+argon2 = { version = "=0.6.0", default-features = false, features = ["alloc"] }
+# Point checks on identity keys aws-lc-rs does not expose; XEdDSA and the username hash later
+# (D-0047: implement the protocols on permissive crates, D-0048). BSD-3-Clause; default features off.
+curve25519-dalek = { version = "=5.0.0", default-features = false }
 
 # Test-only
 proptest = "1.12.0"

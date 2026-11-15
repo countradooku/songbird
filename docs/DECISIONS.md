@@ -22,7 +22,6 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 - Group read receipts follow the read-receipt setting or not (Prompt 4).
 - Public channels: build or not (Prompt 5).
-- Inactivity deletion period (Prompt 3).
 - WhatsApp interop legal gate (Prompt 14).
 - Second EU provider (D-0009): Hetzner only for now (D-0042); the Scaleway code stays dormant.
 - Public domains: the owner holds `songbird.chat` (D-0046). Still to decide: which names under it
@@ -69,18 +68,142 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   instruction. Provider credentials (2026-11-13): an APNs sandbox key and a least-privilege FCM
   service account exist outside the repository and were verified against Apple and Google;
   waking a real device waits for the apps; production keys go to SOPS at deployment.
-- D-0038: whether to store who invited whom for abuse handling (default: no, only per-user counts).
 - D-0037 / D-0044 (report `docs/reports/P02-send.md`): **approved by the owner on 2026-11-14**
   ("Approve both"): D-0044's routing (`api.` admitted to node links for the store of a send
   only) and its two threat-model rows. Prompt 2's final gate (report `docs/reports/P02-final.md`):
   **approved by the owner on 2026-11-15** ("Approve all four"). Prompt 2 is done; its go-live checks
   (24-hour soak, durable latency on the `ccx33`, the 2-hour RTO drill) run after every phase is finished.
+- Prompt 3, milestone 1 (report `docs/reports/P03-M1.md`, D-0048): the gate, and four
+  threat-model §1 rows (account identity key and invite count; invite code hashes; keyed IP-range
+  throttle records; used challenge nonces), await the owner.
 - D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
   tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
   `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0048 — Prompt 3, milestone 1: registration with Argon2id proof of work, honest keys only, invites that record no social graph
+
+- Date: 2026-11-15
+- Status: proposed; built (report P03-M1); awaiting the owner's gate approval
+- Decided by: agent, under the owner's standing instruction (D-0041) and the Prompt 3 decisions
+  (D-0047)
+- Context: Prompt 3 asks for accounts without phone numbers, an Argon2id proof of work "tuned so
+  a phone solves it in a few seconds", per-IP-range throttles, and (D-0038) an invite-only launch.
+  Until now accounts were created only through `api`'s admin link (D-0036); D-0018 left open
+  whether the device authentication key stays separate from the identity key.
+- Decision:
+  - **Keys.** An account has an **account identity key** (Ed25519, aws-lc-rs; it will sign the
+    versioned device list in M4 and is what users verify and key transparency publishes, as
+    WhatsApp's account signature key is). Each device keeps a separate **authentication key**
+    (answers D-0018: a transport credential, rotatable without touching identity, never used end
+    to end) and, from M3, its own device identity key for PQXDH. The server draws account and
+    device IDs.
+  - **Only honest public keys.** Every Ed25519 key the server stores must be the canonical
+    encoding of a prime-order point (`crates/keys`, on `curve25519-dalek`). Found while building:
+    aws-lc-rs 1.19 accepts a signature under the identity point for any message (`R = sB`), and
+    with it anyone could authenticate as a device registered with that key. The admin link now
+    refuses such keys too.
+  - **Proof of work** (`crates/pow`): stateless challenges (51 bytes, HMAC tag from the
+    registration secret, 10-minute life, single use by burning the nonce in `valkey-hot`);
+    `solutions` strictly increasing counters, each an Argon2id(v1.3, `m`, `t`, p = 1) output with
+    `bits` leading zeros. Several easy solutions instead of one hard one keep a phone's time
+    predictable. Defaults 16 MiB, t = 1, 4 bits, 8 solutions (128 evaluations). The server checks
+    everything cheap first (length, throttles, tag, age, keys, signatures), burns the nonce, then
+    verifies off the runtime with bounded concurrency, stopping at the first failure.
+  - **Throttles:** GCRA in `valkey-hot` on Valkey's clock, under HMAC keys of the IP range
+    (IPv4 `/24`, IPv6 `/48`, IPv4-mapped folded), per range and deployment-wide, for challenges,
+    registrations and refused invite codes. Fail closed.
+  - **Invites** (D-0038, D-0047): 120-bit codes (24 Crockford symbols), stored as
+    `SHA-256("songbird.v1/invite\0" || code)` with uses and expiry only; one transaction consumes a
+    use and creates the account (SurrealDB's write conflict lets one of several racing
+    registrations commit; the others retry). Users create single-use codes from an allowance (5,
+    configurable); operators create batches with `songbird-admin invites create`. One answer for
+    every refused code; revocation by whoever holds the code. Invite-only mode is a setting.
+  - **New devices and the directory:** delivery reloads the registry within a second, so a client
+    connecting right after registering can be refused (4000). Rather than let unauthenticated
+    connections trigger registry lookups on delivery, clients retry 4000 for 10 s after
+    registering (`ClientConfig::new_device_grace`; PROTOCOL.md §4.1). Found by the end-to-end
+    test.
+  - **Privacy Pass, evaluated as a later option:** blind-signed tokens (RFC 9576–9578) would let
+    a trusted issuer vouch for "a human passed a check" without linking the check to the account.
+    Today there is no issuer to trust and no check other than the proof of work and invites, so
+    tokens would add a protocol and a key to rotate for nothing; revisit when the launch opens
+    (a token per verified device attestation, App Attest / Play Integrity, is the likely issuer)
+    or when proof of work stops deterring bots.
+- Dependencies (new to the tree, each with its reason):
+  - `argon2` 0.6.0 (RustCrypto, MIT OR Apache-2.0), the prompt's Argon2id; aws-lc-rs has none.
+    Default features off (`alloc` only). Brings `blake2` 0.11.0 and `base64ct` 1.8.3 (compiled);
+    `password-hash` and `phc` appear in `Cargo.lock` only (optional, not enabled). Contains
+    `unsafe` (aligned allocation of the memory blocks, segment views for lanes); read in the
+    pinned source. Output checked against the reference `argon2` command (vector in PROTOCOL.md §13).
+  - `curve25519-dalek` 5.0.0 (BSD-3-Clause), default features off: point decompression and
+    order checks aws-lc-rs does not expose; the library the owner's D-0047 names for XEdDSA and
+    the username hash. `curve25519-dalek-derive` (x86-64 backend) and `fiat-crypto` (an optional
+    backend, lock only) come with it.
+  - All eight are **exempted in `cargo vet`** pending audits (no imported audit covers these
+    versions), like the other client libraries (D-0016); audit backlog: argon2 4,022 lines,
+    blake2 1,561, base64ct 3,651, curve25519-dalek 38,745.
+- Evidence (Apple M5 Pro, 18 cores, 48 GiB, macOS 27.2.1; compose images as pinned, under
+  podman; report P03-M1):
+  - Argon2id per evaluation (release, one core, median of 41): 4 MiB 1.39 ms, 8 MiB 2.25 ms,
+    16 MiB 4.23 ms, 32 MiB 9.08 ms; t = 2 at 16 MiB 8.17 ms. Default parameters: solve over 30
+    challenges p10 0.29 s, median 0.48 s, p90 0.76 s, max 0.82 s; verification of all 8 solutions
+    31.4 ms. A phone core is several times slower than this Mac's; "a few seconds" there is an
+    estimate until the apps exist, and challenges carry their parameters, so retuning needs no
+    client release (`cargo run --release -p songbird-pow --example timing`).
+  - Tests: `crates/pow` (4, vector), `crates/keys` (4), `crates/proto` registration (5 plus the
+    §13 vector test), `crates/accounts` live (4 new: registration, invites valid/expired/used
+    up/unknown/revoked, 24 racing registrations for 1 and 5 uses, allowance and no issuer; 3 of 3
+    runs), `services/api` live `registration_live` (8: the D-0038 invite cases, guessing
+    throttled before any work, quota and revocation, mode off, replay/forgery/wrong work, keys,
+    throttles, no configuration), `tests/e2e` `registration` (registered accounts connect and
+    talk; a stranger still stops); fuzz targets `registration_request`, `pow_challenge`,
+    `ed25519_key` (60 s each: 32.5 M, 14.6 M, 3.4 M runs, nothing found).
+- Consequences: delivery is deployable without operator steps for accounts. Four threat-model §1
+  rows await the owner. Phone timing to measure when the apps exist. A registry restore revives
+  invite codes used after the backup until they expire. Per-range throttles count everyone
+  behind one carrier NAT as one client (generous numbers, deployment-wide caps behind them).
+
+## D-0047 — Prompt 3: the plan, and the owner's decisions it needed
+
+- Date: 2026-11-15
+- Status: accepted (owner, 2026-11-15)
+- Decided by: owner (each answer below), on the agent's plan `docs/reports/P03-plan.md`
+- Context: Prompt 3 leaves the inactivity period and the inviter link (D-0038) to the owner;
+  issue #23 asks the owner how people find each other; and the prompt asks for libsignal's own
+  crates, which are AGPL-3.0-only (root `Cargo.toml`, checked 2026-11-15) and not published on
+  crates.io by Signal (the crates.io `libsignal-protocol` is an unrelated 2019 crate), while
+  `deny.toml` admits permissive licences and crates.io sources only.
+- Decisions:
+  1. **Plan agreed:** seven milestones, each with its own branch, pull request, report and
+     decision: M1 registration and invites; M2 usernames; M3 key directory (the concurrency
+     gate); M4 devices, PIN, passkeys; M5 profiles and sealed sender; M6 key transparency; M7
+     GDPR and the Prompt 3 gate.
+  2. **libsignal: implement the protocols, do not link the library.** The server verifies
+     XEdDSA, the Ristretto username hash and proof, and key formats with permissive crates
+     (`curve25519-dalek`, aws-lc-rs's ML-KEM), byte-compatible with libsignal, proven by vectors
+     generated from libsignal by a tool outside the workspace. The repository licence stays open.
+     (The same question returns for the apps.)
+  3. **Inactivity deletion:** the user chooses 6, 12 or 24 months; default 12; a warning notice
+     before deletion (built in M7).
+  4. **Who invited whom: not stored** (D-0038's default); only each account's remaining
+     allowance. Abuse is handled on the abusive account.
+  5. **Contact discovery (issue #23): none from address books.** People find each other by exact
+     username, invite link or QR code; the server holds no address books.
+  6. **Two-step PIN:** Argon2id with a per-account salt plus an HMAC pepper held in the secrets
+     store (not in the database or backups), at least 6 digits, attempt limits with lockout.
+     It stops a database or backup thief, not a fully compromised `api`; hardware guess limits
+     are issue #26 (Prompt 10). A server that learns a PIN still cannot add a device unnoticed:
+     the device list is signed by the account identity key.
+  7. **Device limit until Prompt 11's plans:** one primary and 5 linked devices, configurable.
+  8. **Prompt 2's final gate:** the owner asked for a report against the master prompt's
+     definition of done; it was written and approved the same day in another session
+     (`docs/reports/P02-final.md`, with the two M5 threat-model rows).
+- Consequences: Prompt 3 departs from the prompt's "libsignal's own crates" with this recorded
+  reason; the vectors from libsignal carry the compatibility proof. No address-book upload
+  endpoint will exist.
 
 ## D-0046 — The repository moves to the `songbirdchat` organization and becomes public; domain `songbird.chat`
 

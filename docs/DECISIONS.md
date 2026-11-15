@@ -72,7 +72,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 - D-0038: whether to store who invited whom for abuse handling (default: no, only per-user counts).
 - D-0037 / D-0044 (report `docs/reports/P02-send.md`): **approved by the owner on 2026-11-14**
   ("Approve both"): D-0044's routing (`api.` admitted to node links for the store of a send
-  only) and its two threat-model rows. Next: the Prompt 2 final gate.
+  only) and its two threat-model rows. Prompt 2's final gate: report `docs/reports/P02-final.md`,
+  for the owner's decision.
 - D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
   tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
   `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment

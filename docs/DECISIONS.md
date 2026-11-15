@@ -79,9 +79,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 - Prompt 3, milestone 2 (report `docs/reports/P03-M2.md`, D-0049): gate **approved by the owner
   on 2026-11-15** ("Approve both"), with its four threat-model §1 rows (username hashes;
   username key verifiers; username links; keyed throttle records).
-- Prompt 3, milestone 3 (report `docs/reports/P03-M3.md`, D-0050): the gate, and two
-  threat-model §1 rows (device public keys and prekeys; keyed throttle records), await the
-  owner. MLS KeyPackages follow as M3b (owner, 2026-11-15).
+- Prompt 3, milestone 3 (report `docs/reports/P03-M3.md`, D-0050): gate **approved by the owner
+  on 2026-11-15** ("Approve both"), with its two threat-model §1 rows (device public keys and
+  prekeys; keyed throttle records). Next: M3b (MLS KeyPackages).
 - D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
   tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
   `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment
@@ -92,7 +92,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0050 — Prompt 3, milestone 3: the PQXDH key directory; XEdDSA and ML-KEM-1024 checked on upload; one-time prekeys claimed exactly once
 
 - Date: 2026-11-15
-- Status: proposed; built (report P03-M3); awaiting the owner's gate approval
+- Status: accepted; built (report P03-M3); **gate approved by the owner on 2026-11-15** ("Approve
+  both"), with its two threat-model rows
 - Decided by: owner for scope (M3 split: MLS KeyPackages in M3b) and the post-quantum format
   (ML-KEM-1024 only); design by agent under the standing instruction (D-0041)
 - Context: Prompt 3's key directory: per device an identity key, a signed prekey, a last-resort

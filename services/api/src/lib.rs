@@ -9,6 +9,9 @@
 //! | `PUT`, `DELETE /v1/username/key`; `PUT`, `DELETE`, `GET /v1/username/link[/<handle>]` | The username key; username links ([`usernames`]) |
 //! | `PUT`, `GET /v1/keys`; `POST /v1/keys/fetch` | The key directory: upload, counts, fetch bundles ([`keys`]) |
 //! | `PUT`, `GET /v1/keypackages`; `POST /v1/keypackages/fetch` | MLS KeyPackages: upload, counts, fetch ([`keys`]) |
+//! | `POST /v1/provisioning`; `PUT`, `GET /v1/provisioning/<channel>` | The QR provisioning channel ([`devices`]; open and read unsigned) |
+//! | `POST /v1/devices/link-token`; `POST /v1/devices/link` | Linking a new device ([`devices`]; the link itself unsigned, both keys proven) |
+//! | `GET /v1/devices`; `PUT /v1/devices/list`; `POST /v1/devices/list/fetch`; `DELETE /v1/devices/self` | The signed device list and removal ([`devices`]) |
 //! | `PUT /v1/push` | Registers the device's push channel, sealed to the push service's key |
 //! | `DELETE /v1/push` | Removes it |
 //! | `POST /v1/attachments` | An upload grant: exact (padded) size and recipient fetches due |
@@ -17,7 +20,8 @@
 //! | `DELETE /v1/account` | Deletes the device's account from every store (outbox job) |
 //! | `PUT /v1/messages` | A WebSocket `Send` frame, for clients with no open socket; answers its `SendResult` ([`messages`]) |
 //!
-//! Every request but the two registration steps is signed by the device ([`auth`]); there are no
+//! Every request but the two registration steps, opening and reading a provisioning channel and
+//! linking is signed by the device ([`auth`]); there are no
 //! tokens or cookies. Registration is paid for with proof of work and throttled per IP range. Bodies are
 //! bounded before they are read. Responses carry status codes and small JSON; errors say nothing
 //! about whether a device, account or object exists beyond what the caller already proved.
@@ -28,6 +32,7 @@ pub mod admin;
 pub mod auth;
 pub mod client;
 pub mod config;
+pub mod devices;
 pub mod keys;
 pub mod messages;
 pub mod registration;
@@ -89,6 +94,8 @@ pub struct ApiMetrics {
     pub usernames: usernames::UsernameMetrics,
     /// The key directory.
     pub keys: keys::KeyMetrics,
+    /// Devices.
+    pub devices: devices::DeviceMetrics,
 }
 
 impl ApiMetrics {
@@ -144,6 +151,7 @@ impl ApiMetrics {
         self.registration.register(m)?;
         self.usernames.register(m)?;
         self.keys.register(m)?;
+        self.devices.register(m)?;
         self.send.register(m, "api")
     }
 }
@@ -176,6 +184,8 @@ pub struct App {
     pub usernames: Option<usernames::Usernames>,
     /// The key directory (absent: those endpoints answer 503).
     pub keys: Option<keys::KeyDirectory>,
+    /// Devices: provisioning, linking, the signed list (absent: those endpoints answer 503).
+    pub devices: Option<devices::Devices>,
 }
 
 impl std::fmt::Debug for App {
@@ -381,6 +391,9 @@ impl App {
                 "/v1/keys" | "/v1/keys/fetch" | "/v1/keypackages" | "/v1/keypackages/fetch",
                 None,
             ) => self.keys(req).await,
+            (_, p, None) if p.starts_with("/v1/provisioning") || p.starts_with("/v1/devices") => {
+                self.devices(req).await
+            }
             _ => Err(Refusal::Status(StatusCode::NOT_FOUND)),
         }
     }
@@ -399,6 +412,89 @@ impl App {
             .get::<registration::Peer>()
             .ok_or(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
         Ok((r, peer.0))
+    }
+
+    /// `/v1/provisioning…` and `/v1/devices…` ([`devices`]).
+    async fn devices(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let d = self.devices.as_ref().ok_or_else(unavailable)?;
+        let peer = req
+            .extensions()
+            .get::<registration::Peer>()
+            .map(|p| p.0)
+            .ok_or_else(unavailable)?;
+        let method = req.method().clone();
+        let path = req.uri().path().to_owned();
+        let channel = path.strip_prefix("/v1/provisioning/").map(str::to_owned);
+        let account_of = |device: DeviceId| async move {
+            self.registry
+                .device(&device)
+                .await
+                .map_err(|_| unavailable())?
+                .map(|r| r.account)
+                .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))
+        };
+        let out = match (&method, path.as_str(), channel) {
+            (&Method::POST, "/v1/provisioning", None) => d.open_channel(&self.hot, peer).await,
+            (&Method::GET, _, Some(c)) => d.take_message(&self.hot, peer, &c).await,
+            (&Method::PUT, _, Some(c)) => {
+                let (device, body) = self
+                    .authenticate_body(req, songbird_proto::devices::MAX_PROVISIONING_LEN)
+                    .await?;
+                let account = account_of(device).await?;
+                d.put_message(&self.hot, &account, &c, &body).await
+            }
+            (&Method::POST, "/v1/devices/link-token", None) => {
+                let (device, _) = self.authenticate_json(req).await?;
+                let account = account_of(device).await?;
+                d.link_token(&self.registry, &self.hot, &account, &device)
+                    .await
+            }
+            (&Method::POST, "/v1/devices/link", None) => {
+                let body = bounded_body(req, songbird_proto::devices::LINK_LEN).await?;
+                d.link(
+                    &self.registry,
+                    &self.hot,
+                    self.messages.as_ref(),
+                    &self.server_name,
+                    peer,
+                    body,
+                )
+                .await
+            }
+            (&Method::GET, "/v1/devices", None) => {
+                let (device, _) = self.authenticate_json(req).await?;
+                let account = account_of(device).await?;
+                d.list_own(&self.registry, &account).await
+            }
+            (&Method::PUT, "/v1/devices/list", None) => {
+                let (device, body) = self
+                    .authenticate_body(req, songbird_proto::devices::MAX_LIST_LEN)
+                    .await?;
+                let account = account_of(device).await?;
+                d.put_list(
+                    &self.registry,
+                    &self.queue,
+                    self.messages.as_ref(),
+                    (&account, &device),
+                    body,
+                )
+                .await
+            }
+            (&Method::POST, "/v1/devices/list/fetch", None) => {
+                let (device, body) = self.authenticate_json(req).await?;
+                let account = account_of(device).await?;
+                d.fetch_list(&self.registry, &self.hot, &account, &body)
+                    .await
+            }
+            (&Method::DELETE, "/v1/devices/self", None) => {
+                let (device, _) = self.authenticate_json(req).await?;
+                d.remove_self(&self.registry, &self.queue, self.messages.as_ref(), &device)
+                    .await
+            }
+            _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
+        };
+        Ok(device_outcome(out))
     }
 
     /// `/v1/keys…` ([`keys`]): signed like every device request.
@@ -499,13 +595,19 @@ impl App {
             })
             .transpose()?;
         let (device, body) = self.authenticate_json(req).await?;
-        let account = self
+        let row = self
             .registry
             .device(&device)
             .await
             .map_err(|_| unavailable())?
-            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?
-            .account;
+            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+        // A pending device (linked, not yet vouched for by a signed list) changes nothing
+        // account-wide (D-0052); it may look up and read links.
+        let changes = !(method == Method::GET || path == "/v1/username/lookup");
+        if row.pending && changes {
+            return Ok(pending_refusal());
+        }
+        let account = row.account;
         let (r, hot) = (self.registry.as_ref(), &self.hot);
         let done = |res: Result<(), songbird_accounts::RegistryError>| match res {
             Ok(()) => Ok(empty(StatusCode::NO_CONTENT)),
@@ -544,13 +646,17 @@ impl App {
         } else {
             serde_json::from_slice(&body).map_err(|_| Refusal::Status(StatusCode::BAD_REQUEST))?
         };
-        let account = self
+        let row = self
             .registry
             .device(&device)
             .await
             .map_err(|_| unavailable())?
-            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?
-            .account;
+            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+        // Invites spend the account's allowance: not from a pending device (D-0052).
+        if row.pending {
+            return Ok(pending_refusal());
+        }
+        let account = row.account;
         match method {
             Method::POST => match r.create_invite(&self.registry, &account, &parsed).await {
                 Ok(Some((code, ttl))) => Ok(json(
@@ -928,20 +1034,24 @@ impl App {
     }
 
     async fn delete_account(&self, device: DeviceId) -> Result<Response<Body>, Refusal> {
-        let row = self
+        // Only the primary may delete the account (D-0052): a linked device, above all a pending
+        // one the primary has not vouched for, could otherwise delete it irreversibly.
+        match self
             .registry
-            .device(&device)
+            .begin_account_deletion_by(&device, |account| {
+                Job::new(Work::DeleteAccount { account: *account }).ok()
+            })
             .await
-            .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?
-            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
-        let job = Job::new(Work::DeleteAccount {
-            account: row.account,
-        })
-        .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
-        self.registry
-            .begin_account_deletion(&row.account, &job)
-            .await
-            .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
+        {
+            Ok(_) => {}
+            Err(songbird_accounts::RegistryError::NotPrimary) => {
+                return Ok(json(
+                    StatusCode::FORBIDDEN,
+                    &serde_json::json!({ "error": "primary" }),
+                ));
+            }
+            Err(_) => return Err(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE)),
+        }
         self.metrics.deletions.inc();
         // Relay now; the periodic relay retries if this fails.
         if let Err(e) = songbird_jobs::relay(self.registry.as_ref(), &self.queue).await {
@@ -949,6 +1059,14 @@ impl App {
         }
         Ok(empty(StatusCode::ACCEPTED))
     }
+}
+
+/// 403 for an account-wide change from a pending device (D-0052).
+fn pending_refusal() -> Response<Body> {
+    json(
+        StatusCode::FORBIDDEN,
+        &serde_json::json!({ "error": "pending" }),
+    )
 }
 
 /// A body of at most `max` bytes, read only after `Content-Length` says it fits.
@@ -971,6 +1089,40 @@ async fn bounded_body(req: Request<Incoming>, max: usize) -> Result<Bytes, Refus
         return Err(Refusal::Status(StatusCode::BAD_REQUEST));
     }
     Ok(body)
+}
+
+/// The HTTP answer for a device outcome.
+fn device_outcome(o: devices::Outcome) -> Response<Body> {
+    use devices::Outcome;
+    match o {
+        Outcome::Done => empty(StatusCode::NO_CONTENT),
+        Outcome::Json(v) => json(StatusCode::OK, &v),
+        Outcome::Blob(b) => {
+            let mut r = Response::new(Full::new(b).map_err(|e| match e {}).boxed_unsync());
+            r.headers_mut().insert(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            );
+            r
+        }
+        Outcome::Malformed(what) => json(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({ "error": what }),
+        ),
+        Outcome::NotFound => empty(StatusCode::NOT_FOUND),
+        Outcome::Conflict(what) => {
+            json(StatusCode::CONFLICT, &serde_json::json!({ "error": what }))
+        }
+        Outcome::Throttled(wait_us) => {
+            let mut r = empty(StatusCode::TOO_MANY_REQUESTS);
+            let secs = wait_us.div_ceil(1_000_000).max(1);
+            if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
+                r.headers_mut().insert(hyper::header::RETRY_AFTER, v);
+            }
+            r
+        }
+        Outcome::Unavailable => empty(StatusCode::SERVICE_UNAVAILABLE),
+    }
 }
 
 /// The HTTP answer for a key directory outcome.

@@ -112,13 +112,7 @@ async fn build_messages(
     // The directory, followed like the delivery nodes follow it.
     let version = registry.directory_version().await?;
     let directory = Arc::new(songbird_send::LiveDirectory::from(
-        songbird_send::Directory::from_accounts(
-            registry
-                .load_directory()
-                .await?
-                .into_iter()
-                .map(|(d, a, k)| (d, k, a)),
-        ),
+        songbird_send::Directory::from_registry(registry).await?,
     ));
     let follower = tokio::spawn(songbird_send::directory::follow_registry(
         Arc::clone(registry),
@@ -206,21 +200,31 @@ async fn build(
         )?),
         None => None,
     };
-    let keys = match &s.keys {
+    let (keys, devices) = match &s.keys {
         Some(k) => {
             let seed = k
                 .system_key
                 .as_ref()
                 .map(songbird_types::SecretRef::resolve_key32)
                 .transpose()?;
-            Some(songbird_api::keys::KeyDirectory::new(
-                k.clone(),
-                &*k.secret.resolve_key32()?,
-                seed.as_deref(),
-                metrics.keys.clone(),
-            )?)
+            let secret = k.secret.resolve_key32()?;
+            (
+                Some(songbird_api::keys::KeyDirectory::new(
+                    k.clone(),
+                    &secret,
+                    seed.as_deref(),
+                    metrics.keys.clone(),
+                )?),
+                Some(songbird_api::devices::Devices::new(
+                    k.devices,
+                    &k.throttle,
+                    &secret,
+                    seed.as_deref(),
+                    metrics.devices.clone(),
+                )?),
+            )
         }
-        None => None,
+        None => (None, None),
     };
     let app = Arc::new(App {
         server_name: s.server_name.clone(),
@@ -236,6 +240,7 @@ async fn build(
         registration,
         usernames,
         keys,
+        devices,
     });
     Ok((app, tasks))
 }

@@ -183,6 +183,7 @@ async fn registered_accounts_connect_and_talk_without_an_operator() {
         registration: Some(reg),
         usernames: None,
         keys: None,
+        devices: None,
     });
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_addr = api_listener.local_addr().unwrap();

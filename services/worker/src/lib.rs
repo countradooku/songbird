@@ -118,6 +118,8 @@ pub struct WorkerMetrics {
     pub objects_deleted: Counter,
     /// Expired upload grants removed.
     pub grants_expired: Counter,
+    /// Removed devices deleted and verified gone (one per job).
+    pub devices_deleted: Counter,
 }
 
 impl WorkerMetrics {
@@ -144,6 +146,11 @@ impl WorkerMetrics {
                 "worker_objects_deleted",
                 "Attachment objects deleted",
                 &self.objects_deleted,
+            ),
+            (
+                "worker_devices_deleted",
+                "Removed devices deleted and verified gone",
+                &self.devices_deleted,
             ),
             (
                 "worker_grants_expired",
@@ -257,6 +264,17 @@ impl Worker {
                     Outcome::Retry(None)
                 }
             },
+            Work::DeleteDevices { account } => match self.delete_devices(&account).await {
+                Ok(()) => {
+                    self.metrics.devices_deleted.inc();
+                    Outcome::Done
+                }
+                Err(left) => {
+                    self.metrics.deletion_retries.inc();
+                    tracing::warn!(?left, "device deletion incomplete; retrying");
+                    Outcome::Retry(None)
+                }
+            },
             Work::DeleteObject { object } => match self.delete_object(&object).await {
                 Ok(()) => Outcome::Done,
                 Err(_) => Outcome::Retry(None),
@@ -334,6 +352,87 @@ impl Worker {
         Ok(())
     }
 
+    /// Deletes an account's removed devices (Prompt 3, M4, D-0052) from every store and
+    /// verifies it, as an account deletion does for all its devices: the mailbox forgets them
+    /// (twice, around the directory's propagation, for a racing send), their push tokens and
+    /// upload grants go, then their rows, prekeys and KeyPackages. The account and its enabled
+    /// devices are untouched; nothing to do is success (the job repeats harmlessly).
+    ///
+    /// # Errors
+    /// [`Left`]: what is still there; the job is retried.
+    pub async fn delete_devices(&self, account: &AccountId) -> Result<(), Left> {
+        let unavailable = |_| Left::Unavailable;
+        let devices = self
+            .registry
+            .removed_devices(account)
+            .await
+            .map_err(unavailable)?;
+        if devices.is_empty() {
+            return Ok(());
+        }
+        let index: Vec<[u8; 32]> = devices
+            .iter()
+            .map(|d| push_index(&self.push_index_secret, d))
+            .collect();
+        self.delivery.forget(&devices).await?;
+        self.registry
+            .delete_push_tokens(&index)
+            .await
+            .map_err(unavailable)?;
+        let grants = self
+            .registry
+            .grants_of(&devices)
+            .await
+            .map_err(unavailable)?;
+        for g in &grants {
+            self.s3
+                .delete_object(&object_name(g))
+                .await
+                .map_err(|_| Left::Unavailable)?;
+            self.registry.delete_grant(g).await.map_err(unavailable)?;
+        }
+        tokio::time::sleep(self.propagation).await;
+        self.delivery.forget(&devices).await?;
+        if self.delivery.any_known(&devices).await? {
+            return Err(Left::Mailbox);
+        }
+        for g in &grants {
+            if self
+                .s3
+                .head_object(&object_name(g))
+                .await
+                .map_err(|_| Left::Unavailable)?
+                .is_some()
+            {
+                return Err(Left::Objects);
+            }
+        }
+        self.registry
+            .delete_device_rows(&devices)
+            .await
+            .map_err(unavailable)?;
+        let left = self
+            .registry
+            .device_remnants(&devices)
+            .await
+            .map_err(unavailable)?;
+        let tokens = self
+            .registry
+            .remnants(account, &[], &index)
+            .await
+            .map_err(unavailable)?
+            .push_tokens;
+        let grants_left = self
+            .registry
+            .grants_of(&devices)
+            .await
+            .map_err(unavailable)?;
+        if left != 0 || tokens != 0 || !grants_left.is_empty() {
+            return Err(Left::Rows);
+        }
+        Ok(())
+    }
+
     /// Deletes an attachment object, then its record (idempotent).
     ///
     /// # Errors
@@ -352,7 +451,7 @@ impl Worker {
     }
 
     /// One sweep: attachments past 30 days or fully fetched, expired grants, expired invite
-    /// codes, expired KeyPackages, released usernames whose hold ended, the outbox.
+    /// codes, expired KeyPackages, expired link tokens, released usernames whose hold ended, the outbox.
     pub async fn sweep(&self) {
         match self.registry.expired_attachments(SWEEP_BATCH).await {
             Ok(objects) => {
@@ -381,6 +480,10 @@ impl Worker {
         // Expired KeyPackages are never served; this only stops them taking space.
         if let Err(e) = self.registry.delete_expired_key_packages(SWEEP_BATCH).await {
             tracing::warn!(error = %e, "key package sweep failed");
+        }
+        // Expired link tokens are refused already; this only stops them taking space.
+        if let Err(e) = self.registry.delete_expired_link_tokens(SWEEP_BATCH).await {
+            tracing::warn!(error = %e, "link token sweep failed");
         }
         // Released usernames whose hold ended become claimable again.
         if let Err(e) = self.registry.delete_released_usernames(SWEEP_BATCH).await {

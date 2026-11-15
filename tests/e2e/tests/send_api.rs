@@ -13,6 +13,7 @@
     clippy::panic,
     clippy::indexing_slicing,
     clippy::too_many_lines,
+    clippy::many_single_char_names,
     reason = "tests"
 )]
 
@@ -212,10 +213,25 @@ async fn stack(limits: Limits, sends_per_sec: u32, send_burst: u32) -> Option<St
                     max_stored: 20,
                     refill_below: 3,
                     throttle: songbird_api::config::KeyThrottle::default(),
+                    devices: songbird_api::config::DeviceSettings::default(),
                 },
                 &random32(),
                 Some(&SYSTEM_SEED),
                 songbird_api::keys::KeyMetrics::default(),
+            )
+            .unwrap(),
+        ),
+        // Devices (M4), with the system key, so a link and a new list are announced.
+        devices: Some(
+            songbird_api::devices::Devices::new(
+                songbird_api::config::DeviceSettings {
+                    token_burst: 50,
+                    ..songbird_api::config::DeviceSettings::default()
+                },
+                &songbird_api::config::KeyThrottle::default(),
+                &random32(),
+                Some(&SYSTEM_SEED),
+                songbird_api::devices::DeviceMetrics::default(),
             )
             .unwrap(),
         ),
@@ -748,5 +764,203 @@ async fn a_device_low_on_prekeys_is_told_once() {
             .await
             .is_err(),
         "a second notice within the hour"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_linked_device_is_announced_and_joins_the_send_check_only_once_listed() {
+    use songbird_keys::xeddsa::Signer;
+    use songbird_proto::devices::{
+        self as wire, DeviceList, IDENTITY_LEN, LINK_AUTH_CONTEXT, LINK_IDENTITY_CONTEXT,
+        LinkRequest, ListedDevice,
+    };
+
+    let Some(s) = default_stack().await else {
+        return;
+    };
+    let reg = &s.app.registry;
+    let reload = || async {
+        s.shared
+            .directory
+            .store(Directory::from_registry(reg).await.unwrap());
+    };
+    let pk = |k: &Ed25519KeyPair| -> [u8; 32] {
+        use aws_lc_rs::signature::KeyPair as _;
+        k.public_key().as_ref().try_into().unwrap()
+    };
+    let ec = |sgn: &Signer| {
+        let mut k = [0u8; IDENTITY_LEN];
+        k[0] = 5;
+        k[1..].copy_from_slice(&sgn.public());
+        k
+    };
+    // Carol registers (an account identity key) and uploads her device identity key.
+    let carol = Dev::new();
+    let account_key = Ed25519KeyPair::generate().unwrap();
+    let carol_identity = Signer::new(&random32());
+    let account = AccountId::random().unwrap();
+    reg.register(
+        &songbird_accounts::NewAccount {
+            account,
+            identity: pk(&account_key),
+            device: carol.id,
+            auth_key: carol.key().public_key(),
+            allowance: 0,
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    reg.put_keys(
+        &carol.id,
+        &songbird_accounts::KeysUpdate {
+            identity: Some(ec(&carol_identity)),
+            signed: Some(vec![1]),
+            last_resort: Some(vec![2]),
+            ..songbird_accounts::KeysUpdate::default()
+        },
+        10,
+    )
+    .await
+    .unwrap();
+    reload().await;
+    let (_carol_ws, mut carol_events) = connect(&s, &carol).await;
+    let carol_api = carol.api(&s);
+
+    // Carol's primary asks for a link token; the new device links (the QR channel itself is
+    // `services/api` `devices_live`).
+    let (st, b) = carol_api
+        .send("POST", "/v1/devices/link-token", None)
+        .await
+        .unwrap();
+    assert_eq!(st, 200);
+    let t: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    let token: [u8; 32] = hex::decode(t["token"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let new_id = DeviceId::parse_hex(t["device"].as_str().unwrap()).unwrap();
+    let new = Dev {
+        id: new_id,
+        seed: DeviceKey::generate(new_id).unwrap().1,
+    };
+    let new_identity = Signer::new(&random32());
+    let mut r = LinkRequest {
+        token,
+        device: new.id,
+        auth_key: new.key().public_key(),
+        identity_key: ec(&new_identity),
+        auth_sig: [0; 64],
+        identity_sig: [0; 64],
+        confirm: [0; 32],
+    };
+    let tr = |c, r: &LinkRequest| {
+        wire::link_transcript(c, API, &r.token, &r.device, &r.auth_key, &r.identity_key).unwrap()
+    };
+    let auth = Ed25519KeyPair::from_seed_unchecked(&new.seed).unwrap();
+    let sig = auth.sign(&tr(LINK_AUTH_CONTEXT, &r));
+    r.auth_sig.copy_from_slice(sig.as_ref());
+    r.identity_sig = new_identity.sign(&tr(LINK_IDENTITY_CONTEXT, &r), &[1; 64]);
+    let (st, _) = songbird_api::client::unsigned(
+        s.api_addr,
+        API,
+        "POST",
+        "/v1/devices/link",
+        Some(&r.encode()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(st, 200);
+
+    // Carol's primary is told, by a notice signed by the system key.
+    let (_, envelope) = next_delivery(&mut carol_events).await;
+    let notice = SystemFrame::decode(&envelope).unwrap();
+    assert_eq!(notice.frame.kind, Kind::DeviceListChanged);
+    assert_eq!(notice.frame.device, carol.id);
+    assert_eq!(
+        DeviceListChanged::decode(&notice.frame.body)
+            .unwrap()
+            .account,
+        account
+    );
+    let signer = SystemSigner::from_seed(&SYSTEM_SEED).unwrap();
+    UnparsedPublicKey::new(&ED25519, signer.public_key())
+        .verify(&notice.message(), &notice.signature)
+        .unwrap();
+
+    // Delivery reloads its directory (the follower does this on the version bump). The new
+    // device authenticates, but while pending no sender is asked to encrypt to it, and a send
+    // to it is refused.
+    reload().await;
+    let (_new_ws, _new_events) = connect(&s, &new).await;
+    let alice_api = s.alice.api(&s);
+    assert_eq!(
+        alice_api
+            .put_message(&frame(key(), vec![to(carol.id, "hi")]))
+            .await
+            .unwrap(),
+        (200, Some((42, SendStatus::Accepted)))
+    );
+    match alice_api
+        .put_message(&frame(key(), vec![to(carol.id, "hi"), to(new.id, "hi")]))
+        .await
+        .unwrap()
+    {
+        (200, Some((_, SendStatus::DeviceMismatch(m)))) => {
+            assert_eq!(m.extra, vec![new.id.as_bytes().to_vec()]);
+            assert_eq!(m.missing, Vec::<Vec<u8>>::new());
+        }
+        other => panic!("expected a device mismatch, got {other:?}"),
+    }
+
+    // Carol signs a list naming both; from now on a send that leaves the new device out is
+    // stale, and the sender is told which device is missing.
+    let mut list = DeviceList {
+        account,
+        list_version: 1,
+        issued_ms: 0,
+        devices: vec![
+            ListedDevice {
+                device: carol.id,
+                auth_key: carol.key().public_key(),
+                identity_key: ec(&carol_identity),
+                primary: true,
+            },
+            ListedDevice {
+                device: new.id,
+                auth_key: new.key().public_key(),
+                identity_key: ec(&new_identity),
+                primary: false,
+            },
+        ],
+        signature: [0; 64],
+    };
+    let sig = account_key.sign(&list.signed_bytes());
+    list.signature.copy_from_slice(sig.as_ref());
+    assert_eq!(
+        carol_api
+            .send("PUT", "/v1/devices/list", Some(&list.encode()))
+            .await
+            .unwrap()
+            .0,
+        204
+    );
+    reload().await;
+    match alice_api
+        .put_message(&frame(key(), vec![to(carol.id, "hi")]))
+        .await
+        .unwrap()
+    {
+        (200, Some((_, SendStatus::DeviceMismatch(m)))) => {
+            assert_eq!(m.missing, vec![new.id.as_bytes().to_vec()]);
+        }
+        other => panic!("expected a device mismatch, got {other:?}"),
+    }
+    assert_eq!(
+        alice_api
+            .put_message(&frame(key(), vec![to(carol.id, "hi"), to(new.id, "hi")]))
+            .await
+            .unwrap(),
+        (200, Some((42, SendStatus::Accepted)))
     );
 }

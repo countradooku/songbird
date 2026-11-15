@@ -119,3 +119,10 @@ path = "fuzz_targets/keypackages.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "devices"
+path = "fuzz_targets/devices.rs"
+test = false
+doc = false
+bench = false

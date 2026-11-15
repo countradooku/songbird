@@ -461,13 +461,7 @@ async fn load_directory(
     let registry = Arc::new(songbird_accounts::Registry::connect(db).await?);
     let version = registry.directory_version().await?;
     let generation = registry.store_generation().await?;
-    let directory = Directory::from_accounts(
-        registry
-            .load_directory()
-            .await?
-            .into_iter()
-            .map(|(d, a, k)| (d, k, a)),
-    );
+    let directory = Directory::from_registry(&registry).await?;
     tracing::info!(
         devices = directory.len(),
         "device directory loaded from the registry"

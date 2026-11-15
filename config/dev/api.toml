@@ -73,3 +73,8 @@ filter = "info"
 # [api.keys]
 # secret = { file = "/path/to/keys-secret.hex" }                  # 64 hex; same on every api node
 # system_key = { file = "/path/to/system-key-seed.hex" }          # optional; "prekeys low" notices, with [api.send]
+# [api.keys.devices]                                             # device linking (Prompt 3, M4, D-0052); defaults
+# max_devices = 6                                                 # primary + 5 (D-0047)
+# link_token_ttl_secs = 600
+# channel_ttl_secs = 600
+# long_poll_secs = 25

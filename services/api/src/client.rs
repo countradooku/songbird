@@ -143,6 +143,27 @@ impl ApiClient {
     }
 }
 
+/// An unsigned request (opening and reading a provisioning channel, linking a device), with a
+/// `Content-Length` header when there is a body.
+///
+/// # Errors
+/// Connection or protocol failure.
+pub async fn unsigned(
+    addr: SocketAddr,
+    server_name: &str,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+) -> Result<Reply, hyper::Error> {
+    let body = body.map(Bytes::copy_from_slice).unwrap_or_default();
+    let b = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", server_name)
+        .header("content-length", body.len());
+    exchange(addr, b, body).await
+}
+
 async fn exchange(
     addr: SocketAddr,
     b: hyper::http::request::Builder,

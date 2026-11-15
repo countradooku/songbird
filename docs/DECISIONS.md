@@ -83,14 +83,91 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   on 2026-11-15** ("Approve both"), with its two threat-model §1 rows (device public keys and
   prekeys; keyed throttle records).
 - Prompt 3, milestone 3b (report `docs/reports/P03-M3b.md`, D-0051): gate **approved by the owner
-  on 2026-11-15** ("Approve both"), with its threat-model §1 row (KeyPackages). Next: M4
-  (devices: QR linking, the signed device list, PIN, passkeys).
+  on 2026-11-15** ("Approve both"), with its threat-model §1 row (KeyPackages). M4 split by the
+  owner (2026-11-15): M4 (devices: QR linking, the signed device list, limits, removal) then M4b
+  (two-step PIN, passkeys with Songbird's own minimal WebAuthn verifier, multiple accounts on one
+  device).
+- Prompt 3, milestone 4 (report `docs/reports/P03-M4.md`, D-0052): built; **gate and four
+  threat-model §1 rows awaiting the owner's approval**.
 - D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
   tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
   `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0052 — Prompt 3, milestone 4: QR provisioning, linking with a confirmation the server cannot forge, and a signed, versioned device list
+
+- Date: 2026-11-15
+- Status: accepted; built (report P03-M4); **gate awaiting the owner's approval**
+- Decided by: owner for scope (M4 split: PIN, passkeys and multiple accounts in M4b, 2026-11-15)
+  and the limit (primary + 5, D-0047); design by agent under the owner's standing instruction
+  (Proton-level bar)
+- Context: Prompt 3, "Devices": QR provisioning through a short-lived channel that sees only
+  ciphertext; a signed, versioned device list the server refuses to roll back; device limits;
+  removal with "device list changed" frames and a hook for Prompt 5's MLS removal.
+- Options considered:
+  - Signal's model (the primary sends the account identity private key to the new device) was
+    rejected: every linked device could then sign device lists. Here only the primary holds the
+    account identity key, and every device has its own identity key (D-0048).
+  - Linking authenticated by the token alone was rejected. The server sees the token in the link
+    request, so it could link keys of its own. The new device also MACs its keys under a
+    confirmation key that only the sealed provisioning message carries. The primary checks the
+    tag before vouching for the device.
+  - An unsigned list kept by the server was rejected: the server could add devices.
+  - The server notifying contacts was rejected: it keeps no social graph (sealed sender comes in
+    M5). Only the account's own devices are notified; contacts learn through the send path's
+    device check and list fetches.
+- Decision:
+  - **Provisioning channel** in `valkey-hot`: a 128-bit bearer ID under a keyed hash; one message
+    of at most 4 KiB, written once, read once (long poll up to 25 s), gone after ten minutes.
+    Sealing is client-side (`songbird_keys::provisioning`: X25519, HKDF-SHA256, AES-256-GCM); the
+    server never holds a provisioning key.
+  - **Link tokens**: 256-bit, hash stored, single use, ten minutes, primary only. A token
+    reserves a server-chosen device ID and counts toward the limit while outstanding.
+  - **Link request**: both new keys proven (Ed25519 and XEdDSA) over a transcript binding the
+    token, the device ID and the server, plus the confirmation tag. The identity key is fixed at
+    link time.
+  - **Pending devices**: a linked device authenticates at once, but is outside the send check
+    and its keys are not served until a list signed by the account identity key names it
+    (`Directory::with_pending`; key fetches skip it).
+  - **The device list**: binary, at most 16 entries, Ed25519 by the account identity key over a
+    domain-separated body, versions strictly increasing. The server checks the signature, the
+    account, the limit, the version, and that every entry matches an enabled device's stored keys
+    with the right primary flag. Devices left out are disabled in the same transaction, and a
+    `DeleteDevices` outbox job deletes them from every store as account deletion does.
+  - **Removal**: by a list, or a linked device removing itself; never the primary (nor a legacy
+    first device without the flag).
+  - **Account-wide authority** (found by the security review): before M4 every account had one
+    device, so `DELETE /v1/account`, usernames and invites never asked which device called. Now
+    **only the primary deletes the account** (checked in the deletion's transaction), and **a
+    pending device changes nothing account-wide** (usernames, the username key and link,
+    invites). Otherwise a device linked by phishing a QR scan could delete the account
+    irreversibly before the primary removes it. Listed linked devices keep the account-wide
+    changes they had (M4b's second factors may narrow this).
+  - **Device limit** under races: every change to an account's devices writes the account row
+    in its transaction, so concurrent changes conflict and retry.
+  - **Notices**: `DeviceListChanged` (system notice kind 1, signed by the system key) to the
+    account's other devices on link, list and removal.
+  - The MLS removal hook for Prompt 5 is the `DeleteDevices` job and the list change: removed
+    devices are named by the list diff that clients see.
+- Evidence (Apple M5 Pro, macOS 27.2.1; compose stack under podman; report P03-M4):
+  - `crates/accounts` `devices_live` (6). Among them, **40 concurrent token requests over eight
+    connections for a limit of 6 grant exactly 5; without the account-row write all 40
+    succeeded**.
+  - `services/api` `devices_live` (4): the QR flow over HTTP, every refusal, throttles.
+  - `tests/e2e` (2): the notice over a WebSocket and the send check before and after listing;
+    removal verified across every store.
+  - Unit tests of the formats, proofs, provisioning seal and directory.
+  - Fuzz `devices` (60 s, 1,611,017 runs).
+- Consequences:
+  - Losing the primary means deleting the account until M4b's recovery and a primary transfer
+    exist.
+  - Until key transparency (M6), a first-time contact trusts the server for the account identity
+    key.
+  - A registry restore brings back devices removed after the backup; clients refuse the old list
+    as a rollback, and the primary must sign again.
+  - New settings `[api.keys.devices]` with defaults. No new dependency.
 
 ## D-0051 — Prompt 3, milestone 3b: MLS KeyPackages checked by Songbird's own parser, bound to the uploading device, served once
 

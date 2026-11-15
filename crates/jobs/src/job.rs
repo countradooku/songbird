@@ -18,6 +18,7 @@ const VERSION: u8 = 1;
 const KIND_PUSH: u8 = 1;
 const KIND_DELETE_ACCOUNT: u8 = 2;
 const KIND_DELETE_OBJECT: u8 = 3;
+const KIND_DELETE_DEVICES: u8 = 4;
 
 const FLAG_CALL: u8 = 0x01;
 
@@ -78,6 +79,13 @@ pub enum Work {
         /// The account.
         account: AccountId,
     },
+    /// Delete an account's removed devices from every store (Prompt 3, M4, D-0052): the
+    /// devices are already disabled; the worker finds them by the account, so the job names no
+    /// device and repeating it is harmless.
+    DeleteDevices {
+        /// The account.
+        account: AccountId,
+    },
     /// Delete one attachment object and its record.
     DeleteObject {
         /// The object.
@@ -91,7 +99,7 @@ impl Work {
     pub fn stream(&self) -> crate::Stream {
         match self {
             Self::Push { .. } => crate::Stream::Push,
-            Self::DeleteAccount { .. } => crate::Stream::Deletion,
+            Self::DeleteAccount { .. } | Self::DeleteDevices { .. } => crate::Stream::Deletion,
             Self::DeleteObject { .. } => crate::Stream::Cleanup,
         }
     }
@@ -166,6 +174,10 @@ impl Job {
                 b.push(KIND_DELETE_ACCOUNT);
                 b.extend_from_slice(account.as_bytes());
             }
+            Work::DeleteDevices { account } => {
+                b.push(KIND_DELETE_DEVICES);
+                b.extend_from_slice(account.as_bytes());
+            }
             Work::DeleteObject { object } => {
                 b.push(KIND_DELETE_OBJECT);
                 b.extend_from_slice(&object.0);
@@ -195,6 +207,9 @@ impl Job {
                 }
             }
             (KIND_DELETE_ACCOUNT, 16) => Work::DeleteAccount {
+                account: AccountId::from_slice(rest).map_err(|_| JobError::Malformed)?,
+            },
+            (KIND_DELETE_DEVICES, 16) => Work::DeleteDevices {
                 account: AccountId::from_slice(rest).map_err(|_| JobError::Malformed)?,
             },
             (KIND_DELETE_OBJECT, 32) => {
@@ -301,6 +316,13 @@ mod tests {
                 attempt: 3,
                 work: Work::DeleteAccount {
                     account: AccountId::from_bytes([3; 16]),
+                },
+            },
+            Job {
+                id,
+                attempt: 4,
+                work: Work::DeleteDevices {
+                    account: AccountId::from_bytes([5; 16]),
                 },
             },
             Job {

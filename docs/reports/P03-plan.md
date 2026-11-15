@@ -5,7 +5,7 @@
 - Status: **agreed by the owner on 2026-11-15**, with every recommended answer below (D-0047).
   M1 and M2 built and their gates approved on 2026-11-15: reports `P03-M1.md` (D-0048) and
   `P03-M2.md` (D-0049). M3 built and its gate approved (`P03-M3.md`, D-0050); M3b (MLS KeyPackages) built and its gate approved
-  (`P03-M3b.md`, D-0051). M4 (devices) built, gate awaiting approval (`P03-M4.md`, D-0052); M4b
+  (`P03-M3b.md`, D-0051). M4 (devices) built and its gate approved (`P03-M4.md`, D-0052); M4b
   next.
 - Base: `main` at `c377d4d` (CI on hosted runners, D-0045/D-0046).
 - Skills: the environment offers general skills only (`security-review`, `code-review`,

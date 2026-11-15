@@ -87,8 +87,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   owner (2026-11-15): M4 (devices: QR linking, the signed device list, limits, removal) then M4b
   (two-step PIN, passkeys with Songbird's own minimal WebAuthn verifier, multiple accounts on one
   device).
-- Prompt 3, milestone 4 (report `docs/reports/P03-M4.md`, D-0052): built; **gate and four
-  threat-model §1 rows awaiting the owner's approval**.
+- Prompt 3, milestone 4 (report `docs/reports/P03-M4.md`, D-0052): gate **approved by the owner
+  on 2026-11-15** ("Approve both"), with its four threat-model §1 rows (the signed device list
+  and device flags; link token hashes; provisioning channels; keyed throttle records). Next: M4b.
 - D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
   tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
   `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment
@@ -99,7 +100,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0052 — Prompt 3, milestone 4: QR provisioning, linking with a confirmation the server cannot forge, and a signed, versioned device list
 
 - Date: 2026-11-15
-- Status: accepted; built (report P03-M4); **gate awaiting the owner's approval**
+- Status: accepted; built (report P03-M4, PR #52); **gate approved by the owner on 2026-11-15**
+  ("Approve both"), with its four threat-model rows
 - Decided by: owner for scope (M4 split: PIN, passkeys and multiple accounts in M4b, 2026-11-15)
   and the limit (primary + 5, D-0047); design by agent under the owner's standing instruction
   (Proton-level bar)

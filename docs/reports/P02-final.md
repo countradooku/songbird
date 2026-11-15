@@ -3,9 +3,10 @@
 - Date: 2026-11-15
 - Prompt: [02-realtime.md](../prompts/02-realtime.md), "Definition of done" in
   [02a-realtime-master.md](../prompts/02a-realtime-master.md) §9.
-- Status: **for the owner's decision.** This report adds no new build or measurement. It checks each
-  definition-of-done item against the milestone reports, the tests on `main` (`c377d4d`) and the
-  runbooks, and lists what is still open.
+- Status: **approved by the owner on 2026-11-15** ("Approve all four": the four decisions in §5).
+  Prompt 2 is done. Its go-live checks (items 5–7) run after every prompt phase is finished. This
+  report adds no new build or measurement. It checks each definition-of-done item against the
+  milestone reports, the tests on `main` (`c377d4d`) and the runbooks.
 - State of `main`:
   - `ci` passed on `c377d4d`. CodeQL passed on #46, whose tree is identical.
   - The scheduled nightly passed all 13 jobs on 2026-11-15 (run 43699416351, `83cf2b9`): fuzz on
@@ -17,21 +18,21 @@
 
 | Definition of done | Verdict |
 | --- | --- |
-| Every milestone gate passed and its report written | **Met for M2–M7 and the send library.** M1: approval not written down (below). M0 is Prompt 1, whose gate is still open. |
+| Every milestone gate passed and its report written | **Met for M1–M7 and the send library** (M1's approval recorded with this gate). M0 is Prompt 1, whose gate is still open. |
 | Every invariant has a named, passing test; the checker passes in every load, chaos and restore scenario | **Met.** |
-| A timed DR drill met the RTO; every failure in the matrix has a tested runbook | **Partly.** The restore drill under load passed (software path). The 2-hour whole-environment RTO is not drilled. Every matrix row has a runbook; three rows have no test or drill. |
-| One command reproduces the benchmark suite and compares against the baseline and Sockudo | **Met against the stored baseline.** Sockudo was replaced by the sockudo-ws baseline at M1 (owner-accepted, D-0022), and the suite does not run it. |
+| A timed DR drill met the RTO; every failure in the matrix has a tested runbook | **Partly; gaps accepted.** The restore drill under load passed (software path). The 2-hour whole-environment RTO is not drilled (a go-live check). Every matrix row has a runbook; three rows have no test or drill, accepted with their plans (§5, item 4). |
+| One command reproduces the benchmark suite and compares against the baseline and Sockudo | **Met.** Against the stored baseline in the suite. For Sockudo, the owner accepted the sockudo-ws baseline from M1 (D-0022, confirmed 2026-11-15). |
 
 ## 1. Milestone gates and reports
 
 | Gate | Report | Approval |
 | --- | --- | --- |
 | M0: workspace, CI, compose, telemetry, decisions | [P01-foundations](P01-foundations.md) | Prompt 1's report still reads "stopped at the gate, waiting for the owner". Of its open items, CI on GitHub is now green on every pull request. The timed rebuild at a second provider is not run (§3). |
-| M1: proto, server, session, client, loadgen | [P02-M1](P02-M1.md) | **Not recorded.** The report's status still reads "waiting for the owner's approval of the gate". The owner merged PR #21 on 2026-11-11, settled its three decisions (D-0024), accepted the sockudo-ws baseline (D-0022) and started M2. |
+| M1: proto, server, session, client, loadgen | [P02-M1](P02-M1.md) | **Approved; recorded on 2026-11-15.** It had not been written down: the owner merged PR #21 on 2026-11-11, settled its three decisions (D-0024), accepted the sockudo-ws baseline (D-0022) and started M2. |
 | M2: mailbox, send path, ACK deletes | [P02-M2](P02-M2.md), [deletion](P02-M2-deletion.md) | Approved 2026-11-12 |
 | M3: thread-per-core runtime | [P02-M3](P02-M3.md) | Approved 2026-11-12 |
 | M4: Valkey routing, takeover, chaos | [P02-M4](P02-M4.md) | Approved 2026-11-12 |
-| M5: jobs, push, worker, api | [P02-M5](P02-M5.md) | Approved 2026-11-13. Two threat-model rows are still **awaiting approval** (§5). |
+| M5: jobs, push, worker, api | [P02-M5](P02-M5.md) | Approved 2026-11-13. Its two remaining threat-model rows were approved on 2026-11-15 (§5). |
 | M6: backups, store generation, restore | [P02-M6](P02-M6.md) | Approved 2026-11-13 (delegated, D-0041) |
 | M7: tuning, load suite, soak, threat model | [P02-M7](P02-M7.md) | Approved 2026-11-13, with the soak moved |
 | Send library, `PUT /v1/messages`, system frames | [P02-send](P02-send.md) | Approved 2026-11-14 (D-0044) |
@@ -108,15 +109,14 @@ the checker.
 
 ## 5. Open items
 
-For the owner to decide now:
+Decided by the owner on 2026-11-15 ("Approve all four"), as recommended:
 
-1. **Approve the two M5 threat-model rows** (THREAT_MODEL §1, D-0036): jobs in `valkey-jobs` as
+1. **Approved: the two M5 threat-model rows** (THREAT_MODEL §1, D-0036): jobs in `valkey-jobs` as
    sealed IDs, and the hash of a request's (device, nonce) in `valkey-hot` for 2 minutes. Both are
    sealed or hashed forms of data already approved.
-2. **Record the M1 gate as approved**, given PR #21's merge and M2's start.
-3. **Accept the sockudo-ws baseline as meeting the "against Sockudo" item**, or ask for a Sockudo
-   server run to be added to the suite.
-4. **Accept the untested matrix rows as known gaps**, each with its plan: RustFS outage (a
+2. **Recorded: the M1 gate is approved**, given PR #21's merge and M2's start.
+3. **Accepted: the sockudo-ws baseline meets the "against Sockudo" item.**
+4. **Accepted: the untested matrix rows are known gaps**, each with its plan: RustFS outage (a
    compose test can stop RustFS mid-upload), bad deploy (the first release), and compromise (a
    game day).
 
@@ -130,7 +130,7 @@ Not blocking, already tracked in DECISIONS: Iggy pre-1.0 and its seccomp needs (
 supply-chain audit backlog, the RustFS digest pin (D-0035), and the owner's GitHub and Actions
 settings (D-0045, D-0046).
 
-## Recommendation
+## Outcome
 
-Approve Prompt 2 as done, with items 1–4 decided as above and items 5–7 as the recorded go-live
-checks. None of the open items changes code that Prompt 3 builds on.
+Prompt 2 is done. Items 1–4 are decided as above, and items 5–7 are the recorded go-live checks.
+None of the open items changes code that Prompt 3 builds on.

@@ -208,6 +208,12 @@ impl std::fmt::Debug for KeyBody {
     }
 }
 
+/// A stored verifier's salt and Argon2id output; `None` for anything not 48 bytes.
+fn split_verifier(v: &[u8]) -> Option<([u8; SALT_LEN], [u8; 32])> {
+    let (salt, output) = v.split_first_chunk::<SALT_LEN>()?;
+    Some((*salt, output.try_into().ok()?))
+}
+
 /// Whether a username key has the allowed shape: 4 to 10 ASCII digits.
 #[must_use]
 pub fn key_ok(key: &str) -> bool {
@@ -223,7 +229,8 @@ pub struct Usernames {
     reserved: HashSet<[u8; HASH_LEN]>,
     /// Checked against when a keyed lookup has no verifier to check, so every keyed lookup costs
     /// one Argon2id run. Random per process.
-    dummy: [u8; VERIFIER_LEN],
+    dummy_salt: [u8; SALT_LEN],
+    dummy_output: [u8; 32],
     checks: Arc<Semaphore>,
     /// Counters.
     pub metrics: UsernameMetrics,
@@ -269,10 +276,13 @@ impl Usernames {
             0 => std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1)),
             n => n,
         };
-        let mut dummy = [0u8; VERIFIER_LEN];
-        getrandom::fill(&mut dummy).map_err(|_| "random source")?;
+        let mut dummy_salt = [0u8; SALT_LEN];
+        getrandom::fill(&mut dummy_salt).map_err(|_| "random source")?;
+        let mut dummy_output = [0u8; 32];
+        getrandom::fill(&mut dummy_output).map_err(|_| "random source")?;
         Ok(Self {
-            dummy,
+            dummy_salt,
+            dummy_output,
             pepper,
             throttle_key: hmac::Key::new(hmac::HMAC_SHA256, &throttle),
             reserved,
@@ -280,12 +290,6 @@ impl Usernames {
             settings,
             metrics,
         })
-    }
-
-    fn dummy_salt(&self) -> [u8; SALT_LEN] {
-        let mut salt = [0u8; SALT_LEN];
-        salt.copy_from_slice(self.dummy.get(..SALT_LEN).unwrap_or_default());
-        salt
     }
 
     fn record(&self, kind: &str, subject: &[u8]) -> String {
@@ -463,25 +467,18 @@ impl Usernames {
         row: Option<songbird_accounts::UsernameRow>,
         key: Zeroizing<String>,
     ) -> Outcome {
-        // The verifier to check against: the account's, or the random dummy of the same shape
-        // drawn at start-up (it matches no key: its output part is random bytes, not a hash).
+        // The verifier to check against: the account's, or the random dummy drawn at start-up
+        // (it matches no key: its output part is random bytes, not a hash of one).
         let stored = row.as_ref().and_then(|r| r.key.clone());
-        let verifier: [u8; VERIFIER_LEN] = stored
+        let (salt, expected) = stored
             .as_deref()
-            .and_then(|v| v.try_into().ok())
-            .unwrap_or(self.dummy);
-        let salt: [u8; SALT_LEN] = verifier
-            .split_first_chunk::<SALT_LEN>()
-            .map_or_else(|| self.dummy_salt(), |(s, _)| *s);
+            .and_then(split_verifier)
+            .unwrap_or((self.dummy_salt, self.dummy_output));
         self.metrics.key_checks.inc();
         let Some(derived) = self.derive(key, salt).await else {
             return Outcome::Unavailable;
         };
-        let matches = constant_time::verify_slices_are_equal(
-            &derived,
-            verifier.get(SALT_LEN..).unwrap_or_default(),
-        )
-        .is_ok();
+        let matches = constant_time::verify_slices_are_equal(&derived, &expected).is_ok();
         let t = &self.settings.throttle;
         let budget = self.record("k", hash);
         let would_find = row

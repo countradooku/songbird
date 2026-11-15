@@ -34,6 +34,7 @@ use songbird_surreal::Value;
 use songbird_types::{AccountId, DeviceId, JobId};
 
 pub mod devices;
+pub mod gdpr;
 pub mod journal;
 pub mod kt;
 pub mod profile;
@@ -136,6 +137,10 @@ DEFINE FIELD IF NOT EXISTS subject ON ktleaf TYPE bytes;
 DEFINE INDEX IF NOT EXISTS ktleaf_subject ON ktleaf FIELDS subject;
 DEFINE TABLE IF NOT EXISTS ktnode SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS h ON ktnode TYPE bytes;
+DEFINE FIELD IF NOT EXISTS last_seen ON account TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS inactive_months ON account TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS inact_warned ON account TYPE option<int>;
+DEFINE INDEX IF NOT EXISTS account_last_seen ON account FIELDS last_seen;
 DEFINE TABLE IF NOT EXISTS kt SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS size ON kt TYPE int;
 DEFINE TABLE IF NOT EXISTS directory SCHEMAFULL;
@@ -479,7 +484,8 @@ impl Registry {
             .db
             .query(
                 "BEGIN TRANSACTION;
-                 CREATE account:[$a] SET at = time::now(), deleting = false RETURN NONE;
+                 CREATE account:[$a] SET at = time::now(), deleting = false, last_seen = time::now()
+                   RETURN NONE;
                  FOR $d IN $devices {
                    CREATE device:[$d[0]] SET account = $a, key = $d[1], disabled = false,
                      prim = $d[2], at = time::now() RETURN NONE;
@@ -528,7 +534,7 @@ impl Registry {
             "BEGIN TRANSACTION;
              {invite_sql}
              CREATE account:[$a] SET at = time::now(), deleting = false, identity = $identity,
-               invites = $allowance, kt_gen = 1 RETURN NONE;
+               invites = $allowance, kt_gen = 1, last_seen = time::now() RETURN NONE;
              CREATE device:[$d] SET account = $a, key = $k, disabled = false, prim = true,
                at = time::now() RETURN NONE;
              UPDATE directory:v SET version += 1 RETURN NONE;

@@ -761,6 +761,39 @@ list, and changes reach clients by three paths:
 In each case the app compares the new list with the last one it accepted and warns the user
 about new devices.
 
+### 4.10 GDPR: export, deletion and inactivity
+
+Decision D-0056 (M7).
+
+- **Export** (`GET /v1/account/export`, the primary, signed): JSON of everything the registry
+  holds about the account:
+  - the account row: creation, invites left, identity key, username hash, whether a username key
+    is set, the signed device list, the profile, the access key, the PIN's state, the
+    transparency salt, last use and the inactivity period;
+  - username links, passkeys and avatars;
+  - every device: keys, flags, prekey and KeyPackage counts, whether a sealed push registration
+    exists, pending uploads.
+  Secrets derived from what the user knows (the PIN and username-key verifiers) are reported as
+  present, not handed out. What cannot be attributed to the account (mailbox ciphertext, sent
+  attachments, keyed throttle records, transparency leaves once the salt is gone, encrypted
+  backups) is listed with its retention.
+- **Deletion** (`DELETE /v1/account`, the primary): the outbox job deletes every Prompt 2 and 3
+  store, then verifies it:
+  - mailbox and push registrations;
+  - upload grants and objects, and avatar objects;
+  - devices, prekeys, KeyPackages and passkeys;
+  - username (held 30 days, unlinked) and links;
+  - link tokens;
+  - the profile, device list, PIN and transparency salt on the account row.
+  Encrypted backups keep the data until they expire (at most 93 days); a restore deletes it
+  again through the journal (D-0041).
+- **Inactivity** (owner, D-0047): each account chooses 6, 12 or 24 months
+  (`PUT /v1/account/inactivity {"months"}`, the primary; default 12; a month is 30 days).
+  - Any signed `api` request counts as use, recorded at most once a day.
+  - A month and a week before the period ends, the worker sends every device a wake-up push. The
+    app wakes, makes a request, and the clock restarts.
+  - At the end, the account is deleted exactly as if it had asked.
+
 ## 5. Encrypted content schemas (Prompt 4)
 
 ## 6. Groups, roles and channels (MLS) (Prompt 5)

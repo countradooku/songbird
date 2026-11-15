@@ -120,6 +120,8 @@ pub struct WorkerMetrics {
     pub grants_expired: Counter,
     /// Removed devices deleted and verified gone (one per job).
     pub devices_deleted: Counter,
+    /// Accounts whose deletion started for inactivity.
+    pub inactive_deleted: Counter,
 }
 
 impl WorkerMetrics {
@@ -146,6 +148,11 @@ impl WorkerMetrics {
                 "worker_objects_deleted",
                 "Attachment objects deleted",
                 &self.objects_deleted,
+            ),
+            (
+                "worker_inactive_deleted",
+                "Account deletions started for inactivity",
+                &self.inactive_deleted,
             ),
             (
                 "worker_devices_deleted",
@@ -457,6 +464,50 @@ impl Worker {
         Ok(())
     }
 
+    /// Inactivity deletion (Prompt 3, M7, D-0056): a wake-up push to every device of an
+    /// account a month and a week before its period ends (the app wakes, makes a request and
+    /// the account counts as used again), then the account's deletion through the outbox, as if
+    /// it had asked itself.
+    pub async fn inactivity(&self) {
+        let found = match self.registry.inactive(SWEEP_BATCH).await {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!(error = %e, "inactivity pass failed");
+                return;
+            }
+        };
+        for (level, list) in [(1u8, &found.warn_month), (2u8, &found.warn_week)] {
+            for (account, devices) in list {
+                let jobs: Vec<Job> = devices
+                    .iter()
+                    .filter_map(|d| {
+                        Job::new(Work::Push {
+                            device: *d,
+                            call: false,
+                        })
+                        .ok()
+                    })
+                    .collect();
+                if self.queue.enqueue(&jobs).await.is_ok() {
+                    let _ = self.registry.mark_warned(account, level).await;
+                }
+            }
+        }
+        for account in &found.expired {
+            let Ok(job) = Job::new(Work::DeleteAccount { account: *account }) else {
+                continue;
+            };
+            if let Err(e) = self.registry.begin_account_deletion(account, &job).await {
+                tracing::warn!(error = %e, "inactive account deletion not started");
+            }
+        }
+        if !found.expired.is_empty() {
+            self.metrics
+                .inactive_deleted
+                .inc_by(u64::try_from(found.expired.len()).unwrap_or(u64::MAX));
+        }
+    }
+
     /// Deletes an attachment object, then its record (idempotent).
     ///
     /// # Errors
@@ -516,6 +567,7 @@ impl Worker {
             }
             Err(e) => tracing::warn!(error = %e, "avatar sweep failed"),
         }
+        self.inactivity().await;
         // Key transparency (Prompt 3, M6): log what changed since the last pass.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

@@ -20,7 +20,8 @@
 //! | `POST /v1/attachments` | An upload grant: exact (padded) size and recipient fetches due |
 //! | `PUT /v1/attachments/<id>` | The upload, streamed to `RustFS`; exactly the granted size |
 //! | `GET /v1/attachments/<id>` | A download; each completed one counts a fetch, the last deletes |
-//! | `DELETE /v1/account` | Deletes the device's account from every store (outbox job) |
+//! | `DELETE /v1/account` | Deletes the device's account from every store (outbox job; the primary only) |
+//! | `GET /v1/account/export`; `PUT /v1/account/inactivity` | GDPR export; the inactivity period (the primary only) |
 //! | `PUT /v1/messages` | A WebSocket `Send` frame, for clients with no open socket; answers its `SendResult` ([`messages`]) |
 //!
 //! Every request but the two registration steps, opening and reading a provisioning channel and
@@ -587,7 +588,8 @@ impl App {
         Ok(r)
     }
 
-    /// `/v1/account/…` second factors ([`devices`], M4b): the primary's to change.
+    /// `/v1/account/…`: second factors ([`devices`], M4b), the export and the inactivity period
+    /// (M7); the primary's to change.
     async fn factors(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
         let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
         let d = self.devices.as_ref().ok_or_else(unavailable)?;
@@ -624,6 +626,31 @@ impl App {
                 None => not_primary(),
             },
             (&Method::GET, "/v1/account/factors") => d.factors(&self.registry, &row.account).await,
+            // GDPR (M7): the export and the inactivity period, the primary's.
+            (&Method::GET, "/v1/account/export") => match primary {
+                Some(a) => match self.registry.export(&a, &self.push_index_secret).await {
+                    Ok(v) => devices::Outcome::Json(v),
+                    Err(_) => devices::Outcome::Unavailable,
+                },
+                None => not_primary(),
+            },
+            (&Method::PUT, "/v1/account/inactivity") => match primary {
+                Some(a) => {
+                    let months = serde_json::from_slice::<serde_json::Value>(&body)
+                        .ok()
+                        .and_then(|v| v.get("months").and_then(serde_json::Value::as_u64))
+                        .and_then(|m| u32::try_from(m).ok())
+                        .filter(|m| songbird_accounts::gdpr::INACTIVITY_CHOICES.contains(m));
+                    match months {
+                        Some(m) => match self.registry.set_inactivity(&a, m).await {
+                            Ok(()) => devices::Outcome::Done,
+                            Err(_) => devices::Outcome::Unavailable,
+                        },
+                        None => devices::Outcome::Malformed("months"),
+                    }
+                }
+                None => not_primary(),
+            },
             _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
         };
         Ok(device_outcome(out))
@@ -1066,6 +1093,7 @@ impl App {
             .device(&s.device)
             .await
             .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
+        let account = row.map(|r| r.account);
         let key = row.filter(|r| !r.disabled).map(|r| r.key);
         let t = auth::transcript(
             &self.server_name,
@@ -1095,7 +1123,39 @@ impl App {
         if matches!(fresh, redis::Value::Nil) {
             return Err(unauthorized());
         }
+        if let Some(a) = account {
+            self.touch(&a).await;
+        }
         Ok(s.device)
+    }
+
+    /// Records that the account is in use, at most once a day (inactivity deletion, M7): a
+    /// keyed daily mark in `valkey-hot`, then the registry. Best effort.
+    async fn touch(&self, account: &songbird_types::AccountId) {
+        let k = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, &self.push_index_secret);
+        let mut ctx = aws_lc_rs::hmac::Context::with_key(&k);
+        ctx.update(b"songbird.v1/last-seen\0");
+        ctx.update(account.as_bytes());
+        let mark = format!(
+            "ls:{}",
+            hex::encode(ctx.sign().as_ref().get(..16).unwrap_or_default())
+        );
+        let first: Result<redis::Value, _> = self
+            .hot
+            .query(
+                redis::cmd("SET")
+                    .arg(mark)
+                    .arg(1)
+                    .arg("NX")
+                    .arg("EX")
+                    .arg(86_400),
+            )
+            .await;
+        if matches!(first, Ok(redis::Value::Okay))
+            && let Err(e) = self.registry.touch(account).await
+        {
+            tracing::warn!(error = %e, "last-seen not recorded");
+        }
     }
 
     async fn put_push(&self, device: DeviceId, body: &[u8]) -> Result<Response<Body>, Refusal> {

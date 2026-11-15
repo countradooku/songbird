@@ -100,6 +100,34 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0056 — Prompt 3, milestone 7: GDPR export, deletion across every Prompt 3 store, inactivity deletion; the Prompt 3 gate
+
+- Date: 2026-11-15
+- Status: accepted; built (report `P03-gate.md`); **the Prompt 3 gate awaits the owner's approval**
+- Decided by:
+  - owner: the inactivity period, user-chosen from 6, 12 or 24 months with a default of 12 and
+    a warning first (D-0047);
+  - agent: the design below.
+- Decision:
+  - **Export** by the primary only (as deletion, D-0052): one JSON document of every registry
+    store. Derived secrets (the PIN and username-key verifiers) are reported as present, not
+    given out. Sealed push registrations are reported as present. What cannot be attributed to
+    the account is listed with its retention.
+  - **Deletion**: the existing outbox job extended to avatar objects; the registry deletion
+    extended to passkeys, avatars and link tokens. Profile, PIN, device list and transparency
+    salt go with the account row; the job verifies all of it.
+  - **Inactivity**:
+    - "use" is any signed `api` request, recorded at most daily through a keyed mark in
+      `valkey-hot`;
+    - warnings are wake-up pushes a month and a week before the end, which make the app
+      reconnect;
+    - at the end, the same deletion as a user's own.
+- Evidence: `an_account_is_exported_then_deleted_from_every_prompt_3_store` and
+  `inactivity_warns_a_month_and_a_week_before_then_deletes` (`tests/e2e/tests/gate_p03.rs`,
+  against SurrealDB, `RustFS` and both Valkeys). The Prompt 3 gate is in `P03-gate.md`.
+- Consequences: none new beyond the fields listed in the threat model row. Inactivity is
+  measured from `api` use, so apps must call `api` at least daily while in use.
+
 ## D-0055 — Prompt 3, milestone 6: key transparency as Songbird's own RFC 9162 log; akd recorded as the upgrade path
 
 - Date: 2026-11-15

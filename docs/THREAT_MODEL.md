@@ -50,6 +50,7 @@ server in plaintext. Adding to this list requires the owner's approval.
 | Per account: the encrypted profile and its version, the unidentified-access key (16 bytes derived from the profile key; reveals nothing of it) and whether anyone may send to it sealed; encrypted avatar objects in RustFS with their random IDs and upload times | Serve profiles and avatars to contacts who hold the key; authorize sealed sends | Until replaced (avatars: an hour after replacement) or with the account | Prompt 3 (M5), D-0054; ciphertext and a derived key; **awaiting the owner's approval** |
 | Keyed hashes (HMAC-SHA256, key from the profiles secret) of a requesting account, an IP range or a recipient account, with the next allowed time for profile and avatar fetches and sealed sends, in `valkey-hot`; no identifier | Throttle fetches and sealed sends | At most the throttle window (about an hour), then expired | Prompt 3 (M5), D-0054; keyed forms; **awaiting the owner's approval** |
 | Key transparency log: per change, a leaf with the kind, a salted HMAC of the account (salt per account, deleted with it), SHA-256 of the identity key or device list or the username hash, and the time; the Merkle tree's hashes; per account the salt, the last logged values and generations | Let anyone check what the server vouches for, and detect a server that shows different keys to different people | The log is append-only and kept for the service's life; a deleted account's salt goes with it, which leaves its leaves unlinkable | Prompt 3 (M6), D-0055; **awaiting the owner's approval** |
+| Per account: last use (a day's precision), the chosen inactivity period and which warnings were sent; a keyed daily "seen" mark in `valkey-hot` (no identifier) | Delete accounts after the inactivity period the user chose, warning twice first | Last use until the next use or the account's deletion; the mark 24 hours | Prompt 3 (M7), D-0056; **awaiting the owner's approval** |
 | Deletion journal: per deleted account, an empty tombstone in the backup bucket named by the deletion time and HMAC-SHA256(journal key, account ID); no account ID | A restore must not bring a deleted account back | Write-once, 93 days (the longest backup retention) | Prompt 2 (M6), D-0041; **approved under the owner's delegation** |
 
 Prompt 1 adds two operational views, neither of which is user data on the server:
@@ -322,6 +323,15 @@ the key directory (M3) and key transparency (M6).
 | The log identifying people forever (GDPR) | I | Anyone reading the log | Leaves carry a salted HMAC of the account; the salt is deleted with the account | the same test (the deleted account's entries no longer resolve) |
 | Malformed proofs or heads | T | Malicious server | Bounded, strict decoders and verifiers (RFC 9162); fuzzed | fuzz `kt` |
 
+### 3.16 GDPR (Prompt 3, milestone 7)
+
+| Threat | STRIDE | Attacker | Mitigation | Test or proof |
+| --- | --- | --- | --- | --- |
+| Data outliving an account's deletion | I | Compromised server later, insider | The outbox job deletes every Prompt 2 and 3 store and verifies it; the transparency salt goes with the row (its leaves unlinkable); backups expire within 93 days and a restore deletes again | `an_account_is_exported_then_deleted_from_every_prompt_3_store`; `account_deletion_is_verified_across_every_store` |
+| Exporting someone else's data, or a thief exporting with a linked device | I, E | Thief of a linked device | Export only by the account's primary, signed; it carries public keys and ciphertext, never the PIN or username-key verifiers | the same test (the PIN verifier absent from the export); `a_pending_device_changes_nothing_account_wide…` |
+| An active user's account deleted for inactivity | D | Bug, a user who only uses the WebSocket | Any signed `api` request counts as use (apps call `api` at least daily); two wake-up warnings first; the user chooses the period | `inactivity_warns_a_month_and_a_week_before_then_deletes` |
+| Inactivity deletion as an attack (keeping someone's devices from reaching `api`) | D | Network attacker | Months-long periods, two warnings, any single request resets; censorship resistance is the proxy's (Prompt 1) | D-0056 |
+
 ## 4. Server-enforced settings
 
 ## 5. Compliance notes (GDPR, age of digital consent per EU country)
@@ -421,3 +431,7 @@ the key directory (M3) and key transparency (M6).
   account ID can ask for its salt and see how many keys and lists it has had. Meta's `akd`
   (verifiable map, VRF, used by WhatsApp) is the recorded upgrade path behind the same endpoints.
   The log key is not deployed yet (secrets store; apps pin it). There is no external auditor yet.
+- GDPR (M7, D-0056): the export does not include what the mailbox holds (ciphertext the user's
+  devices receive anyway); `api` has no read path into it. A device that only holds a WebSocket
+  and never calls `api` would not count as use; the apps call `api` at least daily (prekey and
+  KeyPackage counts). Inactivity warnings are wake-up pushes: a device without push gets none.

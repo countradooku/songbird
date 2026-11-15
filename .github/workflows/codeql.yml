@@ -1,24 +1,36 @@
 name: codeql
 
+# Every pull request, every push to main, weekly, and on demand, on GitHub-hosted runners (D-0045).
+# The job fails on any finding, as before (D-0015). Results are also uploaded to code scanning
+# (the Security tab), which a public repository has for free; not from pull requests, whose token
+# from a fork cannot write security events.
 on:
+  pull_request:
+    paths-ignore: ["docs/**", "**/*.md"]
   push:
     branches: [main]
-  pull_request:
+    paths-ignore: ["docs/**", "**/*.md"]
   schedule:
     - cron: "41 3 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   analyze:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
-      # codeql-action reads the workflow run to build the analysis key; private repositories
-      # need this granted explicitly.
+      # codeql-action reads the workflow run to build the analysis key.
       actions: read
       contents: read
+      # Upload to code scanning (D-0045). A fork's pull request gets this as read only.
+      security-events: write
     strategy:
       fail-fast: false
       matrix:
@@ -32,12 +44,12 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: none
           queries: security-extended
-      # Code scanning is not enabled on this private repository, so results are not uploaded to
-      # GitHub. The job gates on the SARIF itself and keeps it as an artifact (D-0015).
+      # The job gates on the SARIF itself and keeps it as an artifact (D-0015); outside pull
+      # requests the results also go to code scanning (D-0045).
       - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           category: /language:${{ matrix.language }}
-          upload: never
+          upload: ${{ github.event_name == 'pull_request' && 'never' || 'always' }}
           output: sarif-results
       - name: Keep SARIF
         if: always()

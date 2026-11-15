@@ -1,6 +1,6 @@
 # GitHub setup scripts
 
-Re-runnable setup for `countradooku/songbird`. Both scripts check what exists before changing anything.
+Re-runnable setup for `songbirdchat/songbird`. Both scripts check what exists before changing anything.
 
 - `gen.py <input_dir> <repo_dir> <out.json>`: splits `PROMPT_SET.md` into `docs/prompts/NN-<slug>.md`,
   copies `MASTER_BUILD_PROMPT.md` to `docs/prompts/02a-realtime-master.md` (links rewritten), and writes

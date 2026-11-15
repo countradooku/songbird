@@ -38,7 +38,7 @@ edition = "2024"
 rust-version = "1.95" # the Iggy SDK needs 1.95 (D-0030)
 publish = false
 license = "LicenseRef-Proprietary"
-repository = "https://github.com/countradooku/songbird"
+repository = "https://github.com/songbirdchat/songbird"
 
 # Every dependency here has a recorded reason in docs/DECISIONS.md (D-0004).
 [workspace.dependencies]

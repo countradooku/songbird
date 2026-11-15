@@ -35,7 +35,7 @@ name pointing at it, and Docker.
    ```
 5. Make your proxy link and share it:
    ```bash
-   docker run --rm ghcr.io/countradooku/songbird-proxy:$SONGBIRD_PROXY_VERSION --print-link proxy.example.org
+   docker run --rm ghcr.io/songbirdchat/songbird-proxy:$SONGBIRD_PROXY_VERSION --print-link proxy.example.org
    # songbird://proxy#proxy.example.org
    ```
    People open the link, or enter the host name under Settings > Storage and data > Proxy.
@@ -48,8 +48,8 @@ Renew the certificate before it expires and restart the container afterwards
 Release images are signed. Check before running:
 
 ```bash
-cosign verify ghcr.io/countradooku/songbird-proxy:$SONGBIRD_PROXY_VERSION \
-  --certificate-identity-regexp '^https://github.com/countradooku/songbird/\.github/workflows/release\.yml@refs/tags/v' \
+cosign verify ghcr.io/songbirdchat/songbird-proxy:$SONGBIRD_PROXY_VERSION \
+  --certificate-identity-regexp '^https://github.com/songbirdchat/songbird/\.github/workflows/release\.yml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 

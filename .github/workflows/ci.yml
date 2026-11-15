@@ -1,20 +1,28 @@
-# Fast checks: every push and pull request. Must stay under ~15 minutes.
-# Deep checks (sanitizers, long fuzzing, full benchmarks) run nightly: nightly.yml.
+# Fast checks: pull requests and pushes to main. Must stay under ~15 minutes.
+# Deep checks (sanitizers, long fuzzing, full benchmarks) run nightly: nightly.yml. So do
+# CodeQL (codeql.yml) and the container images (images.yml), off the pull request path (D-0045).
 # Every action is pinned to a full commit SHA; the tag is in the trailing comment.
 name: ci
 
+# GitHub-hosted runners only (D-0045): the repository is public, so they cost nothing, and every
+# job gets a fresh VM. Pull requests from forks run here too, with a read-only token and no
+# secrets; a self-hosted runner never runs this code (`cargo xtask workflows` rejects one).
 on:
   push:
     branches: [main]
+    paths-ignore: ["docs/**", "**/*.md"]
   pull_request:
+    # A docs-only change builds nothing.
+    paths-ignore: ["docs/**", "**/*.md"]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# A new push to a pull request cancels its older run; every commit on main is checked to the end.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -33,16 +41,23 @@ jobs:
       - name: toolchain (from rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # Pull requests restore main's cache but never save their own (D-0045): per-branch
+          # caches (about 0.8 GB each) went past the free 10 GB of Actions cache.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-nextest@0.9.151,cargo-deny@0.20.2,cargo-audit@0.22.2,cargo-vet@0.10.2
       - run: cargo xtask ci fast
-      - if: always()
+      # Artifacts only when something failed (D-0045): they count against the 500 MB of free
+      # Actions storage.
+      - if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
+          retention-days: 14
 
   compose:
     name: integration environment (docker compose)
@@ -54,6 +69,10 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # Pull requests restore main's cache but never save their own (D-0045): per-branch
+          # caches went past the free 10 GB of Actions cache.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: start SurrealDB, Iggy, valkey-hot, valkey-jobs, RustFS, LiveKit and wait for health
         run: cargo xtask compose up
       - run: cargo xtask compose ps
@@ -110,43 +129,19 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # Pull requests restore main's cache but never save their own (D-0045): per-branch
+          # caches went past the free 10 GB of Actions cache.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Autobahn fuzzingclient against the delivery WebSocket layer (image pinned by digest)
         run: cargo xtask autobahn
-      - if: always()
+      - if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: autobahn-reports
           path: target/autobahn
           if-no-files-found: ignore
-          retention-days: 30
-
-  images:
-    name: container image (${{ matrix.bin }})
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        bin: [songbird-delivery, songbird-api, songbird-push, songbird-worker, songbird-calls, songbird-proxy]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: deploy/docker/Dockerfile
-          build-args: BIN=${{ matrix.bin }}
-          push: false
-          load: true
-          tags: ${{ matrix.bin }}:ci
-          cache-from: type=gha,scope=${{ matrix.bin }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.bin }}
-      - name: image starts and runs as non-root
-        run: |
-          test "$(docker image inspect ${{ matrix.bin }}:ci --format '{{.Config.User}}')" = "nonroot:nonroot"
-          docker run --rm ${{ matrix.bin }}:ci --version
+          retention-days: 14
 
   semgrep:
     name: semgrep

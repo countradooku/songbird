@@ -1,4 +1,5 @@
 # Deep checks, nightly and on demand: long fuzzing, sanitizers, Miri, full benchmarks.
+# GitHub-hosted runners only (D-0045); enforced by `cargo xtask workflows`.
 # A failure here opens no PR by itself; it fails the run and the owner is notified by GitHub.
 name: nightly
 
@@ -13,6 +14,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -53,6 +58,7 @@ jobs:
             fuzz/artifacts/${{ matrix.target }}
             fuzz/corpus/${{ matrix.target }}
           if-no-files-found: ignore
+          retention-days: 14
 
   sanitizers:
     name: sanitizers (ASan, TSan)
@@ -93,6 +99,7 @@ jobs:
           name: criterion
           path: target/criterion
           if-no-files-found: ignore
+          retention-days: 14
 
   full-ci:
     name: fast checks on a clean cache

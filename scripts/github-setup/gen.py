@@ -7,7 +7,7 @@ Idempotent: rewrites the same files with the same content every run.
 import json, os, re, sys
 
 src, repo, out_json = sys.argv[1:4]
-OWNER = "countradooku"
+OWNER = "songbirdchat"
 REPO_URL = f"https://github.com/{OWNER}/songbird"
 MASTER_LINK = "https://claude.ai/artifact/WBgym6gXuXwJcm9VJQhtmB"
 

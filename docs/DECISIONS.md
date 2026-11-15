@@ -25,11 +25,21 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 - Inactivity deletion period (Prompt 3).
 - WhatsApp interop legal gate (Prompt 14).
 - Second EU provider (D-0009): Hetzner only for now (D-0042); the Scaleway code stays dormant.
-- Public domains: Songbird's client endpoints and the web domain for proxy links (D-0011). The
-  upstream names in `deploy/proxy/proxy.example.toml` are placeholders until then.
+- Public domains: the owner holds `songbird.chat` (D-0046). Still to decide: which names under it
+  serve the client endpoints and the web domain for proxy links (D-0011). The upstream names in
+  `deploy/proxy/proxy.example.toml` are placeholders until then.
 - Licence for the repository (README says all rights reserved until chosen).
 - Deployment access model: SSH as root with a key, through one bastion restricted to admin ranges
   (D-0014). Alternatives: WireGuard-only access, a non-root deploy user with sudo.
+- D-0045 (CI on GitHub-hosted runners for the public repository): branch `ci/hosted-public` merged
+  on 2026-11-15 (it carried PR 37, closed with it). Still the owner's: do **not** register the D-0039 runners for this
+  repository; set the organization's Actions budget to $0 with "stop usage"; in the repository's
+  Actions settings require approval for workflows from all external contributors (it was
+  "first-time contributors" on 2026-11-14).
+- D-0046 (public repository): enable secret scanning with push protection and private
+  vulnerability reporting (the security-advisory link needs it; both were off on 2026-11-14),
+  protect `main` (required checks and a review; a collaborator with write access exists), and
+  choose a licence (none yet: the code is visible, all rights reserved).
 - GitHub environments `staging` and `production` with required reviewers, and their secrets
   (`SOPS_AGE_KEY`, `DEPLOY_SSH_KEY`), must be created by the owner before `deploy.yml` can run.
 - Prompt 2, milestone 2 (report `docs/reports/P02-M2.md`):
@@ -69,6 +79,114 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0046 — The repository moves to the `songbirdchat` organization and becomes public; domain `songbird.chat`
+
+- Date: 2026-11-14
+- Status: accepted (owner); done on 2026-11-14: the repository is `songbirdchat/songbird` (GitHub
+  Free organization) and **public**.
+- Decided by: owner (created the organization `songbirdchat` and registered `songbird.chat`;
+  `songbird` and `getsongbird` were taken on GitHub). Organization name matches the domain.
+- Decision: the repository's home is `github.com/songbirdchat/songbird`; images are published to
+  `ghcr.io/songbirdchat/<service>`. Every reference in the tree points there (`Cargo.toml`
+  `repository`, `deploy/ansible/group_vars/all.yml` registry, `deploy/bin/verify-release` default,
+  `deploy/proxy` image and its cosign identity, `deploy/ci-runner` registration,
+  `scripts/github-setup`, the security-advisory link). `CODEOWNERS` keeps `@countradooku`: it names
+  the owner as a person. Reports under `docs/reports` keep the old name as history.
+- Consequences:
+  - Release signatures are keyless (D-0013): the certificate identity is the workflow path in the
+    repository, so `cosign verify` checks `https://github.com/songbirdchat/songbird/...`. No release
+    has been made yet, so no signature carries the old identity.
+  - Public: anyone can read the code and open pull requests, so CI runs only on GitHub-hosted
+    runners (D-0045). Checked on 2026-11-14 before and after: no secret in any of the 136 commits
+    (pattern scan for age, PEM, GitHub, AWS, Google and Slack keys; the hits are AWS's published
+    example key and PEM templates in tests), and none of the APNs or FCM identifiers. Public with
+    it: the runner host's name in D-0039, commit author e-mail addresses, the full design and
+    threat model (by intent: security rests on keys, not on secrecy of the design).
+  - Write access: the owner (admin) and one collaborator (write) on 2026-11-14.
+  - `scripts/github-setup/setup.py` finds the project board through the `ProjectV2Owner` interface,
+    which matches an organization as well as a user; the board on the personal account is not
+    moved by it (a new one is created under the organization when the script runs).
+  - Which names under `songbird.chat` serve clients and proxy links is still open (D-0011).
+
+## D-0045 — CI on GitHub-hosted runners only, for a public repository; self-hosted runners retired
+
+- Date: 2026-11-14
+- Status: proposed: implemented on branch `ci/hosted-public` (which also merges D-0039's branch,
+  PR 37, for its scripts and the rootless Autobahn option); accepted when the owner merges it.
+- Decided by: owner ("i dont have money for that, we must continue locally"; then moved the
+  repository to `songbirdchat` and made it public, D-0046; "Yes, rework it" for hosted runners);
+  layout by agent.
+- Context: D-0039's runners were never merged into `main`, so Prompt 2's pull requests (M2 to M7
+  and the send library) ran every `ci` and `codeql` job on GitHub-hosted `ubuntu-24.04` while the
+  repository was private. From 2026-11-12 to 2026-11-14 that billed **4,178 minutes** (job start
+  and end times, rounded up per job): `ci` on pull_request 1,881 (56 runs), `codeql` on
+  pull_request 863, `ci` on push to main 770, `codeql` on push 424, `nightly` 158. The free 2,000
+  minutes went, then the overage; at 07:32 UTC on 2026-11-14 every job failed before starting
+  ("recent account payments have failed or your spending limit needs to be increased", run
+  43571585635). A first version of this decision moved everything to the self-hosted runners.
+  The owner then made the repository public. That changes both sides: standard GitHub-hosted
+  runners cost nothing for a public repository (the 08:59 UTC nightly, run 43578342236, ran its
+  12 jobs on hosted runners after the 07:32 refusals), and anyone can now open a pull request
+  whose code, and whose copy of the workflows, would run on whatever runner it names, including
+  a persistent self-hosted runner on a shared VPS. GitHub advises against self-hosted runners for
+  public repositories. Storage limits stay: Actions cache 13.2 GB against 10 GB (rust-cache 11.6 GB
+  in 15 entries, 7.6 GB of it from pull-request branches; image layer caches 1.6 GB in 199
+  entries).
+- Options considered: self-hosted runners for every job with a same-repository guard (a fork's
+  pull request can delete the guard in its copy of the workflow; outside code on a machine that
+  keeps state between jobs); self-hosted for scheduled jobs only (`workflow_dispatch` still lets
+  any writer run any branch there); GitHub-hosted runners for everything (chosen: free, a fresh VM
+  per job, nothing of ours to compromise).
+- Decision:
+  - **Standard GitHub-hosted runners only**, pinned image `ubuntu-24.04` (the `-arm` variant is
+    allowed). No self-hosted runner, no larger runner (billed even for public repositories), no
+    `-latest`. The D-0039 runners are not registered for this repository.
+  - **Pull requests from forks run CI** like any other: with a read-only token
+    (`contents: read`, `persist-credentials: false`), no secrets, and no `pull_request_target` or
+    `workflow_run`. Secrets appear only in `release.yml` and `deploy.yml`, which run only on a
+    pushed tag or by hand. Approval before an outside contributor's workflows run is a repository
+    setting for the owner (recommended: all external contributors).
+  - **Triggers:** `ci` (quality bar, compose integration, Autobahn, Semgrep, IaC) on pull requests
+    and pushes to `main`, docs-only changes skipped. CodeQL (Rust and Actions, security-extended)
+    on pull requests, pushes to `main`, weekly and on demand; it still fails on any finding
+    (D-0015) and, outside pull requests, uploads to code scanning, which a public repository has
+    for free (the API answered "no analysis found", not D-0015's 403). Container images moved out
+    of `ci` into `images.yml`: pull requests that touch `deploy/docker/**` or the workflow,
+    nightly at 02:23 UTC, and on demand (six builds of the whole workspace on every push before).
+  - **Concurrency everywhere:** a new push to a pull request cancels its older `ci` and `codeql`
+    runs; every commit on `main` is checked to the end; `images` and `nightly` runs supersede
+    older ones.
+  - **Storage inside the free limits:** `Swatinem/rust-cache` saves only on `main` (pull requests
+    restore it); image builds use no Actions cache and upload no build record; `junit` and the
+    Autobahn reports are uploaded only when the job fails, and nightly fuzz and benchmark
+    artifacts are kept 14 days (the default was 90).
+  - **Enforced, not remembered:** `cargo xtask workflows` (the first step of `cargo xtask ci
+    fast`, `xtask/src/workflows.rs`) fails on a runner that is not a standard hosted Ubuntu image
+    (self-hosted, a label list, an expression, `-latest`, a larger runner), on `secrets.` outside
+    `release.yml` and `deploy.yml`, on those two gaining a trigger other than a pushed tag or
+    `workflow_dispatch`, on `pull_request_target` or `workflow_run`, on an action not pinned to a
+    full commit SHA (or a docker action without a digest), on top-level permissions other than
+    `contents: read`, and on a workflow without a concurrency group (release excepted). 14 tests,
+    one of them over the repository's own workflows; it rejects both `main`'s private-repo layout
+    (21 violations under the first version's rules) and the self-hosted layout.
+- Evidence: `cargo nextest run -p xtask` (14 passed); `cargo xtask ci fast` on the branch (macOS
+  arm64, 2026-11-14): workflow policy, rustfmt, clippy, doctests, rustdoc, deny, audit, vet and
+  smoke pass; nextest 357 of 359, the two failures being Linux-only behaviour that fails the same
+  way on `main` on macOS (`reuseport_listeners_share_the_port_and_the_connections`: macOS does not
+  spread `SO_REUSEPORT` connections, `[0, 0, 0, 128]`; `inv7_bounded_and_validated_input`:
+  `ConnectionClosed`); the minute, cache and run figures above from the GitHub API on 2026-11-14.
+- Consequences:
+  - CI costs nothing while the repository is public. If it goes private again, the free 2,000
+    minutes return as the limit and this decision must be revisited before the next pull request.
+  - D-0039 is superseded; its scripts stay for a private forge (Forgejo) later, never for this
+    public repository.
+  - Fork pull requests can spend our hosted time but not our money or secrets; the approval
+    setting is the brake on abuse.
+  - A broken image from a crate change shows up in the nightly `images` run, not in the pull
+    request.
+  - The owner should set the Actions budget to $0 with "stop usage" on the organization, so a
+    larger runner or a return to private cannot bill anything.
 
 ## D-0044 — The send library: `api` stores on partition owners over node links, admitted for the store of a send only; system frames signed and in a reserved format
 
@@ -394,6 +512,47 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   delivery receipts make it complete; until then the Rust client keeps its own send log). Needs
   from the owner: confirmation of the four choices, a Scaleway project with Object Storage, and
   the age identity's public key.
+
+## D-0039 — CI on a self-hosted runner, isolated, with Forgejo to follow
+
+- Date: 2026-11-13
+- Status: superseded by D-0045 (the repository became public: GitHub-hosted runners cost nothing,
+  and a self-hosted runner must never run code from outside pull requests); the scripts stay for a
+  private forge later
+- Decided by: owner (GitHub Actions minutes exhausted; "do both, runner first": a self-hosted
+  runner now, a move to self-hosted Forgejo next); setup by agent.
+- Context: the private repository's 2,000 free monthly minutes ran out during M5. The nightly
+  workflow and six image builds per push were the largest consumers.
+- Decision:
+  - **Runners** on the owner's Hetzner VPS (`coolify.sockudo.io`, Falkenstein; 8 x86 cores,
+    16 GB, Ubuntu 24.04), which also runs Coolify and the Sockudo docs. Two runners
+    (`songbird-1` with the `songbird-stack` label for jobs that start the compose stack or bind
+    fixed ports, one at a time; `songbird-2`), as systemd services.
+  - **Isolation:** an unprivileged `ci` user with its own **rootless Docker** daemon: CI jobs
+    cannot see or reach the host's Docker (verified: `permission denied` on the host socket, zero
+    containers visible). Caps through systemd slices: runners 6 cores and 7 GB, the rootless
+    daemon and its containers 4 cores and 5 GB. Runner units with `NoNewPrivileges`,
+    `ProtectSystem=full`, private `/tmp`. No Songbird production secrets on the host.
+  - **Not ephemeral:** an ephemeral runner re-registers for every job, which needs a long-lived
+    GitHub token on the host; persistent runners on a private repository that only the owner
+    pushes to keep less on the box. Registration tokens (one hour) are fetched with `gh` and
+    passed over SSH, never stored.
+  - **Rootless details:** AppArmor profile for `rootlesskit` (Ubuntu 24.04 restricts unprivileged
+    user namespaces); containers reach the host's loopback through `10.0.2.2`, used by
+    `cargo xtask autobahn` when `SONGBIRD_AUTOBAHN_HOST` is set; rustup 1.29.3 from upstream,
+    checksum-verified (Ubuntu's 1.26 cannot install the toolchain `rust-toolchain.toml` names
+    without arguments).
+  - **Workflows:** `ci`, `codeql` and `nightly` run on the runners; `release` and `deploy` stay on
+    GitHub-hosted runners (rare; they sign and attest releases). Docs-only pull requests skip
+    `ci` and `codeql`.
+  - Reproducible: `deploy/ci-runner/provision.sh` and `add-runner.sh` (idempotent).
+  - Runner units use `KillMode=mixed`, not GitHub's suggested `process`: with a private `/tmp`, a
+    listener that outlived a restart kept taking jobs in a namespace whose `/tmp` was gone (the
+    first CI run's CodeQL and Ansible jobs failed on it).
+- Consequences: no minute limits; CI depends on one VPS (a dead VPS means local checks until it is
+  rebuilt from the scripts). The host's other workloads share the kernel. Next: Forgejo
+  (self-hosted forge and Forgejo Actions), with GitHub kept as a private mirror; that move is
+  recorded when made.
 
 ## D-0038 — Prompt 3 amendment: invite-only registration
 
@@ -1483,7 +1642,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   value use random nonces instead.
 - Consequences: no Security tab alerts or dismissal workflow; a false positive is fixed in code or
   excluded in the workflow. If code scanning is enabled later, switch back to uploading and grant
-  `security-events: write`.
+  `security-events: write`. Done in D-0045: the repository is public, so code scanning is free;
+  CodeQL still gates on its SARIF and, outside pull requests, also uploads it.
 
 ## D-0014 — Hosts: containers on host networking, nftables authoritative, bastion-only SSH
 
@@ -1655,7 +1815,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   v2.0.2 `a1320f89…`). Tools: cargo-nextest 0.9.151, cargo-deny 0.20.2, cargo-audit 0.22.2,
   cargo-vet 0.10.2, cargo-fuzz 0.13.2, cargo-cyclonedx 0.5.10, Semgrep 1.185.0 by digest.
 - Consequences: shared runners make nightly benchmark numbers trend-only; decisions use the
-  reference hardware (Prompt 13).
+  reference hardware (Prompt 13). Amended by D-0045: container images in their own workflow
+  (image changes, nightly, on demand) instead of on every push; `cargo xtask workflows` enforces
+  the pins, hosted runners only, and where secrets may appear.
 
 ## D-0007 — Local and CI environment: docker compose, images pinned by digest
 

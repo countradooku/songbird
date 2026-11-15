@@ -5,7 +5,7 @@
 source "$(dirname "$0")/lib.sh"
 [ $# -eq 1 ] || die "usage: verify-release <version>"
 version=$1; need gh cosign
-repo=${GITHUB_REPOSITORY:-countradooku/songbird}
+repo=${GITHUB_REPOSITORY:-songbirdchat/songbird}
 owner=${repo%%/*}
 identity="^https://github.com/${repo}/\\.github/workflows/release\\.yml@refs/tags/v${version//./\\.}\$"
 issuer=https://token.actions.githubusercontent.com

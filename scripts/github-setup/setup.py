@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Idempotent GitHub setup for countradooku/songbird: security settings, branch protection,
+"""Idempotent GitHub setup for songbirdchat/songbird: security settings, branch protection,
 labels, milestones, epics, issue dependencies, the pinned Start here issue and the project board.
 
 Usage: setup.py <issues.json from gen.py> [--skip-project]
@@ -8,7 +8,7 @@ owner; the project board also needs the `project` scope (gh auth refresh -s proj
 """
 import json, subprocess, sys
 
-OWNER, NAME = "countradooku", "songbird"
+OWNER, NAME = "songbirdchat", "songbird"
 REPO = f"{OWNER}/{NAME}"
 URL = f"https://github.com/{REPO}"
 spec = json.load(open(sys.argv[1]))
@@ -198,8 +198,9 @@ def opts(names):
 
 def project():
     global project_url
-    q = gql("""query($login:String!){ user(login:$login){ id projectsV2(first:100){ nodes{ id number title url } } } }""",
-            login=OWNER)["user"]
+    # ProjectV2Owner matches the organization (songbirdchat) as well as a user account.
+    q = gql("""query($login:String!){ repositoryOwner(login:$login){ ... on ProjectV2Owner { id projectsV2(first:100){ nodes{ id number title url } } } } }""",
+            login=OWNER)["repositoryOwner"]
     proj = next((p for p in q["projectsV2"]["nodes"] if p["title"] == "Songbird Backend"), None)
     if not proj:
         proj = gql("""mutation($o:ID!,$t:String!){ createProjectV2(input:{ownerId:$o,title:$t}){ projectV2{ id number title url } } }""",

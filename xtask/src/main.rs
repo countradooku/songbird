@@ -18,15 +18,20 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
+mod workflows;
+
 type Result<T = ()> = std::result::Result<T, String>;
 
 const HELP: &str = "\
 cargo xtask <command>
 
   ci [fast|deep]        quality bar from the constitution (default: fast)
-                          fast: fmt, clippy -D warnings, nextest, doctests, rustdoc, deny,
-                                audit, vet, smoke
+                          fast: workflows, fmt, clippy -D warnings, nextest, doctests, rustdoc,
+                                deny, audit, vet, smoke
                           deep: fast + fuzz (10 min/target), ASan, TSan, Miri, benchmarks
+  workflows             CI policy for .github/workflows (D-0045): standard GitHub-hosted
+                          runners only, release and deploy on tags or by hand only, secrets
+                          only there, pinned actions, read-only token, concurrency
   smoke                 start every service, check /readyz and /metrics, SIGTERM, expect exit 0
   sanitize              workspace tests under ASan and TSan (nightly, -Zbuild-std)
   miri                  Miri on the pure crates (nightly)
@@ -72,6 +77,7 @@ fn main() -> ExitCode {
         .map_or(("help", &[][..]), |(c, r)| (c.as_str(), r));
     let r = match cmd {
         "ci" => ci(rest.first().map_or("fast", String::as_str)),
+        "workflows" => workflows::check(Path::new(".github/workflows")),
         "smoke" => smoke(),
         "sanitize" => sanitizers(),
         "miri" => miri(),
@@ -169,6 +175,8 @@ fn ci(level: &str) -> Result {
         "deep" => true,
         other => return Err(format!("ci level must be fast or deep, not `{other}`")),
     };
+    step("workflow policy (hosted runners only, pins, read-only token, D-0045)");
+    workflows::check(Path::new(".github/workflows"))?;
     step("rustfmt");
     run(cargo().args(["fmt", "--all", "--", "--check"]))?;
     step("clippy (pedantic + selected restriction lints, -D warnings)");
@@ -775,8 +783,13 @@ fn autobahn_pass(
             .collect::<Vec<_>>()
             .join(", ")
     };
+    // The container reaches the echo server on the host's loopback: through the host network
+    // normally; under rootless Docker (the CI runner, D-0039) through the gateway address the
+    // runner names in SONGBIRD_AUTOBAHN_HOST (slirp4netns: 10.0.2.2), on Docker's own network.
+    let via_gateway = std::env::var("SONGBIRD_AUTOBAHN_HOST").ok();
+    let target = via_gateway.as_deref().unwrap_or("127.0.0.1");
     let spec = format!(
-        "{{\"outdir\": \"/ab/{name}\", \"servers\": [{{\"agent\": \"{name}\", \"url\": \"ws://127.0.0.1:{port}\"}}], \"cases\": [{}], \"exclude-cases\": [{}], \"exclude-agent-cases\": {{}}}}",
+        "{{\"outdir\": \"/ab/{name}\", \"servers\": [{{\"agent\": \"{name}\", \"url\": \"ws://{target}:{port}\"}}], \"cases\": [{}], \"exclude-cases\": [{}], \"exclude-agent-cases\": {{}}}}",
         quote(cases),
         quote(exclude)
     );
@@ -792,11 +805,16 @@ fn autobahn_pass(
         .map_err(|e| format!("start echo server: {e}"))?;
     std::thread::sleep(Duration::from_millis(300));
     let abs = std::fs::canonicalize(dir).map_err(|e| e.to_string())?;
+    let network = if via_gateway.is_some() {
+        "bridge"
+    } else {
+        "host"
+    };
     let r = run(Command::new(rt).args([
         "run",
         "--rm",
         "--network",
-        "host",
+        network,
         "-v",
         &format!("{}:/ab:Z", abs.display()),
         AUTOBAHN_IMAGE,

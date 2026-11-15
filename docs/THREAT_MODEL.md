@@ -47,6 +47,8 @@ server in plaintext. Adding to this list requires the owner's approval.
 | Keyed hashes (same key) of an IP range or an account, with the next allowed time for channels, channel reads, link attempts, link tokens and list fetches, in `valkey-hot`; no identifier | Throttle provisioning and linking | At most the throttle window (about an hour at the defaults), then expired | Prompt 3 (M4), D-0052; keyed forms of data above; **approved by the owner on 2026-11-15** |
 | Two-step PIN verifier: random salt and Argon2id output under a pepper from the secrets store (not in the database or backups); attempts since the last correct PIN and the lock's end | Require the PIN to link a device (and to recover, Prompt 10) without it being guessable from the database | Until removed or replaced, or with the account | Prompt 3 (M4b), D-0053; **awaiting the owner's approval** |
 | Passkeys: credential ID, public key (ES256 or Ed25519), signature counter, registration time | Require a passkey to link a device (and to recover) | Until removed, or with the account | Prompt 3 (M4b), D-0053; **awaiting the owner's approval** |
+| Per account: the encrypted profile and its version, the unidentified-access key (16 bytes derived from the profile key; reveals nothing of it) and whether anyone may send to it sealed; encrypted avatar objects in RustFS with their random IDs and upload times | Serve profiles and avatars to contacts who hold the key; authorize sealed sends | Until replaced (avatars: an hour after replacement) or with the account | Prompt 3 (M5), D-0054; ciphertext and a derived key; **awaiting the owner's approval** |
+| Keyed hashes (HMAC-SHA256, key from the profiles secret) of a requesting account, an IP range or a recipient account, with the next allowed time for profile and avatar fetches and sealed sends, in `valkey-hot`; no identifier | Throttle fetches and sealed sends | At most the throttle window (about an hour), then expired | Prompt 3 (M5), D-0054; keyed forms; **awaiting the owner's approval** |
 | Deletion journal: per deleted account, an empty tombstone in the backup bucket named by the deletion time and HMAC-SHA256(journal key, account ID); no account ID | A restore must not bring a deleted account back | Write-once, 93 days (the longest backup retention) | Prompt 2 (M6), D-0041; **approved under the owner's delegation** |
 
 Prompt 1 adds two operational views, neither of which is user data on the server:
@@ -296,6 +298,18 @@ the key directory (M3) and key transparency (M6).
 | A linked or pending device changing the account's factors | E | Thief of a linked device | Only the primary sets or removes a PIN or passkey | `a_pin_gates_linking…` (403 `primary`) |
 | One account's actions reaching another account on the same installation | E, I | Malicious app state, bug | Accounts share nothing on the server; every request is the authenticated device's own account | `accounts_sharing_an_installation_stay_apart` |
 
+### 3.14 Profiles and sealed sender (Prompt 3, milestone 5)
+
+| Threat | STRIDE | Attacker | Mitigation | Test or proof |
+| --- | --- | --- | --- | --- |
+| Reading profiles or avatars on the server | I | Insider, seized server, backups | Encrypted by the client under a profile key the server never holds; stored opaque; avatars under random IDs | `profiles_certificates_and_sealed_sends` (the server stores and returns only ciphertext) |
+| Rolling a profile back to an older one | T | Malicious client, replay | Versions only grow | `profiles_only_grow_and_access_keys_follow_devices`; the e2e test (409) |
+| **Sending sealed without being a contact** (spam, harassment) | S, E | Anyone | A sealed send needs every closed recipient account's access key (derived from the profile key, compared in constant time); accounts without one are unreachable sealed unless open; throttles per IP range and per recipient account | `profiles_certificates_and_sealed_sends` (wrong key, no key, no profile: 401; combined keys) |
+| **Impersonating a sender** inside a sealed message | S | Malicious client | Certificates signed by the server's certificate key, bound to the account, device and identity key, valid 24 hours; the recipient checks them | `certificate_vector` (OpenSSL cross-check; another device, expiry); the e2e test |
+| Learning who sent a sealed message | I | Server, insider | The sealed endpoint takes no device signature; the sender's IP range is used only for a keyed throttle record; the envelope (with the certificate) is end-to-end encrypted | D-0054; the code path (`SEALED_SENDER`) |
+| Sealed sender running before it is verified | E | Configuration error | Off by default; on needs a certificate key; off answers 404 | the e2e test (flag off) |
+| Malformed certificate or profile bytes | T | Malicious client | Strict, bounded decoders; fuzzed | `uploads_and_certificates_round_trip_and_decode_strictly`; fuzz `profile` |
+
 ## 4. Server-enforced settings
 
 ## 5. Compliance notes (GDPR, age of digital consent per EU country)
@@ -382,3 +396,9 @@ the key directory (M3) and key transparency (M6).
   attestation is checked: any authenticator the user picks is accepted. APNs gives one token per
   app installation, so on iOS several accounts on one phone are linked by their shared push token
   at the push service (the app documents this; FCM and Web Push register one per account).
+- Sealed sender (M5, D-0054): the server still sees the sender's IP address (as for any
+  request) and the time, so traffic analysis can link a sealed send to a connection. Users who
+  need that hidden use the proxy or Tor. The access key is shared with every contact who has the
+  profile key, so revoking a contact means rotating the profile key. Spam from one contact is
+  bounded by the per-recipient throttle, not by identity. The certificate key is not deployed yet
+  (it goes in the secrets store at deployment; rotation by `key_id`).

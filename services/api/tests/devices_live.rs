@@ -114,6 +114,7 @@ async fn stack(d: DeviceSettings) -> Option<Stack> {
         registration: None,
         usernames: None,
         keys: None,
+        profiles: None,
         devices: Some(devices),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

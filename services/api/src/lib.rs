@@ -11,6 +11,8 @@
 //! | `PUT`, `GET /v1/keypackages`; `POST /v1/keypackages/fetch` | MLS KeyPackages: upload, counts, fetch ([`keys`]) |
 //! | `POST /v1/provisioning`; `PUT`, `GET /v1/provisioning/<channel>` | The QR provisioning channel ([`devices`]; open and read unsigned) |
 //! | `POST /v1/devices/link-token`; `POST /v1/devices/link` | Linking a new device ([`devices`]; the link itself unsigned, both keys proven) |
+//! | `PUT /v1/profile`; `POST /v1/profile/fetch`; `PUT`, `GET /v1/profile/avatar[/<id>]` | Encrypted profiles and avatars ([`profiles`]) |
+//! | `GET /v1/certificate`; `PUT /v1/messages/sealed` | Sealed sender ([`profiles`]; the sealed send unsigned, authorized by access keys) |
 //! | `GET /v1/devices`; `PUT /v1/devices/list`; `POST /v1/devices/list/fetch`; `DELETE /v1/devices/self` | The signed device list and removal ([`devices`]) |
 //! | `PUT /v1/push` | Registers the device's push channel, sealed to the push service's key |
 //! | `DELETE /v1/push` | Removes it |
@@ -35,6 +37,7 @@ pub mod config;
 pub mod devices;
 pub mod keys;
 pub mod messages;
+pub mod profiles;
 pub mod registration;
 pub mod server;
 pub mod usernames;
@@ -96,6 +99,8 @@ pub struct ApiMetrics {
     pub keys: keys::KeyMetrics,
     /// Devices.
     pub devices: devices::DeviceMetrics,
+    /// Profiles and sealed sender.
+    pub profiles: profiles::ProfileMetrics,
 }
 
 impl ApiMetrics {
@@ -152,6 +157,7 @@ impl ApiMetrics {
         self.usernames.register(m)?;
         self.keys.register(m)?;
         self.devices.register(m)?;
+        self.profiles.register(m)?;
         self.send.register(m, "api")
     }
 }
@@ -186,6 +192,8 @@ pub struct App {
     pub keys: Option<keys::KeyDirectory>,
     /// Devices: provisioning, linking, the signed list (absent: those endpoints answer 503).
     pub devices: Option<devices::Devices>,
+    /// Encrypted profiles and sealed sender (absent: those endpoints answer 503).
+    pub profiles: Option<profiles::Profiles>,
 }
 
 impl std::fmt::Debug for App {
@@ -368,6 +376,14 @@ impl App {
                 self.delete_account(device).await
             }
             (&Method::PUT, "/v1/messages", None) => self.put_message(req).await,
+            (_, p, None)
+                if p == "/v1/messages/sealed"
+                    || p == "/v1/certificate"
+                    || p == "/v1/profile"
+                    || p.starts_with("/v1/profile/") =>
+            {
+                self.profiles(req).await
+            }
             (&Method::POST, "/v1/registration/challenge", None) => {
                 let (r, peer) = self.registration_and_peer(&req)?;
                 Ok(outcome(r.challenge(&self.hot, peer).await))
@@ -413,6 +429,122 @@ impl App {
             .get::<registration::Peer>()
             .ok_or(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
         Ok((r, peer.0))
+    }
+
+    /// `/v1/profile…`, `/v1/certificate` and `/v1/messages/sealed` ([`profiles`]).
+    async fn profiles(self: &Arc<Self>, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let p = self.profiles.as_ref().ok_or_else(unavailable)?;
+        let method = req.method().clone();
+        let path = req.uri().path().to_owned();
+        // Who may change account-wide state: a listed (not pending) device of the account.
+        let listed = |device: DeviceId| async move {
+            let row = self
+                .registry
+                .device(&device)
+                .await
+                .map_err(|_| unavailable())?
+                .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+            Ok::<_, Refusal>((row.account, !row.pending))
+        };
+        let out = match (&method, path.as_str()) {
+            (&Method::PUT, "/v1/messages/sealed") => {
+                let peer = req
+                    .extensions()
+                    .get::<registration::Peer>()
+                    .map(|x| x.0)
+                    .ok_or_else(unavailable)?;
+                let key = req
+                    .headers()
+                    .get("unidentified-access-key")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| {
+                        let mut k = [0u8; 16];
+                        hex::decode_to_slice(v, &mut k).ok().map(|()| k)
+                    });
+                let max = self
+                    .messages
+                    .as_ref()
+                    .map_or(0, |m| m.limits.max_send_bytes);
+                let body = bounded_body(req, max.max(1)).await?;
+                p.sealed_send(
+                    &self.registry,
+                    &self.hot,
+                    self.messages.as_ref(),
+                    peer,
+                    key,
+                    body,
+                )
+                .await
+            }
+            (&Method::GET, "/v1/certificate") => {
+                let (device, _) = self.authenticate_json(req).await?;
+                match listed(device).await? {
+                    (a, true) => p.certificate(&self.registry, &a, &device).await,
+                    (_, false) => return Ok(pending_refusal()),
+                }
+            }
+            (&Method::PUT, "/v1/profile") => {
+                let (device, body) = self
+                    .authenticate_body(req, songbird_proto::profile::MAX_PROFILE + 64)
+                    .await?;
+                match listed(device).await? {
+                    (a, true) => p.put(&self.registry, &a, &body).await,
+                    (_, false) => return Ok(pending_refusal()),
+                }
+            }
+            (&Method::POST, "/v1/profile/fetch") => {
+                let (device, body) = self.authenticate_json(req).await?;
+                let (a, _) = listed(device).await?;
+                p.fetch(&self.registry, &self.hot, &a, &body).await
+            }
+            (&Method::PUT, "/v1/profile/avatar") => {
+                let (device, body) = self
+                    .authenticate_body(req, songbird_proto::profile::MAX_AVATAR)
+                    .await?;
+                match listed(device).await? {
+                    (a, true) => p.put_avatar(&self.registry, &self.s3, &a, body).await,
+                    (_, false) => return Ok(pending_refusal()),
+                }
+            }
+            (&Method::GET, path) if path.starts_with("/v1/profile/avatar/") => {
+                let mut id = [0u8; 32];
+                hex::decode_to_slice(path.trim_start_matches("/v1/profile/avatar/"), &mut id)
+                    .map_err(|_| Refusal::Status(StatusCode::NOT_FOUND))?;
+                let (device, _) = self.authenticate_json(req).await?;
+                let (a, _) = listed(device).await?;
+                if let Err(o) = p.avatar_allowed(&self.registry, &self.hot, &a, &id).await {
+                    return Ok(profile_outcome(o));
+                }
+                return self.serve_avatar(&id).await;
+            }
+            _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
+        };
+        Ok(profile_outcome(out))
+    }
+
+    /// An avatar object, streamed.
+    async fn serve_avatar(&self, id: &[u8; 32]) -> Result<Response<Body>, Refusal> {
+        let got = match self.s3.get_object(&profiles::avatar_name(id), None).await {
+            Ok(g) => g,
+            Err(songbird_s3::Error::NotFound) => {
+                return Err(Refusal::Status(StatusCode::NOT_FOUND));
+            }
+            Err(_) => return Err(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE)),
+        };
+        let counted = Counted {
+            inner: got.body,
+            left: got.length,
+            on_done: None,
+        };
+        let mut r = Response::new(StreamBody::new(counted).boxed_unsync());
+        r.headers_mut().insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        r.headers_mut()
+            .insert(CONTENT_LENGTH, HeaderValue::from(got.length));
+        Ok(r)
     }
 
     /// `/v1/account/…` second factors ([`devices`], M4b): the primary's to change.
@@ -1101,6 +1233,42 @@ impl App {
             tracing::warn!(error = %e, "outbox relay deferred");
         }
         Ok(empty(StatusCode::ACCEPTED))
+    }
+}
+
+/// The HTTP answer for a profile outcome.
+fn profile_outcome(o: profiles::Outcome) -> Response<Body> {
+    use profiles::Outcome;
+    let bytes = |b: Bytes| {
+        let mut r = Response::new(Full::new(b).map_err(|e| match e {}).boxed_unsync());
+        r.headers_mut().insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        r
+    };
+    match o {
+        Outcome::Done => empty(StatusCode::NO_CONTENT),
+        Outcome::Json(v) => json(StatusCode::OK, &v),
+        Outcome::Blob(b) | Outcome::Sent(b) => bytes(b),
+        Outcome::Malformed(what) => json(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({ "error": what }),
+        ),
+        Outcome::Unauthorized => empty(StatusCode::UNAUTHORIZED),
+        Outcome::NotFound => empty(StatusCode::NOT_FOUND),
+        Outcome::Conflict(what) => {
+            json(StatusCode::CONFLICT, &serde_json::json!({ "error": what }))
+        }
+        Outcome::Throttled(wait_us) => {
+            let mut r = empty(StatusCode::TOO_MANY_REQUESTS);
+            let secs = wait_us.div_ceil(1_000_000).max(1);
+            if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
+                r.headers_mut().insert(hyper::header::RETRY_AFTER, v);
+            }
+            r
+        }
+        Outcome::Unavailable => empty(StatusCode::SERVICE_UNAVAILABLE),
     }
 }
 

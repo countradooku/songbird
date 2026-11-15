@@ -114,6 +114,104 @@ pub struct ApiSettings {
     /// 503.
     #[serde(default)]
     pub keys: Option<KeySettings>,
+    /// `[api.profiles]`: encrypted profiles and sealed sender (Prompt 3, M5, D-0054). Absent:
+    /// those endpoints answer 503.
+    #[serde(default)]
+    pub profiles: Option<ProfileSettings>,
+}
+
+/// `[api.profiles]` (Prompt 3, M5, D-0054).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileSettings {
+    /// 32 bytes (64 hex characters), the same on every `api` node: keys the throttle records.
+    pub secret: SecretRef,
+    /// The sender-certificate key's Ed25519 seed (64 hex characters); with `sealed_sender`.
+    #[serde(default)]
+    pub certificate_key: Option<SecretRef>,
+    /// Sealed sender on (the flag Prompt 12 verifies). Off: certificates and sealed sends 404.
+    #[serde(default)]
+    pub sealed_sender: bool,
+    /// Sender certificate lifetime (hours).
+    #[serde(default = "default_certificate_hours")]
+    pub certificate_hours: u64,
+    /// Profile and avatar fetches per hour per requesting account.
+    #[serde(default = "default_profile_fetches")]
+    pub fetches_per_hour: u32,
+    /// Its burst.
+    #[serde(default = "default_profile_fetch_burst")]
+    pub fetch_burst: u32,
+    /// Sealed sends per hour per IP range.
+    #[serde(default = "default_sealed")]
+    pub sealed_per_hour: u32,
+    /// Sealed sends per hour per recipient account.
+    #[serde(default = "default_sealed")]
+    pub sealed_per_account_hour: u32,
+    /// Burst of both.
+    #[serde(default = "default_sealed_burst")]
+    pub sealed_burst: u32,
+    /// IPv4 prefix length of a range.
+    #[serde(default = "default_v4")]
+    pub ipv4_prefix: u8,
+    /// IPv6 prefix length of a range.
+    #[serde(default = "default_v6")]
+    pub ipv6_prefix: u8,
+}
+
+const fn default_certificate_hours() -> u64 {
+    24
+}
+const fn default_profile_fetches() -> u32 {
+    600
+}
+const fn default_profile_fetch_burst() -> u32 {
+    120
+}
+const fn default_sealed() -> u32 {
+    3_600
+}
+const fn default_sealed_burst() -> u32 {
+    200
+}
+const fn default_v4() -> u8 {
+    24
+}
+const fn default_v6() -> u8 {
+    48
+}
+
+impl Validate for ProfileSettings {
+    fn validate(&self, v: &mut Validator) {
+        v.check(
+            !self.sealed_sender || self.certificate_key.is_some(),
+            "certificate_key",
+            "must be set when sealed_sender is on",
+        );
+        v.check(
+            (1..=168).contains(&self.certificate_hours),
+            "certificate_hours",
+            "must be in 1..=168",
+        );
+        for (name, n) in [
+            ("fetches_per_hour", self.fetches_per_hour),
+            ("fetch_burst", self.fetch_burst),
+            ("sealed_per_hour", self.sealed_per_hour),
+            ("sealed_per_account_hour", self.sealed_per_account_hour),
+            ("sealed_burst", self.sealed_burst),
+        ] {
+            v.check((1..=3_600_000).contains(&n), name, "must be in 1..=3600000");
+        }
+        v.check(
+            (8..=32).contains(&self.ipv4_prefix),
+            "ipv4_prefix",
+            "must be in 8..=32",
+        );
+        v.check(
+            (16..=128).contains(&self.ipv6_prefix),
+            "ipv6_prefix",
+            "must be in 16..=128",
+        );
+    }
 }
 
 const fn default_max_connections() -> usize {
@@ -154,6 +252,9 @@ impl Validate for ApiSettings {
         }
         if let Some(u) = &self.usernames {
             v.section("usernames", u);
+        }
+        if let Some(p) = &self.profiles {
+            v.section("profiles", p);
         }
         if let Some(k) = &self.keys {
             v.section("keys", k);

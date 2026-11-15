@@ -100,6 +100,37 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0054 — Prompt 3, milestone 5: encrypted profiles, avatars and sealed sender behind a flag
+
+- Date: 2026-11-15
+- Status: accepted; built (report P03-M5); **awaiting the owner's approval**
+- Decided by: agent (rest of Prompt 3 in one pass, at the owner's request)
+- Decision:
+  - **Profiles.** One opaque blob encrypted by the client under its profile key, at most 8 KiB,
+    whose version must grow. Avatars go to RustFS (encrypted, at most 512 KiB, random ID); only
+    an account's current avatar is served, and replaced ones are swept after an hour.
+  - **Unidentified-access key.** `HKDF-SHA256(salt "songbird.v1", profile key, info
+    "unidentified-access")[..16]`, stored with the profile, with an "anyone may send" flag.
+  - **Sealed sends** (`PUT /v1/messages/sealed`):
+    - unsigned, authorized by the XOR of the closed recipient accounts' keys, compared in
+      constant time;
+    - no MLS commits;
+    - throttled per IP range and per recipient account;
+    - the send path is entered with a sentinel sender that no device has.
+  - **Sender certificates.** Ed25519 by a dedicated certificate key (not the system key, so
+    rotating either does not touch the other), carrying the account, device, device identity key
+    and expiry; lifetime 24 hours.
+  - **Off by default** (`[api.profiles] sealed_sender`). Prompt 12 verifies it before it is
+    switched on.
+- Evidence:
+  - the certificate vector (`certificate_vector`), cross-checked with OpenSSL 4.1;
+  - live tests (`profile_live`; `profiles_certificates_and_sealed_sends`: versions, fetch,
+    certificates, sealed with the right, wrong, missing or combined keys, open accounts, the
+    device check, the flag off);
+  - fuzz `profile`.
+- Consequences: new settings `[api.profiles]` and a certificate key for the secrets store. No new
+  dependency.
+
 ## D-0053 — Prompt 3, milestone 4b: two-step PIN and passkeys as second factors for linking; multiple accounts per installation
 
 - Date: 2026-11-15

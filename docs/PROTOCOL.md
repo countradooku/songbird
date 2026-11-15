@@ -663,6 +663,55 @@ to several devices: it links them. Where the platform allows several tokens per 
 (FCM instance IDs, Web Push subscriptions), the app registers one per account. APNs gives one
 token per app installation, so on iOS the link remains (threat model §6).
 
+### 4.8 Encrypted profiles and sealed sender
+
+Decision D-0054 (M5).
+
+**Profiles.** A profile is one blob, encrypted by the client under its 32-byte profile key, which
+it shares only with contacts. The blob holds the name, avatar pointer, about, status line and
+profile links; the server never sees inside it.
+
+```text
+PUT /v1/profile:
+version u8 (1) | profile_version u64 | access_key [16] | flags u8 (1 anyone may send sealed)
+  | len u16 | blob (1..=8192)
+```
+
+- The version must exceed the stored one (409 `{"error": "version"}`).
+- A pending device may not change it (403 `pending`).
+- `POST /v1/profile/fetch` `{"account": hex}` answers `{"version", "profile": hex}` and is
+  throttled per requesting account.
+- Avatars are encrypted by the client and uploaded with `PUT /v1/profile/avatar` (a signed body,
+  at most 512 KiB). They are stored in RustFS under a fresh random 32-byte ID (`p/<hex>`), which
+  is answered as `{"avatar": hex}` and goes inside the profile blob.
+- `GET /v1/profile/avatar/<id>` serves only an account's current avatar. Replaced ones are
+  deleted by the worker after an hour; all of them go when the account is deleted.
+
+**Sealed sender** (behind `[api.profiles] sealed_sender`, off by default; Prompt 12 verifies it):
+
+- **Access key.** `access_key = HKDF-SHA256(salt = "songbird.v1", ikm = profile_key,
+  info = "unidentified-access")[..16]` (`songbird_keys::sealed::access_key`). Contacts derive it
+  from the profile key. The server stores only it, plus the "anyone may send" flag.
+- **Sender certificate.** `GET /v1/certificate`, from a listed device that has uploaded its
+  identity key:
+  `version u8 (1) | key_id [8] | account [16] | device [16] | identity_key [33] | expires_ms u64 | signature [64]`.
+  - The signature is Ed25519 by the certificate key over `"songbird.v1/sender-certificate\0"`
+    followed by every byte before it.
+  - `key_id` is the first 8 bytes of SHA-256 of the key; lifetime 24 hours (configurable, at
+    most a week).
+  - The sender puts the certificate inside the end-to-end encrypted envelope. The recipient
+    checks the signature against the pinned key, the expiry, and the identity key against the
+    sender's.
+- **Sealed send.** `PUT /v1/messages/sealed` carries an ordinary `Send` frame (no MLS commit),
+  with no device signature, and the header `Unidentified-Access-Key: hex(16)`. The header holds
+  the XOR of the access keys of every addressed account that is not open
+  (`songbird_keys::sealed::combine`).
+  - The server recomputes it from what it stores and compares in constant time.
+  - An account with no access key that is not open cannot be reached sealed (401).
+  - The device-list check applies as for any send.
+  - Throttles: per IP range and per recipient account.
+  - The server learns who receives, never who sent.
+
 ## 5. Encrypted content schemas (Prompt 4)
 
 ## 6. Groups, roles and channels (MLS) (Prompt 5)
@@ -756,3 +805,16 @@ Registration (Prompt 3, D-0048), from `crates/pow` and `crates/proto` tests:
   ```
 
   and each verifies the other's signature.
+
+Sender certificate (Prompt 3, D-0054), from `services/api` `certificate_vector`, cross-checked
+with OpenSSL 4.1. The inputs are: Ed25519 seed 32 × `42`; account 16 × `01`; device 16 × `02`;
+identity key `05` || 32 × `03`; expiry 1,800,000,000,000 ms. The certificate:
+
+```
+01 3097e2dee2cb4a34 01010101010101010101010101010101 02020202020202020202020202020202
+05 0303030303030303030303030303030303030303030303030303030303030303 000001a3185c5000
+e2ba85e62f8006c7ff540bbed16ff64f1636cb28133f05da28b9604b0d4d32596d486dd773916abf4a674b75813703d273e747b840ed8288da465c69f4c98804
+```
+
+WebAuthn (Prompt 3, D-0053): `crates/keys/tests/webauthn_vectors.rs` carries the W3C WebAuthn
+Level 3 test vectors (§16.2, §16.11) verbatim.

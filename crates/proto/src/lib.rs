@@ -13,6 +13,7 @@
 //! - [`system`]: server-signed system frames (notices such as "your device list changed"),
 //!   delivered as mailbox envelopes in a reserved format no user envelope may take.
 //! - [`devices`]: the signed device list and the link request (Prompt 3).
+//! - [`profile`]: encrypted profiles and sender certificates (Prompt 3).
 //! - [`keys`]: the key directory's upload and fetch formats (PQXDH prekeys, Prompt 3).
 //! - [`registration`]: the registration request, the transcripts its keys sign, and invite codes
 //!   (`POST /v1/registration`, Prompt 3).
@@ -27,6 +28,7 @@ pub mod control;
 pub mod devices;
 pub mod frame;
 pub mod keys;
+pub mod profile;
 pub mod registration;
 pub mod system;
 

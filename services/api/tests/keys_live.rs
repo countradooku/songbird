@@ -103,6 +103,7 @@ async fn stack(k: Option<KeySettings>) -> Option<Stack> {
         registration: None,
         usernames: None,
         keys,
+        profiles: None,
         devices: None,
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

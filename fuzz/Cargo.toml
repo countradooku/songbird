@@ -126,3 +126,10 @@ path = "fuzz_targets/devices.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "profile"
+path = "fuzz_targets/profile.rs"
+test = false
+doc = false
+bench = false

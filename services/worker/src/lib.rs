@@ -241,6 +241,14 @@ pub enum Left {
     Rows,
 }
 
+/// An avatar's object name (as `api` writes it, `songbird_api::profiles::avatar_name`).
+fn avatar_name(id: &[u8; 32]) -> String {
+    let mut name = String::with_capacity(66);
+    name.push_str("p/");
+    name.push_str(&ObjectKey(*id).to_hex_unredacted());
+    name
+}
+
 /// An attachment's object name (as `api` writes it).
 fn object_name(o: &ObjectKey) -> String {
     let mut name = String::with_capacity(66);
@@ -320,16 +328,32 @@ impl Worker {
                 .map_err(|_| Left::Unavailable)?;
             self.registry.delete_grant(g).await.map_err(unavailable)?;
         }
+        // Encrypted avatars (Prompt 3, M5): every object the account uploaded.
+        let avatars = self
+            .registry
+            .avatars_of(account)
+            .await
+            .map_err(unavailable)?;
+        for a in &avatars {
+            self.s3
+                .delete_object(&avatar_name(a))
+                .await
+                .map_err(|_| Left::Unavailable)?;
+        }
         // Every delivery node has dropped the devices: forget again what a racing send stored.
         tokio::time::sleep(self.propagation).await;
         self.delivery.forget(&devices).await?;
         if self.delivery.any_known(&devices).await? {
             return Err(Left::Mailbox);
         }
-        for g in &grants {
+        for name in grants
+            .iter()
+            .map(object_name)
+            .chain(avatars.iter().map(avatar_name))
+        {
             if self
                 .s3
-                .head_object(&object_name(g))
+                .head_object(&name)
                 .await
                 .map_err(|_| Left::Unavailable)?
                 .is_some()
@@ -480,6 +504,17 @@ impl Worker {
         // Expired KeyPackages are never served; this only stops them taking space.
         if let Err(e) = self.registry.delete_expired_key_packages(SWEEP_BATCH).await {
             tracing::warn!(error = %e, "key package sweep failed");
+        }
+        // Replaced avatars (Prompt 3, M5): objects that are no account's current one.
+        match self.registry.stale_avatars(SWEEP_BATCH).await {
+            Ok(ids) => {
+                for id in ids {
+                    if self.s3.delete_object(&avatar_name(&id)).await.is_ok() {
+                        let _ = self.registry.delete_avatar(&id).await;
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "avatar sweep failed"),
         }
         // Expired link tokens are refused already; this only stops them taking space.
         if let Err(e) = self.registry.delete_expired_link_tokens(SWEEP_BATCH).await {

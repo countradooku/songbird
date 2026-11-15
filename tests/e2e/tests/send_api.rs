@@ -41,6 +41,8 @@ use tokio::sync::{mpsc, watch};
 const API: &str = "api.test";
 /// The system key's seed in these tests.
 const SYSTEM_SEED: [u8; 32] = [0x51; 32];
+/// The sender-certificate key's seed in these tests.
+const CERT_SEED: [u8; 32] = [0x52; 32];
 
 fn env(name: &str) -> Option<String> {
     let v = std::env::var(name).ok();
@@ -222,6 +224,28 @@ async fn stack(limits: Limits, sends_per_sec: u32, send_burst: u32) -> Option<St
             .unwrap(),
         ),
         // Devices (M4), with the system key, so a link and a new list are announced.
+        // Profiles and sealed sender (M5), the flag on.
+        profiles: Some(
+            songbird_api::profiles::Profiles::new(
+                songbird_api::config::ProfileSettings {
+                    secret: songbird_types::SecretRef::Env("UNUSED".into()),
+                    certificate_key: None,
+                    sealed_sender: true,
+                    certificate_hours: 24,
+                    fetches_per_hour: 600,
+                    fetch_burst: 120,
+                    sealed_per_hour: 3_600,
+                    sealed_per_account_hour: 3_600,
+                    sealed_burst: 200,
+                    ipv4_prefix: 24,
+                    ipv6_prefix: 48,
+                },
+                &random32(),
+                Some(&CERT_SEED),
+                songbird_api::profiles::ProfileMetrics::default(),
+            )
+            .unwrap(),
+        ),
         devices: Some(
             songbird_api::devices::Devices::new(
                 songbird_api::config::DeviceSettings {
@@ -964,4 +988,227 @@ async fn a_linked_device_is_announced_and_joins_the_send_check_only_once_listed(
             .unwrap(),
         (200, Some((42, SendStatus::Accepted)))
     );
+}
+
+/// Prompt 3, M5 (D-0054): encrypted profiles with growing versions; sender certificates; sealed
+/// sends authorized by the recipients' access keys, with no device signature.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn profiles_certificates_and_sealed_sends() {
+    use songbird_keys::sealed::{access_key, combine};
+    use songbird_proto::profile::{ProfileUpload, SenderCertificate};
+
+    let Some(s) = default_stack().await else {
+        return;
+    };
+    let reg = &s.app.registry;
+    let (alice_api, bob_api) = (s.alice.api(&s), s.bob1.api(&s));
+    let bob_account = reg.device(&s.bob1.id).await.unwrap().unwrap().account;
+    let alice_account = reg.device(&s.alice.id).await.unwrap().unwrap().account;
+    // Bob publishes his encrypted profile with the access key derived from his profile key.
+    let bob_key = access_key(&[0xB0; 32]);
+    let put = |v: u64, open: bool, key: [u8; 16]| {
+        ProfileUpload {
+            profile_version: v,
+            access_key: key,
+            open,
+            blob: vec![0xAA; 300],
+        }
+        .encode()
+    };
+    assert_eq!(
+        bob_api
+            .send("PUT", "/v1/profile", Some(&put(1, false, bob_key)))
+            .await
+            .unwrap()
+            .0,
+        204
+    );
+    let (st, b) = bob_api
+        .send("PUT", "/v1/profile", Some(&put(1, false, bob_key)))
+        .await
+        .unwrap();
+    assert_eq!(
+        (st, b.as_ref()),
+        (409, br#"{"error":"version"}"#.as_slice())
+    );
+    assert_eq!(
+        bob_api
+            .send("PUT", "/v1/profile", Some(&put(2, false, bob_key)))
+            .await
+            .unwrap()
+            .0,
+        204
+    );
+    let body = format!(r#"{{"account":"{}"}}"#, bob_account.to_hex_unredacted());
+    let (st, b) = alice_api
+        .send("POST", "/v1/profile/fetch", Some(body.as_bytes()))
+        .await
+        .unwrap();
+    assert_eq!(st, 200);
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(v["version"], 2);
+    assert_eq!(v["profile"].as_str().unwrap(), hex::encode([0xAA; 300]));
+    // A sender certificate needs the device's identity key, then names the device, signed.
+    assert_eq!(
+        alice_api
+            .send("GET", "/v1/certificate", None)
+            .await
+            .unwrap()
+            .0,
+        409
+    );
+    let mut ik = [7u8; 33];
+    ik[0] = 5;
+    reg.put_keys(
+        &s.alice.id,
+        &songbird_accounts::KeysUpdate {
+            identity: Some(ik),
+            signed: Some(vec![1]),
+            last_resort: Some(vec![2]),
+            ..songbird_accounts::KeysUpdate::default()
+        },
+        10,
+    )
+    .await
+    .unwrap();
+    let (st, b) = alice_api
+        .send("GET", "/v1/certificate", None)
+        .await
+        .unwrap();
+    assert_eq!(st, 200);
+    let cert = SenderCertificate::decode(&b).unwrap();
+    let cert_key = Ed25519KeyPair::from_seed_unchecked(&CERT_SEED).unwrap();
+    let public: [u8; 32] = {
+        use aws_lc_rs::signature::KeyPair as _;
+        cert_key.public_key().as_ref().try_into().unwrap()
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let now = u64::try_from(now).unwrap();
+    assert!(songbird_api::profiles::certificate_valid(
+        &cert, &public, now
+    ));
+    assert_eq!(
+        (cert.account, cert.device, cert.identity_key),
+        (alice_account, s.alice.id, ik)
+    );
+    assert!(cert.expires_ms <= now + 24 * 3_600_000);
+
+    // Sealed sends: no device signature, only the access key.
+    let sealed = |devices: Vec<DeviceId>, key: Option<[u8; 16]>| {
+        let api = &alice_api;
+        async move {
+            let frame = frame(
+                key_rand(),
+                devices.iter().map(|d| to(*d, "sealed")).collect(),
+            );
+            let body = ClientFrame::Send(frame).to_bytes();
+            let mut b = hyper::Request::builder()
+                .method("PUT")
+                .uri("/v1/messages/sealed")
+                .header("host", API)
+                .header("content-length", body.len());
+            if let Some(k) = key {
+                b = b.header("unidentified-access-key", hex::encode(k));
+            }
+            let (st, reply) = api.raw(b, body).await.unwrap();
+            let status = match songbird_proto::ServerFrame::decode(&reply, &Limits::DEFAULT) {
+                Ok(songbird_proto::ServerFrame::SendResult { status, .. }) => Some(status),
+                _ => None,
+            };
+            (st, status)
+        }
+    };
+    let bob_devices = vec![s.bob1.id, s.bob2.id];
+    assert_eq!(
+        sealed(bob_devices.clone(), Some(bob_key)).await,
+        (200, Some(SendStatus::Accepted))
+    );
+    assert_eq!(
+        sealed(bob_devices.clone(), Some(access_key(&[0xB1; 32])))
+            .await
+            .0,
+        401
+    );
+    assert_eq!(sealed(bob_devices.clone(), None).await.0, 401);
+    // Bob's device receives it from its mailbox like any message.
+    let (_bob, mut bob_events) = connect(&s, &s.bob1).await;
+    assert_eq!(
+        next_delivery(&mut bob_events).await.1,
+        Bytes::from("sealed")
+    );
+    // Alice has no profile and is not open: refused; once open, anyone may send sealed.
+    assert_eq!(sealed(vec![s.alice.id], Some([0; 16])).await.0, 401);
+    assert_eq!(
+        alice_api
+            .send(
+                "PUT",
+                "/v1/profile",
+                Some(&put(1, true, access_key(&[0xA0; 32])))
+            )
+            .await
+            .unwrap()
+            .0,
+        204
+    );
+    assert_eq!(
+        sealed(vec![s.alice.id], None).await,
+        (200, Some(SendStatus::Accepted))
+    );
+    // Several accounts: the XOR of the closed ones' keys.
+    let both = vec![s.alice.id, s.bob1.id, s.bob2.id];
+    assert_eq!(
+        sealed(both.clone(), Some(combine([&bob_key]))).await,
+        (200, Some(SendStatus::Accepted))
+    );
+    // The device-list check still applies (Bob's second device left out).
+    assert!(matches!(
+        sealed(vec![s.bob1.id], Some(bob_key)).await,
+        (200, Some(SendStatus::DeviceMismatch(_)))
+    ));
+
+    // The flag off: no certificates, no sealed sends.
+    let off = songbird_api::profiles::Profiles::new(
+        songbird_api::config::ProfileSettings {
+            secret: songbird_types::SecretRef::Env("UNUSED".into()),
+            certificate_key: None,
+            sealed_sender: false,
+            certificate_hours: 24,
+            fetches_per_hour: 600,
+            fetch_burst: 120,
+            sealed_per_hour: 3_600,
+            sealed_per_account_hour: 3_600,
+            sealed_burst: 200,
+            ipv4_prefix: 24,
+            ipv6_prefix: 48,
+        },
+        &random32(),
+        Some(&CERT_SEED),
+        songbird_api::profiles::ProfileMetrics::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        off.certificate(reg, &alice_account, &s.alice.id).await,
+        songbird_api::profiles::Outcome::NotFound
+    );
+    assert_eq!(
+        off.sealed_send(
+            reg,
+            &s.app.hot,
+            None,
+            "127.0.0.1".parse().unwrap(),
+            Some(bob_key),
+            Bytes::new()
+        )
+        .await,
+        songbird_api::profiles::Outcome::NotFound
+    );
+}
+
+fn key_rand() -> [u8; 16] {
+    let mut k = [0u8; 16];
+    aws_lc_rs::rand::fill(&mut k).unwrap();
+    k
 }

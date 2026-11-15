@@ -73,6 +73,12 @@ filter = "info"
 # [api.keys]
 # secret = { file = "/path/to/keys-secret.hex" }                  # 64 hex; same on every api node
 # system_key = { file = "/path/to/system-key-seed.hex" }          # optional; "prekeys low" notices, with [api.send]
+# Profiles and sealed sender (Prompt 3, M5, D-0054). Absent: those endpoints answer 503.
+# [api.profiles]
+# secret = { file = "/path/to/profiles-secret.hex" }             # 64 hex; same on every api node
+# certificate_key = { file = "/path/to/certificate-seed.hex" }   # with sealed_sender
+# sealed_sender = false                                           # the flag; Prompt 12 verifies it
+#
 # [api.keys.devices]                                             # device linking (Prompt 3, M4, D-0052); defaults
 # max_devices = 6                                                 # primary + 5 (D-0047)
 # link_token_ttl_secs = 600

@@ -35,6 +35,7 @@ use songbird_types::{AccountId, DeviceId, JobId};
 
 pub mod devices;
 pub mod journal;
+pub mod profile;
 pub use db::{Db, DbError, SurrealSettings};
 
 /// Ed25519 public key length.
@@ -111,6 +112,16 @@ DEFINE FIELD IF NOT EXISTS key ON passkey TYPE bytes;
 DEFINE FIELD IF NOT EXISTS count ON passkey TYPE int;
 DEFINE FIELD IF NOT EXISTS at ON passkey TYPE datetime;
 DEFINE INDEX IF NOT EXISTS passkey_account ON passkey FIELDS account;
+DEFINE FIELD IF NOT EXISTS profile ON account TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS profile_v ON account TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS uak ON account TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS uak_open ON account TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS avatar ON account TYPE option<bytes>;
+DEFINE TABLE IF NOT EXISTS avatar SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS account ON avatar TYPE bytes;
+DEFINE FIELD IF NOT EXISTS at ON avatar TYPE datetime;
+DEFINE INDEX IF NOT EXISTS avatar_account ON avatar FIELDS account;
+DEFINE INDEX IF NOT EXISTS avatar_at ON avatar FIELDS at;
 DEFINE TABLE IF NOT EXISTS directory SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS version ON directory TYPE int;
 DEFINE TABLE IF NOT EXISTS push_token SCHEMAFULL;
@@ -361,7 +372,7 @@ pub struct Remnants {
     pub grants: u64,
     /// Usernames still naming the account.
     pub usernames: u64,
-    /// Username links, link tokens and passkeys of the account.
+    /// Username links, link tokens, passkeys and avatar records of the account.
     pub links: u64,
     /// One-time prekeys (both kinds) and single-use KeyPackages of the devices.
     pub prekeys: u64,
@@ -1668,6 +1679,7 @@ impl Registry {
                  DELETE ulink WHERE account = $a RETURN NONE;
                  DELETE ltoken WHERE account = $a RETURN NONE;
                  DELETE passkey WHERE account = $a RETURN NONE;
+                 DELETE avatar WHERE account = $a RETURN NONE;
                  DELETE account:[$a] RETURN NONE;
                  UPDATE directory:v SET version += 1 RETURN NONE;
                  COMMIT TRANSACTION;",
@@ -1702,7 +1714,8 @@ impl Registry {
                  RETURN count(SELECT id FROM username WHERE account = $a);
                  RETURN count(SELECT id FROM ulink WHERE account = $a)
                    + count(SELECT id FROM ltoken WHERE account = $a)
-                   + count(SELECT id FROM passkey WHERE account = $a);
+                   + count(SELECT id FROM passkey WHERE account = $a)
+                   + count(SELECT id FROM avatar WHERE account = $a);
                  RETURN count(SELECT id FROM otpk WHERE device IN $ds)
                    + count(SELECT id FROM otkem WHERE device IN $ds)
                    + count(SELECT id FROM mlskp WHERE device IN $ds);",

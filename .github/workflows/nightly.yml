@@ -31,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [client_hello, proxy_link, config_toml, id_parse, proto_client_frame, proto_server_frame, surreal_cbor, iggy_record, registration_request, pow_challenge, ed25519_key, username, prekeys, keypackages, devices]
+        target: [client_hello, proxy_link, config_toml, id_parse, proto_client_frame, proto_server_frame, surreal_cbor, iggy_record, registration_request, pow_challenge, ed25519_key, username, prekeys, keypackages, devices, profile]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

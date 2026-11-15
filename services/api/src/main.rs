@@ -198,6 +198,14 @@ async fn build(
         }
         None => None,
     };
+    let usernames = match &s.usernames {
+        Some(u) => Some(songbird_api::usernames::Usernames::new(
+            u.clone(),
+            &*u.secret.resolve_key32()?,
+            metrics.usernames.clone(),
+        )?),
+        None => None,
+    };
     let app = Arc::new(App {
         server_name: s.server_name.clone(),
         registry,
@@ -210,6 +218,7 @@ async fn build(
         metrics,
         messages,
         registration,
+        usernames,
     });
     Ok((app, tasks))
 }

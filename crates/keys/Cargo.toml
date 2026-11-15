@@ -1,6 +1,6 @@
 [package]
 name = "songbird-keys"
-description = "Songbird server-side checks of identity key material (D-0048): Ed25519 public keys that are canonical and of prime order, signature verification. XEdDSA and the PQXDH key formats join in Prompt 3's M3."
+description = "Songbird identity key material (D-0048, D-0049): Ed25519 public keys that are canonical and of prime order; usernames as a Ristretto hash with a proof (libsignal's scheme, implemented from its specification). XEdDSA and the PQXDH key formats join in Prompt 3's M3."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,7 @@ license.workspace = true
 [dependencies]
 aws-lc-rs.workspace = true
 curve25519-dalek.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 hex.workspace = true

@@ -98,3 +98,10 @@ path = "fuzz_targets/ed25519_key.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "username"
+path = "fuzz_targets/username.rs"
+test = false
+doc = false
+bench = false

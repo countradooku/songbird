@@ -15,6 +15,8 @@
 //! D-0047: implement the protocols, do not link libsignal).
 #![forbid(unsafe_code)]
 
+pub mod username;
+
 use aws_lc_rs::signature::{ED25519, UnparsedPublicKey};
 use curve25519_dalek::edwards::CompressedEdwardsY;
 

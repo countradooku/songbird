@@ -13,6 +13,8 @@
 //! | `attachment` | object key | size, fetches left, expiry (30 days) | at the last fetch or expiry |
 //! | `outbox` | job ID | the job (IDs only) | relayed to the queue |
 //! | `invite` | SHA-256 of the code | uses left, expiry; **no issuer** (D-0038, D-0047) | at its last use, revocation, or expiry |
+//! | `username` | username hash (Ristretto, D-0049) | its account, or none while held after release | held [`USERNAME_HOLD`] after release, then swept |
+//! | `ulink` | random link handle | its account, the link's ciphertext | replaced, deleted, at a username change, or with the account |
 //!
 //! An attachment row has no link to the account that uploaded it (owner-approved threat-model
 //! row, D-0036).
@@ -47,6 +49,17 @@ DEFINE TABLE IF NOT EXISTS invite SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS uses ON invite TYPE int;
 DEFINE FIELD IF NOT EXISTS expires ON invite TYPE datetime;
 DEFINE INDEX IF NOT EXISTS invite_expires ON invite FIELDS expires;
+DEFINE FIELD IF NOT EXISTS username ON account TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS ukey ON account TYPE option<bytes>;
+DEFINE TABLE IF NOT EXISTS username SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS account ON username TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS held_until ON username TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS username_account ON username FIELDS account;
+DEFINE INDEX IF NOT EXISTS username_held ON username FIELDS held_until;
+DEFINE TABLE IF NOT EXISTS ulink SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS account ON ulink TYPE bytes;
+DEFINE FIELD IF NOT EXISTS blob ON ulink TYPE bytes;
+DEFINE INDEX IF NOT EXISTS ulink_account ON ulink FIELDS account;
 DEFINE TABLE IF NOT EXISTS device SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS account ON device TYPE bytes;
 DEFINE FIELD IF NOT EXISTS key ON device TYPE bytes;
@@ -98,6 +111,25 @@ pub enum RegistryError {
     /// The account has no invites left.
     #[error("no invites left")]
     Allowance,
+    /// The username belongs to another account, or is held after its release.
+    #[error("username taken")]
+    Taken,
+    /// The account has no username (a link needs one).
+    #[error("no username")]
+    NoUsername,
+}
+
+/// How long a released username stays unavailable to everyone (impersonation of its previous
+/// owner by whoever grabs it first). The held row names no account.
+pub const USERNAME_HOLD: Duration = Duration::from_hours(30 * 24);
+
+/// A username as lookup sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsernameRow {
+    /// Its account.
+    pub account: AccountId,
+    /// The account's username key verifier (salt and Argon2id output), if it set one.
+    pub key: Option<Bytes>,
 }
 
 /// A new account as registration creates it.
@@ -172,6 +204,10 @@ pub struct Remnants {
     pub push_tokens: u64,
     /// Upload grants of the devices.
     pub grants: u64,
+    /// Usernames still naming the account.
+    pub usernames: u64,
+    /// Username links of the account.
+    pub links: u64,
 }
 
 impl Remnants {
@@ -529,6 +565,242 @@ impl Registry {
         Ok(id32(&v))
     }
 
+    // ----- usernames (Prompt 3, M2, D-0049) -----
+
+    /// Gives an account the username with this hash, in one transaction: refused if another
+    /// account holds it or it is held after a release; the account's previous username (if
+    /// another) becomes held for [`USERNAME_HOLD`] with no account named; its link goes (the
+    /// link's ciphertext names the old username). Setting the username the account already has
+    /// changes nothing. Racing claims write the same row, so one commits and the others retry and
+    /// find it taken.
+    ///
+    /// # Errors
+    /// [`RegistryError::Taken`].
+    pub async fn set_username(
+        &self,
+        account: &AccountId,
+        hash: &[u8; 32],
+    ) -> Result<(), RegistryError> {
+        let sql = "BEGIN TRANSACTION;
+             LET $owner = username:[$h].account;
+             LET $held = username:[$h].held_until;
+             IF record::exists(username:[$h]) AND $owner != $a
+                AND ($owner != NONE OR $held > time::now()) { THROW 'taken' };
+             LET $old = account:[$a].username;
+             IF $old != NONE AND $old != $h {
+               UPDATE username:[$old] SET account = NONE,
+                 held_until = time::now() + duration::from_secs($hold) RETURN NONE;
+               DELETE ulink WHERE account = $a RETURN NONE;
+             };
+             UPSERT username:[$h] SET account = $a, held_until = NONE RETURN NONE;
+             UPDATE account:[$a] SET username = $h RETURN NONE;
+             COMMIT TRANSACTION;";
+        self.retrying(sql, || {
+            vec![
+                var("a", bytes(account.as_bytes())),
+                var("h", bytes(hash)),
+                var("hold", int(USERNAME_HOLD.as_secs())),
+            ]
+        })
+        .await
+        .map_err(|e| match e {
+            RegistryError::Invite => RegistryError::Taken,
+            other => other,
+        })
+    }
+
+    /// Removes the account's username (held for [`USERNAME_HOLD`], naming no account) and its
+    /// link. Nothing to remove is not an error.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn delete_username(&self, account: &AccountId) -> Result<(), RegistryError> {
+        let sql = "BEGIN TRANSACTION;
+             LET $old = account:[$a].username;
+             IF $old != NONE {
+               UPDATE username:[$old] SET account = NONE,
+                 held_until = time::now() + duration::from_secs($hold) RETURN NONE;
+             };
+             DELETE ulink WHERE account = $a RETURN NONE;
+             UPDATE account:[$a] SET username = NONE RETURN NONE;
+             COMMIT TRANSACTION;";
+        self.retrying(sql, || {
+            vec![
+                var("a", bytes(account.as_bytes())),
+                var("hold", int(USERNAME_HOLD.as_secs())),
+            ]
+        })
+        .await
+    }
+
+    /// The account a username hash names, with its username key verifier; `None` for an unknown
+    /// or held username, or one whose account is being deleted.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn lookup_username(
+        &self,
+        hash: &[u8; 32],
+    ) -> Result<Option<UsernameRow>, RegistryError> {
+        // One statement, the same work whether or not the username exists: an absent username
+        // reads the key of an account ID that cannot exist (all zeros), so the answer's timing
+        // does not depend on existence.
+        let v = self
+            .db
+            .query1(
+                "RETURN [username:[$h].account, account:[username:[$h].account ?? $zero].ukey,
+                   account:[username:[$h].account ?? $zero].deleting];",
+                vec![var("h", bytes(hash)), var("zero", bytes(&[0u8; 16]))],
+            )
+            .await?;
+        let r = rows(v);
+        let Some(account) = r.first().and_then(id16).map(AccountId::from_bytes) else {
+            return Ok(None);
+        };
+        // An account being deleted is found by nobody.
+        if matches!(r.get(2), Some(Value::Bool(true))) {
+            return Ok(None);
+        }
+        let key = r.get(1).and_then(|k| k.as_bytes().cloned());
+        Ok(Some(UsernameRow { account, key }))
+    }
+
+    /// The hash of the account's username, if it has one.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn username_of(
+        &self,
+        account: &AccountId,
+    ) -> Result<Option<[u8; 32]>, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "RETURN account:[$a].username;",
+                vec![var("a", bytes(account.as_bytes()))],
+            )
+            .await?;
+        Ok(id32(&v))
+    }
+
+    /// Sets (`Some`) or removes the account's username key verifier.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn set_username_key(
+        &self,
+        account: &AccountId,
+        verifier: Option<&[u8]>,
+    ) -> Result<(), RegistryError> {
+        let mut vars = vec![var("a", bytes(account.as_bytes()))];
+        let sql = match verifier {
+            Some(k) => {
+                vars.push(var("k", bytes(k)));
+                "UPDATE account:[$a] SET ukey = $k RETURN NONE;"
+            }
+            // An optional field is cleared with NONE (NULL is a value and fails validation).
+            None => "UPDATE account:[$a] SET ukey = NONE RETURN NONE;",
+        };
+        self.db.exec(sql, vars).await?;
+        Ok(())
+    }
+
+    /// Stores the account's username link under a new handle, replacing any previous link (a
+    /// reset: the old handle stops working).
+    ///
+    /// # Errors
+    /// [`RegistryError::NoUsername`] without a username.
+    pub async fn put_username_link(
+        &self,
+        account: &AccountId,
+        handle: &[u8; 16],
+        blob: &[u8],
+    ) -> Result<(), RegistryError> {
+        let sql = "BEGIN TRANSACTION;
+             IF account:[$a].username = NONE { THROW 'no_username' };
+             DELETE ulink WHERE account = $a RETURN NONE;
+             CREATE ulink:[$l] SET account = $a, blob = $b RETURN NONE;
+             COMMIT TRANSACTION;";
+        self.retrying(sql, || {
+            vec![
+                var("a", bytes(account.as_bytes())),
+                var("l", bytes(handle)),
+                var("b", bytes(blob)),
+            ]
+        })
+        .await
+        .map_err(|e| match e {
+            RegistryError::Invite => RegistryError::NoUsername,
+            other => other,
+        })
+    }
+
+    /// A link's ciphertext.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn username_link(&self, handle: &[u8; 16]) -> Result<Option<Bytes>, RegistryError> {
+        let v = self
+            .db
+            .query1("RETURN ulink:[$l].blob;", vec![var("l", bytes(handle))])
+            .await?;
+        Ok(v.as_bytes().cloned())
+    }
+
+    /// Deletes the account's link.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn delete_username_link(&self, account: &AccountId) -> Result<(), RegistryError> {
+        self.db
+            .exec(
+                "DELETE ulink WHERE account = $a RETURN NONE;",
+                vec![var("a", bytes(account.as_bytes()))],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Deletes up to `limit` held usernames whose hold ended (the worker's sweep); returns how
+    /// many.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn delete_released_usernames(&self, limit: usize) -> Result<usize, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "DELETE (SELECT VALUE id FROM username
+                   WHERE account = NONE AND held_until <= time::now() LIMIT $n) RETURN BEFORE;",
+                vec![var("n", int(u64::try_from(limit).unwrap_or(u64::MAX)))],
+            )
+            .await?;
+        Ok(rows(v).len())
+    }
+
+    /// Runs a transaction, retrying lost write conflicts; `THROW` maps to
+    /// [`RegistryError::Invite`] for the caller to rename.
+    async fn retrying(
+        &self,
+        sql: &str,
+        vars: impl Fn() -> Vec<(String, Value)>,
+    ) -> Result<(), RegistryError> {
+        let mut attempt = 0;
+        loop {
+            match self.db.query(sql, vars()).await {
+                Ok(_) => return Ok(()),
+                Err(DbError::Statement(kind)) if kind == "Thrown" => {
+                    return Err(RegistryError::Invite);
+                }
+                Err(e) if is_conflict(&e) && attempt < CONFLICT_RETRIES => {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(2u64 << attempt.min(6))).await;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
     /// The directory version: bumped by every change to accounts or devices.
     ///
     /// # Errors
@@ -725,7 +997,8 @@ impl Registry {
         }
     }
 
-    /// Deletes an account's device rows and its account row (last step of deletion).
+    /// Deletes an account's device rows and its account row (last step of deletion); its username
+    /// is held for [`USERNAME_HOLD`] with no account named, its link deleted.
     ///
     /// # Errors
     /// [`RegistryError`].
@@ -734,10 +1007,16 @@ impl Registry {
             .query(
                 "BEGIN TRANSACTION;
                  DELETE device WHERE account = $a RETURN NONE;
+                 UPDATE username SET account = NONE, held_until = time::now() + duration::from_secs($hold)
+                   WHERE account = $a RETURN NONE;
+                 DELETE ulink WHERE account = $a RETURN NONE;
                  DELETE account:[$a] RETURN NONE;
                  UPDATE directory:v SET version += 1 RETURN NONE;
                  COMMIT TRANSACTION;",
-                vec![var("a", bytes(account.as_bytes()))],
+                vec![
+                    var("a", bytes(account.as_bytes())),
+                    var("hold", int(USERNAME_HOLD.as_secs())),
+                ],
             )
             .await?;
         Ok(())
@@ -761,7 +1040,9 @@ impl Registry {
                 "RETURN count(SELECT id FROM account:[$a]);
                  RETURN count(SELECT id FROM device WHERE account = $a OR meta::id(id)[0] IN $ds);
                  RETURN count(SELECT id FROM push_token WHERE meta::id(id)[0] IN $ps);
-                 RETURN count(SELECT id FROM upload_grant WHERE device IN $ds);",
+                 RETURN count(SELECT id FROM upload_grant WHERE device IN $ds);
+                 RETURN count(SELECT id FROM username WHERE account = $a);
+                 RETURN count(SELECT id FROM ulink WHERE account = $a);",
                 vec![
                     var("a", bytes(account.as_bytes())),
                     var("ds", Value::Array(ds)),
@@ -780,6 +1061,8 @@ impl Registry {
             devices: n(1)?,
             push_tokens: n(2)?,
             grants: n(3)?,
+            usernames: n(4)?,
+            links: n(5)?,
         })
     }
 

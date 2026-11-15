@@ -63,3 +63,8 @@ filter = "info"
 # iterations = 1
 # bits = 4
 # solutions = 8
+#
+# Usernames (Prompt 3, M2, D-0049). Absent: those endpoints answer 503.
+# [api.usernames]
+# secret = { file = "/path/to/usernames-secret.hex" }            # 64 hex; same on every api node
+# reserved = ["songbird_ops"]                                     # beyond the built-in list

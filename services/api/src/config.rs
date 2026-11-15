@@ -106,6 +106,10 @@ pub struct ApiSettings {
     /// the registration and invite endpoints answer 503 (accounts only through the admin link).
     #[serde(default)]
     pub registration: Option<RegistrationSettings>,
+    /// `[api.usernames]`: usernames, the username key, links (Prompt 3, M2, D-0049). Absent:
+    /// those endpoints answer 503.
+    #[serde(default)]
+    pub usernames: Option<UsernameSettings>,
 }
 
 const fn default_max_connections() -> usize {
@@ -143,6 +147,9 @@ impl Validate for ApiSettings {
         }
         if let Some(r) = &self.registration {
             v.section("registration", r);
+        }
+        if let Some(u) = &self.usernames {
+            v.section("usernames", u);
         }
     }
 }
@@ -599,6 +606,151 @@ impl Validate for ThrottleSettings {
                 name,
                 "must be in 1..=100000",
             );
+        }
+        v.check(
+            (8..=32).contains(&self.ipv4_prefix),
+            "ipv4_prefix",
+            "must be in 8..=32",
+        );
+        v.check(
+            (16..=128).contains(&self.ipv6_prefix),
+            "ipv6_prefix",
+            "must be in 16..=128",
+        );
+    }
+}
+
+/// `[api.usernames]` (Prompt 3, M2, D-0049).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsernameSettings {
+    /// 32 bytes (64 hex characters), the same on every `api` node: the username key's pepper and
+    /// the throttle records' key. Never in the database or its backups.
+    pub secret: SecretRef,
+    /// Usernames nobody may claim, beyond the built-in list (`usernames::RESERVED`).
+    #[serde(default)]
+    pub reserved: Vec<String>,
+    /// Username key verifications at once (each holds `key.memory_kib`); 0: half the cores.
+    #[serde(default)]
+    pub max_concurrent_key_checks: usize,
+    /// Argon2id cost of the username key.
+    #[serde(default)]
+    pub key: KeyCost,
+    /// Throttles.
+    #[serde(default)]
+    pub throttle: UsernameThrottle,
+}
+
+impl Validate for UsernameSettings {
+    fn validate(&self, v: &mut Validator) {
+        v.check(
+            self.reserved
+                .iter()
+                .all(|r| songbird_keys::username::Username::parse(r).is_ok()),
+            "reserved",
+            "every entry must be a valid username",
+        );
+        v.check(
+            self.max_concurrent_key_checks <= 1_024,
+            "max_concurrent_key_checks",
+            "must be at most 1024",
+        );
+        v.section("key", &self.key);
+        v.section("throttle", &self.throttle);
+    }
+}
+
+/// Argon2id cost of a username key verifier. Default 19 MiB, two passes (the OWASP baseline for
+/// Argon2id).
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct KeyCost {
+    /// Memory, KiB.
+    pub memory_kib: u32,
+    /// Passes.
+    pub iterations: u32,
+}
+
+impl Default for KeyCost {
+    fn default() -> Self {
+        Self {
+            memory_kib: 19_456,
+            iterations: 2,
+        }
+    }
+}
+
+impl Validate for KeyCost {
+    fn validate(&self, v: &mut Validator) {
+        v.check(
+            (8..=262_144).contains(&self.memory_kib),
+            "memory_kib",
+            "must be in 8..=262144",
+        );
+        v.check(
+            (1..=16).contains(&self.iterations),
+            "iterations",
+            "must be in 1..=16",
+        );
+    }
+}
+
+/// Username throttles (GCRA in `valkey-hot` under keyed hashes; fail closed).
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct UsernameThrottle {
+    /// Lookups (and link reads) per hour per account.
+    pub lookups_per_hour: u32,
+    /// Their burst.
+    pub lookup_burst: u32,
+    /// Lookups per hour per IP range.
+    pub range_lookups_per_hour: u32,
+    /// Their burst.
+    pub range_lookup_burst: u32,
+    /// Username claims per hour per account (attempts, taken or not).
+    pub changes_per_hour: u32,
+    /// Their burst.
+    pub change_burst: u32,
+    /// Lookups with a key that find nothing, per hour per username, across every requester.
+    pub key_failures_per_hour: u32,
+    /// Their burst.
+    pub key_failure_burst: u32,
+    /// IPv4 prefix length of a range.
+    pub ipv4_prefix: u8,
+    /// IPv6 prefix length of a range.
+    pub ipv6_prefix: u8,
+}
+
+impl Default for UsernameThrottle {
+    fn default() -> Self {
+        Self {
+            lookups_per_hour: 120,
+            lookup_burst: 30,
+            range_lookups_per_hour: 600,
+            range_lookup_burst: 100,
+            changes_per_hour: 2,
+            change_burst: 5,
+            key_failures_per_hour: 1,
+            key_failure_burst: 10,
+            ipv4_prefix: 24,
+            ipv6_prefix: 48,
+        }
+    }
+}
+
+impl Validate for UsernameThrottle {
+    fn validate(&self, v: &mut Validator) {
+        for (name, n) in [
+            ("lookups_per_hour", self.lookups_per_hour),
+            ("lookup_burst", self.lookup_burst),
+            ("range_lookups_per_hour", self.range_lookups_per_hour),
+            ("range_lookup_burst", self.range_lookup_burst),
+            ("changes_per_hour", self.changes_per_hour),
+            ("change_burst", self.change_burst),
+            ("key_failures_per_hour", self.key_failures_per_hour),
+            ("key_failure_burst", self.key_failure_burst),
+        ] {
+            v.check((1..=3_600_000).contains(&n), name, "must be in 1..=3600000");
         }
         v.check(
             (8..=32).contains(&self.ipv4_prefix),

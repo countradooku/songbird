@@ -247,6 +247,7 @@ async fn account_deletion_is_verified_across_every_store() {
         metrics: ApiMetrics::default(),
         messages: None,
         registration: None,
+        usernames: None,
     });
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_addr = api_listener.local_addr().unwrap();
@@ -551,6 +552,7 @@ async fn an_offline_device_receives_a_push_end_to_end() {
         metrics: ApiMetrics::default(),
         messages: None,
         registration: None,
+        usernames: None,
     });
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_addr = api_listener.local_addr().unwrap();
@@ -766,6 +768,7 @@ async fn m5_numbers() {
         metrics: ApiMetrics::default(),
         messages: None,
         registration: None,
+        usernames: None,
     });
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_addr = l.local_addr().unwrap();

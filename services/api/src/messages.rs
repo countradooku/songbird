@@ -43,6 +43,16 @@ pub trait Submit: Send + Sync + 'static {
         frame: SendFrame,
         received: Instant,
     ) -> Pin<Box<dyn Future<Output = SendStatus> + Send + 'a>>;
+
+    /// A server-signed system notice to `devices` (D-0044), through the same path.
+    fn system<'a>(
+        &'a self,
+        signer: &'a songbird_send::system::SystemSigner,
+        devices: &'a [DeviceId],
+        kind: songbird_proto::system::Kind,
+        body: &'a [u8],
+        notice_id: [u8; songbird_proto::system::NOTICE_ID_LEN],
+    ) -> Pin<Box<dyn Future<Output = Result<(), songbird_send::system::SystemError>> + Send + 'a>>;
 }
 
 /// What the send path needs, owned.
@@ -81,6 +91,28 @@ impl<M: StoreSend, R: Router> Submit for SendStack<M, R> {
                 metrics: &self.metrics,
             };
             path.send(sender, frame, received, &mut Vec::new()).await
+        })
+    }
+
+    fn system<'a>(
+        &'a self,
+        signer: &'a songbird_send::system::SystemSigner,
+        devices: &'a [DeviceId],
+        kind: songbird_proto::system::Kind,
+        body: &'a [u8],
+        notice_id: [u8; songbird_proto::system::NOTICE_ID_LEN],
+    ) -> Pin<Box<dyn Future<Output = Result<(), songbird_send::system::SystemError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let path = SendPath {
+                directory: &self.directory,
+                mailbox: &self.mailbox,
+                router: &self.router,
+                push: &self.push,
+                metrics: &self.metrics,
+            };
+            path.send_system(signer, devices, kind, body, notice_id)
+                .await
         })
     }
 }

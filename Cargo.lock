@@ -3269,6 +3269,7 @@ dependencies = [
  "songbird-client",
  "songbird-delivery",
  "songbird-jobs",
+ "songbird-keys",
  "songbird-mailbox",
  "songbird-proto",
  "songbird-push",

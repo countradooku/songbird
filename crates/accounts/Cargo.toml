@@ -13,6 +13,7 @@ songbird-surreal.workspace = true
 songbird-jobs.workspace = true
 aws-lc-rs.workspace = true
 bytes.workspace = true
+getrandom.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
 serde.workspace = true
@@ -22,7 +23,6 @@ tokio = { workspace = true, features = ["sync", "time"] }
 
 [dev-dependencies]
 proptest.workspace = true
-getrandom.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "macros", "rt", "rt-multi-thread"] }
 
 [lints]

@@ -12,6 +12,7 @@
 //! - [`auth`]: the domain-separated transcript a device signs to authenticate.
 //! - [`system`]: server-signed system frames (notices such as "your device list changed"),
 //!   delivered as mailbox envelopes in a reserved format no user envelope may take.
+//! - [`keys`]: the key directory's upload and fetch formats (PQXDH prekeys, Prompt 3).
 //! - [`registration`]: the registration request, the transcripts its keys sign, and invite codes
 //!   (`POST /v1/registration`, Prompt 3).
 //!
@@ -23,6 +24,7 @@ pub mod auth;
 pub mod close;
 pub mod control;
 pub mod frame;
+pub mod keys;
 pub mod registration;
 pub mod system;
 

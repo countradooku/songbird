@@ -107,6 +107,15 @@ impl SurrealSettings {
     }
 }
 
+/// The tag of a `THROW 'songbird:<tag>'` (ASCII letters and `_` only), if the message is one.
+fn thrown_tag(message: &str) -> Option<&str> {
+    let tag = message.split("songbird:").nth(1)?;
+    let tag = tag
+        .split(|c: char| !(c.is_ascii_alphabetic() || c == '_'))
+        .next()?;
+    (!tag.is_empty()).then_some(tag)
+}
+
 /// The statement kind given to a transaction that lost a write conflict and may be retried.
 pub(crate) const TRANSACTION_CONFLICT: &str = "TransactionConflict";
 
@@ -170,6 +179,15 @@ impl Db {
         })
     }
 
+    /// The configuration this handle connects with (a second, independent connection to the
+    /// same database: tests of concurrent writers).
+    ///
+    /// # Errors
+    /// Never; a `Result` for symmetry with [`SurrealSettings::config`].
+    pub fn config_clone(&self) -> Result<Config, DbError> {
+        Ok(self.cfg.clone())
+    }
+
     async fn client(&self) -> Result<Client, DbError> {
         let mut cur = self.current.lock().await;
         if let Some(c) = cur.as_ref()
@@ -212,6 +230,10 @@ impl Db {
                         // SurrealDB 4 reports a write conflict at COMMIT as a `Query` error
                         // whose message says it can be retried (found by the invite race test).
                         TRANSACTION_CONFLICT.to_owned()
+                    } else if let Some(tag) = thrown_tag(&e.message).filter(|_| e.kind == "Thrown")
+                    {
+                        // Our own `THROW 'songbird:<tag>'`: the tag is ours, never data.
+                        format!("Thrown:{tag}")
                     } else {
                         e.kind.clone()
                     };

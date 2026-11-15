@@ -105,3 +105,10 @@ path = "fuzz_targets/username.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "prekeys"
+path = "fuzz_targets/prekeys.rs"
+test = false
+doc = false
+bench = false

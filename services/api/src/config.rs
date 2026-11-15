@@ -110,6 +110,10 @@ pub struct ApiSettings {
     /// those endpoints answer 503.
     #[serde(default)]
     pub usernames: Option<UsernameSettings>,
+    /// `[api.keys]`: the key directory (Prompt 3, M3, D-0050). Absent: those endpoints answer
+    /// 503.
+    #[serde(default)]
+    pub keys: Option<KeySettings>,
 }
 
 const fn default_max_connections() -> usize {
@@ -150,6 +154,9 @@ impl Validate for ApiSettings {
         }
         if let Some(u) = &self.usernames {
             v.section("usernames", u);
+        }
+        if let Some(k) = &self.keys {
+            v.section("keys", k);
         }
     }
 }
@@ -749,6 +756,113 @@ impl Validate for UsernameThrottle {
             ("change_burst", self.change_burst),
             ("key_failures_per_hour", self.key_failures_per_hour),
             ("key_failure_burst", self.key_failure_burst),
+        ] {
+            v.check((1..=3_600_000).contains(&n), name, "must be in 1..=3600000");
+        }
+        v.check(
+            (8..=32).contains(&self.ipv4_prefix),
+            "ipv4_prefix",
+            "must be in 8..=32",
+        );
+        v.check(
+            (16..=128).contains(&self.ipv6_prefix),
+            "ipv6_prefix",
+            "must be in 16..=128",
+        );
+    }
+}
+
+/// `[api.keys]` (Prompt 3, M3, D-0050).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeySettings {
+    /// 32 bytes (64 hex characters), the same on every `api` node: keys the throttle records.
+    pub secret: SecretRef,
+    /// The system key's Ed25519 seed (64 hex characters) for "prekeys low" notices (D-0044);
+    /// with `[api.send]`. Absent: no notices (clients still see their counts).
+    #[serde(default)]
+    pub system_key: Option<SecretRef>,
+    /// Most one-time prekeys of each kind a device may hold.
+    #[serde(default = "default_max_stored")]
+    pub max_stored: usize,
+    /// A device below this many one-time prekeys of either kind is told to upload more.
+    #[serde(default = "default_refill_below")]
+    pub refill_below: u32,
+    /// Throttles.
+    #[serde(default)]
+    pub throttle: KeyThrottle,
+}
+
+const fn default_max_stored() -> usize {
+    200
+}
+const fn default_refill_below() -> u32 {
+    10
+}
+
+impl Validate for KeySettings {
+    fn validate(&self, v: &mut Validator) {
+        v.check(
+            (1..=1_000).contains(&self.max_stored),
+            "max_stored",
+            "must be in 1..=1000",
+        );
+        v.check(
+            self.refill_below <= 1_000,
+            "refill_below",
+            "must be at most 1000",
+        );
+        v.section("throttle", &self.throttle);
+    }
+}
+
+/// Key directory throttles (GCRA in `valkey-hot` under keyed hashes; fail closed).
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct KeyThrottle {
+    /// Fetches per hour per requesting account.
+    pub fetches_per_hour: u32,
+    /// Their burst.
+    pub fetch_burst: u32,
+    /// Fetches per hour per IP range.
+    pub range_fetches_per_hour: u32,
+    /// Their burst.
+    pub range_fetch_burst: u32,
+    /// Fetches per hour per target account that may claim one-time prekeys, across all
+    /// requesters; beyond it a fetch gets last-resort keys only.
+    pub target_one_time_per_hour: u32,
+    /// Its burst.
+    pub target_one_time_burst: u32,
+    /// IPv4 prefix length of a range.
+    pub ipv4_prefix: u8,
+    /// IPv6 prefix length of a range.
+    pub ipv6_prefix: u8,
+}
+
+impl Default for KeyThrottle {
+    fn default() -> Self {
+        Self {
+            fetches_per_hour: 240,
+            fetch_burst: 60,
+            range_fetches_per_hour: 1_200,
+            range_fetch_burst: 200,
+            target_one_time_per_hour: 60,
+            target_one_time_burst: 30,
+            ipv4_prefix: 24,
+            ipv6_prefix: 48,
+        }
+    }
+}
+
+impl Validate for KeyThrottle {
+    fn validate(&self, v: &mut Validator) {
+        for (name, n) in [
+            ("fetches_per_hour", self.fetches_per_hour),
+            ("fetch_burst", self.fetch_burst),
+            ("range_fetches_per_hour", self.range_fetches_per_hour),
+            ("range_fetch_burst", self.range_fetch_burst),
+            ("target_one_time_per_hour", self.target_one_time_per_hour),
+            ("target_one_time_burst", self.target_one_time_burst),
         ] {
             v.check((1..=3_600_000).contains(&n), name, "must be in 1..=3600000");
         }

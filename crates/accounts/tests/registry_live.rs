@@ -610,3 +610,217 @@ async fn keys_links_and_deletion() {
     assert!(left.is_empty(), "{left:?}");
     assert_eq!(r.username_link(&[3; 16]).await.unwrap(), None);
 }
+
+// ----- Prompt 3, M3: the key directory -----
+
+use songbird_accounts::KeysUpdate;
+
+fn blob(tag: u8, id: u32, len: usize) -> Vec<u8> {
+    let mut b = id.to_be_bytes().to_vec();
+    b.resize(len, tag);
+    b
+}
+
+fn full_update(ik: [u8; 33], first_id: u32, n: u32) -> KeysUpdate {
+    KeysUpdate {
+        identity: Some(ik),
+        signed: Some(blob(1, 1, 101)),
+        last_resort: Some(blob(2, 2, 1637)),
+        one_time_ec: (first_id..first_id + n)
+            .map(|i| (i, blob(3, i, 37)))
+            .collect(),
+        one_time_kem: (first_id..first_id + n)
+            .map(|i| (i, blob(4, i, 1637)))
+            .collect(),
+    }
+}
+
+#[tokio::test]
+async fn uploads_keep_the_identity_bound_the_store_and_refuse_duplicates() {
+    let Some(r) = registry().await else { return };
+    let a = registered(&r).await;
+    // A first upload without its identity key and prekeys is incomplete.
+    let partial = KeysUpdate {
+        one_time_ec: vec![(1, blob(3, 1, 37))],
+        ..KeysUpdate::default()
+    };
+    assert!(matches!(
+        r.put_keys(&a.device, &partial, 200).await,
+        Err(RegistryError::Incomplete)
+    ));
+    r.put_keys(&a.device, &full_update([5; 33], 0, 10), 200)
+        .await
+        .unwrap();
+    assert_eq!(r.prekey_counts(&a.device).await.unwrap(), (10, 10));
+    let keys = r.device_keys(&a.device).await.unwrap();
+    assert_eq!(keys.identity, Some([5; 33]));
+    // The identity key is never replaced; the same one is accepted.
+    assert!(matches!(
+        r.put_keys(&a.device, &full_update([6; 33], 100, 1), 200)
+            .await,
+        Err(RegistryError::IdentityMismatch)
+    ));
+    r.put_keys(&a.device, &full_update([5; 33], 100, 1), 200)
+        .await
+        .unwrap();
+    // A duplicate ID; the bound per kind.
+    assert!(matches!(
+        r.put_keys(&a.device, &full_update([5; 33], 100, 1), 200)
+            .await,
+        Err(RegistryError::Duplicate)
+    ));
+    assert!(matches!(
+        r.put_keys(&a.device, &full_update([5; 33], 1000, 190), 200)
+            .await,
+        Err(RegistryError::Full)
+    ));
+    // A refused upload changes nothing.
+    assert_eq!(r.prekey_counts(&a.device).await.unwrap(), (11, 11));
+    // Prekeys alone (no identity) once the device is complete.
+    let more = KeysUpdate {
+        one_time_ec: vec![(500, blob(3, 500, 37))],
+        ..KeysUpdate::default()
+    };
+    r.put_keys(&a.device, &more, 200).await.unwrap();
+    assert_eq!(r.prekey_counts(&a.device).await.unwrap(), (12, 11));
+}
+
+#[tokio::test]
+async fn bundles_claim_one_time_keys_skip_the_requester_and_fall_back_to_last_resort() {
+    let Some(r) = registry().await else { return };
+    let alice = registered(&r).await;
+    let bob = registered(&r).await;
+    r.put_keys(&alice.device, &full_update([5; 33], 0, 1), 200)
+        .await
+        .unwrap();
+    // Alice's own device is skipped.
+    assert!(
+        r.claim_bundles(&alice.account, None, &alice.device, true)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let b = r
+        .claim_bundles(&alice.account, None, &bob.device, true)
+        .await
+        .unwrap();
+    assert_eq!(b.len(), 1);
+    assert_eq!(b[0].one_time_ec.as_deref(), Some(&blob(3, 0, 37)[..]));
+    assert!(b[0].kem_one_time);
+    // Nothing one-time left: no X25519 one, the last-resort ML-KEM one.
+    let b = r
+        .claim_bundles(&alice.account, None, &bob.device, true)
+        .await
+        .unwrap();
+    assert_eq!(b[0].one_time_ec, None);
+    assert!(!b[0].kem_one_time);
+    assert_eq!(&b[0].kem[..], &blob(2, 2, 1637)[..]);
+    // `one_time = false` (the target's budget spent) claims nothing.
+    r.put_keys(&alice.device, &full_update([5; 33], 10, 1), 200)
+        .await
+        .unwrap();
+    let b = r
+        .claim_bundles(&alice.account, None, &bob.device, false)
+        .await
+        .unwrap();
+    assert!(b[0].one_time_ec.is_none() && !b[0].kem_one_time);
+    assert_eq!(r.prekey_counts(&alice.device).await.unwrap(), (1, 1));
+    // Deletion leaves no prekey behind.
+    r.delete_account_rows(&alice.account).await.unwrap();
+    let left = r
+        .remnants(&alice.account, &[alice.device], &[])
+        .await
+        .unwrap();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+/// **Prompt 3's gate**: no one-time prekey is ever served twice under parallel claims. 400
+/// claims at once, from eight independent database connections, against 200 one-time keys of
+/// each kind, three rounds: every served key is distinct, and served plus still stored is
+/// always exactly what was uploaded (nothing served twice, nothing lost).
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn no_one_time_prekey_is_ever_served_twice_under_parallel_claims() {
+    let Some(first) = registry().await else {
+        return;
+    };
+    let target = registered(&first).await;
+    let requester = registered(&first).await;
+    // Eight registries on eight connections to the same database.
+    let mut conns = vec![std::sync::Arc::new(first)];
+    for _ in 1..8 {
+        let db = conns[0].db().config_clone().unwrap();
+        conns.push(std::sync::Arc::new(
+            Registry::connect(Db::connect(db).await.unwrap())
+                .await
+                .unwrap(),
+        ));
+    }
+    let mut next_id = 0u32;
+    for round in 0..3 {
+        // 200 of each kind, in two uploads of 100.
+        for _ in 0..2 {
+            conns[0]
+                .put_keys(&target.device, &full_update([5; 33], next_id, 100), 200)
+                .await
+                .unwrap();
+            next_id += 100;
+        }
+        let tasks: Vec<_> = (0..400)
+            .map(|i| {
+                let r = std::sync::Arc::clone(&conns[i % conns.len()]);
+                let (account, device) = (target.account, requester.device);
+                tokio::spawn(async move {
+                    r.claim_bundles(&account, None, &device, true)
+                        .await
+                        .unwrap()
+                })
+            })
+            .collect();
+        let mut ec = std::collections::HashSet::new();
+        let mut kem = std::collections::HashSet::new();
+        let (mut ec_served, mut kem_served) = (0u64, 0u64);
+        for t in tasks {
+            for b in t.await.unwrap() {
+                if let Some(k) = b.one_time_ec {
+                    ec_served += 1;
+                    assert!(ec.insert(k), "round {round}: an X25519 prekey served twice");
+                }
+                if b.kem_one_time {
+                    kem_served += 1;
+                    assert!(
+                        kem.insert(b.kem),
+                        "round {round}: an ML-KEM prekey served twice"
+                    );
+                }
+            }
+        }
+        let (ec_left, kem_left) = conns[0].prekey_counts(&target.device).await.unwrap();
+        println!(
+            "round {round}: served {ec_served} X25519 and {kem_served} ML-KEM one-time prekeys of 200 each; {ec_left} and {kem_left} left"
+        );
+        assert_eq!(
+            ec_served + ec_left,
+            200,
+            "round {round}: X25519 conservation"
+        );
+        assert_eq!(
+            kem_served + kem_left,
+            200,
+            "round {round}: ML-KEM conservation"
+        );
+        // 400 claims for 200 keys: under contention a claim may give up and serve none, but
+        // nearly all keys go out.
+        assert!(
+            ec_served >= 190 && kem_served >= 190,
+            "round {round}: too few served"
+        );
+        // Drain what is left so the next round starts from 200.
+        while conns[0]
+            .claim_bundles(&target.account, None, &requester.device, true)
+            .await
+            .unwrap()
+            .iter()
+            .any(|b| b.one_time_ec.is_some() || b.kem_one_time)
+        {}
+    }
+}

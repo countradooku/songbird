@@ -7,6 +7,7 @@
 //! | `POST`, `GET`, `DELETE /v1/invites` | Invite codes: create from the allowance, see it, revoke ([`registration`]) |
 //! | `PUT`, `DELETE /v1/username`; `POST /v1/username/lookup` | Claim, release and look up usernames ([`usernames`]) |
 //! | `PUT`, `DELETE /v1/username/key`; `PUT`, `DELETE`, `GET /v1/username/link[/<handle>]` | The username key; username links ([`usernames`]) |
+//! | `PUT`, `GET /v1/keys`; `POST /v1/keys/fetch` | The key directory: upload, counts, fetch bundles ([`keys`]) |
 //! | `PUT /v1/push` | Registers the device's push channel, sealed to the push service's key |
 //! | `DELETE /v1/push` | Removes it |
 //! | `POST /v1/attachments` | An upload grant: exact (padded) size and recipient fetches due |
@@ -26,6 +27,7 @@ pub mod admin;
 pub mod auth;
 pub mod client;
 pub mod config;
+pub mod keys;
 pub mod messages;
 pub mod registration;
 pub mod server;
@@ -84,6 +86,8 @@ pub struct ApiMetrics {
     pub registration: registration::RegistrationMetrics,
     /// Usernames.
     pub usernames: usernames::UsernameMetrics,
+    /// The key directory.
+    pub keys: keys::KeyMetrics,
 }
 
 impl ApiMetrics {
@@ -138,6 +142,7 @@ impl ApiMetrics {
         }
         self.registration.register(m)?;
         self.usernames.register(m)?;
+        self.keys.register(m)?;
         self.send.register(m, "api")
     }
 }
@@ -168,6 +173,8 @@ pub struct App {
     pub registration: Option<registration::Registration>,
     /// Usernames (absent: those endpoints answer 503).
     pub usernames: Option<usernames::Usernames>,
+    /// The key directory (absent: those endpoints answer 503).
+    pub keys: Option<keys::KeyDirectory>,
 }
 
 impl std::fmt::Debug for App {
@@ -368,6 +375,7 @@ impl App {
             (_, p, None) if p == "/v1/username" || p.starts_with("/v1/username/") => {
                 self.usernames(req).await
             }
+            (_, "/v1/keys" | "/v1/keys/fetch", None) => self.keys(req).await,
             _ => Err(Refusal::Status(StatusCode::NOT_FOUND)),
         }
     }
@@ -386,6 +394,54 @@ impl App {
             .get::<registration::Peer>()
             .ok_or(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
         Ok((r, peer.0))
+    }
+
+    /// `/v1/keys…` ([`keys`]): signed like every device request.
+    async fn keys(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let k = self.keys.as_ref().ok_or_else(unavailable)?;
+        let peer = req
+            .extensions()
+            .get::<registration::Peer>()
+            .map(|p| p.0)
+            .ok_or_else(unavailable)?;
+        let method = req.method().clone();
+        let path = req.uri().path().to_owned();
+        let out = match (&method, path.as_str()) {
+            (&Method::PUT, "/v1/keys") => {
+                // Large and signed over its digest: authenticated from the headers before the
+                // body is read.
+                let (device, body) = self
+                    .authenticate_body(req, songbird_proto::keys::MAX_UPLOAD_LEN)
+                    .await?;
+                k.upload(&self.registry, &device, body).await
+            }
+            (&Method::GET, "/v1/keys") => {
+                let (device, _) = self.authenticate_json(req).await?;
+                k.counts(&self.registry, &device).await
+            }
+            (&Method::POST, "/v1/keys/fetch") => {
+                let (device, body) = self.authenticate_json(req).await?;
+                let account = self
+                    .registry
+                    .device(&device)
+                    .await
+                    .map_err(|_| unavailable())?
+                    .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?
+                    .account;
+                k.fetch(
+                    &self.registry,
+                    &self.hot,
+                    self.messages.as_ref(),
+                    (&account, &device),
+                    peer,
+                    &body,
+                )
+                .await
+            }
+            _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
+        };
+        Ok(key_outcome(out))
     }
 
     /// `/v1/username…` ([`usernames`]): signed like every device request.
@@ -881,6 +937,42 @@ async fn bounded_body(req: Request<Incoming>, max: usize) -> Result<Bytes, Refus
         return Err(Refusal::Status(StatusCode::BAD_REQUEST));
     }
     Ok(body)
+}
+
+/// The HTTP answer for a key directory outcome.
+fn key_outcome(o: keys::Outcome) -> Response<Body> {
+    use keys::Outcome;
+    match o {
+        Outcome::Done => empty(StatusCode::NO_CONTENT),
+        Outcome::Counts(ec, kem) => {
+            json(StatusCode::OK, &serde_json::json!({ "ec": ec, "kem": kem }))
+        }
+        Outcome::Bundles(b) => {
+            let mut r = Response::new(Full::new(b).map_err(|e| match e {}).boxed_unsync());
+            r.headers_mut().insert(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            );
+            r
+        }
+        Outcome::Malformed(what) => json(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({ "error": what }),
+        ),
+        Outcome::NotFound => empty(StatusCode::NOT_FOUND),
+        Outcome::Conflict(what) => {
+            json(StatusCode::CONFLICT, &serde_json::json!({ "error": what }))
+        }
+        Outcome::Throttled(wait_us) => {
+            let mut r = empty(StatusCode::TOO_MANY_REQUESTS);
+            let secs = wait_us.div_ceil(1_000_000).max(1);
+            if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
+                r.headers_mut().insert(hyper::header::RETRY_AFTER, v);
+            }
+            r
+        }
+        Outcome::Unavailable => empty(StatusCode::SERVICE_UNAVAILABLE),
+    }
 }
 
 /// The HTTP answer for a username outcome.

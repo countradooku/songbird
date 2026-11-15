@@ -13,5 +13,7 @@ poksho = { path = "../../../libsignal/rust/poksho" }
 curve25519-dalek = { version = "5.0", features = ["digest"] }
 sha2 = "0.11"
 hex = "0.4"
+libsignal-core = { path = "../../../libsignal/rust/core" }
+rand = "0.9"
 
 [workspace]

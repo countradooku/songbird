@@ -78,13 +78,73 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   invite code hashes; keyed IP-range throttle records; used challenge nonces).
 - Prompt 3, milestone 2 (report `docs/reports/P03-M2.md`, D-0049): gate **approved by the owner
   on 2026-11-15** ("Approve both"), with its four threat-model §1 rows (username hashes;
-  username key verifiers; username links; keyed throttle records). Next: M3 (key directory).
+  username key verifiers; username links; keyed throttle records).
+- Prompt 3, milestone 3 (report `docs/reports/P03-M3.md`, D-0050): the gate, and two
+  threat-model §1 rows (device public keys and prekeys; keyed throttle records), await the
+  owner. MLS KeyPackages follow as M3b (owner, 2026-11-15).
 - D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
   tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
   `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0050 — Prompt 3, milestone 3: the PQXDH key directory; XEdDSA and ML-KEM-1024 checked on upload; one-time prekeys claimed exactly once
+
+- Date: 2026-11-15
+- Status: proposed; built (report P03-M3); awaiting the owner's gate approval
+- Decided by: owner for scope (M3 split: MLS KeyPackages in M3b) and the post-quantum format
+  (ML-KEM-1024 only); design by agent under the standing instruction (D-0041)
+- Context: Prompt 3's key directory: per device an identity key, a signed prekey, a last-resort
+  post-quantum prekey, one-time EC and post-quantum prekeys as libsignal's PQXDH needs; one-time
+  prekeys claimed atomically and never handed out twice; refill signals; signature validation;
+  exhaustion protection (rate limits per requester and per target). Its gate: concurrency tests
+  that prove no one-time prekey is ever served twice under parallel claims.
+- Owner's decisions (2026-11-15): **split M3**, MLS KeyPackages (and the OpenMLS question) in
+  M3b; **ML-KEM-1024 only** (type `0x0A`, the NIST standard), not libsignal's default
+  pre-standard Kyber1024 (`0x08`).
+- Decision:
+  - **Formats are libsignal's** (X25519 `0x05 || u`, ML-KEM-1024 `0x0A || ek`, XEdDSA over the
+    serialization), so a PQXDH implementation reads them unchanged.
+  - **XEdDSA implemented from libsignal's code and specification** (D-0047), in `crates/keys`:
+    libsignal and Songbird agree byte for byte (same public key from a private key, the same
+    signature for the same randomness) and each verifies the other's signature. Stricter than
+    libsignal in one place: `s` must be canonical (libsignal reduces any `s` below 2^253), so a
+    signature has a single encoding; honest signers are unaffected.
+  - **Every key checked before storing**: X25519 keys honest (canonical, on the curve, prime
+    order); ML-KEM keys pass FIPS 203's modulus check. Found while building: **aws-lc-rs 1.19
+    accepts an encapsulation key with a coefficient ≥ q**, so the check is ours, with a test
+    that asserts aws-lc-rs's behaviour (as M1's for its Ed25519 identity-point forgery).
+  - **The identity key is set once per device** and never replaced; a new identity is a new
+    device (M4's signed device list, M6's key transparency).
+  - **Claims**: one transaction-free delete per attempt, `DELETE ONLY otpk:[device, id] RETURN
+    BEFORE`, among up to 16 random candidates: whoever deletes the record gets it; a racing claim
+    gets nothing or loses the write conflict and tries another. Proven by the gate test (400
+    concurrent claims over eight connections, three rounds: every one-time key served once,
+    none twice, none lost), whose power was checked by a deliberately non-atomic claim (read,
+    then delete): it served a key twice and the test failed at once.
+  - **Exhaustion**: fetches 240 an hour per requesting account (burst 60) and 1,200 per IP range;
+    one-time claims 60 an hour per target account across all requesters (burst 30), beyond
+    which fetches answer with the last-resort key only, leaving the one-time keys for later.
+  - **Refill**: a device left below 10 one-time keys of either kind gets a system notice, kind 2
+    `PrekeysLow` (`ec u16 | kem u16`), signed by the system key (D-0044) and sent through the
+    send path `api` already links, at most once an hour (a keyed one-hour mark in
+    `valkey-hot`). `Submit` gains `system` for it. The system key is optional configuration:
+    without it (or without `[api.send]`) clients rely on `GET /v1/keys`.
+  - **Deletion**: an account's devices' one-time prekeys are deleted with it and counted by the
+    worker's verification.
+  - Moved from the plan's M3 row: the send path's `stale` list (D-0026) needs device-list
+    versions, which M4's signed device list brings.
+  - No new dependency (`curve25519-dalek` and aws-lc-rs's ML-KEM, both in the tree).
+- Evidence (Apple M5 Pro, macOS 27.2.1; compose stack under podman; report P03-M3): the gate test
+  above; `crates/keys` XEdDSA (tampering, a non-canonical `s`, dishonest keys) and ML-KEM tests;
+  `xeddsa_vectors.rs`; `crates/proto` key formats (strict decoding, the longest upload);
+  `crates/accounts` live (identity once, bounds, duplicates, last-resort fall-back, deletion);
+  `services/api` `keys_live` (4) and `keys` unit test (every kind of tampering refused);
+  `tests/e2e` `a_device_low_on_prekeys_is_told_once`; fuzz `prekeys` (60 s, 641,996 runs).
+- Consequences: a client stack must speak ML-KEM-1024 (libsignal's `mlkem1024` feature, if a
+  client uses libsignal). Sessions started after a target's one-time budget is spent use the
+  last-resort key (no one-time X25519 key): the PQXDH spec's degraded but defined mode.
 
 ## D-0049 — Prompt 3, milestone 2: unique usernames as Ristretto hashes with poksho proofs, a username key that never confirms existence, resettable links
 

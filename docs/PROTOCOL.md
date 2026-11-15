@@ -382,6 +382,53 @@ switching it off needs no migration, and codes are then ignored.
 - **Operators:** `songbird-admin invites create --count N --uses U --days D` prints codes once
   (audit-logged without them); `songbird-admin invites grant --account <hex> --add N`.
 
+### 4.3 Usernames, the username key and links
+
+Decision D-0049 (unique handles, the owner's choice). Every request is signed by a device.
+
+- **A username** is 3 to 32 characters: ASCII letters, digits, `_` and `.`; it starts with a
+  letter, has no `..` and does not end with `.`. Unique in lower case (`Radu` and `radu` are one
+  username); shown as typed. Found only by exact match: there is no search, prefix or listing.
+- **The server never sees it.** It stores and is asked about only
+  `hash = s·G` on Ristretto255, with `s = SHA-512("songbird.v1/username\0" || lower-cased
+  username)` reduced mod l and `G` the point `Sho("songbird.v1/username-generator")` squeezes
+  (64 bytes, `from_uniform_bytes`). The SHO is libsignal's poksho `ShoHmacSha256`.
+- **Claiming** needs a proof: a poksho proof (label `POKSHO_Ristretto_SHOHMACSHA256`, statement
+  `hash = s·G`, encoded `01 01 01 00 02`, points base, hash, `G`, message the hash) that the
+  client knows `s`: `challenge || response`, two canonical scalars, 64 bytes. libsignal's own
+  verifier accepts these proofs (`tools/libsignal-vectors`).
+
+| Request | Body | Answers |
+| --- | --- | --- |
+| `PUT /v1/username` | `hash [32] \|\| proof [64]` | 204; 409 `{"error":"taken"}` (another account's, held, or reserved); 400 `{"error":"proof"}`; 429 |
+| `DELETE /v1/username` | none | 204 |
+| `POST /v1/username/lookup` | `{"hash": hex, "key"?: digits}` | 200 `{"account": hex}`; 404; 400 for a malformed hash or key; 429 |
+| `PUT /v1/username/key` | `{"key": "4 to 10 digits"}` | 204 |
+| `DELETE /v1/username/key` | none | 204 |
+| `PUT /v1/username/link` | the link's ciphertext, 1 to 256 bytes | 200 `{"handle": 32 hex}`; 409 `{"error":"no username"}` |
+| `DELETE /v1/username/link` | none | 204 |
+| `GET /v1/username/link/<handle>` | none | 200 the ciphertext; 404 |
+
+- **Changing or releasing** a username holds the old one for 30 days: nobody can claim or find
+  it, so nobody can pose as its previous owner by grabbing it. The held row names no account.
+  Account deletion releases the username the same way.
+- **Reserved names** (`admin`, `support`, `songbird`, … plus `[api.usernames] reserved`) answer
+  `taken`; the server compares hashes.
+- **The username key** (optional): with one set, a lookup finds the account only with the right
+  key. A missing key, a wrong key and a username whose guessing budget is spent all answer 404,
+  exactly like an unknown or held username (the owner's decision, D-0049). A lookup that
+  carries a key always costs one Argon2id verification, and one without never does, so time
+  does not tell them apart either. The key is stored as `salt [16] || Argon2id(m = 19 MiB, t = 2,
+  p = 1, secret = a pepper from the secrets store)(key, salt)`.
+- **Throttles:** lookups and link reads 120 an hour per account (burst 30) and 600 per IP range
+  (burst 100); claims 2 an hour per account (burst 5), counting every attempt; key guesses that
+  find nothing, 1 an hour per username across all requesters (burst 10).
+- **Links** let someone share a username without typing it, and reset the link without changing
+  the username: the client encrypts the username under a key that stays in the link (the
+  server never sees it) and uploads the ciphertext; the server keeps it under a new random
+  16-byte handle each time (the old handle stops working). A username change deletes the link.
+  The client's encryption follows Signal's username links; the server only stores bytes.
+
 ## 5. Encrypted content schemas (Prompt 4)
 
 ## 6. Groups, roles and channels (MLS) (Prompt 5)
@@ -453,3 +500,14 @@ Registration (Prompt 3, D-0048), from `crates/pow` and `crates/proto` tests:
   ```
 
   The authentication key's differs only in its context, `"songbird.v1/register-device\0"`.
+- Username (Prompt 3, M2, D-0049), from `crates/keys/tests/username_vectors.rs`: the
+  generator `G` is `9c921379c3fdb3bf5dc4810f37d8fb50ea2e9392fa28b908ca6fdd849f0c627c`; the username `Radu` hashes to `b0aff097b1eb85225fbb895965cb81ff2757a8e39f458e731743270b1fb5ad09`; its proof with randomness 32 ×
+  `11` is
+
+  ```
+  77c74bbf972c93f70681b1b75869c7538915a43910e79341499dc4428559710d
+  0bd820c1436c8e463b66283e3b805440c59905fc025c964fa709c7be6a031f04
+  ```
+
+  libsignal's poksho (commit `8be00c2`) produces the same proof for the same statement and
+  randomness, and verifies it.

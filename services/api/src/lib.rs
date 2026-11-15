@@ -5,6 +5,8 @@
 //! | `POST /v1/registration/challenge` | A proof-of-work challenge ([`registration`]; unsigned) |
 //! | `POST /v1/registration` | A new account and its first device ([`registration`]; unsigned, proof of work) |
 //! | `POST`, `GET`, `DELETE /v1/invites` | Invite codes: create from the allowance, see it, revoke ([`registration`]) |
+//! | `PUT`, `DELETE /v1/username`; `POST /v1/username/lookup` | Claim, release and look up usernames ([`usernames`]) |
+//! | `PUT`, `DELETE /v1/username/key`; `PUT`, `DELETE`, `GET /v1/username/link[/<handle>]` | The username key; username links ([`usernames`]) |
 //! | `PUT /v1/push` | Registers the device's push channel, sealed to the push service's key |
 //! | `DELETE /v1/push` | Removes it |
 //! | `POST /v1/attachments` | An upload grant: exact (padded) size and recipient fetches due |
@@ -27,6 +29,7 @@ pub mod config;
 pub mod messages;
 pub mod registration;
 pub mod server;
+pub mod usernames;
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -79,6 +82,8 @@ pub struct ApiMetrics {
     pub push: songbird_send::PushMetrics,
     /// Registration and invites.
     pub registration: registration::RegistrationMetrics,
+    /// Usernames.
+    pub usernames: usernames::UsernameMetrics,
 }
 
 impl ApiMetrics {
@@ -132,6 +137,7 @@ impl ApiMetrics {
             m.register(name, help, c.clone())?;
         }
         self.registration.register(m)?;
+        self.usernames.register(m)?;
         self.send.register(m, "api")
     }
 }
@@ -160,6 +166,8 @@ pub struct App {
     pub messages: Option<messages::Messages>,
     /// Registration and invites (absent: those endpoints answer 503).
     pub registration: Option<registration::Registration>,
+    /// Usernames (absent: those endpoints answer 503).
+    pub usernames: Option<usernames::Usernames>,
 }
 
 impl std::fmt::Debug for App {
@@ -357,6 +365,9 @@ impl App {
             (&Method::POST | &Method::GET | &Method::DELETE, "/v1/invites", None) => {
                 self.invites(req).await
             }
+            (_, p, None) if p == "/v1/username" || p.starts_with("/v1/username/") => {
+                self.usernames(req).await
+            }
             _ => Err(Refusal::Status(StatusCode::NOT_FOUND)),
         }
     }
@@ -375,6 +386,61 @@ impl App {
             .get::<registration::Peer>()
             .ok_or(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
         Ok((r, peer.0))
+    }
+
+    /// `/v1/username…` ([`usernames`]): signed like every device request.
+    async fn usernames(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let u = self.usernames.as_ref().ok_or_else(unavailable)?;
+        let peer = req
+            .extensions()
+            .get::<registration::Peer>()
+            .map(|p| p.0)
+            .ok_or_else(unavailable)?;
+        let method = req.method().clone();
+        let path = req.uri().path().to_owned();
+        let handle = path
+            .strip_prefix("/v1/username/link/")
+            .map(|h| {
+                let mut out = [0u8; 16];
+                hex::decode_to_slice(h, &mut out)
+                    .map(|()| out)
+                    .map_err(|_| Refusal::Status(StatusCode::NOT_FOUND))
+            })
+            .transpose()?;
+        let (device, body) = self.authenticate_json(req).await?;
+        let account = self
+            .registry
+            .device(&device)
+            .await
+            .map_err(|_| unavailable())?
+            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?
+            .account;
+        let (r, hot) = (self.registry.as_ref(), &self.hot);
+        let done = |res: Result<(), songbird_accounts::RegistryError>| match res {
+            Ok(()) => Ok(empty(StatusCode::NO_CONTENT)),
+            Err(_) => Err(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE)),
+        };
+        let out = match (&method, path.as_str(), handle) {
+            (&Method::PUT, "/v1/username", None) => u.claim(r, hot, &account, &body).await,
+            (&Method::DELETE, "/v1/username", None) => {
+                return done(r.delete_username(&account).await);
+            }
+            (&Method::POST, "/v1/username/lookup", None) => {
+                u.lookup(r, hot, &account, peer, &body).await
+            }
+            (&Method::PUT, "/v1/username/key", None) => u.set_key(r, &account, &body).await,
+            (&Method::DELETE, "/v1/username/key", None) => {
+                return done(r.set_username_key(&account, None).await);
+            }
+            (&Method::PUT, "/v1/username/link", None) => u.put_link(r, &account, &body).await,
+            (&Method::DELETE, "/v1/username/link", None) => {
+                return done(r.delete_username_link(&account).await);
+            }
+            (&Method::GET, _, Some(h)) => u.get_link(r, hot, &account, peer, &h).await,
+            _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
+        };
+        Ok(username_outcome(out))
     }
 
     /// `/v1/invites`: signed like every device request.
@@ -817,6 +883,52 @@ async fn bounded_body(req: Request<Incoming>, max: usize) -> Result<Bytes, Refus
     Ok(body)
 }
 
+/// The HTTP answer for a username outcome.
+fn username_outcome(o: usernames::Outcome) -> Response<Body> {
+    use usernames::Outcome;
+    match o {
+        Outcome::Done => empty(StatusCode::NO_CONTENT),
+        Outcome::Found(a) => json(
+            StatusCode::OK,
+            &serde_json::json!({ "account": a.to_hex_unredacted() }),
+        ),
+        Outcome::Link(h) => json(
+            StatusCode::OK,
+            &serde_json::json!({ "handle": hex::encode(h) }),
+        ),
+        Outcome::Blob(b) => {
+            let mut r = Response::new(Full::new(b).map_err(|e| match e {}).boxed_unsync());
+            r.headers_mut().insert(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            );
+            r
+        }
+        Outcome::Malformed(what) => json(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({ "error": what }),
+        ),
+        Outcome::NotFound => empty(StatusCode::NOT_FOUND),
+        Outcome::Taken => json(
+            StatusCode::CONFLICT,
+            &serde_json::json!({ "error": "taken" }),
+        ),
+        Outcome::NoUsername => json(
+            StatusCode::CONFLICT,
+            &serde_json::json!({ "error": "no username" }),
+        ),
+        Outcome::Throttled(wait_us) => {
+            let mut r = empty(StatusCode::TOO_MANY_REQUESTS);
+            let secs = wait_us.div_ceil(1_000_000).max(1);
+            if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
+                r.headers_mut().insert(hyper::header::RETRY_AFTER, v);
+            }
+            r
+        }
+        Outcome::Unavailable => empty(StatusCode::SERVICE_UNAVAILABLE),
+    }
+}
+
 /// The HTTP answer for a registration outcome.
 fn outcome(o: registration::Outcome) -> Response<Body> {
     use registration::Outcome;
@@ -867,4 +979,17 @@ pub fn object_name(o: &ObjectKey) -> String {
     name.push_str("a/");
     name.push_str(&o.to_hex_unredacted());
     name
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, reason = "tests")]
+
+    /// Every metric name passes the telemetry layer's redaction rules (invariant 6): a refused
+    /// name stops the service at start-up.
+    #[test]
+    fn every_metric_name_is_accepted() {
+        let mut m = songbird_service::telemetry::Metrics::new("api", "test");
+        super::ApiMetrics::default().register(&mut m).unwrap();
+    }
 }

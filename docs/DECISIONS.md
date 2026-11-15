@@ -75,14 +75,89 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (24-hour soak, durable latency on the `ccx33`, the 2-hour RTO drill) run after every phase is finished.
 - Prompt 3, milestone 1 (report `docs/reports/P03-M1.md`, D-0048): gate **approved by the owner
   on 2026-11-15**, with its four threat-model §1 rows (account identity key and invite count;
-  invite code hashes; keyed IP-range throttle records; used challenge nonces). Next: M2
-  (usernames).
+  invite code hashes; keyed IP-range throttle records; used challenge nonces).
+- Prompt 3, milestone 2 (report `docs/reports/P03-M2.md`, D-0049): gate **approved by the owner
+  on 2026-11-15** ("Approve both"), with its four threat-model §1 rows (username hashes;
+  username key verifiers; username links; keyed throttle records). Next: M3 (key directory).
 - D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
   tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
   `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0049 — Prompt 3, milestone 2: unique usernames as Ristretto hashes with poksho proofs, a username key that never confirms existence, resettable links
+
+- Date: 2026-11-15
+- Status: accepted; built (report P03-M2); **gate approved by the owner on 2026-11-15** ("Approve
+  both"), with its four threat-model rows
+- Decided by: owner for the product choices (below); design by agent under the standing
+  instruction (D-0041)
+- Context: Prompt 3: "Usernames are changeable and found only by exact match. Evaluate
+  libsignal's username scheme (the server stores a hash plus a proof, never the username
+  itself) and adopt it unless a recorded reason says otherwise. Username lookups are
+  rate-limited per account and per IP range", plus WhatsApp's username key. D-0047: implement
+  Signal's protocols, do not link libsignal.
+- Owner's decisions (2026-11-15):
+  1. **Unique handles**, one person per name, as WhatsApp's. The owner first chose Signal's
+     `nickname.NN`, then asked how other companies and Proton would do it, and chose unique
+     handles "built Signal-grade underneath". The reasons, as put to the owner: the
+     discriminator buys little privacy (the hash cannot be salted, and two digits multiply a
+     guess by about 99), invites look-alike impersonation (`radu.42` and `radu.24`), and Discord
+     dropped discriminators in 2023 because people could not remember them; the username key
+     (WhatsApp's answer to enumeration) presumes unique names; WhatsApp switchers expect them.
+  2. **A missing or wrong username key answers exactly like "not found".**
+  3. **Resettable username links** are built.
+- Recorded reason for departing from libsignal's scheme: with unique handles there is no
+  discriminator, so libsignal's hash (three generators over nickname, discriminator and a
+  SHA-512 scalar) and its statement do not apply. Songbird keeps the construction and changes
+  only what the format forces:
+  - `hash = s·G`, `s = SHA-512("songbird.v1/username\0" || lower-cased name) mod l`, `G` squeezed
+    from libsignal's SHO under a Songbird label (nobody knows its discrete logarithm);
+  - the claim proof is a standard **poksho** proof (poksho's label, statement encoding,
+    transcript and nonce derivation) of `hash = s·G`.
+- Evidence of compatibility (libsignal at commit `8be00c2`, AGPL, built only in a scratch tool
+  outside the workspace, `tools/libsignal-vectors`):
+  - Before the format changed, this implementation with libsignal's own constants reproduced
+    libsignal's username hashes and proofs exactly: 12 of 12 (the SHO sequence, six names with
+    hash and proof at fixed randomness, five more hashes), proof nonces included.
+  - After: `Sho` matches libsignal's published vector and a longer sequence (tests); libsignal's
+    poksho produces, for Songbird's statement and randomness, the same generator, hash and proof
+    bytes as Songbird, and verifies Songbird's proof.
+- Design:
+  - **Format:** 3 to 32 ASCII letters, digits, `_`, `.`; starts with a letter; no `..`, no final
+    `.`; unique in lower case. ASCII only (no look-alike letters from other scripts).
+  - **Claims** (`PUT /v1/username`): proof checked, reserved names refused by hash, one
+    transaction (racing claims conflict and retry); the previous name is **held 30 days**,
+    naming no account, so nobody can grab it to pose as its owner; the link goes. Every attempt
+    spends a per-account budget (2 an hour, burst 5), so probing which names are taken is slow.
+  - **Lookups** (`POST /v1/username/lookup`, signed; the hash in the body, never a URL): exact
+    match; 120 an hour per account, 600 per IP range; one answer, 404, for unknown, held, key
+    missing, key wrong and budget spent; the registry reads the same rows whether or not the
+    name exists; a keyed lookup always runs one Argon2id check (against a dummy verifier when
+    nothing is to be checked) and always makes one atomic check-and-spend of the name's guessing
+    budget (a single Lua step, so concurrent guesses cannot share a token; found by the review).
+    An account being deleted is found by nobody.
+  - **Username key:** 4 to 10 digits; `salt || Argon2id(19 MiB, t = 2, secret = pepper)`; the
+    pepper and the throttle key by HKDF from `[api.usernames] secret` (secrets store). Key
+    guesses that find nothing: 1 an hour per username across all requesters, burst 10.
+  - **Links:** the server stores up to 256 bytes of ciphertext under a new random 16-byte handle
+    per upload (a reset), deleted with a username change or the account; it never sees the key.
+  - **Deletion:** account deletion holds the username (no account named) and deletes the link;
+    the worker's verification counts both; the worker sweeps holds that ended.
+  - No new dependency: `curve25519-dalek` (D-0048) with its default features still off; `argon2`
+    (D-0048) now also in `api`.
+- Evidence (Apple M5 Pro, macOS 27.2.1; compose stack under podman; report P03-M2):
+  `crates/keys` username tests (rules, tampering, a non-canonical scalar, case) and vectors;
+  `crates/accounts` live: unique, held, swept, 16 racing claims with one winner, keys, links,
+  deletion (3 of 3 runs); `services/api` live `usernames_live` (6), including keyed lookups at
+  the production Argon2id cost taking the same time whether or not the name exists (means
+  0.1916 s against 0.1926 s in a debug build, ratio 0.995); fuzz `username` (60 s, 653,381 runs,
+  nothing found).
+- Consequences: the server holds username hashes, which anyone can test guesses against; a
+  common name is found by trying it (recorded in the threat model). Name disputes and
+  impersonation by people are an abuse process (Prompt 11). Key transparency (M6) will publish
+  username hash to identity key, so a recycled name shows a new key.
 
 ## D-0048 — Prompt 3, milestone 1: registration with Argon2id proof of work, honest keys only, invites that record no social graph
 

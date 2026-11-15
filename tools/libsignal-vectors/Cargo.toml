@@ -1,0 +1,17 @@
+# Prints reference vectors from libsignal for Songbird's own implementations (D-0047, D-0049).
+# NOT part of the workspace or of any build: libsignal is AGPL-3.0-only and Songbird never links
+# it. Run by hand against a libsignal checkout next to this repository (see README.md).
+[package]
+name = "libsignal-vectors"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+usernames = { path = "../../../libsignal/rust/usernames" }
+poksho = { path = "../../../libsignal/rust/poksho" }
+curve25519-dalek = { version = "5.0", features = ["digest"] }
+sha2 = "0.11"
+hex = "0.4"
+
+[workspace]

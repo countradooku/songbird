@@ -123,3 +123,23 @@ explicit; none affects existing accounts or messages.
   prints the codes once (hand them over through a channel you trust); the audit log records the
   count only. `songbird-admin invites grant --account <hex> --add N` gives one account more.
 - Verification: `api_registrations` rising; a test registration with a fresh code answers 201.
+
+## Usernames: lookups or claims failing (Prompt 3, M2, D-0049)
+
+- Detection: `api_handle_throttled` rising (429s); 503s with `api_errors`; complaints that a
+  username "does not exist" while its owner says it does.
+- Causes and actions:
+  1. **`valkey-hot` unreachable**: every username request answers 503 (throttles fail closed).
+     Restore `valkey-hot`.
+  2. **Someone found by name is "not found"**: by design for a missing or wrong username key,
+     and for a username whose key-guessing budget someone spent (up to about ten hours). Ask the
+     owner to share a link or QR code meanwhile; there is no operator override (an override
+     would be an enumeration oracle).
+  3. **Key verifications saturated** (503 after a 2 s wait): check
+     `api_handle_guard_checks` for a campaign before raising `max_concurrent_key_checks` (each
+     holds `key.memory_kib`).
+  4. **A name taken by an impersonator**: add it to `[api.usernames] reserved` only for names
+     that would pose as the service; disputes between people are an abuse process (Prompt 11),
+     not a configuration change.
+- Rotating `[api.usernames] secret` invalidates every username key verifier (users set their
+  key again) and resets the throttles; do it only after a compromise of the secret.

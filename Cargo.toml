@@ -32,7 +32,7 @@ members = [
     "xtask",
 ]
 # Fuzz targets need nightly and libFuzzer; they live outside the workspace (see fuzz/README.md).
-exclude = ["fuzz"]
+exclude = ["fuzz", "tools/libsignal-vectors"]
 
 [workspace.package]
 version = "0.1.0"

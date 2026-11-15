@@ -434,3 +434,179 @@ async fn user_invites_spend_the_allowance_and_record_no_issuer() {
     r.delete_account_rows(&n.account).await.unwrap();
     assert!(r.device(&invitee.device).await.unwrap().is_some());
 }
+
+// ----- Prompt 3, M2: usernames -----
+
+fn uname() -> [u8; 32] {
+    code()
+}
+
+async fn registered(r: &Registry) -> NewAccount {
+    let n = new_account(0);
+    r.register(&n, None).await.unwrap();
+    n
+}
+
+#[tokio::test]
+async fn usernames_are_unique_held_after_release_and_swept() {
+    let Some(r) = registry().await else { return };
+    let (a, b) = (registered(&r).await, registered(&r).await);
+    let (h1, h2) = (uname(), uname());
+    assert_eq!(r.lookup_username(&h1).await.unwrap(), None);
+    r.set_username(&a.account, &h1).await.unwrap();
+    // Setting it again changes nothing; another account cannot take it.
+    r.set_username(&a.account, &h1).await.unwrap();
+    assert!(matches!(
+        r.set_username(&b.account, &h1).await,
+        Err(RegistryError::Taken)
+    ));
+    let row = r.lookup_username(&h1).await.unwrap().unwrap();
+    assert_eq!((row.account, row.key), (a.account, None));
+    assert_eq!(r.username_of(&a.account).await.unwrap(), Some(h1));
+    // A changes to h2: h1 is held, for everyone (A included) and found by nobody.
+    r.set_username(&a.account, &h2).await.unwrap();
+    assert_eq!(r.lookup_username(&h1).await.unwrap(), None);
+    assert!(matches!(
+        r.set_username(&b.account, &h1).await,
+        Err(RegistryError::Taken)
+    ));
+    assert!(matches!(
+        r.set_username(&a.account, &h1).await,
+        Err(RegistryError::Taken)
+    ));
+    // The held row names nobody.
+    let held = r
+        .db()
+        .query1(
+            "SELECT VALUE account FROM ONLY username:[$h];",
+            vec![(
+                "h".into(),
+                songbird_surreal::Value::Bytes(bytes::Bytes::copy_from_slice(&h1)),
+            )],
+        )
+        .await
+        .unwrap();
+    assert!(
+        held.is_absent() || matches!(held, songbird_surreal::Value::Null),
+        "{held:?}"
+    );
+    // Once the hold ends, B may take it, and the sweep removes ended holds.
+    r.db()
+        .exec(
+            "UPDATE username:[$h] SET held_until = time::now() - 1s RETURN NONE;",
+            vec![(
+                "h".into(),
+                songbird_surreal::Value::Bytes(bytes::Bytes::copy_from_slice(&h1)),
+            )],
+        )
+        .await
+        .unwrap();
+    r.set_username(&b.account, &h1).await.unwrap();
+    assert_eq!(
+        r.lookup_username(&h1).await.unwrap().unwrap().account,
+        b.account
+    );
+    // Delete: held again, then swept once ended.
+    r.delete_username(&b.account).await.unwrap();
+    assert_eq!(r.lookup_username(&h1).await.unwrap(), None);
+    assert_eq!(r.username_of(&b.account).await.unwrap(), None);
+    r.db()
+        .exec(
+            "UPDATE username SET held_until = time::now() - 1s WHERE account = NONE RETURN NONE;",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    // h1 (released by B) is the only held username; h2 is still A's.
+    assert_eq!(r.delete_released_usernames(100).await.unwrap(), 1);
+    assert_eq!(
+        r.lookup_username(&h2).await.unwrap().unwrap().account,
+        a.account
+    );
+}
+
+#[tokio::test]
+async fn racing_claims_for_one_username_give_it_to_one_account() {
+    let Some(r) = registry().await else { return };
+    let r = std::sync::Arc::new(r);
+    let mut accounts = Vec::new();
+    for _ in 0..16 {
+        accounts.push(registered(&r).await.account);
+    }
+    let h = uname();
+    let tasks: Vec<_> = accounts
+        .iter()
+        .map(|a| {
+            let (r, a) = (std::sync::Arc::clone(&r), *a);
+            tokio::spawn(async move { r.set_username(&a, &h).await.map(|()| a) })
+        })
+        .collect();
+    let mut winners = Vec::new();
+    for t in tasks {
+        match t.await.unwrap() {
+            Ok(a) => winners.push(a),
+            Err(RegistryError::Taken) => {}
+            Err(e) => panic!("unexpected {e:?}"),
+        }
+    }
+    assert_eq!(winners.len(), 1);
+    assert_eq!(
+        r.lookup_username(&h).await.unwrap().unwrap().account,
+        winners[0]
+    );
+}
+
+#[tokio::test]
+async fn keys_links_and_deletion() {
+    let Some(r) = registry().await else { return };
+    let a = registered(&r).await;
+    // A link needs a username.
+    assert!(matches!(
+        r.put_username_link(&a.account, &[1; 16], b"ciphertext")
+            .await,
+        Err(RegistryError::NoUsername)
+    ));
+    let h = uname();
+    r.set_username(&a.account, &h).await.unwrap();
+    r.set_username_key(&a.account, Some(b"salt-and-verifier"))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.lookup_username(&h).await.unwrap().unwrap().key.as_deref(),
+        Some(&b"salt-and-verifier"[..])
+    );
+    r.put_username_link(&a.account, &[1; 16], b"first")
+        .await
+        .unwrap();
+    assert_eq!(
+        r.username_link(&[1; 16]).await.unwrap().as_deref(),
+        Some(&b"first"[..])
+    );
+    // A reset: the old handle stops working.
+    r.put_username_link(&a.account, &[2; 16], b"second")
+        .await
+        .unwrap();
+    assert_eq!(r.username_link(&[1; 16]).await.unwrap(), None);
+    assert_eq!(
+        r.username_link(&[2; 16]).await.unwrap().as_deref(),
+        Some(&b"second"[..])
+    );
+    // A username change drops the link (its ciphertext names the old username).
+    r.set_username(&a.account, &uname()).await.unwrap();
+    assert_eq!(r.username_link(&[2; 16]).await.unwrap(), None);
+    r.put_username_link(&a.account, &[3; 16], b"third")
+        .await
+        .unwrap();
+    r.set_username_key(&a.account, None).await.unwrap();
+    // Once deletion starts, nobody finds the account by its username.
+    let current = r.username_of(&a.account).await.unwrap().unwrap();
+    assert!(r.lookup_username(&current).await.unwrap().is_some());
+    let job = Job::new(Work::DeleteAccount { account: a.account }).unwrap();
+    assert!(r.begin_account_deletion(&a.account, &job).await.unwrap());
+    assert_eq!(r.lookup_username(&current).await.unwrap(), None);
+    // Deletion: nothing names the account any more.
+    r.delete_account_rows(&a.account).await.unwrap();
+    let left = r.remnants(&a.account, &[a.device], &[]).await.unwrap();
+    assert!(left.is_empty(), "{left:?}");
+    assert_eq!(r.username_link(&[3; 16]).await.unwrap(), None);
+}

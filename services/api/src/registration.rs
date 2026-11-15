@@ -50,7 +50,7 @@ use songbird_types::{AccountId, DeviceId};
 use songbird_valkey::ValkeyConn;
 use tokio::sync::Semaphore;
 
-use crate::config::{RegistrationSettings, ThrottleSettings};
+use crate::config::RegistrationSettings;
 
 /// The client's address, put on every request by the listener.
 #[derive(Debug, Clone, Copy)]
@@ -135,15 +135,15 @@ fn now_ms() -> u64 {
 /// The IP range an address belongs to: family byte, then the address masked to the prefix.
 /// IPv4-mapped IPv6 addresses count as IPv4.
 #[must_use]
-pub fn range_of(ip: IpAddr, t: &ThrottleSettings) -> [u8; 17] {
+pub fn range_of(ip: IpAddr, ipv4_prefix: u8, ipv6_prefix: u8) -> [u8; 17] {
     let ip = match ip {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
         v4 @ IpAddr::V4(_) => v4,
     };
     let mut out = [0u8; 17];
     let (family, bytes, prefix): (u8, Vec<u8>, u8) = match ip {
-        IpAddr::V4(a) => (4, a.octets().to_vec(), t.ipv4_prefix),
-        IpAddr::V6(a) => (6, a.octets().to_vec(), t.ipv6_prefix),
+        IpAddr::V4(a) => (4, a.octets().to_vec(), ipv4_prefix),
+        IpAddr::V6(a) => (6, a.octets().to_vec(), ipv6_prefix),
     };
     out[0] = family;
     let mut left = u32::from(prefix);
@@ -260,7 +260,7 @@ impl Registration {
     }
 
     /// Spends one unit of a budget (`peek`: only asks). 0 if allowed, else microseconds to wait.
-    async fn gcra(
+    pub(crate) async fn gcra(
         hot: &ValkeyConn,
         record: &str,
         per_hour: u32,
@@ -290,7 +290,7 @@ impl Registration {
     /// `POST /v1/registration/challenge`.
     pub async fn challenge(&self, hot: &ValkeyConn, peer: IpAddr) -> Outcome {
         let t = self.settings.throttle;
-        let range = range_of(peer, &t);
+        let range = range_of(peer, t.ipv4_prefix, t.ipv6_prefix);
         match Self::gcra(
             hot,
             &self.record("c", &range),
@@ -369,7 +369,11 @@ impl Registration {
         // 1. Decode.
         let req = RegisterRequest::decode(body).map_err(|_| Outcome::Malformed("request"))?;
         // 2. Throttles.
-        let range = range_of(peer, &self.settings.throttle);
+        let range = range_of(
+            peer,
+            self.settings.throttle.ipv4_prefix,
+            self.settings.throttle.ipv6_prefix,
+        );
         self.throttle(hot, &range).await?;
         // Without a code there is nothing to check: refused before any work.
         if self.settings.invite_only && req.invite.is_none() {
@@ -591,6 +595,7 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     use super::*;
+    use crate::config::ThrottleSettings;
 
     #[test]
     fn formats_agree_across_crates() {
@@ -601,20 +606,36 @@ mod tests {
     #[test]
     fn ranges_mask_to_the_prefix_and_fold_mapped_addresses() {
         let t = ThrottleSettings::default();
-        let a = range_of(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)), &t);
-        let b = range_of(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 200)), &t);
-        let c = range_of(IpAddr::V4(Ipv4Addr::new(192, 0, 3, 7)), &t);
+        let a = range_of(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
+            t.ipv4_prefix,
+            t.ipv6_prefix,
+        );
+        let b = range_of(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 200)),
+            t.ipv4_prefix,
+            t.ipv6_prefix,
+        );
+        let c = range_of(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 3, 7)),
+            t.ipv4_prefix,
+            t.ipv6_prefix,
+        );
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(&a[..5], &[4, 192, 0, 2, 0]);
-        let mapped = range_of(IpAddr::V6(Ipv4Addr::new(192, 0, 2, 9).to_ipv6_mapped()), &t);
+        let mapped = range_of(
+            IpAddr::V6(Ipv4Addr::new(192, 0, 2, 9).to_ipv6_mapped()),
+            t.ipv4_prefix,
+            t.ipv6_prefix,
+        );
         assert_eq!(mapped, a);
         let x: Ipv6Addr = "2001:db8:1234:5678::1".parse().unwrap();
         let y: Ipv6Addr = "2001:db8:1234:ffff::2".parse().unwrap();
         let z: Ipv6Addr = "2001:db8:1235::1".parse().unwrap();
-        let rx = range_of(IpAddr::V6(x), &t);
-        assert_eq!(rx, range_of(IpAddr::V6(y), &t));
-        assert_ne!(rx, range_of(IpAddr::V6(z), &t));
+        let rx = range_of(IpAddr::V6(x), t.ipv4_prefix, t.ipv6_prefix);
+        assert_eq!(rx, range_of(IpAddr::V6(y), t.ipv4_prefix, t.ipv6_prefix));
+        assert_ne!(rx, range_of(IpAddr::V6(z), t.ipv4_prefix, t.ipv6_prefix));
         assert_eq!(rx[0], 6);
         assert!(rx[7..].iter().all(|&b| b == 0));
         // An odd prefix keeps only its top bits.
@@ -623,7 +644,11 @@ mod tests {
             ..t
         };
         assert_eq!(
-            &range_of(IpAddr::V4(Ipv4Addr::new(10, 1, 0xFF, 1)), &odd)[..5],
+            &range_of(
+                IpAddr::V4(Ipv4Addr::new(10, 1, 0xFF, 1)),
+                odd.ipv4_prefix,
+                odd.ipv6_prefix
+            )[..5],
             &[4, 10, 1, 0xF0, 0]
         );
     }
@@ -645,10 +670,7 @@ mod tests {
             RegistrationMetrics::default(),
         )
         .unwrap();
-        let range = range_of(
-            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-            &ThrottleSettings::default(),
-        );
+        let range = range_of(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 24, 48);
         let rec = r.record("r", &range);
         assert_eq!(rec.len(), 36);
         assert!(!rec.contains("c00002"));

@@ -3148,6 +3148,7 @@ version = "0.1.0"
 name = "songbird-api"
 version = "0.1.0"
 dependencies = [
+ "argon2",
  "aws-lc-rs",
  "bytes",
  "futures-core",
@@ -3179,6 +3180,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -3310,6 +3312,7 @@ dependencies = [
  "curve25519-dalek",
  "hex",
  "proptest",
+ "thiserror",
 ]
 
 [[package]]

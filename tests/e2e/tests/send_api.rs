@@ -199,6 +199,7 @@ async fn stack(limits: Limits, sends_per_sec: u32, send_burst: u32) -> Option<St
         metrics,
         messages: Some(messages),
         registration: None,
+        usernames: None,
     });
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_addr = api_listener.local_addr().unwrap();

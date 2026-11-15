@@ -221,6 +221,9 @@ pub struct Usernames {
     pepper: Zeroizing<[u8; 32]>,
     throttle_key: hmac::Key,
     reserved: HashSet<[u8; HASH_LEN]>,
+    /// Checked against when a keyed lookup has no verifier to check, so every keyed lookup costs
+    /// one Argon2id run. Random per process.
+    dummy: [u8; VERIFIER_LEN],
     checks: Arc<Semaphore>,
     /// Counters.
     pub metrics: UsernameMetrics,
@@ -266,7 +269,10 @@ impl Usernames {
             0 => std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1)),
             n => n,
         };
+        let mut dummy = [0u8; VERIFIER_LEN];
+        getrandom::fill(&mut dummy).map_err(|_| "random source")?;
         Ok(Self {
+            dummy,
             pepper,
             throttle_key: hmac::Key::new(hmac::HMAC_SHA256, &throttle),
             reserved,
@@ -274,6 +280,12 @@ impl Usernames {
             settings,
             metrics,
         })
+    }
+
+    fn dummy_salt(&self) -> [u8; SALT_LEN] {
+        let mut salt = [0u8; SALT_LEN];
+        salt.copy_from_slice(self.dummy.get(..SALT_LEN).unwrap_or_default());
+        salt
     }
 
     fn record(&self, kind: &str, subject: &[u8]) -> String {
@@ -451,14 +463,16 @@ impl Usernames {
         row: Option<songbird_accounts::UsernameRow>,
         key: Zeroizing<String>,
     ) -> Outcome {
-        // The verifier to check against: the account's, or a fixed dummy of the same shape.
+        // The verifier to check against: the account's, or the random dummy of the same shape
+        // drawn at start-up (it matches no key: its output part is random bytes, not a hash).
         let stored = row.as_ref().and_then(|r| r.key.clone());
         let verifier: [u8; VERIFIER_LEN] = stored
             .as_deref()
             .and_then(|v| v.try_into().ok())
-            .unwrap_or([0; VERIFIER_LEN]);
-        let mut salt = [0u8; SALT_LEN];
-        salt.copy_from_slice(verifier.get(..SALT_LEN).unwrap_or(&[0; SALT_LEN]));
+            .unwrap_or(self.dummy);
+        let salt: [u8; SALT_LEN] = verifier
+            .split_first_chunk::<SALT_LEN>()
+            .map_or_else(|| self.dummy_salt(), |(s, _)| *s);
         self.metrics.key_checks.inc();
         let Some(derived) = self.derive(key, salt).await else {
             return Outcome::Unavailable;

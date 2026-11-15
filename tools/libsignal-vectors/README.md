@@ -8,7 +8,7 @@ byte-compatible. It is **not** in the workspace, CI never builds it, and nothing
 git clone https://github.com/signalapp/libsignal.git ../libsignal   # next to this repository
 cd tools/libsignal-vectors
 cargo run --release                     # SHO sequence; libsignal username hashes and proofs
-cargo run --release --bin songbird -- <generator> <hash> <proof>   # poksho checks Songbird's
+cargo run --release --bin songbird < ../../crates/keys/tests/username_vector.txt   # poksho checks Songbird's
 ```
 
 The username crate's `build.rs` needs `protoc` for an unrelated protobuf (username links);

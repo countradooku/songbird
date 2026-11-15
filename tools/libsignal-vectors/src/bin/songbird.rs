@@ -6,7 +6,10 @@ use poksho::{ShoApi, ShoHmacSha256, Statement};
 use sha2::{Digest, Sha512};
 
 fn main() {
-    let ours: Vec<String> = std::env::args().skip(1).collect();
+    // Songbird's vector line (generator, hash, proof) on stdin, as `username_vector.txt` holds it.
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).unwrap();
+    let ours: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
     let mut sho = ShoHmacSha256::new(b"songbird.v1/username-generator");
     let wide: [u8; 64] = sho.squeeze_and_ratchet(64).try_into().unwrap();
     let g = RistrettoPoint::from_uniform_bytes(&wide);

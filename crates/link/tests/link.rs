@@ -17,8 +17,14 @@ use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     PKCS_ECDSA_P256_SHA256,
 };
-use songbird_link::{Handler, LinkClient, LinkError, LinkStats, LinkTls, serve};
+use songbird_link::{
+    Admit, Handler, LinkClient, LinkError, LinkStats, LinkTls, serve, serve_admitting,
+};
 use tokio::sync::watch;
+
+/// Factor for wall-clock budgets: `cargo xtask sanitize` builds (`songbird_sanitizer`) run 5-15
+/// times slower; a test keeps its meaning, only the scale changes.
+const SLOW: u32 = if cfg!(songbird_sanitizer) { 10 } else { 1 };
 
 struct Ca {
     pem: String,
@@ -145,6 +151,56 @@ async fn other_components_and_other_cas_are_refused() {
     assert!(stats.refused.load(Ordering::Relaxed) >= 3);
 }
 
+/// A handler that answers with a fixed tag, to tell which one served a call.
+fn tagged(tag: &'static [u8]) -> Handler {
+    Arc::new(move |_req: Bytes| Box::pin(async move { Bytes::from_static(tag) }))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_admitted_kind_of_peer_gets_only_its_own_handler() {
+    let ca = ca();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop, stop_rx) = watch::channel(false);
+    let stats = Arc::new(LinkStats::default());
+    tokio::spawn(serve_admitting(
+        listener,
+        leaf(&ca, &ca, B, B),
+        vec![
+            Admit {
+                prefix: "delivery.".into(),
+                handler: tagged(b"all"),
+            },
+            Admit {
+                prefix: "api.".into(),
+                handler: tagged(b"store-only"),
+            },
+            // No dot: would admit `pushy.` and `push.` alike; dropped, admits nobody.
+            Admit {
+                prefix: "push".into(),
+                handler: tagged(b"wrong"),
+            },
+        ],
+        Arc::clone(&stats),
+        stop_rx,
+    ));
+    let call = |name: &str| {
+        let c = LinkClient::new(addr, B, leaf(&ca, &ca, name, name));
+        async move { c.call(b"x", Duration::from_secs(2)).await }
+    };
+    assert_eq!(&call(A).await.unwrap()[..], b"all");
+    assert_eq!(
+        &call("api.x.songbird.internal").await.unwrap()[..],
+        b"store-only"
+    );
+    assert!(call("push.x.songbird.internal").await.is_err());
+    assert!(call("worker.x.songbird.internal").await.is_err());
+    // An api certificate claiming a delivery name is refused, not upgraded.
+    let liar = LinkClient::new(addr, B, leaf(&ca, &ca, "api.x.songbird.internal", A));
+    assert!(liar.call(b"x", Duration::from_secs(2)).await.is_err());
+    let _ = stop.send(true);
+}
+
 fn ca_other() -> Ca {
     ca()
 }
@@ -170,9 +226,13 @@ async fn a_stopped_server_serves_nothing_more_even_on_open_connections() {
     // A stopped node (shut down, or crashed in tests) must not keep acknowledging work, such as
     // a key-store copy its owner would then count on.
     let _ = stop.send(true);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(100) * SLOW).await;
     // And the caller learns it at once, not when its timeout runs out.
     let t = std::time::Instant::now();
-    assert!(c.call(b"cd", Duration::from_secs(5)).await.is_err());
-    assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+    assert!(c.call(b"cd", Duration::from_secs(5) * SLOW).await.is_err());
+    assert!(
+        t.elapsed() < Duration::from_secs(1) * SLOW,
+        "{:?}",
+        t.elapsed()
+    );
 }

@@ -27,6 +27,8 @@ songbird-jobs.workspace = true
 songbird-s3.workspace = true
 songbird-valkey.workspace = true
 songbird-api = { path = "../../services/api" }
+songbird-send.workspace = true
+hyper.workspace = true
 songbird-worker = { path = "../../services/worker" }
 songbird-push = { path = "../../services/push" }
 songbird-push-providers = { workspace = true, features = ["test-support"] }

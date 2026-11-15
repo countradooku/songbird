@@ -15,7 +15,9 @@
 //!   replays the log and fences the old writer.
 //! - **Rebalancing**: an owner hands a partition to the node that should own it once that node
 //!   holds a full copy (one partition per round), so a node that joins takes its share.
-//! - Everything crosses nodes over node links (mutual TLS, `delivery.` identities only).
+//! - Everything crosses nodes over node links (mutual TLS, internal CA). Delivery nodes
+//!   (`delivery.`) may ask for every operation; nodes that only send (`api.`, when listed in
+//!   [`ClusterConfig::senders`], D-0044) may ask for one: the store of a send.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -56,6 +58,10 @@ pub struct ClusterConfig {
     /// This node's failure domain (a zone or rack, `[a-z0-9-]`, empty for none): a partition's
     /// second standby is in a zone neither its owner nor its first standby is in.
     pub zone: String,
+    /// Certificate-name prefixes of nodes that only send (`api.`, D-0044), admitted to this
+    /// node's link listener for one request, the store of a send; anything else they ask is
+    /// refused and counted. Empty: delivery nodes only. `delivery.` here is ignored.
+    pub senders: Vec<String>,
 }
 
 impl std::fmt::Debug for ClusterConfig {
@@ -71,11 +77,11 @@ const STANDBYS: usize = 2;
 
 /// A live node.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Member {
-    id: u64,
+pub(crate) struct Member {
+    pub(crate) id: u64,
     zone: String,
-    name: String,
-    addr: SocketAddr,
+    pub(crate) name: String,
+    pub(crate) addr: SocketAddr,
 }
 
 impl Member {
@@ -83,7 +89,7 @@ impl Member {
         format!("{:016x}|{}|{}|{}", self.id, self.zone, self.name, self.addr)
     }
 
-    fn decode(s: &str) -> Option<Self> {
+    pub(crate) fn decode(s: &str) -> Option<Self> {
         let mut it = s.splitn(4, '|');
         let id = u64::from_str_radix(it.next()?, 16).ok()?;
         let zone = it.next()?.to_owned();
@@ -153,9 +159,9 @@ fn standbys(members: &[Member], p: u32, owner: u64) -> Vec<&Member> {
 }
 
 /// A node link to another member, as a [`Peer`].
-struct LinkPeer {
-    client: LinkClient,
-    timeout: Duration,
+pub(crate) struct LinkPeer {
+    pub(crate) client: LinkClient,
+    pub(crate) timeout: Duration,
 }
 
 impl Peer for LinkPeer {
@@ -368,6 +374,8 @@ pub(crate) struct Cluster {
     /// When this node last found its registration gone (Valkey lost its data).
     reset_at: Mutex<Option<Instant>>,
     link_stats: Arc<LinkStats>,
+    /// Requests from send-only nodes refused for asking more than a store.
+    sender_refused: std::sync::atomic::AtomicU64,
     stop: watch::Sender<bool>,
 }
 
@@ -462,14 +470,23 @@ impl Prepared {
             joined: std::sync::atomic::AtomicBool::new(false),
             reset_at: Mutex::new(None),
             link_stats: Arc::new(LinkStats::default()),
+            sender_refused: std::sync::atomic::AtomicU64::new(0),
             stop,
         });
-        let handler = Cluster::handler(&cluster);
-        tokio::spawn(songbird_link::serve(
+        let mut admit = vec![songbird_link::Admit {
+            prefix: "delivery.".into(),
+            handler: Cluster::handler(&cluster),
+        }];
+        for prefix in self.cfg.senders.iter().filter(|p| *p != "delivery.") {
+            admit.push(songbird_link::Admit {
+                prefix: prefix.clone(),
+                handler: Cluster::sender_handler(&cluster),
+            });
+        }
+        tokio::spawn(songbird_link::serve_admitting(
             listener,
             self.cfg.link_tls,
-            "delivery.".into(),
-            handler,
+            admit,
             Arc::clone(&cluster.link_stats),
             stop_rx.clone(),
         ));
@@ -522,6 +539,34 @@ impl Cluster {
                 resp.encode()
             })
         })
+    }
+
+    /// Serves nodes that only send (D-0044): the store of a send, nothing else. Fetches, ACKs,
+    /// forgets, key-store copies and the rest are refused (and counted), so a compromised `api`
+    /// can neither read nor delete anyone's messages, nor touch a key store. `PartDone` is
+    /// refused too: a sender leaves a multi-partition send's bookkeeping to the home partition's
+    /// re-driver, so it cannot mark another send's part stored before it is.
+    fn sender_handler(cluster: &Arc<Self>) -> Handler {
+        let c = Arc::clone(cluster);
+        Arc::new(move |raw: Bytes| {
+            let c = Arc::clone(&c);
+            Box::pin(async move {
+                let resp = if let Some(req @ Request::Store { .. }) = Request::decode(&raw) {
+                    partitions::serve(&c.ctx.parts, req).await
+                } else {
+                    c.sender_refused
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Response::Done(Err(MailboxError::Unavailable))
+                };
+                resp.encode()
+            })
+        })
+    }
+
+    /// Requests from send-only nodes refused for asking more than a store.
+    pub(crate) fn sender_refused(&self) -> u64 {
+        self.sender_refused
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     async fn apply_replica(

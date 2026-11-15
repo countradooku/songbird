@@ -66,6 +66,27 @@ impl ApiClient {
         self.exchange(b, body).await
     }
 
+    /// `PUT /v1/messages` with a `Send` frame (signed): the HTTP status and, on a 200, the
+    /// `SendResult` it carries (request ID and status).
+    ///
+    /// # Errors
+    /// Connection or protocol failure.
+    pub async fn put_message(
+        &self,
+        frame: &songbird_proto::frame::SendFrame,
+    ) -> Result<(u16, Option<(u32, songbird_proto::frame::SendStatus)>), hyper::Error> {
+        let body = songbird_proto::ClientFrame::Send(frame.clone()).to_bytes();
+        let (status, reply) = self.send("PUT", "/v1/messages", Some(&body)).await?;
+        let result =
+            match songbird_proto::ServerFrame::decode(&reply, &songbird_proto::Limits::DEFAULT) {
+                Ok(songbird_proto::ServerFrame::SendResult { req_id, status }) => {
+                    Some((req_id, status))
+                }
+                _ => None,
+            };
+        Ok((status, result))
+    }
+
     /// Uploads an attachment body (unsigned content, exact length).
     ///
     /// # Errors

@@ -1,5 +1,9 @@
 //! End-to-end: sensitive callsites never reach the writer (invariant 6).
-//! nextest runs each test in its own process, so callsite interest caching cannot leak between them.
+//!
+//! The panic-mode test lives in `redaction_panic.rs`, its own test binary and therefore its own
+//! process under any runner. tracing's callsite registry is process-wide: registering a dispatcher
+//! re-asks every live dispatcher, on every thread, about every known callsite, so a panic-mode
+//! layer running beside this test under libtest's threads panics inside this test.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -56,13 +60,4 @@ fn sensitive_events_and_spans_are_dropped() {
     assert!(!out.contains("203.0.113.9"), "{out}");
     assert!(!out.contains("refused event"), "{out}");
     assert!(songbird_telemetry::redaction::refused_callsites() >= 3);
-}
-
-#[test]
-#[should_panic(expected = "invariant 6")]
-fn panic_mode_fails_loudly() {
-    let buf = Buf::default();
-    tracing::subscriber::with_default(subscriber(&buf, RedactionMode::Panic), || {
-        tracing::warn!(password = "x", "nope");
-    });
 }

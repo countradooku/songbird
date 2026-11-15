@@ -3084,7 +3084,11 @@ dependencies = [
  "songbird-accounts",
  "songbird-jobs",
  "songbird-link",
+ "songbird-mailbox",
+ "songbird-proto",
+ "songbird-router",
  "songbird-s3",
+ "songbird-send",
  "songbird-service",
  "songbird-surreal",
  "songbird-types",
@@ -3126,7 +3130,6 @@ dependencies = [
 name = "songbird-delivery"
 version = "0.1.0"
 dependencies = [
- "arc-swap",
  "aws-lc-rs",
  "bytes",
  "futures-core",
@@ -3148,6 +3151,7 @@ dependencies = [
  "songbird-proto",
  "songbird-router",
  "songbird-runtime",
+ "songbird-send",
  "songbird-service",
  "songbird-surreal",
  "songbird-types",
@@ -3155,7 +3159,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-rustls",
- "toml",
  "tracing",
 ]
 
@@ -3168,6 +3171,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "hex",
+ "hyper",
  "rcgen",
  "redis",
  "rustls",
@@ -3186,6 +3190,7 @@ dependencies = [
  "songbird-push-providers",
  "songbird-router",
  "songbird-s3",
+ "songbird-send",
  "songbird-service",
  "songbird-surreal",
  "songbird-telemetry",
@@ -3402,6 +3407,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "songbird-send"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "aws-lc-rs",
+ "bytes",
+ "getrandom 0.4.3",
+ "hex",
+ "serde",
+ "songbird-accounts",
+ "songbird-jobs",
+ "songbird-mailbox",
+ "songbird-proto",
+ "songbird-router",
+ "songbird-service",
+ "songbird-types",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "songbird-service"
 version = "0.1.0"
 dependencies = [
@@ -3425,6 +3454,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "sockudo-ws",
+ "songbird-alloc-count",
  "songbird-types",
  "thiserror",
  "tokio",

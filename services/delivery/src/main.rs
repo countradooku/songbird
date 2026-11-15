@@ -27,7 +27,8 @@ use tokio::sync::watch;
 
 // mimalloc (master prompt §4). `--features system-allocator` builds with the system allocator
 // instead, only to measure the two against each other (M7, D-0043).
-#[cfg(not(feature = "system-allocator"))]
+// Sanitizer builds keep the system allocator too: ASan and TSan see only allocations they intercept.
+#[cfg(not(any(feature = "system-allocator", songbird_sanitizer)))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -114,6 +115,7 @@ fn cluster_config(
         valkey_tls_client: conn.tls_client,
         lease_ttl: Duration::from_millis(c.lease_ttl_ms),
         zone: c.zone.clone(),
+        senders: c.senders.clone(),
     })
 }
 
@@ -486,12 +488,12 @@ async fn start_pusher(
         songbird_jobs::QueueConfig::new("delivery".into()),
     )
     .await?;
-    let (pusher, rx) = Pusher::new(metrics.clone());
+    let (pusher, rx) = Pusher::new(metrics.push());
     let task = tokio::spawn(songbird_delivery::push::run(
         Arc::new(queue),
         rx,
         debounce,
-        metrics.clone(),
+        metrics.push(),
         stop,
     ));
     tracing::info!("push jobs enabled");

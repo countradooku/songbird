@@ -1,6 +1,6 @@
 //! Push jobs for offline devices (D-0036).
 //!
-//! When a stored envelope's device has no session anywhere, the session calls
+//! When a stored envelope's device has no session anywhere, the send path calls
 //! [`Pusher::offline`], which never blocks and never touches Valkey: it puts the device in a
 //! bounded channel. One task per process debounces (at most one job per device per window: a
 //! burst of messages is one wake-up) and adds the jobs to the queue in pipelined batches. If the
@@ -13,11 +13,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use songbird_jobs::{Job, Queue, Work};
+use songbird_service::telemetry::sharded::ShardedCounter as Counter;
 use songbird_types::DeviceId;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
-
-use crate::DeliveryMetrics;
 
 /// Wake-ups waiting for the batching task.
 const BUFFER: usize = 65_536;
@@ -26,11 +25,21 @@ const BATCH: usize = 512;
 /// Debounce entries are pruned when the map grows past this.
 const PRUNE_ABOVE: usize = 100_000;
 
-/// The sessions' handle. Cheap to clone.
+/// Push counters. Clones share their counts (`delivery` passes its own, so metric names stay).
+#[derive(Debug, Clone, Default)]
+pub struct PushMetrics {
+    /// Push jobs enqueued (after debouncing).
+    pub jobs: Counter,
+    /// Wake-ups dropped (buffer full or job queue unreachable; the message is safe in the
+    /// mailbox).
+    pub dropped: Counter,
+}
+
+/// The senders' handle. Cheap to clone.
 #[derive(Debug, Clone)]
 pub struct Pusher {
     tx: Option<mpsc::Sender<DeviceId>>,
-    metrics: DeliveryMetrics,
+    metrics: PushMetrics,
 }
 
 impl Pusher {
@@ -39,13 +48,13 @@ impl Pusher {
     pub fn disabled() -> Self {
         Self {
             tx: None,
-            metrics: DeliveryMetrics::default(),
+            metrics: PushMetrics::default(),
         }
     }
 
     /// A pusher feeding a task started with [`run`].
     #[must_use]
-    pub fn new(metrics: DeliveryMetrics) -> (Self, mpsc::Receiver<DeviceId>) {
+    pub fn new(metrics: PushMetrics) -> (Self, mpsc::Receiver<DeviceId>) {
         let (tx, rx) = mpsc::channel(BUFFER);
         (
             Self {
@@ -61,7 +70,7 @@ impl Pusher {
         if let Some(tx) = &self.tx
             && tx.try_send(device).is_err()
         {
-            self.metrics.push_dropped.inc();
+            self.metrics.dropped.inc();
         }
     }
 }
@@ -71,7 +80,7 @@ pub async fn run(
     queue: Arc<Queue>,
     mut rx: mpsc::Receiver<DeviceId>,
     debounce: Duration,
-    metrics: DeliveryMetrics,
+    metrics: PushMetrics,
     mut stop: watch::Receiver<bool>,
 ) {
     // Randomly seeded SipHash: keys are device IDs, which clients choose to target.
@@ -109,9 +118,9 @@ pub async fn run(
         if !batch.is_empty() {
             let n = u64::try_from(batch.len()).unwrap_or(u64::MAX);
             match queue.enqueue(&batch).await {
-                Ok(()) => metrics.push_jobs.inc_by(n),
+                Ok(()) => metrics.jobs.inc_by(n),
                 Err(e) => {
-                    metrics.push_dropped.inc_by(n);
+                    metrics.dropped.inc_by(n);
                     tracing::warn!(error = %e, "push jobs dropped: job queue unavailable");
                     // Let these devices be tried again on their next message.
                     for j in &batch {

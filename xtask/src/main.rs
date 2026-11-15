@@ -240,25 +240,59 @@ fn host_triple() -> Result<String> {
 
 fn sanitizers() -> Result {
     let target = host_triple()?;
+    // Narrow, reviewed suppressions only (see the file); an absolute path because each test
+    // binary runs in its own crate's directory.
+    let supp = std::env::current_dir()
+        .map_err(|e| e.to_string())?
+        .join("xtask/tsan-suppressions.txt");
+    if !supp.is_file() {
+        return Err(format!("{} missing", supp.display()));
+    }
+    let tsan_options = format!("halt_on_error=1 suppressions=\"{}\"", supp.display());
+    let mut failed = Vec::new();
     for san in ["address", "thread"] {
         eprintln!("--- -Zsanitizer={san}");
-        let flags = format!("-Zsanitizer={san}");
-        run(cargo_nightly()
+        // `songbird_sanitizer` swaps mimalloc for the system allocator: the sanitizer runtimes see
+        // only allocations they intercept, and mimalloc's uninstrumented free lists read as races.
+        let flags = format!("-Zsanitizer={san} --cfg songbird_sanitizer");
+        let dir = format!("target/san-{san}");
+        // Every sanitizer runs even when the one before it failed.
+        if let Err(e) = run(cargo_nightly()
             .args([
                 "test",
                 "--workspace",
                 "--lib",
                 "--tests",
+                // Report every failing test binary, not just the first one.
+                "--no-fail-fast",
                 "-Zbuild-std",
                 "--target",
                 &target,
             ])
             .env("RUSTFLAGS", &flags)
             .env("RUSTDOCFLAGS", &flags)
-            .env("CARGO_TARGET_DIR", format!("target/san-{san}"))
-            .env("TSAN_OPTIONS", "halt_on_error=1"))?;
+            .env("CARGO_TARGET_DIR", &dir)
+            .env("TSAN_OPTIONS", &tsan_options))
+        {
+            eprintln!("{e}");
+            failed.push(san);
+        }
+        // Each build-std tree is several gigabytes; two of them filled a hosted runner's disk
+        // (nightly run 43402308599). CI checkouts start clean, so nothing is lost there.
+        if std::env::var_os("CI").is_some() {
+            match std::fs::remove_dir_all(&dir) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(format!("{dir}: {e}"));
+                }
+                _ => {}
+            }
+        }
     }
-    Ok(())
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("sanitizers failed: {}", failed.join(", ")))
+    }
 }
 
 fn miri() -> Result {
@@ -409,21 +443,32 @@ fn fuzz(args: &[String]) -> Result {
     if !has_cargo_tool("fuzz") {
         return Err("cargo fuzz not installed: cargo install --locked cargo-fuzz".into());
     }
+    // cargo-fuzz defaults `--target` to the triple it was itself compiled for, not the host's. A
+    // prebuilt static binary (cargo-binstall fetches `x86_64-unknown-linux-musl`) would build for
+    // musl, which has no std installed and refuses ASan. Name the host triple explicitly.
+    let target = host_triple()?;
     for t in &targets {
         eprintln!("--- fuzz {t} ({secs} s)");
         let corpus = format!("fuzz/corpus/{t}");
         std::fs::create_dir_all(&corpus).map_err(|e| e.to_string())?;
-        run(cargo_nightly().args([
-            "fuzz",
-            "run",
-            "--fuzz-dir",
-            "fuzz",
-            t,
-            &corpus,
-            "--",
-            &format!("-max_total_time={secs}"),
-            "-rss_limit_mb=2048",
-        ]))?;
+        // ASan keeps every distinct allocation stack forever; the recursive decoders produce
+        // distinct stacks without end, so full-depth stacks grew a 10-minute run past 2 GiB
+        // (nightly run 43618568338, live heap 25 MB). Ten frames keep reports useful and RSS flat.
+        run(cargo_nightly()
+            .env("ASAN_OPTIONS", "malloc_context_size=10")
+            .args([
+                "fuzz",
+                "run",
+                "--fuzz-dir",
+                "fuzz",
+                "--target",
+                &target,
+                t,
+                &corpus,
+                "--",
+                &format!("-max_total_time={secs}"),
+                "-rss_limit_mb=2048",
+            ]))?;
     }
     Ok(())
 }

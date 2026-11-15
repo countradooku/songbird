@@ -245,6 +245,7 @@ async fn account_deletion_is_verified_across_every_store() {
         push_index_secret: PUSH_INDEX,
         limits: songbird_api::config::AttachmentLimits::default(),
         metrics: ApiMetrics::default(),
+        messages: None,
     });
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_addr = api_listener.local_addr().unwrap();
@@ -506,7 +507,7 @@ async fn an_offline_device_receives_a_push_end_to_end() {
     let listener = tokio::net::TcpListener::bind(cfg.listen).await.unwrap();
     let addr = listener.local_addr().unwrap();
     let metrics = DeliveryMetrics::default();
-    let (pusher, rx) = songbird_delivery::Pusher::new(metrics.clone());
+    let (pusher, rx) = songbird_delivery::Pusher::new(metrics.push());
     let shared = Arc::new(
         Shared::new(
             cfg,
@@ -528,7 +529,7 @@ async fn an_offline_device_receives_a_push_end_to_end() {
         queue(&e, "gate-delivery").await,
         rx,
         Duration::from_secs(5),
-        metrics.clone(),
+        metrics.push(),
         stop_rx.clone(),
     ));
 
@@ -547,6 +548,7 @@ async fn an_offline_device_receives_a_push_end_to_end() {
         push_index_secret: PUSH_INDEX,
         limits: songbird_api::config::AttachmentLimits::default(),
         metrics: ApiMetrics::default(),
+        messages: None,
     });
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_addr = api_listener.local_addr().unwrap();
@@ -760,6 +762,7 @@ async fn m5_numbers() {
         push_index_secret: PUSH_INDEX,
         limits: songbird_api::config::AttachmentLimits::default(),
         metrics: ApiMetrics::default(),
+        messages: None,
     });
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_addr = l.local_addr().unwrap();

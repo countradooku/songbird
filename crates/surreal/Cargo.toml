@@ -22,6 +22,8 @@ tokio-rustls.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 hex.workspace = true
+# Counts the decoder's allocations in tests/cbor_alloc.rs (invariant 7).
+songbird-alloc-count.workspace = true
 
 [lints]
 workspace = true

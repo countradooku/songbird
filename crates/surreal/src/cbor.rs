@@ -2,7 +2,8 @@
 //!
 //! Encodes and decodes definite-length items only (the server writes definite lengths). The
 //! decoder is bounded (invariant 7): every length is checked against the bytes that remain
-//! before anything is allocated, nesting is limited to [`MAX_DEPTH`], and indefinite lengths,
+//! before anything is allocated, arrays and maps reserve at most a few KiB up front whatever count
+//! they claim, nesting is limited to [`MAX_DEPTH`], and indefinite lengths,
 //! reserved additional-info values and trailing bytes are rejected. Fuzzed by
 //! `fuzz/fuzz_targets/surreal_cbor.rs`.
 //!
@@ -14,6 +15,18 @@ use bytes::{BufMut, Bytes, BytesMut};
 
 /// Deepest nesting accepted when decoding.
 pub const MAX_DEPTH: usize = 64;
+
+/// Most bytes an array or map reserves up front from its claimed count. Larger ones grow as
+/// their items actually decode: a count is checked only against the bytes left, and one input byte
+/// becomes a whole [`Value`], so reserving the full count let nested headers multiply memory by
+/// `size_of::<Value>() * MAX_DEPTH` (found by the `surreal_cbor` fuzz target).
+const PREALLOC_BYTES: usize = 4096;
+
+/// Capacity to reserve for `claimed` items of type `T`.
+const fn prealloc<T>(claimed: usize) -> usize {
+    let cap = PREALLOC_BYTES / size_of::<T>();
+    if claimed < cap { claimed } else { cap }
+}
 
 /// SurrealDB `NONE` (tag 6 over `null`).
 pub const TAG_NONE: u64 = 6;
@@ -368,7 +381,7 @@ impl Reader<'_> {
             }
             4 => {
                 let n = self.len(info, 1)?;
-                let mut a = Vec::with_capacity(n);
+                let mut a = Vec::with_capacity(prealloc::<Value>(n));
                 for _ in 0..n {
                     a.push(self.value(depth + 1)?);
                 }
@@ -376,7 +389,7 @@ impl Reader<'_> {
             }
             5 => {
                 let n = self.len(info, 2)?;
-                let mut m = Vec::with_capacity(n);
+                let mut m = Vec::with_capacity(prealloc::<(String, Value)>(n));
                 for _ in 0..n {
                     let Value::Text(k) = self.value(depth + 1)? else {
                         return Err(CborError::Invalid);

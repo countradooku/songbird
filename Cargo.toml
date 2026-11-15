@@ -17,6 +17,7 @@ members = [
     "crates/accounts",
     "crates/s3",
     "crates/push-providers",
+    "crates/send",
     "services/delivery",
     "services/api",
     "services/push",
@@ -58,6 +59,7 @@ songbird-accounts = { path = "crates/accounts" }
 songbird-s3 = { path = "crates/s3" }
 songbird-delivery = { path = "services/delivery" }
 songbird-push-providers = { path = "crates/push-providers" }
+songbird-send = { path = "crates/send" }
 
 anyhow = "1.0.104"
 aws-lc-rs = { version = "1.19.0", default-features = false, features = ["aws-lc-sys"] }
@@ -119,6 +121,8 @@ unsafe_code = "forbid"
 missing_debug_implementations = "warn"
 unreachable_pub = "warn"
 unused_qualifications = "warn"
+# Set by `cargo xtask sanitize`: binaries keep the system allocator under ASan and TSan.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(songbird_sanitizer)"] }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

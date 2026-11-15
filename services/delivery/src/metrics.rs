@@ -73,6 +73,30 @@ pub struct DeliveryMetrics {
 }
 
 impl DeliveryMetrics {
+    /// The send path's counters, sharing these (so `delivery_*` names stay as they were).
+    #[must_use]
+    pub fn send(&self) -> songbird_send::SendMetrics {
+        songbird_send::SendMetrics {
+            sends_accepted: self.sends_accepted.clone(),
+            sends_replayed: self.sends_replayed.clone(),
+            sends_rejected: self.sends_rejected.clone(),
+            envelopes_stored: self.envelopes_stored.clone(),
+            routes_lagged: self.routes_lagged.clone(),
+            routes_offline: self.routes_offline.clone(),
+            mailbox_errors: self.mailbox_errors.clone(),
+            store_seconds: self.store_seconds.clone(),
+        }
+    }
+
+    /// Push counters, sharing these.
+    #[must_use]
+    pub fn push(&self) -> songbird_send::PushMetrics {
+        songbird_send::PushMetrics {
+            jobs: self.push_jobs.clone(),
+            dropped: self.push_dropped.clone(),
+        }
+    }
+
     /// Registers every metric.
     ///
     /// # Errors

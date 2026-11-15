@@ -31,8 +31,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 - Licence for the repository (README says all rights reserved until chosen).
 - Deployment access model: SSH as root with a key, through one bastion restricted to admin ranges
   (D-0014). Alternatives: WireGuard-only access, a non-root deploy user with sudo.
-- D-0045 (CI on GitHub-hosted runners for the public repository): merge branch `ci/hosted-public`
-  (it contains PR 37, which can then be closed); do **not** register the D-0039 runners for this
+- D-0045 (CI on GitHub-hosted runners for the public repository): branch `ci/hosted-public` merged
+  on 2026-11-15 (it carried PR 37, closed with it). Still the owner's: do **not** register the D-0039 runners for this
   repository; set the organization's Actions budget to $0 with "stop usage"; in the repository's
   Actions settings require approval for workflows from all external contributors (it was
   "first-time contributors" on 2026-11-14).
@@ -70,8 +70,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   service account exist outside the repository and were verified against Apple and Google;
   waking a real device waits for the apps; production keys go to SOPS at deployment.
 - D-0038: whether to store who invited whom for abuse handling (default: no, only per-user counts).
-- D-0037: when the `send` crate is extracted, `api` (and `calls`, `worker`) must reach Iggy partition
-  owners; admitting `api.` certificates to node links, or another route, is to be decided then.
+- D-0037 / D-0044 (report `docs/reports/P02-send.md`): **approved by the owner on 2026-11-14**
+  ("Approve both"): D-0044's routing (`api.` admitted to node links for the store of a send
+  only) and its two threat-model rows. Next: the Prompt 2 final gate.
 - D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
   tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
   `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment
@@ -186,6 +187,93 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     request.
   - The owner should set the Actions budget to $0 with "stop usage" on the organization, so a
     larger runner or a return to private cannot bill anything.
+
+## D-0044 — The send library: `api` stores on partition owners over node links, admitted for the store of a send only; system frames signed and in a reserved format
+
+- Date: 2026-11-14
+- Status: accepted; built (report P02-send); **approved by the owner on 2026-11-14** ("Approve
+  both": this decision and its two threat-model rows).
+- Decided by: agent, under the owner's standing instruction (D-0041: "think like someone from
+  Proton or a big corp"), then approved by the owner; D-0037 left the route from `api` to the
+  partition owners to decide when the send crate was built.
+- Context: D-0037 replaced the internal Send API with a `send` library linked by `delivery`,
+  `api`, `calls` and `worker`, plus `PUT /v1/messages`. The mailbox is Iggy with one owner node per
+  partition (D-0029, D-0034); a send must be stored by its partitions' owners. `api` is the
+  internet-facing service most likely to be compromised.
+- Options considered for how `api` reaches the owners:
+  - **(A) Admit `api.` certificates to the delivery nodes' node links**, as a delivery node that
+    does not own a partition reaches the owner today. Same wire, same code path, one hop. Risk:
+    the node link serves every mailbox operation and key-store copies.
+  - **(B) A send link on delivery nodes that accepts `api.` and runs the send path there.** It is
+    the internal network Send API the owner removed in D-0037 (a second protocol, a second hop,
+    a second path that can drift from the WebSocket's).
+  - **(C) `api` owns partitions or writes Iggy itself.** Puts key stores and the master key on the
+    internet-facing host, and a second writer per partition; refused outright.
+  - **(D) Queue sends in Valkey for a delivery node to store.** Acknowledging before the mailbox
+    holds the send breaks invariant 1 (the database is the only durable truth); refused.
+- Decision: **(A), with authorization per kind of peer**, so `api` gets exactly what it needs:
+  - **Node links admit by role.** `songbird_link::serve_admitting` takes one handler per
+    certificate-name prefix (prefixes must end with a dot); a peer is served only by its own
+    kind's handler. Delivery nodes keep every operation; peers listed in
+    `[delivery.cluster] senders` (only `api.`, `calls.`, `worker.` may be listed; default none)
+    get a **store-only handler**: `Store` is served, everything else (`Fetch`, `Ack`, `Count`,
+    `Expire`, `Forget`, `Known`, `KeyStore`, and `PartDone`) is refused and counted
+    (`IggyMailbox::sender_requests_refused`, runbook entry).
+  - **`api` holds no mailbox.** `IggySender` (in `crates/mailbox`) implements only the store
+    (`StoreSend`, a one-method trait every `Mailbox` also has): no Iggy client, no key store, no
+    master key, no lease, no membership. It reads the partition leases (one `MGET` every third of
+    a lease; the lease value names the owner) and points each partition at its owner. It splits a
+    send with the owners' own routine (`store_on`, shared with `IggyMailbox`) and the delivery
+    nodes' idempotency secret, so a retry over the other transport is a replay. It never sends
+    `PartDone`: the home partition's re-driver completes a sender's multi-partition bookkeeping
+    (about 2 s later), so a compromised `api` cannot mark another send's part stored early.
+  - **Routing from `api`** uses `ValkeyRouter::publisher`: the delivery nodes' channel naming and
+    sealing, no subscriber connections.
+  - **One send path.** `crates/send` holds the device-list check, the reserved-prefix and
+    duplicate checks, the idempotent store, routing, push on offline (`Pusher`, moved from
+    `delivery`) and the device directory (moved from `delivery`, re-exported there). `delivery`
+    calls `SendPath::store`, writes `SendResult`, then `SendPath::route`, then flushes once: the
+    same order and the same allocations as before; `SendPath` is a set of borrows (no `Arc`
+    clone per send: a reference count shared by every core would be a contended cache line).
+  - **`PUT /v1/messages`.** Body: a WebSocket `Send` frame byte for byte, under the same
+    `LimitsConfig`. Signed like every `api` request, and **authenticated from the headers before
+    the body is read** (the signature covers the declared digest; `Content-Length` required and
+    bounded first). Answer: `200` with the `SendResult` frame the WebSocket would send; HTTP errors
+    only before the send path. Rate limit: the WebSocket's per-device numbers, counted across all
+    `api` nodes in `valkey-hot` by a GCRA on Valkey's clock, under a keyed hash of the device
+    (key from HKDF of the router's cluster secret); fails closed.
+  - **System frames** (`crates/proto::system`, signer in `crates/send::system`): server notices
+    travel as mailbox envelopes (durable, ordered, pushed) in a reserved format: an 8-byte magic,
+    the recipient device, issue time, random notice ID (the send's idempotency key), kind, a body
+    of at most 1 KiB, and an Ed25519 signature by the system key over a domain-separated
+    transcript. The send path refuses user envelopes that begin with the magic (new reject reason
+    9, `ReservedEnvelope`), so system frames are never user messages in either direction. `proto`
+    stays free of cryptography (clients verify with their own aws-lc-rs); the system key is not
+    deployed until a service issues notices (Prompt 3: "device list changed").
+- Evidence (Apple M5 Pro, 18 cores, 48 GiB, macOS 27.2.1; compose images as pinned, under podman;
+  report P02-send):
+  - Allocation gate unchanged: 5.20 allocations (798 bytes) per message, before and after
+    (`server_allocations_per_message_stay_within_budget`, budget 5.5).
+  - Live tests on Iggy, SurrealDB, Valkey and RustFS on this Mac: 217 of 218 in the compose job's
+    first command (the exception, `inv7_bounded_and_validated_input`, failed identically on
+    `main` on macOS; the test is now robust to how macOS reports a refused write),
+    `songbird-api` 8, `songbird-jobs` 12, `songbird-push` 7; `cargo xtask ci fast` passes.
+  - New tests: `a_send_only_node_stores_on_the_owners_and_may_do_nothing_else` (Iggy cluster),
+    `each_admitted_kind_of_peer_gets_only_its_own_handler`, five `send_api` end-to-end tests on
+    Iggy (auth, limits and rate, idempotency across transports, offline push, system frames),
+    send-path and system-frame unit tests with a fixed byte vector.
+  - `bench/m7/suite.sh` on the VMPal VM `songbird-m7` (arm64, 12 vCPUs, kernel 7.0), `main`
+    against this branch in one session, `IGGY_TMPFS=1`, checker PASS everywhere: steady p99
+    2,339 against 2,124 µs, CPU per 10k messages 3.370 against 3.369 s, group p99 9,517 against
+    9,991 µs, storm recovery 16.4 against 15.4 s; at 80,000/s (five runs each) p99 means 2,916
+    against 3,056 µs, ranges overlapping (Mann–Whitney U = 8, not significant), server CPU per
+    10k deliveries 0.427 s on both. No measurable cost from the extraction.
+- Consequences: `api` can send with no new protocol and no extra hop, and can neither read nor
+  delete anyone's messages; a compromised `api` can still store envelopes into mailboxes (as a
+  compromised delivery node can: ciphertext recipients drop; threat model §6). `calls` and
+  `worker` link the same crate and are admitted the same way when they send. Two threat-model
+  rows, approved by the owner on 2026-11-14. A device using both transports has two rate budgets (at most
+  twice the per-device rate).
 
 ## D-0043 — Milestone 7: the beta's load profile, how the targets are measured, where
 
@@ -489,7 +577,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0037 — Prompt 2 amendment: no internal network Send API; a `send` library and `PUT /v1/messages`
 
 - Date: 2026-11-13
-- Status: accepted (prompt amended; to build)
+- Status: accepted (prompt amended); built (D-0044, report P02-send)
 - Decided by: owner (prompt amendment)
 - Context: Prompt 2 asked for an internal, mutual-TLS "Send API" so `api`, `calls` and `worker`
   could send through the store-then-route path. A network hop adds latency, a second protocol to

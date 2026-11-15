@@ -18,6 +18,8 @@ use songbird_types::config::{CommonConfig, Validate, Validator};
 use songbird_worker::{DeliveryLink, Worker, WorkerMetrics};
 use tokio::sync::watch;
 
+// Sanitizer builds keep the system allocator: ASan and TSan see only allocations they intercept.
+#[cfg(not(songbird_sanitizer))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

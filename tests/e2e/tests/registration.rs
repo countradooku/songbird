@@ -94,7 +94,8 @@ async fn registered_accounts_connect_and_talk_without_an_operator() {
         pass: std::env::var("SONGBIRD_TEST_SURREALDB_PASS").unwrap(),
         namespace: "test".into(),
         database: format!("p03m1_{}", DeviceId::random().unwrap().to_hex_unredacted()),
-        timeout: Duration::from_secs(5),
+        // Generous: CI's shared SurrealDB also serves the prekey gate's 400 concurrent claims.
+        timeout: Duration::from_secs(30),
         max_message_bytes: 16 << 20,
     })
     .await

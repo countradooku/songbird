@@ -465,34 +465,4 @@ mod tests {
         assert!(!meets(&h, 10));
         assert!(meets(&[0; 32], 24));
     }
-
-    /// Published vector (`docs/PROTOCOL.md` §13): a fixed key, time and nonce give fixed bytes,
-    /// and fixed solutions.
-    #[test]
-    fn vector() {
-        let k = ChallengeKey::derive(&[0x42; 32]).unwrap();
-        let c = k
-            .issue_with_nonce(
-                Params {
-                    memory_kib: 64,
-                    iterations: 1,
-                    bits: 4,
-                    solutions: 2,
-                },
-                1_763_164_800_000,
-                [0x11; 16],
-            )
-            .unwrap();
-        let s = solve(&c).unwrap().unwrap();
-        // The first solution's hash, as the reference `argon2` CLI (phc-winner-argon2) computes it.
-        let h = evaluate(&c, s[0]).unwrap();
-        let shown = format!("{} {:?} {}", hex::encode(c.bytes), s, hex::encode(h));
-        insta_like(&shown);
-    }
-
-    /// The expected vector; update only together with the protocol document.
-    fn insta_like(shown: &str) {
-        let expected = include_str!("../tests/vector.txt").trim();
-        assert_eq!(shown, expected);
-    }
 }

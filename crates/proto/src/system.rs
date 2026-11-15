@@ -63,6 +63,9 @@ pub enum Kind {
     DeviceListChanged,
     /// This device's one-time prekeys are running low (body: [`PrekeysLow`]); upload more.
     PrekeysLow,
+    /// This device's single-use MLS KeyPackages are running low (body: `n u16`, how many are
+    /// left); upload more.
+    KeyPackagesLow,
     /// A kind this version does not know (forward compatibility: verify, then ignore).
     Other(u16),
 }
@@ -74,6 +77,7 @@ impl Kind {
         match self {
             Self::DeviceListChanged => 1,
             Self::PrekeysLow => 2,
+            Self::KeyPackagesLow => 3,
             Self::Other(c) => c,
         }
     }
@@ -84,6 +88,7 @@ impl Kind {
         match code {
             1 => Self::DeviceListChanged,
             2 => Self::PrekeysLow,
+            3 => Self::KeyPackagesLow,
             c => Self::Other(c),
         }
     }

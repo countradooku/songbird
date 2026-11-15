@@ -825,3 +825,165 @@ async fn no_one_time_prekey_is_ever_served_twice_under_parallel_claims() {
         {}
     }
 }
+
+// ----- Prompt 3, M3b: MLS KeyPackages -----
+
+use songbird_accounts::StoredKeyPackage;
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+fn kp(tag: u32, valid_for: i64) -> StoredKeyPackage {
+    let mut reference = [0u8; 32];
+    reference[..4].copy_from_slice(&tag.to_be_bytes());
+    reference[4] = 0xAB;
+    StoredKeyPackage {
+        reference,
+        package: blob(9, tag, 300),
+        not_after: now_secs().checked_add_signed(valid_for).unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn key_packages_are_single_use_expire_and_fall_back_to_last_resort() {
+    let Some(r) = registry().await else { return };
+    let alice = registered(&r).await;
+    let bob = registered(&r).await;
+    // Nothing yet: Alice's device is left out.
+    assert!(
+        r.claim_key_packages(&alice.account, None, &bob.device, true)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    r.put_key_packages(
+        &alice.device,
+        &[kp(1, 3600), kp(2, -10)],
+        Some(&kp(100, 3600)),
+        10,
+    )
+    .await
+    .unwrap();
+    // The expired one is never served or counted.
+    assert_eq!(
+        r.key_package_counts(&alice.device).await.unwrap(),
+        (1, true)
+    );
+    let c = r
+        .claim_key_packages(&alice.account, None, &bob.device, true)
+        .await
+        .unwrap();
+    assert_eq!((c.len(), c[0].one_time), (1, true));
+    assert_eq!(&c[0].package[..], &kp(1, 0).package[..]);
+    // Then the last-resort one, again and again.
+    for _ in 0..2 {
+        let c = r
+            .claim_key_packages(&alice.account, None, &bob.device, true)
+            .await
+            .unwrap();
+        assert!(!c[0].one_time);
+        assert_eq!(&c[0].package[..], &kp(100, 0).package[..]);
+    }
+    // Duplicates by reference; the bound.
+    r.put_key_packages(&alice.device, &[kp(3, 3600)], None, 10)
+        .await
+        .unwrap();
+    assert!(matches!(
+        r.put_key_packages(&alice.device, &[kp(3, 3600)], None, 10)
+            .await,
+        Err(RegistryError::Duplicate)
+    ));
+    let many: Vec<_> = (10..20).map(|i| kp(i, 3600)).collect();
+    assert!(matches!(
+        r.put_key_packages(&alice.device, &many, None, 10).await,
+        Err(RegistryError::Full)
+    ));
+    // `one_time = false`: the last-resort one even with single-use ones left.
+    let c = r
+        .claim_key_packages(&alice.account, None, &bob.device, false)
+        .await
+        .unwrap();
+    assert!(!c[0].one_time);
+    // The sweep removes the expired row; deletion removes the rest.
+    assert!(r.delete_expired_key_packages(100).await.unwrap() >= 1);
+    r.delete_account_rows(&alice.account).await.unwrap();
+    let left = r
+        .remnants(&alice.account, &[alice.device], &[])
+        .await
+        .unwrap();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+/// The same gate for KeyPackages: 400 concurrent claims over eight connections against 200
+/// single-use packages, two rounds: each served once, none twice, none lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn no_key_package_is_ever_served_twice_under_parallel_claims() {
+    let Some(first) = registry().await else {
+        return;
+    };
+    let target = registered(&first).await;
+    let requester = registered(&first).await;
+    let mut conns = vec![std::sync::Arc::new(first)];
+    for _ in 1..8 {
+        let db = conns[0].db().config_clone().unwrap();
+        conns.push(std::sync::Arc::new(
+            Registry::connect(Db::connect(db).await.unwrap())
+                .await
+                .unwrap(),
+        ));
+    }
+    conns[0]
+        .put_key_packages(&target.device, &[], Some(&kp(0, 3600)), 200)
+        .await
+        .unwrap();
+    let mut next = 1u32;
+    for round in 0..2 {
+        for _ in 0..2 {
+            let batch: Vec<_> = (next..next + 100).map(|i| kp(i, 3600)).collect();
+            conns[0]
+                .put_key_packages(&target.device, &batch, None, 200)
+                .await
+                .unwrap();
+            next += 100;
+        }
+        let tasks: Vec<_> = (0..400)
+            .map(|i| {
+                let r = std::sync::Arc::clone(&conns[i % conns.len()]);
+                let (account, device) = (target.account, requester.device);
+                tokio::spawn(async move {
+                    r.claim_key_packages(&account, None, &device, true)
+                        .await
+                        .unwrap()
+                })
+            })
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        let mut served = 0u64;
+        for t in tasks {
+            for c in t.await.unwrap() {
+                if c.one_time {
+                    served += 1;
+                    assert!(
+                        seen.insert(c.package),
+                        "round {round}: a KeyPackage served twice"
+                    );
+                }
+            }
+        }
+        let (left, _) = conns[0].key_package_counts(&target.device).await.unwrap();
+        println!("round {round}: served {served} single-use KeyPackages of 200; {left} left");
+        assert_eq!(served + left, 200, "round {round}: conservation");
+        assert!(served >= 190, "round {round}: too few served");
+        while conns[0]
+            .claim_key_packages(&target.account, None, &requester.device, true)
+            .await
+            .unwrap()
+            .iter()
+            .any(|c| c.one_time)
+        {}
+    }
+}

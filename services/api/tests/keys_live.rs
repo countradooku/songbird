@@ -337,3 +337,153 @@ async fn without_settings_nothing_is_served() {
     assert_eq!(fetch(&c, &alice).await.0, 503);
     assert_eq!(c.send("GET", "/v1/keys", None).await.unwrap().0, 503);
 }
+
+// ----- M3b: MLS KeyPackages -----
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// A KeyPackage for `device`, valid now (or `expired`), single use or last resort.
+fn key_package(device: &DeviceId, last_resort: bool, expired: bool) -> Vec<u8> {
+    let signer = Ed25519KeyPair::generate().unwrap();
+    let (init, enc) = (
+        Signer::new(&rand32()).public(),
+        Signer::new(&rand32()).public(),
+    );
+    let now = now_secs();
+    let (nb, na) = if expired {
+        (now - 7_200, now - 3_600)
+    } else {
+        (now - 60, now + 30 * 86_400)
+    };
+    songbird_keys::mls::encode(
+        &songbird_keys::mls::Params {
+            cipher_suite: 0x0001,
+            init_key: &init,
+            encryption_key: &enc,
+            identity: device.as_bytes(),
+            not_before: nb,
+            not_after: na,
+            last_resort,
+        },
+        &signer,
+    )
+}
+
+async fn put_kps(c: &ApiClient, packages: &[Vec<u8>]) -> (u16, String) {
+    let refs: Vec<&[u8]> = packages.iter().map(Vec::as_slice).collect();
+    let body = wire::encode_key_packages(&refs);
+    let (s, b) = c.send("PUT", "/v1/keypackages", Some(&body)).await.unwrap();
+    (s, String::from_utf8_lossy(&b).into_owned())
+}
+
+async fn fetch_kps(c: &ApiClient, account: &AccountId) -> (u16, Vec<wire::KeyPackageBundle>) {
+    let body = format!(r#"{{"account":"{}"}}"#, account.to_hex_unredacted());
+    let (s, b) = c
+        .send("POST", "/v1/keypackages/fetch", Some(body.as_bytes()))
+        .await
+        .unwrap();
+    let bundles = if s == 200 {
+        wire::decode_key_package_bundles(&b).unwrap()
+    } else {
+        Vec::new()
+    };
+    (s, bundles)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn key_packages_are_bound_to_their_device_and_served_once() {
+    let Some(s) = stack(Some(settings(KeyThrottle::default()))).await else {
+        return;
+    };
+    let (alice, alice_dev, alice_c) = person(&s).await;
+    let (_, _, bob_c) = person(&s).await;
+    assert_eq!(fetch_kps(&bob_c, &alice).await.0, 404);
+    let packages: Vec<_> = (0..3)
+        .map(|_| key_package(&alice_dev, false, false))
+        .collect();
+    let mut upload = packages.clone();
+    upload.push(key_package(&alice_dev, true, false));
+    assert_eq!(put_kps(&alice_c, &upload).await.0, 204);
+    let (st, b) = alice_c.send("GET", "/v1/keypackages", None).await.unwrap();
+    assert_eq!(st, 200);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&b).unwrap(),
+        serde_json::json!({ "single_use": 3, "last_resort": true })
+    );
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..3 {
+        let (st, b) = fetch_kps(&bob_c, &alice).await;
+        assert_eq!(st, 200);
+        assert!(b[0].one_time);
+        // What a client checks before adding Alice's device to a group (here, our own checks).
+        songbird_keys::mls::check(&b[0].package, alice_dev.as_bytes(), now_secs()).unwrap();
+        assert!(
+            seen.insert(b[0].package.clone()),
+            "a KeyPackage handed out twice"
+        );
+    }
+    let (_, b) = fetch_kps(&bob_c, &alice).await;
+    assert!(
+        !b[0].one_time,
+        "the last-resort package once single use runs out"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn key_packages_for_another_device_or_out_of_date_are_refused() {
+    let Some(s) = stack(Some(settings(KeyThrottle::default()))).await else {
+        return;
+    };
+    let (_, dev, c) = person(&s).await;
+    let other = DeviceId::random().unwrap();
+    let cases = [
+        (
+            vec![key_package(&other, false, false)],
+            r#"{"error":"identity"}"#,
+        ),
+        (
+            vec![key_package(&dev, false, true)],
+            r#"{"error":"lifetime"}"#,
+        ),
+        (
+            vec![
+                key_package(&dev, true, false),
+                key_package(&dev, true, false),
+            ],
+            r#"{"error":"last resort"}"#,
+        ),
+    ];
+    for (upload, want) in cases {
+        assert_eq!(put_kps(&c, &upload).await, (400, want.to_owned()));
+    }
+    let one = key_package(&dev, false, false);
+    assert_eq!(
+        put_kps(&c, &[one.clone(), one.clone()]).await,
+        (400, r#"{"error":"duplicate"}"#.into())
+    );
+    assert_eq!(put_kps(&c, std::slice::from_ref(&one)).await.0, 204);
+    assert_eq!(
+        put_kps(&c, std::slice::from_ref(&one)).await,
+        (409, r#"{"error":"duplicate"}"#.into())
+    );
+    // A tampered package (its last signature byte).
+    let mut bad = key_package(&dev, false, false);
+    let last = bad.len() - 1;
+    bad[last] ^= 1;
+    assert_eq!(
+        put_kps(&c, &[bad]).await,
+        (400, r#"{"error":"signature"}"#.into())
+    );
+    assert_eq!(
+        c.send("PUT", "/v1/keypackages", Some(&[1, 0]))
+            .await
+            .unwrap()
+            .0,
+        400
+    );
+}

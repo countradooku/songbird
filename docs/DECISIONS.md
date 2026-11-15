@@ -81,13 +81,54 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   username key verifiers; username links; keyed throttle records).
 - Prompt 3, milestone 3 (report `docs/reports/P03-M3.md`, D-0050): gate **approved by the owner
   on 2026-11-15** ("Approve both"), with its two threat-model §1 rows (device public keys and
-  prekeys; keyed throttle records). Next: M3b (MLS KeyPackages).
+  prekeys; keyed throttle records).
+- Prompt 3, milestone 3b (report `docs/reports/P03-M3b.md`, D-0051): the gate, and one
+  threat-model §1 row (KeyPackages), await the owner.
 - D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
   tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
   `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0051 — Prompt 3, milestone 3b: MLS KeyPackages checked by Songbird's own parser, bound to the uploading device, served once
+
+- Date: 2026-11-15
+- Status: proposed; built (report P03-M3b); awaiting the owner's gate approval
+- Decided by: owner (own focused parser over OpenMLS on the server, 2026-11-15); design by agent
+- Context: Prompt 3: "Same pattern for MLS KeyPackages (single use, plus a last-resort package)";
+  the plan said "parsed and signature-checked with OpenMLS", and the owner split this out of M3
+  to evaluate that first.
+- Options and evidence: OpenMLS 0.9.2 with `openmls_rust_crypto` resolves to **194 crates, about
+  109 new to the tree**, including RustCrypto and libcrux (two more cryptography stacks),
+  `bindgen` and `clang-sys` at build time, and `rayon`; a focused parser needs none (Ed25519 and
+  X25519 checks already in `songbird-keys`, aws-lc-rs for signatures and SHA-256). Opaque storage
+  (size only) would let a device publish packages naming another device.
+- Decision (the owner's choice): **Songbird's own parser** (`crates/keys/src/mls.rs`, about 400
+  lines, fuzzed) checking RFC 9420's encoding strictly, mls10, ciphersuites `0x0001`/`0x0003`,
+  honest keys (init ≠ encryption key), a **basic credential naming the uploading device**,
+  capabilities, a current and bounded lifetime (≤ 100 days), and both `SignWithLabel` signatures;
+  `last_resort` (extension type 10, as OpenMLS writes it) decides which packages are last resort,
+  so no client flag can disagree with the package; storage under `KeyPackageRef`. The credential
+  identity is the 16-byte device ID (Prompt 5 maps devices to accounts through the signed device
+  list, M4).
+  - Proven against OpenMLS: `tools/openmls-vectors` (outside the workspace) makes packages with
+    OpenMLS; Songbird accepts its X25519/Ed25519 ones with OpenMLS's own `KeyPackageRef`,
+    recognises its last-resort one, refuses its P-256 one, and refuses every single flipped byte.
+  - An encoder (`mls::encode`) for clients and tests; the checker accepts what it builds.
+  - Storage and claims as M3's prekeys (D-0050): single-use packages claimed by deleting one
+    record; expired ones never served and swept; the last-resort one beyond them; the same
+    throttles (separate records) and per-target budget; `KeyPackagesLow` (system notice kind 3).
+  - No new dependency.
+- Evidence (Apple M5 Pro, macOS 27.2.1; compose stack under podman; report P03-M3b):
+  `mls_vectors.rs` (OpenMLS packages; every flipped byte); `mls` unit tests (minimal varints,
+  `SignContent`, encode/check); `crates/accounts` live (single use, expiry, last resort, bounds,
+  deletion; **400 concurrent claims over eight connections, two rounds: each package served
+  once, none twice, none lost**); `services/api` `keys_live` (bound to the device, served once,
+  every refusal); fuzz `keypackages` (60 s, 2,041,036 runs).
+- Consequences: the server accepts only X25519/Ed25519 ciphersuites until Prompt 5 decides on a
+  post-quantum one (issue #24); the allow-list is one constant to extend. Clients must still
+  validate KeyPackages fully.
 
 ## D-0050 — Prompt 3, milestone 3: the PQXDH key directory; XEdDSA and ML-KEM-1024 checked on upload; one-time prekeys claimed exactly once
 

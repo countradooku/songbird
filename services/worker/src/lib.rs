@@ -352,7 +352,7 @@ impl Worker {
     }
 
     /// One sweep: attachments past 30 days or fully fetched, expired grants, expired invite
-    /// codes, released usernames whose hold ended, the outbox.
+    /// codes, expired KeyPackages, released usernames whose hold ended, the outbox.
     pub async fn sweep(&self) {
         match self.registry.expired_attachments(SWEEP_BATCH).await {
             Ok(objects) => {
@@ -377,6 +377,10 @@ impl Worker {
         // Expired codes are refused already; this only stops them taking space.
         if let Err(e) = self.registry.delete_expired_invites(SWEEP_BATCH).await {
             tracing::warn!(error = %e, "invite sweep failed");
+        }
+        // Expired KeyPackages are never served; this only stops them taking space.
+        if let Err(e) = self.registry.delete_expired_key_packages(SWEEP_BATCH).await {
+            tracing::warn!(error = %e, "key package sweep failed");
         }
         // Released usernames whose hold ended become claimable again.
         if let Err(e) = self.registry.delete_released_usernames(SWEEP_BATCH).await {

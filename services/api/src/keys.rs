@@ -6,6 +6,9 @@
 //! | `PUT /v1/keys` | Upload: identity key (once), signed prekey, last-resort ML-KEM prekey, one-time prekeys |
 //! | `GET /v1/keys` | The device's one-time prekeys left |
 //! | `POST /v1/keys/fetch` | `{"account": hex, "device"?: hex}`: a bundle per device, one-time keys claimed |
+//! | `PUT /v1/keypackages` | MLS KeyPackages (M3b, D-0051): each checked, bound to the uploading device |
+//! | `GET /v1/keypackages` | Single-use KeyPackages left; whether a last-resort one is set |
+//! | `POST /v1/keypackages/fetch` | `{"account": hex, "device"?: hex}`: a KeyPackage per device, single-use ones claimed |
 //!
 //! # What the server checks before storing anything
 //!
@@ -30,7 +33,8 @@ use std::net::IpAddr;
 
 use aws_lc_rs::{hkdf, hmac};
 use bytes::Bytes;
-use songbird_accounts::{ClaimedKeys, KeysUpdate, Registry, RegistryError};
+use songbird_accounts::{ClaimedKeys, KeysUpdate, Registry, RegistryError, StoredKeyPackage};
+use songbird_proto::keys::KeyPackageBundle;
 use songbird_proto::keys::{self as wire, Bundle, OneTimeEc, SignedEc, SignedKem, Upload};
 use songbird_proto::system::{Kind, PrekeysLow};
 use songbird_send::system::SystemSigner;
@@ -108,6 +112,8 @@ pub enum Outcome {
     Done,
     /// 200: one-time prekeys left.
     Counts(u64, u64),
+    /// 200: single-use KeyPackages left, and whether a last-resort one is set.
+    KeyPackageCounts(u64, bool),
     /// 200: encoded bundles.
     Bundles(Bytes),
     /// 400 with a reason.
@@ -462,6 +468,245 @@ impl KeyDirectory {
         {
             Ok(()) => self.metrics.notices.inc(),
             Err(e) => tracing::warn!(error = %e, "prekeys-low notice not sent"),
+        }
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Checks every package of an upload against the uploading device; at most one last-resort.
+fn verify_key_packages(
+    body: &[u8],
+    device: &DeviceId,
+    now: u64,
+) -> Result<(Vec<StoredKeyPackage>, Option<StoredKeyPackage>), Outcome> {
+    let packages = wire::decode_key_packages(body).map_err(|_| Outcome::Malformed("request"))?;
+    let mut single_use = Vec::new();
+    let mut last_resort = None;
+    let mut refs = HashSet::new();
+    for p in packages {
+        let c = songbird_keys::mls::check(p, device.as_bytes(), now).map_err(|e| {
+            Outcome::Malformed(match e {
+                songbird_keys::mls::MlsError::Malformed => "request",
+                songbird_keys::mls::MlsError::Unsupported => "unsupported",
+                songbird_keys::mls::MlsError::Keys => "keys",
+                songbird_keys::mls::MlsError::Identity => "identity",
+                songbird_keys::mls::MlsError::Lifetime => "lifetime",
+                songbird_keys::mls::MlsError::Signature => "signature",
+            })
+        })?;
+        if !refs.insert(c.reference) {
+            return Err(Outcome::Malformed("duplicate"));
+        }
+        let stored = StoredKeyPackage {
+            reference: c.reference,
+            package: p.to_vec(),
+            not_after: c.not_after,
+        };
+        if c.last_resort {
+            if last_resort.is_some() {
+                return Err(Outcome::Malformed("last resort"));
+            }
+            last_resort = Some(stored);
+        } else {
+            single_use.push(stored);
+        }
+    }
+    Ok((single_use, last_resort))
+}
+
+impl KeyDirectory {
+    /// `PUT /v1/keypackages`.
+    pub async fn upload_key_packages(
+        &self,
+        registry: &Registry,
+        device: &DeviceId,
+        body: Bytes,
+    ) -> Outcome {
+        let dev = *device;
+        let checked =
+            tokio::task::spawn_blocking(move || verify_key_packages(&body, &dev, now_secs())).await;
+        let (single_use, last_resort) = match checked {
+            Ok(Ok(x)) => x,
+            Ok(Err(o)) => {
+                self.metrics.refused.inc();
+                return o;
+            }
+            Err(_) => return Outcome::Unavailable,
+        };
+        let out = match registry
+            .put_key_packages(
+                device,
+                &single_use,
+                last_resort.as_ref(),
+                self.settings.max_stored,
+            )
+            .await
+        {
+            Ok(()) => Outcome::Done,
+            Err(RegistryError::Full) => Outcome::Conflict("full"),
+            Err(RegistryError::Duplicate) => Outcome::Conflict("duplicate"),
+            Err(_) => Outcome::Unavailable,
+        };
+        if out == Outcome::Done {
+            self.metrics.uploads.inc();
+        } else if out != Outcome::Unavailable {
+            self.metrics.refused.inc();
+        }
+        out
+    }
+
+    /// `GET /v1/keypackages`.
+    pub async fn key_package_counts(&self, registry: &Registry, device: &DeviceId) -> Outcome {
+        match registry.key_package_counts(device).await {
+            Ok((n, lr)) => Outcome::KeyPackageCounts(n, lr),
+            Err(_) => Outcome::Unavailable,
+        }
+    }
+
+    /// `POST /v1/keypackages/fetch`: the same throttles as prekey fetches (their own records),
+    /// the same per-target budget with last-resort packages beyond it.
+    pub async fn fetch_key_packages(
+        &self,
+        registry: &Registry,
+        hot: &ValkeyConn,
+        messages: Option<&crate::messages::Messages>,
+        requester: (&AccountId, &DeviceId),
+        peer: IpAddr,
+        body: &[u8],
+    ) -> Outcome {
+        let t = &self.settings.throttle;
+        let range = range_of(peer, t.ipv4_prefix, t.ipv6_prefix);
+        for (record, rate, burst) in [
+            (
+                self.record("F", requester.0.as_bytes()),
+                t.fetches_per_hour,
+                t.fetch_burst,
+            ),
+            (
+                self.record("R", &range),
+                t.range_fetches_per_hour,
+                t.range_fetch_burst,
+            ),
+        ] {
+            match Registration::gcra(hot, &record, rate, burst, false).await {
+                Ok(0) => {}
+                Ok(wait) => {
+                    self.metrics.throttled.inc();
+                    return Outcome::Throttled(wait);
+                }
+                Err(()) => return Outcome::Unavailable,
+            }
+        }
+        let Ok(req) = serde_json::from_slice::<FetchBody>(body) else {
+            return Outcome::Malformed("request");
+        };
+        let parse = |h: &str| {
+            let mut b = [0u8; 16];
+            hex::decode_to_slice(h, &mut b).ok().map(|()| b)
+        };
+        let Some(account) = parse(&req.account).map(AccountId::from_bytes) else {
+            return Outcome::Malformed("account");
+        };
+        let only = match req.device.as_deref().map(parse) {
+            Some(Some(d)) => Some(DeviceId::from_bytes(d)),
+            Some(None) => return Outcome::Malformed("device"),
+            None => None,
+        };
+        let one_time = match Registration::gcra(
+            hot,
+            &self.record("T", account.as_bytes()),
+            t.target_one_time_per_hour,
+            t.target_one_time_burst,
+            false,
+        )
+        .await
+        {
+            Ok(wait) => wait == 0,
+            Err(()) => return Outcome::Unavailable,
+        };
+        let Ok(claimed) = registry
+            .claim_key_packages(&account, only.as_ref(), requester.1, one_time)
+            .await
+        else {
+            return Outcome::Unavailable;
+        };
+        if claimed.is_empty() {
+            return Outcome::NotFound;
+        }
+        let bundles: Vec<KeyPackageBundle> = claimed
+            .iter()
+            .map(|c| KeyPackageBundle {
+                device: c.device,
+                one_time: c.one_time,
+                package: c.package.to_vec(),
+            })
+            .collect();
+        for b in &bundles {
+            self.metrics.bundles.inc();
+            if !b.one_time {
+                self.metrics.last_resort.inc();
+            }
+        }
+        if let (Some(signer), Some(m)) = (&self.signer, messages) {
+            for c in claimed.iter().filter(|c| c.one_time) {
+                self.maybe_notify_key_packages(registry, hot, signer, m, &c.device)
+                    .await;
+            }
+        }
+        Outcome::Bundles(Bytes::from(wire::encode_key_package_bundles(&bundles)))
+    }
+
+    /// Tells a device its single-use KeyPackages run low, at most once an hour.
+    async fn maybe_notify_key_packages(
+        &self,
+        registry: &Registry,
+        hot: &ValkeyConn,
+        signer: &SystemSigner,
+        m: &crate::messages::Messages,
+        device: &DeviceId,
+    ) {
+        let Ok((n, _)) = registry.key_package_counts(device).await else {
+            return;
+        };
+        if n >= u64::from(self.settings.refill_below) {
+            return;
+        }
+        let first: Result<redis::Value, _> = hot
+            .query(
+                redis::cmd("SET")
+                    .arg(self.record("N", device.as_bytes()))
+                    .arg(1)
+                    .arg("NX")
+                    .arg("PX")
+                    .arg(3_600_000u64),
+            )
+            .await;
+        if !matches!(first, Ok(redis::Value::Okay)) {
+            return;
+        }
+        let body = u16::try_from(n).unwrap_or(u16::MAX).to_be_bytes();
+        let mut id = [0u8; songbird_proto::system::NOTICE_ID_LEN];
+        if getrandom::fill(&mut id).is_err() {
+            return;
+        }
+        match m
+            .path
+            .system(
+                signer,
+                std::slice::from_ref(device),
+                Kind::KeyPackagesLow,
+                &body,
+                id,
+            )
+            .await
+        {
+            Ok(()) => self.metrics.notices.inc(),
+            Err(e) => tracing::warn!(error = %e, "key packages low notice not sent"),
         }
     }
 }

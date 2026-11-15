@@ -17,6 +17,7 @@
 //! | `ulink` | random link handle | its account, the link's ciphertext | replaced, deleted, at a username change, or with the account |
 //! | `device` (M3 fields) | device ID | identity key, signed prekey, last-resort ML-KEM prekey | replaced (prekeys), or with the device |
 //! | `otpk`, `otkem` | (device, key ID) | one one-time X25519 or ML-KEM-1024 prekey | claimed by one fetch, or with the device |
+//! | `mlskp` | (device, `KeyPackageRef`) | one single-use MLS KeyPackage and its expiry; the device's last-resort package on the device row | claimed by one fetch, expired (swept), or with the device |
 //!
 //! An attachment row has no link to the account that uploaded it (owner-approved threat-model
 //! row, D-0036).
@@ -69,6 +70,14 @@ DEFINE TABLE IF NOT EXISTS otkem SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS device ON otkem TYPE bytes;
 DEFINE FIELD IF NOT EXISTS blob ON otkem TYPE bytes;
 DEFINE INDEX IF NOT EXISTS otkem_device ON otkem FIELDS device;
+DEFINE FIELD IF NOT EXISTS mlslr ON device TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS mlslr_exp ON device TYPE option<datetime>;
+DEFINE TABLE IF NOT EXISTS mlskp SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS device ON mlskp TYPE bytes;
+DEFINE FIELD IF NOT EXISTS blob ON mlskp TYPE bytes;
+DEFINE FIELD IF NOT EXISTS expires ON mlskp TYPE datetime;
+DEFINE INDEX IF NOT EXISTS mlskp_device ON mlskp FIELDS device;
+DEFINE INDEX IF NOT EXISTS mlskp_expires ON mlskp FIELDS expires;
 DEFINE TABLE IF NOT EXISTS ulink SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS account ON ulink TYPE bytes;
 DEFINE FIELD IF NOT EXISTS blob ON ulink TYPE bytes;
@@ -187,6 +196,36 @@ pub struct ClaimedKeys {
     pub kem_one_time: bool,
 }
 
+/// A checked KeyPackage to store (`songbird_keys::mls::check`).
+#[derive(Debug, Clone)]
+pub struct StoredKeyPackage {
+    /// Its `KeyPackageRef`.
+    pub reference: [u8; 32],
+    /// The package.
+    pub package: Vec<u8>,
+    /// When it expires (Unix seconds).
+    pub not_after: u64,
+}
+
+/// A device's KeyPackage, as one fetch claims it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimedKeyPackage {
+    /// The device.
+    pub device: DeviceId,
+    /// The package.
+    pub package: Bytes,
+    /// Whether it is single use (removed by this claim), not the last-resort one.
+    pub one_time: bool,
+}
+
+/// Which one-time pool a claim draws from.
+#[derive(Debug, Clone, Copy)]
+enum Pool {
+    Ec,
+    Kem,
+    KeyPackage,
+}
+
 /// Candidates a claim picks among at random, so concurrent claims rarely aim at one key.
 const CLAIM_CANDIDATES: i64 = 16;
 /// Attempts a claim makes before giving up on a one-time key (it then serves none).
@@ -281,7 +320,7 @@ pub struct Remnants {
     pub usernames: u64,
     /// Username links of the account.
     pub links: u64,
-    /// One-time prekeys (both kinds) of the devices.
+    /// One-time prekeys (both kinds) and single-use KeyPackages of the devices.
     pub prekeys: u64,
 }
 
@@ -1003,19 +1042,24 @@ impl Registry {
     /// at random among the first few, so concurrent claims rarely collide.
     async fn claim_one(
         &self,
-        kem: bool,
+        pool: Pool,
         device: &DeviceId,
     ) -> Result<Option<Bytes>, RegistryError> {
-        let (list, take) = if kem {
-            (
+        let (list, take) = match pool {
+            Pool::Kem => (
                 "SELECT VALUE meta::id(id)[1] FROM otkem WHERE device = $d LIMIT $n;",
                 "DELETE ONLY otkem:[$d, $id] RETURN BEFORE;",
-            )
-        } else {
-            (
+            ),
+            Pool::Ec => (
                 "SELECT VALUE meta::id(id)[1] FROM otpk WHERE device = $d LIMIT $n;",
                 "DELETE ONLY otpk:[$d, $id] RETURN BEFORE;",
-            )
+            ),
+            // An expired package is never served (the sweep deletes it).
+            Pool::KeyPackage => (
+                "SELECT VALUE meta::id(id)[1] FROM mlskp
+                   WHERE device = $d AND expires > time::now() LIMIT $n;",
+                "DELETE ONLY mlskp:[$d, $id] RETURN BEFORE;",
+            ),
         };
         for _ in 0..CLAIM_ATTEMPTS {
             let ids = rows(
@@ -1100,8 +1144,8 @@ impl Registry {
             }
             let (ec, kem) = if one_time {
                 (
-                    self.claim_one(false, &d).await?,
-                    self.claim_one(true, &d).await?,
+                    self.claim_one(Pool::Ec, &d).await?,
+                    self.claim_one(Pool::Kem, &d).await?,
                 )
             } else {
                 (None, None)
@@ -1116,6 +1160,166 @@ impl Registry {
             });
         }
         Ok(out)
+    }
+
+    // ----- MLS KeyPackages (Prompt 3, M3b, D-0051) -----
+
+    /// Stores checked KeyPackages for a device in one transaction: single-use ones within `max`
+    /// (duplicates by reference refused), a last-resort one replacing the current one.
+    ///
+    /// # Errors
+    /// [`RegistryError::Full`], [`RegistryError::Duplicate`].
+    pub async fn put_key_packages(
+        &self,
+        device: &DeviceId,
+        single_use: &[StoredKeyPackage],
+        last_resort: Option<&StoredKeyPackage>,
+        max: usize,
+    ) -> Result<(), RegistryError> {
+        let mut sql = String::from("BEGIN TRANSACTION;\n");
+        let mut vars = vec![
+            var("d", bytes(device.as_bytes())),
+            var("max", int(u64::try_from(max).unwrap_or(u64::MAX))),
+            var(
+                "kps",
+                Value::Array(
+                    single_use
+                        .iter()
+                        .map(|k| {
+                            Value::Array(vec![
+                                bytes(&k.reference),
+                                bytes(&k.package),
+                                int(k.not_after),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+        ];
+        if let Some(lr) = last_resort {
+            vars.push(var("lr", bytes(&lr.package)));
+            vars.push(var("lrexp", int(lr.not_after)));
+            sql.push_str(
+                "UPDATE device:[$d] SET mlslr = $lr,
+                   mlslr_exp = time::from_secs($lrexp) RETURN NONE;\n",
+            );
+        }
+        sql.push_str(
+            "IF count(SELECT id FROM mlskp WHERE device = $d) + array::len($kps) > $max
+               { THROW 'songbird:full' };
+             FOR $k IN $kps {
+               CREATE mlskp:[$d, $k[0]] SET device = $d, blob = $k[1],
+                 expires = time::from_secs($k[2]) RETURN NONE;
+             };
+             COMMIT TRANSACTION;",
+        );
+        let mut attempt = 0;
+        loop {
+            match self.db.query(&sql, vars.clone()).await {
+                Ok(_) => return Ok(()),
+                Err(DbError::Statement(kind)) => match kind.as_str() {
+                    "Thrown:full" => return Err(RegistryError::Full),
+                    k if k.contains("AlreadyExists") => return Err(RegistryError::Duplicate),
+                    k if k == db::TRANSACTION_CONFLICT && attempt < CONFLICT_RETRIES => {
+                        attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(2u64 << attempt.min(6))).await;
+                    }
+                    _ => return Err(DbError::Statement(kind).into()),
+                },
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
+    /// Unexpired single-use KeyPackages a device holds, and whether it has an unexpired
+    /// last-resort one.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn key_package_counts(
+        &self,
+        device: &DeviceId,
+    ) -> Result<(u64, bool), RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "RETURN [count(SELECT id FROM mlskp WHERE device = $d AND expires > time::now()),
+                         device:[$d].mlslr_exp > time::now()];",
+                vec![var("d", bytes(device.as_bytes()))],
+            )
+            .await?;
+        let r = rows(v);
+        let n = r
+            .first()
+            .and_then(Value::as_i64)
+            .and_then(|x| u64::try_from(x).ok())
+            .unwrap_or(0);
+        Ok((n, matches!(r.get(1), Some(Value::Bool(true)))))
+    }
+
+    /// A KeyPackage per enabled device of an account (except `skip`): a single-use one claimed
+    /// for this fetch when `one_time` and any is left, else the unexpired last-resort one;
+    /// devices with neither are left out.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn claim_key_packages(
+        &self,
+        account: &AccountId,
+        only: Option<&DeviceId>,
+        skip: &DeviceId,
+        one_time: bool,
+    ) -> Result<Vec<ClaimedKeyPackage>, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "SELECT meta::id(id)[0] AS d,
+                   (IF mlslr_exp > time::now() THEN mlslr ELSE NONE END) AS lr
+                 FROM device WHERE account = $a AND disabled = false;",
+                vec![var("a", bytes(account.as_bytes()))],
+            )
+            .await?;
+        let mut out = Vec::new();
+        for r in rows(v) {
+            let Some(d) = r.get("d").and_then(id16).map(DeviceId::from_bytes) else {
+                return Err(RegistryError::Shape);
+            };
+            if &d == skip || only.is_some_and(|o| o != &d) {
+                continue;
+            }
+            let claimed = if one_time {
+                self.claim_one(Pool::KeyPackage, &d).await?
+            } else {
+                None
+            };
+            let one = claimed.is_some();
+            let lr = r.get("lr").and_then(|b| b.as_bytes().cloned());
+            if let Some(package) = claimed.or(lr) {
+                out.push(ClaimedKeyPackage {
+                    device: d,
+                    package,
+                    one_time: one,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Deletes up to `limit` expired single-use KeyPackages (the worker's sweep); returns how
+    /// many.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn delete_expired_key_packages(&self, limit: usize) -> Result<usize, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "DELETE (SELECT VALUE id FROM mlskp WHERE expires <= time::now() LIMIT $n)
+                   RETURN BEFORE;",
+                vec![var("n", int(u64::try_from(limit).unwrap_or(u64::MAX)))],
+            )
+            .await?;
+        Ok(rows(v).len())
     }
 
     /// The directory version: bumped by every change to accounts or devices.
@@ -1326,6 +1530,7 @@ impl Registry {
                  LET $devs = (SELECT VALUE meta::id(id)[0] FROM device WHERE account = $a);
                  DELETE otpk WHERE device IN $devs RETURN NONE;
                  DELETE otkem WHERE device IN $devs RETURN NONE;
+                 DELETE mlskp WHERE device IN $devs RETURN NONE;
                  DELETE device WHERE account = $a RETURN NONE;
                  UPDATE username SET account = NONE, held_until = time::now() + duration::from_secs($hold)
                    WHERE account = $a RETURN NONE;
@@ -1364,7 +1569,8 @@ impl Registry {
                  RETURN count(SELECT id FROM username WHERE account = $a);
                  RETURN count(SELECT id FROM ulink WHERE account = $a);
                  RETURN count(SELECT id FROM otpk WHERE device IN $ds)
-                   + count(SELECT id FROM otkem WHERE device IN $ds);",
+                   + count(SELECT id FROM otkem WHERE device IN $ds)
+                   + count(SELECT id FROM mlskp WHERE device IN $ds);",
                 vec![
                     var("a", bytes(account.as_bytes())),
                     var("ds", Value::Array(ds)),

@@ -101,6 +101,16 @@ DEFINE FIELD IF NOT EXISTS device ON ltoken TYPE bytes;
 DEFINE FIELD IF NOT EXISTS expires ON ltoken TYPE datetime;
 DEFINE INDEX IF NOT EXISTS ltoken_account ON ltoken FIELDS account;
 DEFINE INDEX IF NOT EXISTS ltoken_expires ON ltoken FIELDS expires;
+DEFINE FIELD IF NOT EXISTS pin ON account TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS pin_tries ON account TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS pin_lock ON account TYPE option<datetime>;
+DEFINE TABLE IF NOT EXISTS passkey SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS account ON passkey TYPE bytes;
+DEFINE FIELD IF NOT EXISTS cid ON passkey TYPE bytes;
+DEFINE FIELD IF NOT EXISTS key ON passkey TYPE bytes;
+DEFINE FIELD IF NOT EXISTS count ON passkey TYPE int;
+DEFINE FIELD IF NOT EXISTS at ON passkey TYPE datetime;
+DEFINE INDEX IF NOT EXISTS passkey_account ON passkey FIELDS account;
 DEFINE TABLE IF NOT EXISTS directory SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS version ON directory TYPE int;
 DEFINE TABLE IF NOT EXISTS push_token SCHEMAFULL;
@@ -351,7 +361,7 @@ pub struct Remnants {
     pub grants: u64,
     /// Usernames still naming the account.
     pub usernames: u64,
-    /// Username links and link tokens of the account.
+    /// Username links, link tokens and passkeys of the account.
     pub links: u64,
     /// One-time prekeys (both kinds) and single-use KeyPackages of the devices.
     pub prekeys: u64,
@@ -1657,6 +1667,7 @@ impl Registry {
                    WHERE account = $a RETURN NONE;
                  DELETE ulink WHERE account = $a RETURN NONE;
                  DELETE ltoken WHERE account = $a RETURN NONE;
+                 DELETE passkey WHERE account = $a RETURN NONE;
                  DELETE account:[$a] RETURN NONE;
                  UPDATE directory:v SET version += 1 RETURN NONE;
                  COMMIT TRANSACTION;",
@@ -1690,7 +1701,8 @@ impl Registry {
                  RETURN count(SELECT id FROM upload_grant WHERE device IN $ds);
                  RETURN count(SELECT id FROM username WHERE account = $a);
                  RETURN count(SELECT id FROM ulink WHERE account = $a)
-                   + count(SELECT id FROM ltoken WHERE account = $a);
+                   + count(SELECT id FROM ltoken WHERE account = $a)
+                   + count(SELECT id FROM passkey WHERE account = $a);
                  RETURN count(SELECT id FROM otpk WHERE device IN $ds)
                    + count(SELECT id FROM otkem WHERE device IN $ds)
                    + count(SELECT id FROM mlskp WHERE device IN $ds);",

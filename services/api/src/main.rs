@@ -216,7 +216,7 @@ async fn build(
                     metrics.keys.clone(),
                 )?),
                 Some(songbird_api::devices::Devices::new(
-                    k.devices,
+                    k.devices.clone(),
                     &k.throttle,
                     &secret,
                     seed.as_deref(),

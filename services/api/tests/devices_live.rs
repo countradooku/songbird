@@ -25,8 +25,8 @@ use songbird_jobs::{Queue, QueueConfig};
 use songbird_keys::provisioning::{self, ProvisioningKey};
 use songbird_keys::xeddsa::Signer;
 use songbird_proto::devices::{
-    self as wire, DeviceList, IDENTITY_LEN, LINK_AUTH_CONTEXT, LINK_IDENTITY_CONTEXT, LinkRequest,
-    ListedDevice, Provision,
+    self as wire, DeviceList, Factor, IDENTITY_LEN, LINK_AUTH_CONTEXT, LINK_IDENTITY_CONTEXT,
+    LinkRequest, ListedDevice, Provision,
 };
 use songbird_types::{AccountId, DeviceId, Secret};
 
@@ -286,6 +286,7 @@ async fn link_flow(
         auth_sig: [0; 64],
         identity_sig: [0; 64],
         confirm: [0; 32],
+        factor: Factor::None,
     };
     let tr = |c, r: &LinkRequest| {
         wire::link_transcript(c, SERVER, &r.token, &r.device, &r.auth_key, &r.identity_key).unwrap()
@@ -678,4 +679,393 @@ async fn channels_and_links_are_throttled_per_range() {
     }
     assert_eq!(statuses[..2], [400, 400]);
     assert_eq!(statuses[3], 429);
+}
+
+// ----- Prompt 3, M4b (D-0053): second factors -----
+
+mod authenticator {
+    //! A software passkey (ES256) producing what a browser hands a relying party.
+    use aws_lc_rs::digest::{SHA256, digest};
+    use aws_lc_rs::rand::SystemRandom;
+    use aws_lc_rs::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, KeyPair as _};
+    use songbird_keys::webauthn::base64url;
+
+    pub(crate) struct Passkey {
+        key: EcdsaKeyPair,
+        pub(crate) id: Vec<u8>,
+        rp_id: String,
+        origin: String,
+    }
+
+    fn cbor_bytes(out: &mut Vec<u8>, b: &[u8]) {
+        match b.len() {
+            n @ 0..=23 => out.push(0x40 | u8::try_from(n).unwrap()),
+            n @ 24..=255 => out.extend_from_slice(&[0x58, u8::try_from(n).unwrap()]),
+            n => {
+                out.push(0x59);
+                out.extend_from_slice(&u16::try_from(n).unwrap().to_be_bytes());
+            }
+        }
+        out.extend_from_slice(b);
+    }
+
+    fn cbor_text(out: &mut Vec<u8>, s: &str) {
+        out.push(0x60 | u8::try_from(s.len()).unwrap());
+        out.extend_from_slice(s.as_bytes());
+    }
+
+    impl Passkey {
+        pub(crate) fn new(rp_id: &str, origin: &str) -> Self {
+            let pkcs8 =
+                EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &SystemRandom::new())
+                    .unwrap();
+            let key =
+                EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref()).unwrap();
+            let mut id = vec![0u8; 32];
+            getrandom::fill(&mut id).unwrap();
+            Self {
+                key,
+                id,
+                rp_id: rp_id.into(),
+                origin: origin.into(),
+            }
+        }
+
+        fn client_data(&self, kind: &str, challenge: &[u8]) -> Vec<u8> {
+            format!(
+                r#"{{"type":"{kind}","challenge":"{}","origin":"{}","crossOrigin":false}}"#,
+                base64url(challenge),
+                self.origin
+            )
+            .into_bytes()
+        }
+
+        /// (clientDataJSON, attestationObject) for registration.
+        pub(crate) fn register(&self, challenge: &[u8]) -> (Vec<u8>, Vec<u8>) {
+            let public = self.key.public_key().as_ref();
+            let mut ad = digest(&SHA256, self.rp_id.as_bytes()).as_ref().to_vec();
+            ad.push(0x45); // UP | UV | AT
+            ad.extend_from_slice(&[0; 4]);
+            ad.extend_from_slice(&[0; 16]);
+            ad.extend_from_slice(&u16::try_from(self.id.len()).unwrap().to_be_bytes());
+            ad.extend_from_slice(&self.id);
+            ad.extend_from_slice(&[0xa5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20]);
+            ad.extend_from_slice(&public[1..33]);
+            ad.extend_from_slice(&[0x22, 0x58, 0x20]);
+            ad.extend_from_slice(&public[33..]);
+            let mut ao = vec![0xa3];
+            cbor_text(&mut ao, "fmt");
+            cbor_text(&mut ao, "none");
+            cbor_text(&mut ao, "attStmt");
+            ao.push(0xa0);
+            cbor_text(&mut ao, "authData");
+            cbor_bytes(&mut ao, &ad);
+            (self.client_data("webauthn.create", challenge), ao)
+        }
+
+        /// (authenticatorData, clientDataJSON, signature) for an assertion.
+        pub(crate) fn assert(&self, challenge: &[u8], count: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+            let mut ad = digest(&SHA256, self.rp_id.as_bytes()).as_ref().to_vec();
+            ad.push(0x05); // UP | UV
+            ad.extend_from_slice(&count.to_be_bytes());
+            let cd = self.client_data("webauthn.get", challenge);
+            let mut msg = ad.clone();
+            msg.extend_from_slice(digest(&SHA256, &cd).as_ref());
+            let sig = self.key.sign(&SystemRandom::new(), &msg).unwrap();
+            (ad, cd, sig.as_ref().to_vec())
+        }
+    }
+}
+
+fn factor_settings() -> DeviceSettings {
+    DeviceSettings {
+        max_devices: 16,
+        pin_cost: songbird_api::config::KeyCost {
+            memory_kib: 64,
+            iterations: 1,
+        },
+        pin_free_attempts: 2,
+        pin_lock_base_secs: 1,
+        pin_max_attempts: 5,
+        channel_burst: 200,
+        link_burst: 200,
+        rp_id: Some("api.test".into()),
+        origins: vec!["https://api.test".into()],
+        ..settings()
+    }
+}
+
+fn identity_transcript(r: &LinkRequest) -> Vec<u8> {
+    wire::link_transcript(
+        LINK_IDENTITY_CONTEXT,
+        SERVER,
+        &r.token,
+        &r.device,
+        &r.auth_key,
+        &r.identity_key,
+    )
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pin_gates_linking_with_attempt_limits_and_lockout() {
+    let Some(s) = stack(factor_settings()).await else {
+        return;
+    };
+    let p = primary(&s).await;
+    let pin = |v: &str| format!(r#"{{"pin":"{v}"}}"#);
+    // Shape: 6 to 12 digits.
+    let (st, b) = p
+        .client
+        .send("PUT", "/v1/account/pin", Some(pin("12345").as_bytes()))
+        .await
+        .unwrap();
+    assert_eq!((st, b.as_ref()), (400, br#"{"error":"pin"}"#.as_slice()));
+    assert_eq!(
+        p.client
+            .send("PUT", "/v1/account/pin", Some(pin("246810").as_bytes()))
+            .await
+            .unwrap()
+            .0,
+        204
+    );
+    let with = |v: &'static str| move |r: &mut LinkRequest| r.factor = Factor::Pin(v.into());
+    // No factor, then wrong PINs: refused; the third wrong one starts the lock.
+    assert_eq!(link_flow(&s, &p, |_| {}).await.0, 403);
+    assert_eq!(link_flow(&s, &p, with("111111")).await.0, 403);
+    assert_eq!(link_flow(&s, &p, with("222222")).await.0, 403);
+    assert_eq!(link_flow(&s, &p, with("333333")).await.0, 403);
+    // Locked: even the right PIN is refused until the lock ends.
+    assert_eq!(link_flow(&s, &p, with("246810")).await.0, 403);
+    let (_, b) = p
+        .client
+        .send("GET", "/v1/account/factors", None)
+        .await
+        .unwrap();
+    let f = json(&b);
+    assert_eq!(f["pin"], true);
+    assert!(f["pin_locked_secs"].as_u64().is_some(), "{f}");
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    // The right PIN links, and resets the count.
+    let (st, linked) = link_flow(&s, &p, with("246810")).await;
+    assert_eq!(st, 200);
+    let l = linked.unwrap();
+    let (_, b) = p
+        .client
+        .send("GET", "/v1/account/factors", None)
+        .await
+        .unwrap();
+    assert!(json(&b)["pin_locked_secs"].is_null());
+    // Only the primary changes factors.
+    let (st, b) = l
+        .client
+        .send("DELETE", "/v1/account/pin", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        (st, b.as_ref()),
+        (403, br#"{"error":"primary"}"#.as_slice())
+    );
+    // Five wrong attempts in all make the PIN unusable until the primary sets a new one.
+    for _ in 0..5 {
+        let _ = link_flow(&s, &p, with("999999")).await;
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        s.app
+            .registry
+            .db()
+            .exec(
+                "UPDATE account SET pin_lock = NONE RETURN NONE;",
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+    }
+    let (_, b) = p
+        .client
+        .send("GET", "/v1/account/factors", None)
+        .await
+        .unwrap();
+    assert_eq!(json(&b)["pin_unusable"], true);
+    let (st, _) = link_flow(&s, &p, with("246810")).await;
+    assert_eq!(st, 403);
+    assert_eq!(
+        p.client
+            .send("PUT", "/v1/account/pin", Some(pin("135790").as_bytes()))
+            .await
+            .unwrap()
+            .0,
+        204
+    );
+    assert_eq!(link_flow(&s, &p, with("135790")).await.0, 200);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_passkey_registers_and_approves_a_link_bound_to_its_transcript() {
+    let Some(s) = stack(factor_settings()).await else {
+        return;
+    };
+    let p = primary(&s).await;
+    let pk = authenticator::Passkey::new("api.test", "https://api.test");
+    // Registration: a challenge, used once.
+    let (st, b) = p
+        .client
+        .send("POST", "/v1/account/passkeys/challenge", None)
+        .await
+        .unwrap();
+    assert_eq!(st, 200);
+    let challenge = hex::decode(json(&b)["challenge"].as_str().unwrap()).unwrap();
+    let (cd, ao) = pk.register(&challenge);
+    let body = serde_json::json!({
+        "client_data_json": hex::encode(&cd),
+        "attestation_object": hex::encode(&ao),
+    })
+    .to_string();
+    let (st, b) = p
+        .client
+        .send("PUT", "/v1/account/passkeys", Some(body.as_bytes()))
+        .await
+        .unwrap();
+    assert_eq!(st, 200, "{}", String::from_utf8_lossy(&b));
+    let (st, _) = p
+        .client
+        .send("PUT", "/v1/account/passkeys", Some(body.as_bytes()))
+        .await
+        .unwrap();
+    assert_eq!(st, 409, "the challenge is single use");
+    // Registration for another origin is refused.
+    let (_, b) = p
+        .client
+        .send("POST", "/v1/account/passkeys/challenge", None)
+        .await
+        .unwrap();
+    let c2 = hex::decode(json(&b)["challenge"].as_str().unwrap()).unwrap();
+    let other = authenticator::Passkey::new("api.test", "https://evil.test");
+    let (cd2, ao2) = other.register(&c2);
+    let body2 = serde_json::json!({
+        "client_data_json": hex::encode(&cd2),
+        "attestation_object": hex::encode(&ao2),
+    })
+    .to_string();
+    assert_eq!(
+        p.client
+            .send("PUT", "/v1/account/passkeys", Some(body2.as_bytes()))
+            .await
+            .unwrap()
+            .0,
+        400
+    );
+    // Linking now needs the factor.
+    assert_eq!(link_flow(&s, &p, |_| {}).await.0, 403);
+    // An assertion over another challenge (another link's transcript) is refused.
+    let id = pk.id.clone();
+    let stale = {
+        let pk = &pk;
+        let id = id.clone();
+        move |r: &mut LinkRequest| {
+            let (ad, cd, sig) = pk.assert(&[7; 32], 1);
+            r.factor = Factor::Passkey {
+                credential_id: id.clone(),
+                authenticator_data: ad,
+                client_data_json: cd,
+                signature: sig,
+            };
+        }
+    };
+    assert_eq!(link_flow(&s, &p, stale).await.0, 403);
+    // An assertion over this link's own transcript approves it.
+    let good = {
+        let pk = &pk;
+        move |r: &mut LinkRequest| {
+            let c = songbird_keys::webauthn::link_challenge(&identity_transcript(r));
+            let (ad, cd, sig) = pk.assert(&c, 1);
+            r.factor = Factor::Passkey {
+                credential_id: id.clone(),
+                authenticator_data: ad,
+                client_data_json: cd,
+                signature: sig,
+            };
+        }
+    };
+    assert_eq!(link_flow(&s, &p, good).await.0, 200);
+    // A counter that does not grow (a cloned authenticator) is refused.
+    let id = pk.id.clone();
+    let cloned = {
+        let pk = &pk;
+        move |r: &mut LinkRequest| {
+            let c = songbird_keys::webauthn::link_challenge(&identity_transcript(r));
+            let (ad, cd, sig) = pk.assert(&c, 1);
+            r.factor = Factor::Passkey {
+                credential_id: id.clone(),
+                authenticator_data: ad,
+                client_data_json: cd,
+                signature: sig,
+            };
+        }
+    };
+    assert_eq!(link_flow(&s, &p, cloned).await.0, 403);
+    let (_, b) = p
+        .client
+        .send("GET", "/v1/account/factors", None)
+        .await
+        .unwrap();
+    assert_eq!(json(&b)["passkeys"].as_array().unwrap().len(), 1);
+    // Removing it lifts the requirement.
+    let del = serde_json::json!({ "id": hex::encode(&pk.id) }).to_string();
+    assert_eq!(
+        p.client
+            .send("DELETE", "/v1/account/passkeys", Some(del.as_bytes()))
+            .await
+            .unwrap()
+            .0,
+        204
+    );
+    assert_eq!(link_flow(&s, &p, |_| {}).await.0, 200);
+}
+
+/// Prompt 3, M4b: several accounts on one installation are separate accounts on the server (own
+/// device IDs, keys, mailboxes and push registrations); nothing one does reaches the other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn accounts_sharing_an_installation_stay_apart() {
+    let Some(s) = stack(factor_settings()).await else {
+        return;
+    };
+    let (work, home) = (primary(&s).await, primary(&s).await);
+    let (_, l) = link_flow(&s, &work, |_| {}).await;
+    let l = l.unwrap();
+    // Each sees only its own devices.
+    let (_, b) = home.client.send("GET", "/v1/devices", None).await.unwrap();
+    let ids: Vec<String> = json(&b)["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["device"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(ids, vec![home.device.to_hex_unredacted()]);
+    // One account cannot list the other's device, nor sign for it, nor take its PIN.
+    let mut list = signed_list(&home, 1, &[&l], &home.account_key);
+    assert_eq!(put_list(&home, &list).await.0, 409);
+    list = signed_list(&work, 1, &[&l], &work.account_key);
+    assert_eq!(put_list(&home, &list).await.0, 400);
+    assert_eq!(
+        home.client
+            .send("PUT", "/v1/account/pin", Some(br#"{"pin":"112233"}"#))
+            .await
+            .unwrap()
+            .0,
+        204
+    );
+    let (_, b) = work
+        .client
+        .send("GET", "/v1/account/factors", None)
+        .await
+        .unwrap();
+    assert_eq!(json(&b)["pin"], false);
+    // Linking to one account needs only that account's factors.
+    assert_eq!(link_flow(&s, &work, |_| {}).await.0, 200);
+    assert_eq!(link_flow(&s, &home, |_| {}).await.0, 403);
+    // Their push registrations are separate rows under keyed, per-device indexes.
+    assert_ne!(
+        songbird_accounts::push_index(&[9; 32], &work.device),
+        songbird_accounts::push_index(&[9; 32], &home.device)
+    );
 }

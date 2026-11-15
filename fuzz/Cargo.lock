@@ -2779,6 +2779,7 @@ version = "0.1.0"
 dependencies = [
  "aws-lc-rs",
  "curve25519-dalek",
+ "serde_json",
  "thiserror",
 ]
 

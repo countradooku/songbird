@@ -45,6 +45,8 @@ server in plaintext. Adding to this list requires the owner's approval.
 | Link token: SHA-256 of a random 32-byte token, the account and the device ID it reserves | Link exactly one new device, once | Until used, or ten minutes (expired ones swept); with the account | Prompt 3 (M4), D-0052; **approved by the owner on 2026-11-15** |
 | Provisioning channel in `valkey-hot`: a keyed hash (HMAC-SHA256, key derived from the key directory's secret) of a random channel ID, holding at most one sealed provisioning message (at most 4 KiB, sealed to the new device's key; the server cannot open it); no account or device ID | Carry the QR provisioning message from the primary to the new device | Until read (deleted on read) or ten minutes | Prompt 3 (M4), D-0052; **approved by the owner on 2026-11-15** |
 | Keyed hashes (same key) of an IP range or an account, with the next allowed time for channels, channel reads, link attempts, link tokens and list fetches, in `valkey-hot`; no identifier | Throttle provisioning and linking | At most the throttle window (about an hour at the defaults), then expired | Prompt 3 (M4), D-0052; keyed forms of data above; **approved by the owner on 2026-11-15** |
+| Two-step PIN verifier: random salt and Argon2id output under a pepper from the secrets store (not in the database or backups); attempts since the last correct PIN and the lock's end | Require the PIN to link a device (and to recover, Prompt 10) without it being guessable from the database | Until removed or replaced, or with the account | Prompt 3 (M4b), D-0053; **awaiting the owner's approval** |
+| Passkeys: credential ID, public key (ES256 or Ed25519), signature counter, registration time | Require a passkey to link a device (and to recover) | Until removed, or with the account | Prompt 3 (M4b), D-0053; **awaiting the owner's approval** |
 | Deletion journal: per deleted account, an empty tombstone in the backup bucket named by the deletion time and HMAC-SHA256(journal key, account ID); no account ID | A restore must not bring a deleted account back | Write-once, 93 days (the longest backup retention) | Prompt 2 (M6), D-0041; **approved under the owner's delegation** |
 
 Prompt 1 adds two operational views, neither of which is user data on the server:
@@ -282,6 +284,18 @@ the key directory (M3) and key transparency (M6).
 | **A linked device, or one linked by phishing a QR scan and still pending, deletes the account or changes its username or invites** before the primary removes it | E, T | Phisher, thief of a linked device | Only the primary deletes the account, checked inside the deletion transaction; pending devices are refused every account-wide change (usernames, username key and link, invites) | `a_pending_device_changes_nothing_account_wide_and_only_the_primary_deletes` |
 | Flooding provisioning channels or link attempts | D | Anyone | Per-IP-range throttles on opening and reading channels and on linking; bounded message size and lifetime | `channels_and_links_are_throttled_per_range` |
 
+### 3.13 Second factors and multiple accounts (Prompt 3, milestone 4b)
+
+| Threat | STRIDE | Attacker | Mitigation | Test or proof |
+| --- | --- | --- | --- | --- |
+| **Linking by phishing a QR scan**: the victim's primary approves an attacker's device | S, E | Phisher | With a PIN or passkey set, the new device must present one; the passkey assertion is bound to this link's transcript (it cannot be replayed onto another link) | `a_pin_gates_linking_with_attempt_limits_and_lockout`; `a_passkey_registers_and_approves_a_link_bound_to_its_transcript` |
+| **Guessing the PIN online**, also in parallel | S | Anyone holding a link token | Every attempt counted before it is checked (account-row transaction); 5 free, then doubling locks, unusable after 20 until the primary sets a new PIN | `racing_pin_guesses_never_exceed_the_free_attempts` (40 parallel guesses: exactly 4 checked); `a_pin_gates_linking_with_attempt_limits_and_lockout` |
+| **Guessing the PIN offline** from a stolen database or backup | I | Database or backup thief | Argon2id with a pepper held only in the secrets store; without it the verifier cannot be searched | D-0053; the pepper's derivation in `devices.rs` |
+| A forged, replayed or cloned passkey assertion | S | Attacker with a copied credential or a recorded assertion | Signature over authenticator data and client data checked with the stored key; RP ID hash, origin, type and challenge checked; the counter must grow (compare and swap, so one assertion counts once) | W3C WebAuthn test vectors (`webauthn_vectors.rs`: other challenge, origin, RP ID, flipped signature or data, counter); live test (cloned counter refused) |
+| Malformed WebAuthn data (parser differentials) | T | Malicious client | A strict CBOR subset (minimal encodings, no tags or floats, no duplicate keys, bounded depth); fuzzed | `cbor_refuses_non_minimal_indefinite_tags_and_duplicates`; fuzz `devices` |
+| A linked or pending device changing the account's factors | E | Thief of a linked device | Only the primary sets or removes a PIN or passkey | `a_pin_gates_linking…` (403 `primary`) |
+| One account's actions reaching another account on the same installation | E, I | Malicious app state, bug | Accounts share nothing on the server; every request is the authenticated device's own account | `accounts_sharing_an_installation_stay_apart` |
+
 ## 4. Server-enforced settings
 
 ## 5. Compliance notes (GDPR, age of digital consent per EU country)
@@ -361,3 +375,10 @@ the key directory (M3) and key transparency (M6).
   a rollback (they keep the highest version they have seen), so the primary must sign a new list.
   The deletion journal covers accounts, not single devices. Losing the primary means deleting
   the account until M4b's recovery (two-step PIN, passkeys) and a primary transfer exist.
+- Second factors (M4b, D-0053): the PIN stops a database or backup thief, not a fully
+  compromised `api` (which holds the pepper and sees PINs in requests). Hardware guess-limiting
+  is issue #26 (Prompt 10). Passkeys sync through Apple or Google accounts, so whoever controls
+  that account can use the passkey; the PIN and the signed device list remain. No authenticator
+  attestation is checked: any authenticator the user picks is accepted. APNs gives one token per
+  app installation, so on iOS several accounts on one phone are linked by their shared push token
+  at the push service (the app documents this; FCM and Web Push register one per account).

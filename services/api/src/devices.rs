@@ -38,11 +38,12 @@ use std::time::Duration;
 
 use aws_lc_rs::{digest, hkdf, hmac};
 use bytes::Bytes;
-use songbird_accounts::devices::ListEntry;
+use songbird_accounts::devices::{ListEntry, PinRefusal};
 use songbird_accounts::{Registry, RegistryError};
 use songbird_jobs::{Job, Work};
 use songbird_proto::devices::{
-    self as wire, DeviceList, IDENTITY_LEN, LINK_AUTH_CONTEXT, LINK_IDENTITY_CONTEXT, LinkRequest,
+    self as wire, DeviceList, Factor, IDENTITY_LEN, LINK_AUTH_CONTEXT, LINK_IDENTITY_CONTEXT,
+    LinkRequest,
 };
 use songbird_proto::system::{DeviceListChanged, Kind};
 use songbird_send::system::SystemSigner;
@@ -128,6 +129,10 @@ pub enum Outcome {
     NotFound,
     /// 409 with a reason.
     Conflict(&'static str),
+    /// 403 with a reason.
+    Forbidden(&'static str),
+    /// 403 `locked`: the PIN is locked for this many seconds (`None`: until a new PIN).
+    Locked(Option<u64>),
     /// 429: wait this long (microseconds).
     Throttled(u64),
     /// 503.
@@ -150,6 +155,8 @@ pub struct Devices {
     prefixes: (u8, u8),
     record_key: hmac::Key,
     signer: Option<SystemSigner>,
+    pepper: zeroize::Zeroizing<[u8; 32]>,
+    pin_checks: std::sync::Arc<tokio::sync::Semaphore>,
     /// Counters.
     pub metrics: DeviceMetrics,
 }
@@ -256,11 +263,20 @@ impl Devices {
             .map(SystemSigner::from_seed)
             .transpose()
             .map_err(|_| "system key")?;
+        let mut pepper = zeroize::Zeroizing::new([0u8; 32]);
+        hkdf::Salt::new(hkdf::HKDF_SHA256, b"songbird-keys-v1")
+            .extract(secret)
+            .expand(&[b"pin-pepper"], hkdf::HKDF_SHA256)
+            .and_then(|o| o.fill(pepper.as_mut()))
+            .map_err(|_| "hkdf")?;
+        let permits = std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1));
         Ok(Self {
             settings,
             prefixes: (throttle.ipv4_prefix, throttle.ipv6_prefix),
             record_key: hmac::Key::new(hmac::HMAC_SHA256, &k),
             signer,
+            pepper,
+            pin_checks: std::sync::Arc::new(tokio::sync::Semaphore::new(permits)),
             metrics,
         })
     }
@@ -302,7 +318,13 @@ impl Devices {
     }
 
     fn refused(&self, o: Outcome) -> Outcome {
-        if matches!(o, Outcome::Malformed(_) | Outcome::Conflict(_)) {
+        if matches!(
+            o,
+            Outcome::Malformed(_)
+                | Outcome::Conflict(_)
+                | Outcome::Forbidden(_)
+                | Outcome::Locked(_)
+        ) {
             self.metrics.refused.inc();
         }
         o
@@ -312,7 +334,7 @@ impl Devices {
 
     /// `POST /v1/provisioning`.
     pub async fn open_channel(&self, hot: &ValkeyConn, peer: IpAddr) -> Outcome {
-        let s = self.settings;
+        let s = &self.settings;
         if let Err(o) = self
             .throttle(
                 hot,
@@ -356,7 +378,7 @@ impl Devices {
         channel: &str,
         body: &[u8],
     ) -> Outcome {
-        let s = self.settings;
+        let s = &self.settings;
         if let Err(o) = self
             .throttle(
                 hot,
@@ -395,7 +417,7 @@ impl Devices {
     /// `GET /v1/provisioning/<channel>`: waits up to `long_poll_secs`; 204 when nothing came
     /// (ask again), 404 for an unknown, expired or already read channel.
     pub async fn take_message(&self, hot: &ValkeyConn, peer: IpAddr, channel: &str) -> Outcome {
-        let s = self.settings;
+        let s = &self.settings;
         if let Err(o) = self
             .throttle(hot, "r", &self.range(peer), s.reads_per_hour, s.read_burst)
             .await
@@ -434,7 +456,7 @@ impl Devices {
         account: &AccountId,
         primary: &DeviceId,
     ) -> Outcome {
-        let s = self.settings;
+        let s = &self.settings;
         if let Err(o) = self
             .throttle(
                 hot,
@@ -492,7 +514,7 @@ impl Devices {
         peer: IpAddr,
         body: Bytes,
     ) -> Outcome {
-        let s = self.settings;
+        let s = &self.settings;
         if let Err(o) = self
             .throttle(hot, "l", &self.range(peer), s.links_per_hour, s.link_burst)
             .await
@@ -511,9 +533,19 @@ impl Devices {
             Ok(Err(why)) => return self.refused(Outcome::Malformed(why)),
             Err(_) => return Outcome::Unavailable,
         };
+        // A second factor, when the account has one (M4b, D-0053), before the token is spent.
+        let hash = token_hash(&r.token);
+        let owner = match registry.link_token_account(&hash).await {
+            Ok(Some(a)) => a,
+            Ok(None) => return self.refused(Outcome::Conflict("token")),
+            Err(_) => return Outcome::Unavailable,
+        };
+        if let Err(o) = self.second_factor(registry, &owner, &r, server_name).await {
+            return self.refused(o);
+        }
         let account = match registry
             .link_device(
-                &token_hash(&r.token),
+                &hash,
                 &r.device,
                 &r.auth_key,
                 &r.identity_key,
@@ -541,6 +573,308 @@ impl Devices {
             "account": account.to_hex_unredacted(),
             "device": r.device.to_hex_unredacted(),
         }))
+    }
+
+    // ----- second factors (Prompt 3, M4b, D-0053) -----
+
+    /// Argon2id(pin, salt) under the pepper, off the async runtime, bounded.
+    async fn pin_hash(&self, pin: String, salt: [u8; 16]) -> Option<[u8; 32]> {
+        let pin = zeroize::Zeroizing::new(pin);
+        let permit = tokio::time::timeout(
+            Duration::from_secs(2),
+            std::sync::Arc::clone(&self.pin_checks).acquire_owned(),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        let pepper = self.pepper.clone();
+        let cost = self.settings.pin_cost;
+        tokio::task::spawn_blocking(move || {
+            let params = argon2::Params::new(cost.memory_kib, cost.iterations, 1, Some(32)).ok()?;
+            let argon = argon2::Argon2::new_with_secret(
+                pepper.as_slice(),
+                argon2::Algorithm::Argon2id,
+                argon2::Version::V0x13,
+                params,
+            )
+            .ok()?;
+            let mut out = [0u8; 32];
+            argon
+                .hash_password_into(pin.as_bytes(), &salt, &mut out)
+                .ok()?;
+            drop(permit);
+            Some(out)
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    fn rp(&self) -> Option<songbird_keys::webauthn::RelyingParty<'_>> {
+        Some(songbird_keys::webauthn::RelyingParty {
+            id: self.settings.rp_id.as_deref()?,
+            origins: &self.settings.origins,
+            require_uv: self.settings.require_uv,
+        })
+    }
+
+    /// The link's second factor: required when the account has a PIN or a passkey.
+    async fn second_factor(
+        &self,
+        registry: &Registry,
+        account: &AccountId,
+        r: &LinkRequest,
+        server_name: &str,
+    ) -> Result<(), Outcome> {
+        let factors = registry
+            .factors(account)
+            .await
+            .map_err(|_| Outcome::Unavailable)?;
+        if !factors.any() {
+            return Ok(());
+        }
+        match &r.factor {
+            Factor::Pin(pin) if factors.pin => {
+                let s = &self.settings;
+                let verifier = match registry
+                    .spend_pin_attempt(
+                        account,
+                        s.pin_free_attempts,
+                        Duration::from_secs(s.pin_lock_base_secs),
+                        s.pin_max_attempts,
+                    )
+                    .await
+                {
+                    Ok(Ok(v)) => v,
+                    Ok(Err(PinRefusal::NoPin)) => return Err(Outcome::Forbidden("factor")),
+                    Ok(Err(PinRefusal::Locked(left))) => return Err(Outcome::Locked(left)),
+                    Err(_) => return Err(Outcome::Unavailable),
+                };
+                let (Some(salt), Some(stored)) = (
+                    verifier
+                        .get(..16)
+                        .and_then(|x| <[u8; 16]>::try_from(x).ok()),
+                    verifier.get(16..),
+                ) else {
+                    return Err(Outcome::Unavailable);
+                };
+                let got = self
+                    .pin_hash(pin.clone(), salt)
+                    .await
+                    .ok_or(Outcome::Unavailable)?;
+                if aws_lc_rs::constant_time::verify_slices_are_equal(&got, stored).is_err() {
+                    return Err(Outcome::Forbidden("factor"));
+                }
+                registry
+                    .pin_ok(account)
+                    .await
+                    .map_err(|_| Outcome::Unavailable)?;
+                Ok(())
+            }
+            Factor::Passkey {
+                credential_id,
+                authenticator_data,
+                client_data_json,
+                signature,
+            } => {
+                let rp = self.rp().ok_or(Outcome::Forbidden("factor"))?;
+                let stored = registry
+                    .passkey(account, credential_id)
+                    .await
+                    .map_err(|_| Outcome::Unavailable)?
+                    .ok_or(Outcome::Forbidden("factor"))?;
+                let key = songbird_keys::webauthn::CredentialKey::from_bytes(&stored.key)
+                    .map_err(|_| Outcome::Unavailable)?;
+                let t = wire::link_transcript(
+                    LINK_IDENTITY_CONTEXT,
+                    server_name,
+                    &r.token,
+                    &r.device,
+                    &r.auth_key,
+                    &r.identity_key,
+                )
+                .map_err(|_| Outcome::Malformed("request"))?;
+                let challenge = songbird_keys::webauthn::link_challenge(&t);
+                let count = songbird_keys::webauthn::check_assertion(
+                    &key,
+                    stored.count,
+                    authenticator_data,
+                    client_data_json,
+                    signature,
+                    &challenge,
+                    &rp,
+                )
+                .map_err(|_| Outcome::Forbidden("factor"))?;
+                if !registry
+                    .bump_passkey(account, credential_id, stored.count, count)
+                    .await
+                    .map_err(|_| Outcome::Unavailable)?
+                {
+                    return Err(Outcome::Forbidden("factor"));
+                }
+                Ok(())
+            }
+            _ => Err(Outcome::Forbidden("factor")),
+        }
+    }
+
+    /// `PUT /v1/account/pin` by the primary: `{"pin": "6 to 12 digits"}`.
+    pub async fn set_pin(&self, registry: &Registry, account: &AccountId, body: &[u8]) -> Outcome {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Body {
+            pin: String,
+        }
+        let Ok(b) = serde_json::from_slice::<Body>(body) else {
+            return self.refused(Outcome::Malformed("request"));
+        };
+        let pin = zeroize::Zeroizing::new(b.pin);
+        if !wire::pin_ok(&pin) {
+            return self.refused(Outcome::Malformed("pin"));
+        }
+        let mut salt = [0u8; 16];
+        if getrandom::fill(&mut salt).is_err() {
+            return Outcome::Unavailable;
+        }
+        let Some(h) = self.pin_hash(pin.to_string(), salt).await else {
+            return Outcome::Unavailable;
+        };
+        let mut verifier = salt.to_vec();
+        verifier.extend_from_slice(&h);
+        match registry.set_pin(account, Some(&verifier)).await {
+            Ok(()) => Outcome::Done,
+            Err(_) => Outcome::Unavailable,
+        }
+    }
+
+    /// `DELETE /v1/account/pin` by the primary.
+    pub async fn clear_pin(&self, registry: &Registry, account: &AccountId) -> Outcome {
+        match registry.set_pin(account, None).await {
+            Ok(()) => Outcome::Done,
+            Err(_) => Outcome::Unavailable,
+        }
+    }
+
+    /// `POST /v1/account/passkeys/challenge` by the primary: a registration challenge, five
+    /// minutes, single use.
+    pub async fn passkey_challenge(&self, hot: &ValkeyConn, account: &AccountId) -> Outcome {
+        if self.rp().is_none() {
+            return Outcome::Unavailable;
+        }
+        let mut c = [0u8; 32];
+        if getrandom::fill(&mut c).is_err() {
+            return Outcome::Unavailable;
+        }
+        match hot
+            .query::<redis::Value>(
+                redis::cmd("SET")
+                    .arg(self.record("w", account.as_bytes()))
+                    .arg(&c[..])
+                    .arg("EX")
+                    .arg(300),
+            )
+            .await
+        {
+            Ok(redis::Value::Okay) => Outcome::Json(serde_json::json!({
+                "challenge": hex::encode(c),
+                "rp_id": self.settings.rp_id,
+            })),
+            _ => Outcome::Unavailable,
+        }
+    }
+
+    /// `PUT /v1/account/passkeys` by the primary:
+    /// `{"client_data_json": hex, "attestation_object": hex}`.
+    pub async fn add_passkey(
+        &self,
+        registry: &Registry,
+        hot: &ValkeyConn,
+        account: &AccountId,
+        body: &[u8],
+    ) -> Outcome {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Body {
+            client_data_json: String,
+            attestation_object: String,
+        }
+        let Some(rp) = self.rp() else {
+            return Outcome::Unavailable;
+        };
+        let Ok(b) = serde_json::from_slice::<Body>(body) else {
+            return self.refused(Outcome::Malformed("request"));
+        };
+        let (Ok(cd), Ok(ao)) = (
+            hex::decode(&b.client_data_json),
+            hex::decode(&b.attestation_object),
+        ) else {
+            return self.refused(Outcome::Malformed("request"));
+        };
+        let challenge = match hot
+            .query::<Option<Vec<u8>>>(
+                redis::cmd("GETDEL").arg(self.record("w", account.as_bytes())),
+            )
+            .await
+        {
+            Ok(Some(c)) => c,
+            Ok(None) => return self.refused(Outcome::Conflict("challenge")),
+            Err(_) => return Outcome::Unavailable,
+        };
+        let Ok(cred) = songbird_keys::webauthn::check_registration(&cd, &ao, &challenge, &rp)
+        else {
+            return self.refused(Outcome::Malformed("passkey"));
+        };
+        let stored = songbird_accounts::devices::StoredPasskey {
+            id: cred.id.clone(),
+            key: cred.key.to_bytes(),
+            count: cred.sign_count,
+        };
+        match registry
+            .add_passkey(account, &stored, self.settings.max_passkeys)
+            .await
+        {
+            Ok(()) => Outcome::Json(serde_json::json!({ "id": hex::encode(&cred.id) })),
+            Err(RegistryError::Full) => self.refused(Outcome::Conflict("limit")),
+            Err(RegistryError::Duplicate) => self.refused(Outcome::Conflict("duplicate")),
+            Err(_) => Outcome::Unavailable,
+        }
+    }
+
+    /// `DELETE /v1/account/passkeys` by the primary: `{"id": hex}`.
+    pub async fn delete_passkey(
+        &self,
+        registry: &Registry,
+        account: &AccountId,
+        body: &[u8],
+    ) -> Outcome {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Body {
+            id: String,
+        }
+        let Some(id) = serde_json::from_slice::<Body>(body)
+            .ok()
+            .and_then(|b| hex::decode(b.id).ok())
+        else {
+            return self.refused(Outcome::Malformed("request"));
+        };
+        match registry.delete_passkey(account, &id).await {
+            Ok(()) => Outcome::Done,
+            Err(_) => Outcome::Unavailable,
+        }
+    }
+
+    /// `GET /v1/account/factors`: whether a PIN is set (and locked), the passkeys' IDs.
+    pub async fn factors(&self, registry: &Registry, account: &AccountId) -> Outcome {
+        match registry.factors(account).await {
+            Ok(f) => Outcome::Json(serde_json::json!({
+                "pin": f.pin,
+                "pin_locked_secs": f.pin_locked,
+                "pin_unusable": f.pin && f.pin_tries >= self.settings.pin_max_attempts,
+                "passkeys": f.passkeys.iter().map(hex::encode).collect::<Vec<_>>(),
+            })),
+            Err(_) => Outcome::Unavailable,
+        }
     }
 
     // ----- the list -----
@@ -659,7 +993,7 @@ impl Devices {
         requester: &AccountId,
         body: &[u8],
     ) -> Outcome {
-        let s = self.settings;
+        let s = &self.settings;
         if let Err(o) = self
             .throttle(
                 hot,
@@ -776,6 +1110,7 @@ mod tests {
             auth_sig: [0; 64],
             identity_sig: [0; 64],
             confirm: [0; 32],
+            factor: Factor::None,
         };
         r.identity_key[0] = 5;
         r.identity_key[1..].copy_from_slice(&ident.public());

@@ -391,6 +391,7 @@ impl App {
                 "/v1/keys" | "/v1/keys/fetch" | "/v1/keypackages" | "/v1/keypackages/fetch",
                 None,
             ) => self.keys(req).await,
+            (_, p, None) if p.starts_with("/v1/account/") => self.factors(req).await,
             (_, p, None) if p.starts_with("/v1/provisioning") || p.starts_with("/v1/devices") => {
                 self.devices(req).await
             }
@@ -412,6 +413,48 @@ impl App {
             .get::<registration::Peer>()
             .ok_or(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
         Ok((r, peer.0))
+    }
+
+    /// `/v1/account/…` second factors ([`devices`], M4b): the primary's to change.
+    async fn factors(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let d = self.devices.as_ref().ok_or_else(unavailable)?;
+        let method = req.method().clone();
+        let path = req.uri().path().to_owned();
+        let (device, body) = self.authenticate_json(req).await?;
+        let row = self
+            .registry
+            .device(&device)
+            .await
+            .map_err(|_| unavailable())?
+            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+        let primary = row.primary.then_some(row.account);
+        let not_primary = || devices::Outcome::Forbidden("primary");
+        let out = match (&method, path.as_str()) {
+            (&Method::PUT, "/v1/account/pin") => match primary {
+                Some(a) => d.set_pin(&self.registry, &a, &body).await,
+                None => not_primary(),
+            },
+            (&Method::DELETE, "/v1/account/pin") => match primary {
+                Some(a) => d.clear_pin(&self.registry, &a).await,
+                None => not_primary(),
+            },
+            (&Method::POST, "/v1/account/passkeys/challenge") => match primary {
+                Some(a) => d.passkey_challenge(&self.hot, &a).await,
+                None => not_primary(),
+            },
+            (&Method::PUT, "/v1/account/passkeys") => match primary {
+                Some(a) => d.add_passkey(&self.registry, &self.hot, &a, &body).await,
+                None => not_primary(),
+            },
+            (&Method::DELETE, "/v1/account/passkeys") => match primary {
+                Some(a) => d.delete_passkey(&self.registry, &a, &body).await,
+                None => not_primary(),
+            },
+            (&Method::GET, "/v1/account/factors") => d.factors(&self.registry, &row.account).await,
+            _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
+        };
+        Ok(device_outcome(out))
     }
 
     /// `/v1/provisioning…` and `/v1/devices…` ([`devices`]).
@@ -451,7 +494,7 @@ impl App {
                     .await
             }
             (&Method::POST, "/v1/devices/link", None) => {
-                let body = bounded_body(req, songbird_proto::devices::LINK_LEN).await?;
+                let body = bounded_body(req, songbird_proto::devices::MAX_LINK_LEN).await?;
                 d.link(
                     &self.registry,
                     &self.hot,
@@ -1112,6 +1155,21 @@ fn device_outcome(o: devices::Outcome) -> Response<Body> {
         Outcome::NotFound => empty(StatusCode::NOT_FOUND),
         Outcome::Conflict(what) => {
             json(StatusCode::CONFLICT, &serde_json::json!({ "error": what }))
+        }
+        Outcome::Forbidden(what) => {
+            json(StatusCode::FORBIDDEN, &serde_json::json!({ "error": what }))
+        }
+        Outcome::Locked(left) => {
+            let mut r = json(
+                StatusCode::FORBIDDEN,
+                &serde_json::json!({ "error": "locked", "retry_after": left }),
+            );
+            if let Some(secs) = left
+                && let Ok(v) = HeaderValue::from_str(&secs.to_string())
+            {
+                r.headers_mut().insert(hyper::header::RETRY_AFTER, v);
+            }
+            r
         }
         Outcome::Throttled(wait_us) => {
             let mut r = empty(StatusCode::TOO_MANY_REQUESTS);

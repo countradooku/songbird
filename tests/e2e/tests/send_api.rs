@@ -853,6 +853,7 @@ async fn a_linked_device_is_announced_and_joins_the_send_check_only_once_listed(
         auth_sig: [0; 64],
         identity_sig: [0; 64],
         confirm: [0; 32],
+        factor: songbird_proto::devices::Factor::None,
     };
     let tr = |c, r: &LinkRequest| {
         wire::link_transcript(c, API, &r.token, &r.device, &r.auth_key, &r.identity_key).unwrap()

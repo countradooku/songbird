@@ -458,3 +458,66 @@ impl TakeAll for Registry {
         self.take(1000).await.unwrap()
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn racing_pin_guesses_never_exceed_the_free_attempts() {
+    let Some(first) = registry().await else {
+        return;
+    };
+    let n = account(&first).await;
+    first.set_pin(&n.account, Some(&[1; 48])).await.unwrap();
+    let mut conns = vec![Arc::new(first)];
+    for _ in 1..8 {
+        let cfg = conns[0].db().config_clone().unwrap();
+        conns.push(Arc::new(
+            Registry::connect(Db::connect(cfg).await.unwrap())
+                .await
+                .unwrap(),
+        ));
+    }
+    // 40 parallel guesses, 3 free attempts, lock after: exactly 4 attempts get to check the
+    // PIN (the fourth starts the lock), the rest are refused before any check.
+    let tasks: Vec<_> = (0..40)
+        .map(|i| {
+            let r = Arc::clone(&conns[i % conns.len()]);
+            let a = n.account;
+            tokio::spawn(async move {
+                r.spend_pin_attempt(&a, 3, Duration::from_secs(60), 10)
+                    .await
+                    .unwrap()
+            })
+        })
+        .collect();
+    let mut checked = 0;
+    for t in tasks {
+        match t.await.unwrap() {
+            Ok(v) => {
+                assert_eq!(v, vec![1; 48]);
+                checked += 1;
+            }
+            Err(songbird_accounts::devices::PinRefusal::Locked(Some(_))) => {}
+            Err(e) => panic!("unexpected {e:?}"),
+        }
+    }
+    assert_eq!(checked, 4, "PIN checks beyond the limit");
+    let f = conns[0].factors(&n.account).await.unwrap();
+    assert!(f.pin && f.pin_locked.is_some() && f.pin_tries == 4);
+    // A correct PIN clears it; no PIN refuses.
+    conns[0].pin_ok(&n.account).await.unwrap();
+    assert!(
+        conns[0]
+            .factors(&n.account)
+            .await
+            .unwrap()
+            .pin_locked
+            .is_none()
+    );
+    conns[0].set_pin(&n.account, None).await.unwrap();
+    assert_eq!(
+        conns[0]
+            .spend_pin_attempt(&n.account, 3, Duration::from_secs(60), 10)
+            .await
+            .unwrap(),
+        Err(songbird_accounts::devices::PinRefusal::NoPin)
+    );
+}

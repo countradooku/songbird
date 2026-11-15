@@ -56,8 +56,16 @@ pub const LINK_AUTH_CONTEXT: &[u8] = b"songbird.v1/link-device-auth\0";
 pub const LINK_IDENTITY_CONTEXT: &[u8] = b"songbird.v1/link-device-identity\0";
 /// Link token length.
 pub const TOKEN_LEN: usize = 32;
-/// Link request length.
-pub const LINK_LEN: usize = 1 + TOKEN_LEN + ID_LEN + 32 + IDENTITY_LEN + 64 + 64 + 32;
+/// Link request length without a second factor (the factor kind byte included).
+pub const LINK_LEN: usize = 1 + TOKEN_LEN + ID_LEN + 32 + IDENTITY_LEN + 64 + 64 + 32 + 1;
+/// Longest link request (with a passkey assertion).
+pub const MAX_LINK_LEN: usize = LINK_LEN + 2 + 1023 + 2 * (2 + 4096) + 1 + 255;
+/// Shortest PIN.
+pub const MIN_PIN: usize = 6;
+/// Longest PIN.
+pub const MAX_PIN: usize = 12;
+/// Context of a passkey assertion's challenge for linking.
+pub const LINK_PASSKEY_CONTEXT: &[u8] = b"songbird.v1/link-passkey\0";
 /// Longest provisioning message (ciphertext the new device decrypts; opaque to the server).
 pub const MAX_PROVISIONING_LEN: usize = 4096;
 /// Longest device list.
@@ -238,6 +246,47 @@ pub struct LinkRequest {
     pub identity_sig: [u8; 64],
     /// The confirmation tag for the primary (opaque to the server).
     pub confirm: [u8; 32],
+    /// The second factor, when the account has one (Prompt 3, M4b, D-0053).
+    pub factor: Factor,
+}
+
+/// A link request's second factor.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub enum Factor {
+    /// None given.
+    #[default]
+    None,
+    /// The account's two-step PIN: 6 to 12 ASCII digits.
+    Pin(String),
+    /// A passkey assertion whose challenge is
+    /// `SHA-256(LINK_PASSKEY_CONTEXT || identity-context transcript)`
+    /// (`songbird_keys::webauthn::link_challenge`).
+    Passkey {
+        /// Credential ID (1 to 1023 bytes).
+        credential_id: Vec<u8>,
+        /// Authenticator data (at most 4096 bytes).
+        authenticator_data: Vec<u8>,
+        /// `clientDataJSON` (at most 4096 bytes).
+        client_data_json: Vec<u8>,
+        /// Signature (at most 255 bytes).
+        signature: Vec<u8>,
+    },
+}
+
+impl std::fmt::Debug for Factor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::None => "Factor::None",
+            Self::Pin(_) => "Factor::Pin(..)",
+            Self::Passkey { .. } => "Factor::Passkey(..)",
+        })
+    }
+}
+
+/// Whether a PIN has the allowed shape.
+#[must_use]
+pub fn pin_ok(pin: &str) -> bool {
+    (MIN_PIN..=MAX_PIN).contains(&pin.len()) && pin.bytes().all(|b| b.is_ascii_digit())
 }
 
 impl LinkRequest {
@@ -253,29 +302,98 @@ impl LinkRequest {
         b.extend_from_slice(&self.auth_sig);
         b.extend_from_slice(&self.identity_sig);
         b.extend_from_slice(&self.confirm);
+        match &self.factor {
+            Factor::None => b.push(0),
+            Factor::Pin(p) => {
+                b.push(1);
+                b.push(u8::try_from(p.len()).unwrap_or(u8::MAX));
+                b.extend_from_slice(p.as_bytes());
+            }
+            Factor::Passkey {
+                credential_id,
+                authenticator_data,
+                client_data_json,
+                signature,
+            } => {
+                b.push(2);
+                for part in [credential_id, authenticator_data, client_data_json] {
+                    b.extend_from_slice(
+                        &u16::try_from(part.len()).unwrap_or(u16::MAX).to_be_bytes(),
+                    );
+                    b.extend_from_slice(part);
+                }
+                b.push(u8::try_from(signature.len()).unwrap_or(u8::MAX));
+                b.extend_from_slice(signature);
+            }
+        }
         b
     }
 
-    /// Decodes exactly [`LINK_LEN`] bytes.
+    /// Decodes a whole request (at least [`LINK_LEN`], at most [`MAX_LINK_LEN`] bytes).
     ///
     /// # Errors
     /// [`DevicesError::Malformed`].
     pub fn decode(input: &[u8]) -> Result<Self, DevicesError> {
-        if input.len() != LINK_LEN {
+        if input.len() < LINK_LEN || input.len() > MAX_LINK_LEN {
             return Err(DevicesError::Malformed);
         }
         let mut r = Reader(input);
         if r.u8()? != VERSION {
             return Err(DevicesError::Malformed);
         }
+        let token = r.array()?;
+        let device = DeviceId::from_bytes(r.id16()?);
+        let auth_key = r.array()?;
+        let identity_key = r.array()?;
+        let auth_sig = r.array()?;
+        let identity_sig = r.array()?;
+        let confirm = r.array()?;
+        let factor = match r.u8()? {
+            0 => Factor::None,
+            1 => {
+                let n = usize::from(r.u8()?);
+                let pin = std::str::from_utf8(r.take(n)?).map_err(|_| DevicesError::Malformed)?;
+                if !pin_ok(pin) {
+                    return Err(DevicesError::Malformed);
+                }
+                Factor::Pin(pin.to_owned())
+            }
+            2 => {
+                let mut part = |max: usize| -> Result<Vec<u8>, DevicesError> {
+                    let n = usize::from(u16::from_be_bytes(r.array()?));
+                    if n == 0 || n > max {
+                        return Err(DevicesError::Malformed);
+                    }
+                    Ok(r.take(n)?.to_vec())
+                };
+                let credential_id = part(1023)?;
+                let authenticator_data = part(4096)?;
+                let client_data_json = part(4096)?;
+                let n = usize::from(r.u8()?);
+                if n == 0 {
+                    return Err(DevicesError::Malformed);
+                }
+                Factor::Passkey {
+                    credential_id,
+                    authenticator_data,
+                    client_data_json,
+                    signature: r.take(n)?.to_vec(),
+                }
+            }
+            _ => return Err(DevicesError::Malformed),
+        };
+        if !r.0.is_empty() {
+            return Err(DevicesError::Malformed);
+        }
         Ok(Self {
-            token: r.array()?,
-            device: DeviceId::from_bytes(r.id16()?),
-            auth_key: r.array()?,
-            identity_key: r.array()?,
-            auth_sig: r.array()?,
-            identity_sig: r.array()?,
-            confirm: r.array()?,
+            token,
+            device,
+            auth_key,
+            identity_key,
+            auth_sig,
+            identity_sig,
+            confirm,
+            factor,
         })
     }
 }
@@ -447,6 +565,7 @@ mod tests {
             auth_sig: [5; 64],
             identity_sig: [6; 64],
             confirm: [7; 32],
+            factor: Factor::None,
         };
         let b = r.encode();
         assert_eq!(b.len(), LINK_LEN);
@@ -464,6 +583,38 @@ mod tests {
             .unwrap()
         };
         assert_ne!(t(LINK_AUTH_CONTEXT), t(LINK_IDENTITY_CONTEXT));
+        // With each kind of second factor.
+        for factor in [
+            Factor::Pin("123456".to_owned()),
+            Factor::Passkey {
+                credential_id: vec![1; 32],
+                authenticator_data: vec![2; 37],
+                client_data_json: b"{}".to_vec(),
+                signature: vec![3; 70],
+            },
+        ] {
+            let with = LinkRequest {
+                factor,
+                ..r.clone()
+            };
+            let b = with.encode();
+            assert_eq!(LinkRequest::decode(&b), Ok(with));
+            for cut in LINK_LEN..b.len() {
+                assert!(LinkRequest::decode(&b[..cut]).is_err());
+            }
+            let mut long = b.clone();
+            long.push(0);
+            assert!(LinkRequest::decode(&long).is_err());
+        }
+        // PINs: digits only, 6 to 12.
+        for bad in ["12345", "1234567890123", "12345a"] {
+            let mut b = r.encode();
+            b.pop();
+            b.push(1);
+            b.push(u8::try_from(bad.len()).unwrap());
+            b.extend_from_slice(bad.as_bytes());
+            assert!(LinkRequest::decode(&b).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -610,6 +610,59 @@ Throttles (defaults), all as GCRA records in `valkey-hot` under keyed hashes:
 - per account: 20 link tokens and provisioning messages an hour;
 - per requesting account: 240 list fetches an hour.
 
+### 4.7 Second factors and multiple accounts
+
+Decision D-0053 (M4b). An account may set a two-step PIN and passkeys. Once it has either, linking
+a device needs one of them, and so will account recovery (Prompt 10). Only the primary sets,
+replaces or removes them.
+
+**The link request's factor.** These bytes follow `confirm` (§4.6). They are not covered by the
+link signatures; each factor binds itself:
+
+```text
+factor u8: 0 none
+         | 1 PIN:     len u8 | 6 to 12 ASCII digits
+         | 2 passkey: len u16 | credential_id | len u16 | authenticatorData | len u16 | clientDataJSON
+                      | len u8 | signature
+```
+
+- **PIN.** Stored as `salt [16] || Argon2id(m, t, p = 1, secret = pepper)(pin, salt)`. The pepper
+  is derived from `[api.keys] secret` (the secrets store, never the database or its backups).
+  Each attempt is counted before it is checked, so parallel guesses cannot exceed the limit:
+  - the first 5 attempts are free;
+  - each further attempt locks the next for `60 s · 2^(k-1)`, at most a week;
+  - after 20 attempts the PIN is unusable until the primary sets a new one;
+  - a correct PIN resets the count.
+  Refusals: 403 `{"error": "factor"}` for a missing or wrong factor, 403
+  `{"error": "locked", "retry_after": s}` while locked.
+- **Passkey.** WebAuthn with Songbird's own minimal verifier (`songbird_keys::webauthn`):
+  - ES256 or EdDSA (Ed25519) credentials;
+  - no attestation is trusted;
+  - user presence always, user verification required by default;
+  - the RP ID and allowed origins come from `[api.keys.devices]`;
+  - the signature counter must grow unless it is always zero.
+  The assertion's challenge is `SHA-256("songbird.v1/link-passkey\0" || identity-context
+  transcript)`, so it approves exactly this token, device ID, pair of keys and server, and needs
+  no server state.
+
+| Request | Body | Answers |
+| --- | --- | --- |
+| `PUT /v1/account/pin` | `{"pin": "6 to 12 digits"}` (primary) | 204; 400 `{"error": "pin"}`; 403 `{"error": "primary"}` |
+| `DELETE /v1/account/pin` | none (primary) | 204; 403 |
+| `POST /v1/account/passkeys/challenge` | none (primary) | 200 `{"challenge": hex, "rp_id"}`, single use, five minutes; 503 without an RP ID |
+| `PUT /v1/account/passkeys` | `{"client_data_json": hex, "attestation_object": hex}` (primary) | 200 `{"id": hex}`; 400 `{"error": "passkey"}`; 409 `{"error": "challenge" \| "limit" \| "duplicate"}` |
+| `DELETE /v1/account/passkeys` | `{"id": hex}` (primary) | 204 |
+| `GET /v1/account/factors` | none | 200 `{"pin", "pin_locked_secs", "pin_unusable", "passkeys": [hex]}` |
+
+**Multiple accounts on one installation.** Each account is a separate account on the server:
+its own device ID and authentication key, identity keys, mailbox and push registration. The app
+holds one device per account and signs each request as that account's device. One push token
+registered for several accounts is sealed and stored under a separate keyed index per device.
+The push service still opens each registration to deliver, so it can see that one token belongs
+to several devices: it links them. Where the platform allows several tokens per installation
+(FCM instance IDs, Web Push subscriptions), the app registers one per account. APNs gives one
+token per app installation, so on iOS the link remains (threat model §6).
+
 ## 5. Encrypted content schemas (Prompt 4)
 
 ## 6. Groups, roles and channels (MLS) (Prompt 5)

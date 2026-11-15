@@ -89,13 +89,54 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   device).
 - Prompt 3, milestone 4 (report `docs/reports/P03-M4.md`, D-0052): gate **approved by the owner
   on 2026-11-15** ("Approve both"), with its four threat-model §1 rows (the signed device list
-  and device flags; link token hashes; provisioning channels; keyed throttle records). Next: M4b.
+  and device flags; link token hashes; provisioning channels; keyed throttle records).
+- The rest of Prompt 3 in one pass (owner, 2026-11-15: "lets do the rest of milestones in one"):
+  M4b (D-0053), M5 (D-0054), M6 (D-0055) and M7 (D-0056, the final gate `P03-gate.md`) on one
+  branch and one PR; **every gate and new threat-model row awaiting the owner's approval**.
 - D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
   tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
   `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0053 — Prompt 3, milestone 4b: two-step PIN and passkeys as second factors for linking; multiple accounts per installation
+
+- Date: 2026-11-15
+- Status: accepted; built (report P03-M4b); **awaiting the owner's approval** (the owner asked
+  for the rest of Prompt 3 in one pass on 2026-11-15)
+- Decided by:
+  - owner: the PIN as Argon2id + pepper + lockout, at least 6 digits (D-0047); Songbird's own
+    minimal WebAuthn verifier (2026-11-15);
+  - agent: the design below.
+- Decision:
+  - **Where the factor applies.** Once an account has a PIN or a passkey, a link request must
+    carry one. This is the step a QR-scan phisher cannot complete. Recovery (Prompt 10) will
+    require the same.
+  - **PIN.** 6 to 12 digits, Argon2id under a pepper derived from the key directory's secret.
+    - Every attempt is spent in the account row's transaction before it is checked, so parallel
+      guesses cannot exceed the limit.
+    - 5 free attempts, then locks of `60 s · 2^(k-1)` up to a week; unusable after 20 until the
+      primary sets a new PIN.
+    - The comparison is constant-time.
+  - **Passkeys.** Songbird's own verifier (about 400 lines, fuzzed): ES256 and EdDSA; no
+    attestation trusted; user verification required by default; signature counters
+    compare-and-swapped. Registration takes a single-use challenge. The link assertion's
+    challenge is derived from the link transcript, so it needs no server state and cannot be
+    replayed onto another link.
+  - **Only the primary** manages factors.
+  - **Multiple accounts.** Each account on an installation is its own account on the server, with
+    nothing shared. A shared APNs token links them at the push service; this is documented, and
+    per-account registrations are used where the platform allows.
+- Evidence:
+  - the W3C WebAuthn Level 3 test vectors (ES256 with no attestation, Ed25519 with packed
+    attestation) pass, with their refusals;
+  - `racing_pin_guesses_never_exceed_the_free_attempts` (40 parallel guesses: 4 checked);
+  - live HTTP tests for PIN lockout, passkey linking and account isolation;
+  - fuzz `devices` (now including WebAuthn).
+- Consequences: no new dependency (`serde_json` is added to `songbird-keys` from the workspace).
+  `[api.keys.devices]` gains PIN and WebAuthn settings, and passkeys stay off (503) until
+  `rp_id` is set.
 
 ## D-0052 — Prompt 3, milestone 4: QR provisioning, linking with a confirmation the server cannot forge, and a signed, versioned device list
 

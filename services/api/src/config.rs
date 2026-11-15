@@ -797,8 +797,8 @@ pub struct KeySettings {
     pub devices: DeviceSettings,
 }
 
-/// `[api.keys.devices]` (Prompt 3, M4, D-0052).
-#[derive(Debug, Clone, Copy, Deserialize)]
+/// `[api.keys.devices]` (Prompt 3, M4, D-0052; second factors M4b, D-0053).
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct DeviceSettings {
     /// Most enabled devices per account, primary included (owner, D-0047: primary + 5, until
@@ -830,6 +830,22 @@ pub struct DeviceSettings {
     pub list_fetches_per_hour: u32,
     /// Its burst.
     pub list_fetch_burst: u32,
+    /// Argon2id cost of the two-step PIN (with the pepper from the key directory's secret).
+    pub pin_cost: KeyCost,
+    /// PIN attempts before the lock starts.
+    pub pin_free_attempts: u32,
+    /// The first lock (seconds); each further wrong attempt doubles it, at most a week.
+    pub pin_lock_base_secs: u64,
+    /// Attempts after which the PIN is unusable until the primary sets a new one.
+    pub pin_max_attempts: u32,
+    /// Passkeys per account.
+    pub max_passkeys: u32,
+    /// The WebAuthn relying party ID (a domain); absent: passkeys answer 503.
+    pub rp_id: Option<String>,
+    /// Origins passkey ceremonies may come from (`https://…` and the apps' origins).
+    pub origins: Vec<String>,
+    /// Require the authenticator's user-verified flag.
+    pub require_uv: bool,
 }
 
 impl Default for DeviceSettings {
@@ -849,6 +865,14 @@ impl Default for DeviceSettings {
             token_burst: 10,
             list_fetches_per_hour: 240,
             list_fetch_burst: 60,
+            pin_cost: KeyCost::default(),
+            pin_free_attempts: 5,
+            pin_lock_base_secs: 60,
+            pin_max_attempts: 20,
+            max_passkeys: 10,
+            rp_id: None,
+            origins: Vec::new(),
+            require_uv: true,
         }
     }
 }
@@ -867,6 +891,33 @@ impl Validate for DeviceSettings {
         ] {
             v.check((60..=3_600).contains(&n), name, "must be in 60..=3600");
         }
+        v.section("pin_cost", &self.pin_cost);
+        v.check(
+            (1..=20).contains(&self.pin_free_attempts)
+                && self.pin_free_attempts <= self.pin_max_attempts,
+            "pin_free_attempts",
+            "must be in 1..=20 and at most pin_max_attempts",
+        );
+        v.check(
+            (1..=100).contains(&self.pin_max_attempts),
+            "pin_max_attempts",
+            "must be in 1..=100",
+        );
+        v.check(
+            (1..=86_400).contains(&self.pin_lock_base_secs),
+            "pin_lock_base_secs",
+            "must be in 1..=86400",
+        );
+        v.check(
+            (1..=100).contains(&self.max_passkeys),
+            "max_passkeys",
+            "must be in 1..=100",
+        );
+        v.check(
+            self.rp_id.is_none() || !self.origins.is_empty(),
+            "origins",
+            "must list at least one origin when rp_id is set",
+        );
         v.check(
             (1..=55).contains(&self.long_poll_secs),
             "long_poll_secs",

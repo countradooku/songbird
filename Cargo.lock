@@ -3313,6 +3313,7 @@ dependencies = [
  "curve25519-dalek",
  "hex",
  "proptest",
+ "serde_json",
  "thiserror",
 ]
 

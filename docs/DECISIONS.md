@@ -64,15 +64,17 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   under the owner's delegation; the owner may revisit it. New dependency `redis` (with `arcstr`,
   `async-lock`, `xxhash-rust` under BSL-1.0), exempted pending audits.
 - Prompt 2, milestone 5 (report `docs/reports/P02-M5.md`): gate approved by the owner on 2026-11-13.
-  Still open: approve two threat-model rows added beyond the two approved (the sealed job queue and the hashed request nonces, both
-  forms of data already listed); D-0036 decided by the agent under the owner's standing
+  The two further threat-model rows (the sealed job queue and the hashed request nonces) were
+  approved by the owner on 2026-11-15 with the Prompt 2 final gate; D-0036 decided by the agent under the owner's standing
   instruction. Provider credentials (2026-11-13): an APNs sandbox key and a least-privilege FCM
   service account exist outside the repository and were verified against Apple and Google;
   waking a real device waits for the apps; production keys go to SOPS at deployment.
 - D-0038: whether to store who invited whom for abuse handling (default: no, only per-user counts).
 - D-0037 / D-0044 (report `docs/reports/P02-send.md`): **approved by the owner on 2026-11-14**
   ("Approve both"): D-0044's routing (`api.` admitted to node links for the store of a send
-  only) and its two threat-model rows. Next: the Prompt 2 final gate.
+  only) and its two threat-model rows. Prompt 2's final gate (report `docs/reports/P02-final.md`):
+  **approved by the owner on 2026-11-15** ("Approve all four"). Prompt 2 is done; its go-live checks
+  (24-hour soak, durable latency on the `ccx33`, the 2-hour RTO drill) run after every phase is finished.
 - D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
   tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
   `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment

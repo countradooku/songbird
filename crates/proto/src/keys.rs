@@ -426,6 +426,115 @@ pub fn decode_bundles(input: &[u8]) -> Result<Vec<Bundle>, KeysError> {
     Ok(out)
 }
 
+/// Longest MLS KeyPackage accepted (`songbird_keys::mls::MAX_LEN`).
+pub const MAX_KEY_PACKAGE_LEN: usize = 2048;
+/// Most KeyPackages in one upload.
+pub const MAX_KEY_PACKAGES_PER_UPLOAD: usize = 100;
+/// Longest KeyPackage upload.
+pub const MAX_KEY_PACKAGE_UPLOAD_LEN: usize =
+    2 + MAX_KEY_PACKAGES_PER_UPLOAD * (2 + MAX_KEY_PACKAGE_LEN);
+
+/// `PUT /v1/keypackages`: `version u8 (1) | n u8 | n × (len u16 | KeyPackage)`, n <= 100, each
+/// at most 2,048 bytes. A package with the `last_resort` extension replaces the device's
+/// last-resort package; the others are single use.
+///
+/// # Errors
+/// [`KeysError::Malformed`].
+pub fn decode_key_packages(input: &[u8]) -> Result<Vec<&[u8]>, KeysError> {
+    if input.len() > MAX_KEY_PACKAGE_UPLOAD_LEN {
+        return Err(KeysError::Malformed);
+    }
+    let mut r = Reader(input);
+    if r.u8()? != VERSION {
+        return Err(KeysError::Malformed);
+    }
+    let n = usize::from(r.u8()?);
+    if n == 0 || n > MAX_KEY_PACKAGES_PER_UPLOAD {
+        return Err(KeysError::Malformed);
+    }
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let len = usize::from(r.u16()?);
+        if len == 0 || len > MAX_KEY_PACKAGE_LEN {
+            return Err(KeysError::Malformed);
+        }
+        out.push(r.take(len)?);
+    }
+    r.end()?;
+    Ok(out)
+}
+
+/// Encodes a KeyPackage upload.
+#[must_use]
+pub fn encode_key_packages(packages: &[&[u8]]) -> Vec<u8> {
+    let mut b = vec![VERSION, u8::try_from(packages.len()).unwrap_or(u8::MAX)];
+    for p in packages {
+        b.extend_from_slice(&count_u16(p.len()));
+        b.extend_from_slice(p);
+    }
+    b
+}
+
+/// One device's KeyPackage, as a fetch hands it out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyPackageBundle {
+    /// The device.
+    pub device: DeviceId,
+    /// Whether the package is single use (claimed for this fetch), not the last-resort one.
+    pub one_time: bool,
+    /// The TLS-serialized KeyPackage.
+    pub package: Vec<u8>,
+}
+
+/// Encodes a KeyPackage fetch answer: `version u8 | n u8 | n × (device [16] | flags u8 (1 single
+/// use) | len u16 | KeyPackage)`.
+#[must_use]
+pub fn encode_key_package_bundles(bundles: &[KeyPackageBundle]) -> Vec<u8> {
+    let mut b = vec![VERSION, u8::try_from(bundles.len()).unwrap_or(u8::MAX)];
+    for x in bundles {
+        b.extend_from_slice(x.device.as_bytes());
+        b.push(u8::from(x.one_time));
+        b.extend_from_slice(&count_u16(x.package.len()));
+        b.extend_from_slice(&x.package);
+    }
+    b
+}
+
+/// Decodes a KeyPackage fetch answer (clients).
+///
+/// # Errors
+/// [`KeysError::Malformed`].
+pub fn decode_key_package_bundles(input: &[u8]) -> Result<Vec<KeyPackageBundle>, KeysError> {
+    let mut r = Reader(input);
+    if r.u8()? != VERSION {
+        return Err(KeysError::Malformed);
+    }
+    let n = usize::from(r.u8()?);
+    if n > MAX_BUNDLES {
+        return Err(KeysError::Malformed);
+    }
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let device = DeviceId::from_slice(r.take(ID_LEN)?).map_err(|_| KeysError::Malformed)?;
+        let one_time = match r.u8()? {
+            0 => false,
+            1 => true,
+            _ => return Err(KeysError::Malformed),
+        };
+        let len = usize::from(r.u16()?);
+        if len == 0 || len > MAX_KEY_PACKAGE_LEN {
+            return Err(KeysError::Malformed);
+        }
+        out.push(KeyPackageBundle {
+            device,
+            one_time,
+            package: r.take(len)?.to_vec(),
+        });
+    }
+    r.end()?;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "tests")]
@@ -525,11 +634,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn key_package_messages_round_trip_and_decode_strictly() {
+        let a = vec![1u8; 300];
+        let b = vec![2u8; MAX_KEY_PACKAGE_LEN];
+        let up = encode_key_packages(&[&a, &b]);
+        assert_eq!(decode_key_packages(&up).unwrap(), vec![&a[..], &b[..]]);
+        for cut in 0..up.len() {
+            assert!(decode_key_packages(&up[..cut]).is_err());
+        }
+        assert!(decode_key_packages(&encode_key_packages(&[])).is_err());
+        let too_long = vec![3u8; MAX_KEY_PACKAGE_LEN + 1];
+        assert!(decode_key_packages(&encode_key_packages(&[&too_long])).is_err());
+        let bundles = vec![
+            KeyPackageBundle {
+                device: DeviceId::from_bytes([1; 16]),
+                one_time: true,
+                package: a.clone(),
+            },
+            KeyPackageBundle {
+                device: DeviceId::from_bytes([2; 16]),
+                one_time: false,
+                package: b,
+            },
+        ];
+        let enc = encode_key_package_bundles(&bundles);
+        assert_eq!(decode_key_package_bundles(&enc).unwrap(), bundles);
+        let mut bad_flag = enc.clone();
+        bad_flag[2 + 16] = 2;
+        assert!(decode_key_package_bundles(&bad_flag).is_err());
+    }
+
     proptest! {
         #[test]
         fn decoders_never_panic(b in proptest::collection::vec(any::<u8>(), 0..4096)) {
             let _ = Upload::decode(&b);
             let _ = decode_bundles(&b);
+            let _ = decode_key_packages(&b);
+            let _ = decode_key_package_bundles(&b);
         }
     }
 }

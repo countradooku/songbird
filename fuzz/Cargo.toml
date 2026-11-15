@@ -112,3 +112,10 @@ path = "fuzz_targets/prekeys.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "keypackages"
+path = "fuzz_targets/keypackages.rs"
+test = false
+doc = false
+bench = false

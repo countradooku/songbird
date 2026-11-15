@@ -16,6 +16,7 @@
 #![forbid(unsafe_code)]
 
 pub mod kem;
+pub mod mls;
 pub mod username;
 pub mod xeddsa;
 

@@ -13,6 +13,7 @@ every decoder). The crate is outside the main workspace because it needs nightly
 | `pow_challenge` | proof-of-work challenge and its MAC (Prompt 3) | `songbird-pow` |
 | `ed25519_key` | Ed25519 public-key check (Prompt 3) | `songbird-keys` |
 | `username` | username proof verification and parser (Prompt 3) | `songbird-keys` |
+| `keypackages` | MLS KeyPackage checks; KeyPackage upload and fetch decoders (Prompt 3) | `songbird-keys`, `songbird-proto` |
 | `prekeys` | key directory upload and bundle decoders; XEdDSA, X25519 and ML-KEM-1024 checks (Prompt 3) | `songbird-proto`, `songbird-keys` |
 
 ```bash

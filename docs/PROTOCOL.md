@@ -481,7 +481,40 @@ device [16] | identity [33] | signed: id u32 | key [33] | sig [64]
   Clients also see their counts with `GET /v1/keys`.
 - A client verifies both signatures with the identity key before PQXDH, as libsignal does.
 
-MLS KeyPackages (the same single-use pattern for groups) are milestone M3b.
+### 4.5 MLS KeyPackages
+
+Decision D-0051. Groups (Prompt 5) add a device with one of its KeyPackages (RFC 9420 §10). The
+server checks each package before publishing it, with its own focused parser (the owner's choice
+over running OpenMLS on the server), and **binds it to the uploading device**:
+
+- RFC 9420's encoding, strictly (minimal variable-length integers, no trailing bytes, at most
+  2,048 bytes, no duplicate extension types); version mls10; ciphersuite `0x0001` or `0x0003`
+  (X25519 HPKE, Ed25519 signatures);
+- `init_key` and the leaf's `encryption_key` honest X25519 keys, different from each other; the
+  `signature_key` an honest Ed25519 key;
+- a **basic credential whose identity is the uploading device's 16-byte ID**;
+- capabilities listing mls10, the package's ciphersuite and basic credentials; leaf source
+  `key_package`; a lifetime that has begun (an hour of skew allowed), has not ended and is at most
+  100 days;
+- both `SignWithLabel` signatures (`LeafNodeTBS`, `KeyPackageTBS`) by the signature key.
+
+A package carrying the `last_resort` extension (type 10, as OpenMLS writes it) replaces the
+device's last-resort package; the others are single use. Packages are stored under their
+`KeyPackageRef` (RFC 9420 §5.2).
+
+| Request | Body | Answers |
+| --- | --- | --- |
+| `PUT /v1/keypackages` | `version u8 (1) \| n u8 \| n × (len u16 \| KeyPackage)`, 1 to 100 packages | 204; 400 `{"error": "request" \| "unsupported" \| "keys" \| "identity" \| "lifetime" \| "signature" \| "duplicate" \| "last resort"}`; 409 `{"error": "full" \| "duplicate"}` |
+| `GET /v1/keypackages` | none | 200 `{"single_use": n, "last_resort": bool}` (unexpired) |
+| `POST /v1/keypackages/fetch` | `{"account": hex, "device"?: hex}` | 200 `version u8 \| n u8 \| n × (device [16] \| flags u8 (1 single use) \| len u16 \| KeyPackage)`; 404; 429 |
+
+- Each single-use package goes to exactly one fetch (`no_key_package_is_ever_served_twice_under_parallel_claims`);
+  an expired one is never served; beyond the single-use ones, the unexpired last-resort one.
+- The same throttles as prekey fetches (§4.4), counted separately, with the same per-target
+  budget and last-resort fall-back; a device left below 10 single-use packages gets a system
+  notice of kind 3, `KeyPackagesLow`, body `n u16`, at most once an hour. At most 200 stored per
+  device.
+- Clients still validate every package fully before use (RFC 9420 §10.1).
 
 ## 5. Encrypted content schemas (Prompt 4)
 

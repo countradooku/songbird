@@ -8,6 +8,7 @@
 //! | `PUT`, `DELETE /v1/username`; `POST /v1/username/lookup` | Claim, release and look up usernames ([`usernames`]) |
 //! | `PUT`, `DELETE /v1/username/key`; `PUT`, `DELETE`, `GET /v1/username/link[/<handle>]` | The username key; username links ([`usernames`]) |
 //! | `PUT`, `GET /v1/keys`; `POST /v1/keys/fetch` | The key directory: upload, counts, fetch bundles ([`keys`]) |
+//! | `PUT`, `GET /v1/keypackages`; `POST /v1/keypackages/fetch` | MLS KeyPackages: upload, counts, fetch ([`keys`]) |
 //! | `PUT /v1/push` | Registers the device's push channel, sealed to the push service's key |
 //! | `DELETE /v1/push` | Removes it |
 //! | `POST /v1/attachments` | An upload grant: exact (padded) size and recipient fetches due |
@@ -375,7 +376,11 @@ impl App {
             (_, p, None) if p == "/v1/username" || p.starts_with("/v1/username/") => {
                 self.usernames(req).await
             }
-            (_, "/v1/keys" | "/v1/keys/fetch", None) => self.keys(req).await,
+            (
+                _,
+                "/v1/keys" | "/v1/keys/fetch" | "/v1/keypackages" | "/v1/keypackages/fetch",
+                None,
+            ) => self.keys(req).await,
             _ => Err(Refusal::Status(StatusCode::NOT_FOUND)),
         }
     }
@@ -419,6 +424,35 @@ impl App {
             (&Method::GET, "/v1/keys") => {
                 let (device, _) = self.authenticate_json(req).await?;
                 k.counts(&self.registry, &device).await
+            }
+            (&Method::PUT, "/v1/keypackages") => {
+                let (device, body) = self
+                    .authenticate_body(req, songbird_proto::keys::MAX_KEY_PACKAGE_UPLOAD_LEN)
+                    .await?;
+                k.upload_key_packages(&self.registry, &device, body).await
+            }
+            (&Method::GET, "/v1/keypackages") => {
+                let (device, _) = self.authenticate_json(req).await?;
+                k.key_package_counts(&self.registry, &device).await
+            }
+            (&Method::POST, "/v1/keypackages/fetch") => {
+                let (device, body) = self.authenticate_json(req).await?;
+                let account = self
+                    .registry
+                    .device(&device)
+                    .await
+                    .map_err(|_| unavailable())?
+                    .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?
+                    .account;
+                k.fetch_key_packages(
+                    &self.registry,
+                    &self.hot,
+                    self.messages.as_ref(),
+                    (&account, &device),
+                    peer,
+                    &body,
+                )
+                .await
             }
             (&Method::POST, "/v1/keys/fetch") => {
                 let (device, body) = self.authenticate_json(req).await?;
@@ -947,6 +981,10 @@ fn key_outcome(o: keys::Outcome) -> Response<Body> {
         Outcome::Counts(ec, kem) => {
             json(StatusCode::OK, &serde_json::json!({ "ec": ec, "kem": kem }))
         }
+        Outcome::KeyPackageCounts(n, lr) => json(
+            StatusCode::OK,
+            &serde_json::json!({ "single_use": n, "last_resort": lr }),
+        ),
         Outcome::Bundles(b) => {
             let mut r = Response::new(Full::new(b).map_err(|e| match e {}).boxed_unsync());
             r.headers_mut().insert(

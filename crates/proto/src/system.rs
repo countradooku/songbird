@@ -61,6 +61,8 @@ pub enum Kind {
     /// An account's device list changed (body: [`DeviceListChanged`]); fetch it again before the
     /// next send to that account.
     DeviceListChanged,
+    /// This device's one-time prekeys are running low (body: [`PrekeysLow`]); upload more.
+    PrekeysLow,
     /// A kind this version does not know (forward compatibility: verify, then ignore).
     Other(u16),
 }
@@ -71,6 +73,7 @@ impl Kind {
     pub const fn code(self) -> u16 {
         match self {
             Self::DeviceListChanged => 1,
+            Self::PrekeysLow => 2,
             Self::Other(c) => c,
         }
     }
@@ -80,6 +83,7 @@ impl Kind {
     pub const fn from_code(code: u16) -> Self {
         match code {
             1 => Self::DeviceListChanged,
+            2 => Self::PrekeysLow,
             c => Self::Other(c),
         }
     }
@@ -111,6 +115,42 @@ impl DeviceListChanged {
         };
         Ok(Self {
             account: AccountId::from_bytes(bytes),
+        })
+    }
+}
+
+/// Body of [`Kind::PrekeysLow`]: how many one-time prekeys the device has left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrekeysLow {
+    /// One-time X25519 prekeys left.
+    pub ec: u16,
+    /// One-time ML-KEM-1024 prekeys left.
+    pub kem: u16,
+}
+
+impl PrekeysLow {
+    /// Encoded body: `ec u16 | kem u16`.
+    #[must_use]
+    pub fn encode(&self) -> Bytes {
+        let mut b = Vec::with_capacity(4);
+        b.extend_from_slice(&self.ec.to_be_bytes());
+        b.extend_from_slice(&self.kem.to_be_bytes());
+        Bytes::from(b)
+    }
+
+    /// Parses a body.
+    ///
+    /// # Errors
+    /// [`FrameError::Truncated`] or [`FrameError::Trailing`].
+    pub fn decode(body: &[u8]) -> Result<Self, FrameError> {
+        let b: [u8; 4] = match body.len() {
+            n if n < 4 => return Err(FrameError::Truncated),
+            4 => body.try_into().map_err(|_| FrameError::Truncated)?,
+            _ => return Err(FrameError::Trailing),
+        };
+        Ok(Self {
+            ec: u16::from_be_bytes([b[0], b[1]]),
+            kem: u16::from_be_bytes([b[2], b[3]]),
         })
     }
 }

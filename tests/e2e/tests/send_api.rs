@@ -38,6 +38,8 @@ use songbird_types::{AccountId, DeviceId, Secret};
 use tokio::sync::{mpsc, watch};
 
 const API: &str = "api.test";
+/// The system key's seed in these tests.
+const SYSTEM_SEED: [u8; 32] = [0x51; 32];
 
 fn env(name: &str) -> Option<String> {
     let v = std::env::var(name).ok();
@@ -104,7 +106,8 @@ async fn stack(limits: Limits, sends_per_sec: u32, send_burst: u32) -> Option<St
         pass: std::env::var("SONGBIRD_TEST_SURREALDB_PASS").unwrap(),
         namespace: "test".into(),
         database: format!("send_{}", DeviceId::random().unwrap().to_hex_unredacted()),
-        timeout: Duration::from_secs(5),
+        // Generous: CI's shared SurrealDB also serves the prekey gate's 400 concurrent claims.
+        timeout: Duration::from_secs(30),
         max_message_bytes: 16 << 20,
     })
     .await
@@ -200,6 +203,22 @@ async fn stack(limits: Limits, sends_per_sec: u32, send_burst: u32) -> Option<St
         messages: Some(messages),
         registration: None,
         usernames: None,
+        // The key directory, with the system key, so a device low on prekeys is told (M3).
+        keys: Some(
+            songbird_api::keys::KeyDirectory::new(
+                songbird_api::config::KeySettings {
+                    secret: songbird_types::SecretRef::Env("UNUSED".into()),
+                    system_key: None,
+                    max_stored: 20,
+                    refill_below: 3,
+                    throttle: songbird_api::config::KeyThrottle::default(),
+                },
+                &random32(),
+                Some(&SYSTEM_SEED),
+                songbird_api::keys::KeyMetrics::default(),
+            )
+            .unwrap(),
+        ),
     });
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_addr = api_listener.local_addr().unwrap();
@@ -617,5 +636,117 @@ async fn a_system_notice_reaches_the_device_signed_and_a_forged_one_never_does()
     assert_eq!(
         s.shared.mailbox.count_pending(&s.alice.id).await.unwrap(),
         0
+    );
+}
+
+/// A device whose one-time prekeys run low is told once, with a notice signed by the system key
+/// (Prompt 3, M3, D-0050), and not again within the hour.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_device_low_on_prekeys_is_told_once() {
+    use aws_lc_rs::kem::{DecapsulationKey, ML_KEM_1024};
+    use songbird_keys::xeddsa::Signer;
+    use songbird_proto::keys::{self as wire, OneTimeEc, SignedEc, SignedKem, Upload};
+    use songbird_proto::system::PrekeysLow;
+
+    let Some(s) = default_stack().await else {
+        return;
+    };
+    let ec = |seed: &[u8; 32]| {
+        let mut k = [0u8; wire::EC_LEN];
+        k[0] = wire::TYPE_X25519;
+        k[1..].copy_from_slice(&Signer::new(seed).public());
+        k
+    };
+    let identity = Signer::new(&random32());
+    let kem = |id: u32| {
+        let dk = DecapsulationKey::generate(&ML_KEM_1024).unwrap();
+        let mut key = [0u8; wire::KEM_LEN];
+        key[0] = wire::TYPE_ML_KEM_1024;
+        key[1..].copy_from_slice(
+            dk.encapsulation_key()
+                .unwrap()
+                .key_bytes()
+                .unwrap()
+                .as_ref(),
+        );
+        SignedKem {
+            id,
+            sig: identity.sign(&key, &[7; 64]),
+            key: Box::new(key),
+        }
+    };
+    let spk = ec(&random32());
+    let mut ik = [0u8; wire::EC_LEN];
+    ik[0] = wire::TYPE_X25519;
+    ik[1..].copy_from_slice(&identity.public());
+    let upload = Upload {
+        identity: Some(ik),
+        signed: Some(SignedEc {
+            id: 1,
+            key: spk,
+            sig: identity.sign(&spk, &[3; 64]),
+        }),
+        last_resort: Some(kem(2)),
+        one_time_ec: (10..14)
+            .map(|id| OneTimeEc {
+                id,
+                key: ec(&random32()),
+            })
+            .collect(),
+        one_time_kem: (10..14).map(kem).collect(),
+    };
+    let alice_api = s.alice.api(&s);
+    assert_eq!(
+        alice_api
+            .send("PUT", "/v1/keys", Some(&upload.encode()))
+            .await
+            .unwrap()
+            .0,
+        204
+    );
+    let (_alice, mut alice_events) = connect(&s, &s.alice).await;
+    let alice_account = s
+        .app
+        .registry
+        .device(&s.alice.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .account;
+    let body = format!(r#"{{"account":"{}"}}"#, alice_account.to_hex_unredacted());
+    let bob_api = s.bob1.api(&s);
+    // 4 -> 3 (not below 3), then 3 -> 2: the notice.
+    for _ in 0..2 {
+        assert_eq!(
+            bob_api
+                .send("POST", "/v1/keys/fetch", Some(body.as_bytes()))
+                .await
+                .unwrap()
+                .0,
+            200
+        );
+    }
+    let (_, envelope) = next_delivery(&mut alice_events).await;
+    let notice = SystemFrame::decode(&envelope).unwrap();
+    assert_eq!(notice.frame.kind, Kind::PrekeysLow);
+    assert_eq!(notice.frame.device, s.alice.id);
+    assert_eq!(
+        PrekeysLow::decode(&notice.frame.body).unwrap(),
+        PrekeysLow { ec: 2, kem: 2 }
+    );
+    let signer = SystemSigner::from_seed(&SYSTEM_SEED).unwrap();
+    UnparsedPublicKey::new(&ED25519, signer.public_key())
+        .verify(&notice.message(), &notice.signature)
+        .unwrap();
+    // Another fetch (2 -> 1) within the hour: no second notice.
+    bob_api
+        .send("POST", "/v1/keys/fetch", Some(body.as_bytes()))
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), alice_events.recv())
+            .await
+            .is_err(),
+        "a second notice within the hour"
     );
 }

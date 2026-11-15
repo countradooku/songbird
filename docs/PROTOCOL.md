@@ -429,6 +429,60 @@ Decision D-0049 (unique handles, the owner's choice). Every request is signed by
   16-byte handle each time (the old handle stops working). A username change deletes the link.
   The client's encryption follows Signal's username links; the server only stores bytes.
 
+### 4.4 The key directory (PQXDH prekeys)
+
+Decision D-0050. Every device has its own **device identity key** (X25519, used by PQXDH;
+D-0048) and publishes prekeys for others to start sessions with it. Keys are libsignal's
+serializations: an X25519 key is `0x05 || u [32]`; a post-quantum key is ML-KEM-1024 only,
+`0x0A || encapsulation key [1568]` (libsignal's pre-standard Kyber1024, type `0x08`, is refused;
+the owner's decision). Signatures are XEdDSA (libsignal's variant: the signer's Edwards sign bit in
+the top bit of `s`) by the device identity key over the key's serialization.
+
+| Request | Body | Answers |
+| --- | --- | --- |
+| `PUT /v1/keys` | the upload below (at most 169,177 bytes; signed over its digest, authenticated before the body is read) | 204; 400 `{"error": "request" \| "keys" \| "signature" \| "incomplete" \| "duplicate"}`; 409 `{"error": "identity" \| "full" \| "duplicate"}` |
+| `GET /v1/keys` | none | 200 `{"ec": n, "kem": n}` (one-time prekeys left) |
+| `POST /v1/keys/fetch` | `{"account": hex, "device"?: hex}` | 200 the bundles below; 404 (no device of the account holds keys, the requester's own excepted); 429 |
+
+Upload (integers big-endian):
+
+```
+version u8 (1) | flags u8 (1 identity, 2 signed prekey, 4 last-resort KEM prekey)
+  | [identity [33]] | [id u32 | key [33] | sig [64]] | [id u32 | key [1569] | sig [64]]
+  | n u16 | n × (id u32 | key [33])                      one-time X25519, n <= 100
+  | m u16 | m × (id u32 | key [1569] | sig [64])         one-time ML-KEM-1024, m <= 100
+```
+
+- The first upload must carry the identity key, a signed prekey and a last-resort ML-KEM prekey.
+  The identity key is **set once and never replaced** (another one: 409 `identity`; a new
+  identity is a new device, M4). Signed and last-resort prekeys replace the current ones.
+- The server checks every key and signature before storing anything: X25519 keys must be honest
+  (canonical `u`, on the curve, of prime order); ML-KEM keys must pass FIPS 203's modulus check
+  (every coefficient below 3329); XEdDSA signatures must verify with a canonical `s` (stricter than
+  libsignal, which reduces a larger one). A device holds at most 200 one-time keys of each kind.
+
+Fetch answer: `version u8 (1) | n u8 | n × bundle`, one per device of the account that holds
+keys (not the requester's own device):
+
+```
+device [16] | identity [33] | signed: id u32 | key [33] | sig [64]
+  | flags u8 (1 a one-time X25519 key follows, 2 the KEM key is one-time, not last-resort)
+  | [id u32 | key [33]] | kem: id u32 | key [1569] | sig [64]
+```
+
+- Each one-time key goes to **exactly one fetch** and leaves the store with it (the prompt's gate:
+  `no_one_time_prekey_is_ever_served_twice_under_parallel_claims`).
+- **Exhaustion:** fetches are limited per requesting account (240 an hour, burst 60) and per IP
+  range; one-time keys per target account are limited across all requesters (60 an hour, burst
+  30). Past that budget a fetch still answers, with the last-resort ML-KEM key and no one-time
+  X25519 key, and the one-time keys stay for later.
+- **Refill:** when a fetch leaves a device below 10 one-time keys of either kind, the server sends
+  it a system notice (§3.9) of kind 2, `PrekeysLow`, body `ec u16 | kem u16`, at most once an hour.
+  Clients also see their counts with `GET /v1/keys`.
+- A client verifies both signatures with the identity key before PQXDH, as libsignal does.
+
+MLS KeyPackages (the same single-use pattern for groups) are milestone M3b.
+
 ## 5. Encrypted content schemas (Prompt 4)
 
 ## 6. Groups, roles and channels (MLS) (Prompt 5)
@@ -511,3 +565,14 @@ Registration (Prompt 3, D-0048), from `crates/pow` and `crates/proto` tests:
 
   libsignal's poksho (commit `8be00c2`) produces the same proof for the same statement and
   randomness, and verifies it.
+- XEdDSA (Prompt 3, M3, D-0050), from `crates/keys/tests/xeddsa_vectors.rs`: private key 32 ×
+  `31`, message `songbird.v1/xeddsa-vector`, signing randomness 64 × `42`. libsignal (commit
+  `8be00c2`) and Songbird both give the public key
+  `0504f5f29162c31a8defa18e6e742224ee806fc1718a278be859ba5620402b8f3a` and the signature
+
+  ```
+  5bdccfa0250b116ef988e11c678a3562f8b37884cbc3c2ee720d87760a0e8cf0
+  68aba378d09d70b2ad14b47a44709b3b72400c10bd2bdffbe84ee24b29373e82
+  ```
+
+  and each verifies the other's signature.

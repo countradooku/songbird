@@ -206,6 +206,22 @@ async fn build(
         )?),
         None => None,
     };
+    let keys = match &s.keys {
+        Some(k) => {
+            let seed = k
+                .system_key
+                .as_ref()
+                .map(songbird_types::SecretRef::resolve_key32)
+                .transpose()?;
+            Some(songbird_api::keys::KeyDirectory::new(
+                k.clone(),
+                &*k.secret.resolve_key32()?,
+                seed.as_deref(),
+                metrics.keys.clone(),
+            )?)
+        }
+        None => None,
+    };
     let app = Arc::new(App {
         server_name: s.server_name.clone(),
         registry,
@@ -219,6 +235,7 @@ async fn build(
         messages,
         registration,
         usernames,
+        keys,
     });
     Ok((app, tasks))
 }

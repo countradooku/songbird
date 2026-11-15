@@ -9,6 +9,7 @@ git clone https://github.com/signalapp/libsignal.git ../libsignal   # next to th
 cd tools/libsignal-vectors
 cargo run --release                     # SHO sequence; libsignal username hashes and proofs
 cargo run --release --bin songbird < ../../crates/keys/tests/username_vector.txt   # poksho checks Songbird's
+echo "<public> <signature>" | cargo run --release --bin xeddsa   # XEdDSA both ways
 ```
 
 The username crate's `build.rs` needs `protoc` for an unrelated protobuf (username links);
@@ -16,4 +17,4 @@ without it, replace `rust/usernames/build.rs` with `fn main() {}` and write the 
 `UsernameData` message by hand in `rust/usernames/src/proto/username.rs` in your scratch copy.
 
 Used at libsignal commit `8be00c2` (2026-11-13). Outputs are checked in as test data:
-`crates/keys/tests/username_vectors.rs` and `username_vector.txt`.
+`crates/keys/tests/username_vectors.rs`, `username_vector.txt` and `xeddsa_vectors.rs`.

@@ -143,3 +143,20 @@ explicit; none affects existing accounts or messages.
      not a configuration change.
 - Rotating `[api.usernames] secret` invalidates every username key verifier (users set their
   key again) and resets the throttles; do it only after a compromise of the secret.
+
+## Key directory: fetches failing or devices out of prekeys (Prompt 3, M3, D-0050)
+
+- Detection: `api_prekey_throttled` rising (429s); `api_prekey_last_resort` rising against
+  `api_prekey_bundles` (sessions starting without one-time keys); 503s with `api_errors`.
+- Causes and actions:
+  1. **`valkey-hot` unreachable**: fetches answer 503 (throttles fail closed); uploads and counts
+     still work. Restore `valkey-hot`.
+  2. **Many bundles with last-resort keys**: either devices are not refilling (check
+     `api_prekey_notices`; without `[api.keys] system_key` and `[api.send]` no notices go out,
+     and clients rely on their own `GET /v1/keys` checks) or someone is draining a target (the
+     per-target budget is doing its job; nothing to do unless it is broad, then look at the
+     requesting accounts' throttle records' volume, not their identities).
+  3. **Uploads refused with `signature` or `keys`**: a client bug or a client still sending
+     Kyber1024 (type `0x08`); only ML-KEM-1024 is accepted (owner's decision, D-0050).
+- Rotating `[api.keys] secret` resets the throttles and the notice marks (a burst of notices may
+  follow); it invalidates nothing stored.

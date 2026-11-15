@@ -15,6 +15,8 @@
 //! | `invite` | SHA-256 of the code | uses left, expiry; **no issuer** (D-0038, D-0047) | at its last use, revocation, or expiry |
 //! | `username` | username hash (Ristretto, D-0049) | its account, or none while held after release | held [`USERNAME_HOLD`] after release, then swept |
 //! | `ulink` | random link handle | its account, the link's ciphertext | replaced, deleted, at a username change, or with the account |
+//! | `device` (M3 fields) | device ID | identity key, signed prekey, last-resort ML-KEM prekey | replaced (prekeys), or with the device |
+//! | `otpk`, `otkem` | (device, key ID) | one one-time X25519 or ML-KEM-1024 prekey | claimed by one fetch, or with the device |
 //!
 //! An attachment row has no link to the account that uploaded it (owner-approved threat-model
 //! row, D-0036).
@@ -56,6 +58,17 @@ DEFINE FIELD IF NOT EXISTS account ON username TYPE option<bytes>;
 DEFINE FIELD IF NOT EXISTS held_until ON username TYPE option<datetime>;
 DEFINE INDEX IF NOT EXISTS username_account ON username FIELDS account;
 DEFINE INDEX IF NOT EXISTS username_held ON username FIELDS held_until;
+DEFINE FIELD IF NOT EXISTS ik ON device TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS spk ON device TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS lrk ON device TYPE option<bytes>;
+DEFINE TABLE IF NOT EXISTS otpk SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS device ON otpk TYPE bytes;
+DEFINE FIELD IF NOT EXISTS blob ON otpk TYPE bytes;
+DEFINE INDEX IF NOT EXISTS otpk_device ON otpk FIELDS device;
+DEFINE TABLE IF NOT EXISTS otkem SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS device ON otkem TYPE bytes;
+DEFINE FIELD IF NOT EXISTS blob ON otkem TYPE bytes;
+DEFINE INDEX IF NOT EXISTS otkem_device ON otkem FIELDS device;
 DEFINE TABLE IF NOT EXISTS ulink SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS account ON ulink TYPE bytes;
 DEFINE FIELD IF NOT EXISTS blob ON ulink TYPE bytes;
@@ -117,7 +130,67 @@ pub enum RegistryError {
     /// The account has no username (a link needs one).
     #[error("no username")]
     NoUsername,
+    /// The upload names another identity key than the device's (set once, never replaced).
+    #[error("identity key differs")]
+    IdentityMismatch,
+    /// The device would hold more one-time prekeys than allowed.
+    #[error("too many one-time prekeys")]
+    Full,
+    /// A one-time prekey ID the device already holds.
+    #[error("duplicate prekey id")]
+    Duplicate,
+    /// The device has no identity key or prekeys yet (a first upload must carry them).
+    #[error("keys incomplete")]
+    Incomplete,
 }
+
+/// One device's stored keys (opaque stored forms, `songbird_proto::keys`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DeviceKeys {
+    /// Identity key, `0x05 || u`.
+    pub identity: Option<[u8; 33]>,
+    /// Signed prekey, stored form.
+    pub signed: Option<Bytes>,
+    /// Last-resort ML-KEM-1024 prekey, stored form.
+    pub last_resort: Option<Bytes>,
+}
+
+/// What an upload changes (already verified by the caller).
+#[derive(Debug, Clone, Default)]
+pub struct KeysUpdate {
+    /// Identity key, on the first upload.
+    pub identity: Option<[u8; 33]>,
+    /// A new signed prekey.
+    pub signed: Option<Vec<u8>>,
+    /// A new last-resort prekey.
+    pub last_resort: Option<Vec<u8>>,
+    /// One-time X25519 prekeys: (ID, stored form).
+    pub one_time_ec: Vec<(u32, Vec<u8>)>,
+    /// One-time ML-KEM prekeys: (ID, stored form).
+    pub one_time_kem: Vec<(u32, Vec<u8>)>,
+}
+
+/// What one fetch claims for one device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimedKeys {
+    /// The device.
+    pub device: DeviceId,
+    /// Identity key.
+    pub identity: [u8; 33],
+    /// Signed prekey, stored form.
+    pub signed: Bytes,
+    /// A one-time X25519 prekey, stored form, removed from the store by this claim.
+    pub one_time_ec: Option<Bytes>,
+    /// A one-time ML-KEM prekey removed by this claim, or the last-resort one.
+    pub kem: Bytes,
+    /// Whether `kem` is one-time.
+    pub kem_one_time: bool,
+}
+
+/// Candidates a claim picks among at random, so concurrent claims rarely aim at one key.
+const CLAIM_CANDIDATES: i64 = 16;
+/// Attempts a claim makes before giving up on a one-time key (it then serves none).
+const CLAIM_ATTEMPTS: u32 = 32;
 
 /// How long a released username stays unavailable to everyone (impersonation of its previous
 /// owner by whoever grabs it first). The held row names no account.
@@ -208,6 +281,8 @@ pub struct Remnants {
     pub usernames: u64,
     /// Username links of the account.
     pub links: u64,
+    /// One-time prekeys (both kinds) of the devices.
+    pub prekeys: u64,
 }
 
 impl Remnants {
@@ -801,6 +876,248 @@ impl Registry {
         }
     }
 
+    // ----- key directory (Prompt 3, M3, D-0050) -----
+
+    /// A device's stored identity key and prekeys.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn device_keys(&self, device: &DeviceId) -> Result<DeviceKeys, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "RETURN [device:[$d].ik, device:[$d].spk, device:[$d].lrk];",
+                vec![var("d", bytes(device.as_bytes()))],
+            )
+            .await?;
+        let r = rows(v);
+        let get = |i: usize| r.get(i).and_then(|x| x.as_bytes().cloned());
+        Ok(DeviceKeys {
+            identity: get(0).and_then(|b| b.as_ref().try_into().ok()),
+            signed: get(1),
+            last_resort: get(2),
+        })
+    }
+
+    /// Applies a verified upload in one transaction: the identity key only if the device has
+    /// none (another one is refused, never replaced); new signed and last-resort prekeys replace
+    /// the current ones; one-time prekeys are added, within `max` of each kind. After it the
+    /// device must hold an identity key, a signed prekey and a last-resort prekey.
+    ///
+    /// # Errors
+    /// [`RegistryError::IdentityMismatch`], [`RegistryError::Full`],
+    /// [`RegistryError::Duplicate`], [`RegistryError::Incomplete`].
+    pub async fn put_keys(
+        &self,
+        device: &DeviceId,
+        update: &KeysUpdate,
+        max: usize,
+    ) -> Result<(), RegistryError> {
+        let mut sql = String::from("BEGIN TRANSACTION;\n");
+        let mut vars = vec![
+            var("d", bytes(device.as_bytes())),
+            var("max", int(u64::try_from(max).unwrap_or(u64::MAX))),
+        ];
+        if let Some(ik) = &update.identity {
+            vars.push(var("ik", bytes(ik)));
+            sql.push_str(
+                "IF device:[$d].ik != NONE AND device:[$d].ik != $ik { THROW 'songbird:identity' };
+                 UPDATE device:[$d] SET ik = $ik RETURN NONE;\n",
+            );
+        }
+        if let Some(k) = &update.signed {
+            vars.push(var("spk", bytes(k)));
+            sql.push_str("UPDATE device:[$d] SET spk = $spk RETURN NONE;\n");
+        }
+        if let Some(k) = &update.last_resort {
+            vars.push(var("lrk", bytes(k)));
+            sql.push_str("UPDATE device:[$d] SET lrk = $lrk RETURN NONE;\n");
+        }
+        let list = |keys: &[(u32, Vec<u8>)]| {
+            Value::Array(
+                keys.iter()
+                    .map(|(id, b)| Value::Array(vec![int(u64::from(*id)), bytes(b)]))
+                    .collect(),
+            )
+        };
+        vars.push(var("ec", list(&update.one_time_ec)));
+        vars.push(var("kem", list(&update.one_time_kem)));
+        sql.push_str(
+            "IF device:[$d].ik = NONE OR device:[$d].spk = NONE OR device:[$d].lrk = NONE
+               { THROW 'songbird:incomplete' };
+             IF count(SELECT id FROM otpk WHERE device = $d) + array::len($ec) > $max
+               { THROW 'songbird:full' };
+             IF count(SELECT id FROM otkem WHERE device = $d) + array::len($kem) > $max
+               { THROW 'songbird:full' };
+             FOR $k IN $ec { CREATE otpk:[$d, $k[0]] SET device = $d, blob = $k[1] RETURN NONE; };
+             FOR $k IN $kem { CREATE otkem:[$d, $k[0]] SET device = $d, blob = $k[1] RETURN NONE; };
+             COMMIT TRANSACTION;",
+        );
+        let mut attempt = 0;
+        loop {
+            match self.db.query(&sql, vars.clone()).await {
+                Ok(_) => return Ok(()),
+                Err(DbError::Statement(kind)) => match kind.as_str() {
+                    "Thrown:identity" => return Err(RegistryError::IdentityMismatch),
+                    "Thrown:full" => return Err(RegistryError::Full),
+                    "Thrown:incomplete" => return Err(RegistryError::Incomplete),
+                    k if k.contains("AlreadyExists") => return Err(RegistryError::Duplicate),
+                    k if k == db::TRANSACTION_CONFLICT && attempt < CONFLICT_RETRIES => {
+                        attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(2u64 << attempt.min(6))).await;
+                    }
+                    _ => return Err(DbError::Statement(kind).into()),
+                },
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
+    /// One-time prekeys a device holds: (X25519, ML-KEM-1024).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn prekey_counts(&self, device: &DeviceId) -> Result<(u64, u64), RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "RETURN [count(SELECT id FROM otpk WHERE device = $d),
+                         count(SELECT id FROM otkem WHERE device = $d)];",
+                vec![var("d", bytes(device.as_bytes()))],
+            )
+            .await?;
+        let r = rows(v);
+        let n = |i: usize| {
+            r.get(i)
+                .and_then(Value::as_i64)
+                .and_then(|x| u64::try_from(x).ok())
+                .unwrap_or(0)
+        };
+        Ok((n(0), n(1)))
+    }
+
+    /// Removes and returns one one-time prekey of the device, or `None` when it holds none.
+    /// A key is removed by exactly one claim: each attempt deletes one record and returns what
+    /// it deleted, so of two claims racing for one record one gets it and the other gets
+    /// nothing (or loses the write conflict) and tries another candidate. Candidates are drawn
+    /// at random among the first few, so concurrent claims rarely collide.
+    async fn claim_one(
+        &self,
+        kem: bool,
+        device: &DeviceId,
+    ) -> Result<Option<Bytes>, RegistryError> {
+        let (list, take) = if kem {
+            (
+                "SELECT VALUE meta::id(id)[1] FROM otkem WHERE device = $d LIMIT $n;",
+                "DELETE ONLY otkem:[$d, $id] RETURN BEFORE;",
+            )
+        } else {
+            (
+                "SELECT VALUE meta::id(id)[1] FROM otpk WHERE device = $d LIMIT $n;",
+                "DELETE ONLY otpk:[$d, $id] RETURN BEFORE;",
+            )
+        };
+        for _ in 0..CLAIM_ATTEMPTS {
+            let ids = rows(
+                self.db
+                    .query1(
+                        list,
+                        vec![
+                            var("d", bytes(device.as_bytes())),
+                            var("n", Value::Int(CLAIM_CANDIDATES)),
+                        ],
+                    )
+                    .await?,
+            );
+            if ids.is_empty() {
+                return Ok(None);
+            }
+            let mut pick = [0u8; 8];
+            getrandom::fill(&mut pick).map_err(|_| RegistryError::Shape)?;
+            let index =
+                usize::try_from(u64::from_le_bytes(pick) % u64::try_from(ids.len()).unwrap_or(1))
+                    .unwrap_or(0);
+            let Some(id) = ids.get(index).cloned() else {
+                continue;
+            };
+            match self
+                .db
+                .query1(
+                    take,
+                    vec![var("d", bytes(device.as_bytes())), var("id", id)],
+                )
+                .await
+            {
+                Ok(v) => {
+                    if let Some(blob) = v.get("blob").and_then(|b| b.as_bytes().cloned()) {
+                        return Ok(Some(blob));
+                    }
+                    // Someone else claimed it first: try another.
+                }
+                Err(e) if is_conflict(&e) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(None)
+    }
+
+    /// The bundles of an account's enabled devices that hold keys (except `skip`), each with a
+    /// one-time X25519 prekey and a one-time ML-KEM prekey claimed for this fetch when
+    /// `one_time` and when any are left (else the last-resort ML-KEM prekey and no X25519 one).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn claim_bundles(
+        &self,
+        account: &AccountId,
+        only: Option<&DeviceId>,
+        skip: &DeviceId,
+        one_time: bool,
+    ) -> Result<Vec<ClaimedKeys>, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "SELECT meta::id(id)[0] AS d, ik, spk, lrk FROM device
+                   WHERE account = $a AND disabled = false
+                     AND ik != NONE AND spk != NONE AND lrk != NONE;",
+                vec![var("a", bytes(account.as_bytes()))],
+            )
+            .await?;
+        let mut out = Vec::new();
+        for r in rows(v) {
+            let (Some(d), Some(ik), Some(spk), Some(lrk)) = (
+                r.get("d").and_then(id16).map(DeviceId::from_bytes),
+                r.get("ik")
+                    .and_then(|b| b.as_bytes())
+                    .and_then(|b| <[u8; 33]>::try_from(b.as_ref()).ok()),
+                r.get("spk").and_then(|b| b.as_bytes().cloned()),
+                r.get("lrk").and_then(|b| b.as_bytes().cloned()),
+            ) else {
+                return Err(RegistryError::Shape);
+            };
+            if &d == skip || only.is_some_and(|o| o != &d) {
+                continue;
+            }
+            let (ec, kem) = if one_time {
+                (
+                    self.claim_one(false, &d).await?,
+                    self.claim_one(true, &d).await?,
+                )
+            } else {
+                (None, None)
+            };
+            out.push(ClaimedKeys {
+                device: d,
+                identity: ik,
+                signed: spk,
+                one_time_ec: ec,
+                kem_one_time: kem.is_some(),
+                kem: kem.unwrap_or(lrk),
+            });
+        }
+        Ok(out)
+    }
+
     /// The directory version: bumped by every change to accounts or devices.
     ///
     /// # Errors
@@ -1006,6 +1323,9 @@ impl Registry {
         self.db
             .query(
                 "BEGIN TRANSACTION;
+                 LET $devs = (SELECT VALUE meta::id(id)[0] FROM device WHERE account = $a);
+                 DELETE otpk WHERE device IN $devs RETURN NONE;
+                 DELETE otkem WHERE device IN $devs RETURN NONE;
                  DELETE device WHERE account = $a RETURN NONE;
                  UPDATE username SET account = NONE, held_until = time::now() + duration::from_secs($hold)
                    WHERE account = $a RETURN NONE;
@@ -1042,7 +1362,9 @@ impl Registry {
                  RETURN count(SELECT id FROM push_token WHERE meta::id(id)[0] IN $ps);
                  RETURN count(SELECT id FROM upload_grant WHERE device IN $ds);
                  RETURN count(SELECT id FROM username WHERE account = $a);
-                 RETURN count(SELECT id FROM ulink WHERE account = $a);",
+                 RETURN count(SELECT id FROM ulink WHERE account = $a);
+                 RETURN count(SELECT id FROM otpk WHERE device IN $ds)
+                   + count(SELECT id FROM otkem WHERE device IN $ds);",
                 vec![
                     var("a", bytes(account.as_bytes())),
                     var("ds", Value::Array(ds)),
@@ -1063,6 +1385,7 @@ impl Registry {
             grants: n(3)?,
             usernames: n(4)?,
             links: n(5)?,
+            prekeys: n(6)?,
         })
     }
 

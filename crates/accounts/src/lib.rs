@@ -33,6 +33,7 @@ use songbird_jobs::{Job, ObjectKey};
 use songbird_surreal::Value;
 use songbird_types::{AccountId, DeviceId, JobId};
 
+pub mod devices;
 pub mod journal;
 pub use db::{Db, DbError, SurrealSettings};
 
@@ -88,6 +89,18 @@ DEFINE FIELD IF NOT EXISTS key ON device TYPE bytes;
 DEFINE FIELD IF NOT EXISTS disabled ON device TYPE bool;
 DEFINE FIELD IF NOT EXISTS at ON device TYPE datetime;
 DEFINE INDEX IF NOT EXISTS device_account ON device FIELDS account;
+DEFINE FIELD IF NOT EXISTS prim ON device TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS pending ON device TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS lconf ON device TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS dlist ON account TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS dlist_v ON account TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS dgen ON account TYPE option<int>;
+DEFINE TABLE IF NOT EXISTS ltoken SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS account ON ltoken TYPE bytes;
+DEFINE FIELD IF NOT EXISTS device ON ltoken TYPE bytes;
+DEFINE FIELD IF NOT EXISTS expires ON ltoken TYPE datetime;
+DEFINE INDEX IF NOT EXISTS ltoken_account ON ltoken FIELDS account;
+DEFINE INDEX IF NOT EXISTS ltoken_expires ON ltoken FIELDS expires;
 DEFINE TABLE IF NOT EXISTS directory SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS version ON directory TYPE int;
 DEFINE TABLE IF NOT EXISTS push_token SCHEMAFULL;
@@ -151,6 +164,22 @@ pub enum RegistryError {
     /// The device has no identity key or prekeys yet (a first upload must carry them).
     #[error("keys incomplete")]
     Incomplete,
+    /// Only the primary device may do this.
+    #[error("not the primary device")]
+    NotPrimary,
+    /// The account has as many devices (and outstanding link tokens) as allowed.
+    #[error("device limit reached")]
+    DeviceLimit,
+    /// The link token is unknown, used or expired, or names another device (one answer).
+    #[error("link token refused")]
+    LinkToken,
+    /// A device list whose version does not grow.
+    #[error("device list version does not grow")]
+    Rollback,
+    /// A device list naming a device that is not an enabled device of the account with those
+    /// keys, or another primary.
+    #[error("device list does not match the account's devices")]
+    ListMismatch,
 }
 
 /// One device's stored keys (opaque stored forms, `songbird_proto::keys`).
@@ -283,6 +312,10 @@ pub struct DeviceRow {
     pub key: [u8; AUTH_KEY_LEN],
     /// Disabled: the account is being deleted (or the device removed).
     pub disabled: bool,
+    /// Holds the account identity key (Prompt 3, M4).
+    pub primary: bool,
+    /// Linked, not yet in a signed device list (Prompt 3, M4): no account-wide changes.
+    pub pending: bool,
 }
 
 /// A pending upload.
@@ -318,7 +351,7 @@ pub struct Remnants {
     pub grants: u64,
     /// Usernames still naming the account.
     pub usernames: u64,
-    /// Username links of the account.
+    /// Username links and link tokens of the account.
     pub links: u64,
     /// One-time prekeys (both kinds) and single-use KeyPackages of the devices.
     pub prekeys: u64,
@@ -397,9 +430,13 @@ impl Registry {
         account: &AccountId,
         devices: &[(DeviceId, [u8; AUTH_KEY_LEN])],
     ) -> Result<(), RegistryError> {
+        // The first device is the primary (it holds the account identity key).
         let list: Vec<Value> = devices
             .iter()
-            .map(|(d, k)| Value::Array(vec![bytes(d.as_bytes()), bytes(k)]))
+            .enumerate()
+            .map(|(i, (d, k))| {
+                Value::Array(vec![bytes(d.as_bytes()), bytes(k), Value::Bool(i == 0)])
+            })
             .collect();
         let r = self
             .db
@@ -408,7 +445,7 @@ impl Registry {
                  CREATE account:[$a] SET at = time::now(), deleting = false RETURN NONE;
                  FOR $d IN $devices {
                    CREATE device:[$d[0]] SET account = $a, key = $d[1], disabled = false,
-                     at = time::now() RETURN NONE;
+                     prim = $d[2], at = time::now() RETURN NONE;
                  };
                  UPDATE directory:v SET version += 1 RETURN NONE;
                  COMMIT TRANSACTION;",
@@ -455,8 +492,8 @@ impl Registry {
              {invite_sql}
              CREATE account:[$a] SET at = time::now(), deleting = false, identity = $identity,
                invites = $allowance RETURN NONE;
-             CREATE device:[$d] SET account = $a, key = $k, disabled = false, at = time::now()
-               RETURN NONE;
+             CREATE device:[$d] SET account = $a, key = $k, disabled = false, prim = true,
+               at = time::now() RETURN NONE;
              UPDATE directory:v SET version += 1 RETURN NONE;
              COMMIT TRANSACTION;"
         );
@@ -1122,7 +1159,7 @@ impl Registry {
             .db
             .query1(
                 "SELECT meta::id(id)[0] AS d, ik, spk, lrk FROM device
-                   WHERE account = $a AND disabled = false
+                   WHERE account = $a AND disabled = false AND pending != true
                      AND ik != NONE AND spk != NONE AND lrk != NONE;",
                 vec![var("a", bytes(account.as_bytes()))],
             )
@@ -1275,7 +1312,7 @@ impl Registry {
             .query1(
                 "SELECT meta::id(id)[0] AS d,
                    (IF mlslr_exp > time::now() THEN mlslr ELSE NONE END) AS lr
-                 FROM device WHERE account = $a AND disabled = false;",
+                 FROM device WHERE account = $a AND disabled = false AND pending != true;",
                 vec![var("a", bytes(account.as_bytes()))],
             )
             .await?;
@@ -1372,6 +1409,41 @@ impl Registry {
             .ok_or(RegistryError::Shape)
     }
 
+    /// Every enabled device with whether it is pending, in one snapshot: delivery's directory.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn load_directory_full(
+        &self,
+    ) -> Result<Vec<(DeviceId, AccountId, [u8; AUTH_KEY_LEN], bool)>, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "SELECT meta::id(id)[0] AS d, account AS a, key AS k, pending AS p FROM device
+                   WHERE disabled = false;",
+                Vec::new(),
+            )
+            .await?;
+        let mut out = Vec::new();
+        for r in rows(v) {
+            let (Some(d), Some(a), Some(k)) = (
+                r.get("d").and_then(id16),
+                r.get("a").and_then(id16),
+                r.get("k").and_then(id32),
+            ) else {
+                return Err(RegistryError::Shape);
+            };
+            let pending = matches!(r.get("p"), Some(Value::Bool(true)));
+            out.push((
+                DeviceId::from_bytes(d),
+                AccountId::from_bytes(a),
+                k,
+                pending,
+            ));
+        }
+        Ok(out)
+    }
+
     /// Every enabled device: (device, account, key). Delivery's directory.
     ///
     /// # Errors
@@ -1408,7 +1480,7 @@ impl Registry {
         let v = self
             .db
             .query1(
-                "SELECT account AS a, key AS k, disabled FROM ONLY device:[$d];",
+                "SELECT account AS a, key AS k, disabled, prim, pending FROM ONLY device:[$d];",
                 vec![var("d", bytes(device.as_bytes()))],
             )
             .await?;
@@ -1426,6 +1498,8 @@ impl Registry {
             account: AccountId::from_bytes(a),
             key: k,
             disabled,
+            primary: matches!(v.get("prim"), Some(Value::Bool(true))),
+            pending: matches!(v.get("pending"), Some(Value::Bool(true))),
         }))
     }
 
@@ -1518,6 +1592,53 @@ impl Registry {
         }
     }
 
+    /// [`Registry::begin_account_deletion`] on a device's request: only the account's enabled
+    /// primary may delete it, checked inside the same transaction (Prompt 3, M4, D-0052). Returns
+    /// the account.
+    ///
+    /// # Errors
+    /// [`RegistryError::NotPrimary`] for any other device.
+    pub async fn begin_account_deletion_by(
+        &self,
+        device: &DeviceId,
+        job: impl FnOnce(&AccountId) -> Option<Job>,
+    ) -> Result<AccountId, RegistryError> {
+        let Some(row) = self.device(device).await? else {
+            return Err(RegistryError::NotPrimary);
+        };
+        if !row.primary || row.disabled {
+            return Err(RegistryError::NotPrimary);
+        }
+        let job = job(&row.account).ok_or(RegistryError::Shape)?;
+        let v = self
+            .db
+            .query(
+                "BEGIN TRANSACTION;
+                 LET $row = (SELECT account, disabled, prim FROM ONLY device:[$d]);
+                 IF $row = NONE OR $row.disabled OR $row.prim != true OR $row.account != $a
+                   { THROW 'songbird:primary' };
+                 UPDATE account:[$a] SET deleting = true, dgen = (dgen ?? 0) + 1 RETURN NONE;
+                 UPDATE device SET disabled = true WHERE account = $a RETURN NONE;
+                 UPDATE directory:v SET version += 1 RETURN NONE;
+                 UPSERT outbox:[$j] SET job = $job, at = time::now() RETURN NONE;
+                 COMMIT TRANSACTION;",
+                vec![
+                    var("d", bytes(device.as_bytes())),
+                    var("a", bytes(row.account.as_bytes())),
+                    var("j", bytes(job.id.as_bytes())),
+                    var("job", bytes(&job.to_bytes())),
+                ],
+            )
+            .await;
+        match v {
+            Ok(_) => Ok(row.account),
+            Err(DbError::Statement(kind)) if kind == "Thrown:primary" => {
+                Err(RegistryError::NotPrimary)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Deletes an account's device rows and its account row (last step of deletion); its username
     /// is held for [`USERNAME_HOLD`] with no account named, its link deleted.
     ///
@@ -1535,6 +1656,7 @@ impl Registry {
                  UPDATE username SET account = NONE, held_until = time::now() + duration::from_secs($hold)
                    WHERE account = $a RETURN NONE;
                  DELETE ulink WHERE account = $a RETURN NONE;
+                 DELETE ltoken WHERE account = $a RETURN NONE;
                  DELETE account:[$a] RETURN NONE;
                  UPDATE directory:v SET version += 1 RETURN NONE;
                  COMMIT TRANSACTION;",
@@ -1567,7 +1689,8 @@ impl Registry {
                  RETURN count(SELECT id FROM push_token WHERE meta::id(id)[0] IN $ps);
                  RETURN count(SELECT id FROM upload_grant WHERE device IN $ds);
                  RETURN count(SELECT id FROM username WHERE account = $a);
-                 RETURN count(SELECT id FROM ulink WHERE account = $a);
+                 RETURN count(SELECT id FROM ulink WHERE account = $a)
+                   + count(SELECT id FROM ltoken WHERE account = $a);
                  RETURN count(SELECT id FROM otpk WHERE device IN $ds)
                    + count(SELECT id FROM otkem WHERE device IN $ds)
                    + count(SELECT id FROM mlskp WHERE device IN $ds);",

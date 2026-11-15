@@ -110,6 +110,7 @@ async fn stack(u: Option<UsernameSettings>) -> Option<Stack> {
         registration: None,
         usernames,
         keys: None,
+        devices: None,
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -486,4 +487,102 @@ async fn without_settings_or_a_signature_nothing_is_served() {
         Ed25519KeyPair::generate().unwrap(),
     );
     assert_eq!(lookup(&stranger, "anyone", None).await.0, 401);
+}
+
+/// Prompt 3, M4 (D-0052): a pending device (linked, not yet in a signed list) changes nothing
+/// account-wide, but may look up; only the primary deletes the account.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pending_device_changes_nothing_account_wide_and_only_the_primary_deletes() {
+    let Some(s) = stack(Some(settings(CHEAP, UsernameThrottle::default()))).await else {
+        return;
+    };
+    // The primary (first device) and a device linked through a token: pending.
+    let kp = Ed25519KeyPair::generate().unwrap();
+    let mut pk = [0u8; 32];
+    pk.copy_from_slice(kp.public_key().as_ref());
+    let (a, primary) = (AccountId::random().unwrap(), DeviceId::random().unwrap());
+    s.app
+        .registry
+        .create_account(&a, &[(primary, pk)])
+        .await
+        .unwrap();
+    let primary_c = ApiClient::new(s.addr, SERVER, primary, kp);
+    let linked = DeviceId::random().unwrap();
+    let mut token = [0u8; 32];
+    getrandom::fill(&mut token).unwrap();
+    s.app
+        .registry
+        .create_link_token(&primary, &token, &linked, Duration::from_secs(60), 6)
+        .await
+        .unwrap();
+    let lkp = Ed25519KeyPair::generate().unwrap();
+    let mut lpk = [0u8; 32];
+    lpk.copy_from_slice(lkp.public_key().as_ref());
+    let mut ik = [7u8; 33];
+    ik[0] = 5;
+    s.app
+        .registry
+        .link_device(&token, &linked, &lpk, &ik, &[0; 32], 6)
+        .await
+        .unwrap();
+    let linked_c = ApiClient::new(s.addr, SERVER, linked, lkp);
+    let refused = |r: (u16, bytes::Bytes)| {
+        assert_eq!(
+            (r.0, r.1.as_ref()),
+            (403, br#"{"error":"pending"}"#.as_slice())
+        );
+    };
+    refused(
+        linked_c
+            .send("PUT", "/v1/username", Some(&claim_body("Pendingclaim")))
+            .await
+            .unwrap(),
+    );
+    refused(linked_c.send("DELETE", "/v1/username", None).await.unwrap());
+    refused(
+        linked_c
+            .send("DELETE", "/v1/username/key", None)
+            .await
+            .unwrap(),
+    );
+    refused(
+        linked_c
+            .send("DELETE", "/v1/username/link", None)
+            .await
+            .unwrap(),
+    );
+    // Lookups are not changes.
+    assert_eq!(lookup(&linked_c, "Nobodyhere", None).await.0, 404);
+    // Account deletion: never from a linked device; the primary can.
+    let (st, b) = linked_c.send("DELETE", "/v1/account", None).await.unwrap();
+    assert_eq!(
+        (st, b.as_ref()),
+        (403, br#"{"error":"primary"}"#.as_slice())
+    );
+    assert!(
+        !s.app
+            .registry
+            .device(&primary)
+            .await
+            .unwrap()
+            .unwrap()
+            .disabled
+    );
+    assert_eq!(
+        primary_c
+            .send("DELETE", "/v1/account", None)
+            .await
+            .unwrap()
+            .0,
+        202
+    );
+    assert!(
+        s.app
+            .registry
+            .device(&linked)
+            .await
+            .unwrap()
+            .unwrap()
+            .disabled
+    );
 }

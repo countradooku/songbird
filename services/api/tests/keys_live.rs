@@ -49,6 +49,7 @@ fn settings(throttle: KeyThrottle) -> KeySettings {
         max_stored: 20,
         refill_below: 3,
         throttle,
+        devices: songbird_api::config::DeviceSettings::default(),
     }
 }
 
@@ -102,6 +103,7 @@ async fn stack(k: Option<KeySettings>) -> Option<Stack> {
         registration: None,
         usernames: None,
         keys,
+        devices: None,
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

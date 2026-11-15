@@ -17,6 +17,7 @@
 
 pub mod kem;
 pub mod mls;
+pub mod provisioning;
 pub mod username;
 pub mod xeddsa;
 

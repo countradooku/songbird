@@ -74,6 +74,9 @@ pub struct Mismatch {
 pub struct Directory {
     devices: HashMap<DeviceId, Device>,
     accounts: HashMap<AccountId, Vec<DeviceId>>,
+    /// Linked devices not yet in their account's signed list (D-0052): they authenticate, but
+    /// no sender is asked to encrypt to them and a send addressing one is refused as extra.
+    pending: HashSet<DeviceId>,
 }
 
 impl std::fmt::Debug for Directory {
@@ -81,6 +84,7 @@ impl std::fmt::Debug for Directory {
         f.debug_struct("Directory")
             .field("devices", &self.devices.len())
             .field("accounts", &self.accounts.len())
+            .field("pending", &self.pending.len())
             .finish()
     }
 }
@@ -170,6 +174,37 @@ impl Directory {
         dir
     }
 
+    /// Marks devices as pending (linked, not yet vouched for by a signed device list): they
+    /// still authenticate, but leave their account's recipient set. Unknown IDs are ignored.
+    #[must_use]
+    pub fn with_pending(mut self, pending: impl IntoIterator<Item = DeviceId>) -> Self {
+        for d in pending {
+            if let Some(dev) = self.devices.get(&d) {
+                if let Some(list) = self.accounts.get_mut(&dev.account) {
+                    list.retain(|x| *x != d);
+                }
+                self.pending.insert(d);
+            }
+        }
+        self
+    }
+
+    /// Loads the registry's enabled devices, pending ones marked.
+    ///
+    /// # Errors
+    /// The registry failed.
+    pub async fn from_registry(
+        registry: &songbird_accounts::Registry,
+    ) -> Result<Self, songbird_accounts::RegistryError> {
+        // One snapshot for both, so a device removed in between is never loaded as a recipient.
+        let rows = registry.load_directory_full().await?;
+        let pending: Vec<DeviceId> = rows.iter().filter(|r| r.3).map(|r| r.0).collect();
+        Ok(
+            Self::from_accounts(rows.into_iter().map(|(d, a, k, _)| (d, k, a)))
+                .with_pending(pending),
+        )
+    }
+
     /// Number of devices.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -221,6 +256,7 @@ impl Directory {
         for r in recipients {
             match self.devices.get(r) {
                 None => m.extra.push(*r),
+                Some(_) if self.pending.contains(r) => m.extra.push(*r),
                 Some(d) => accounts.insert(d.account),
             }
         }
@@ -307,11 +343,9 @@ pub async fn follow_registry(
         if v == version {
             continue;
         }
-        match registry.load_directory().await {
-            Ok(rows) => {
-                live.store(Directory::from_accounts(
-                    rows.into_iter().map(|(d, a, k)| (d, k, a)),
-                ));
+        match Directory::from_registry(&registry).await {
+            Ok(d) => {
+                live.store(d);
                 version = v;
             }
             Err(e) => tracing::warn!(error = %e, "directory reload failed"),
@@ -424,5 +458,26 @@ mod tests {
         let m = dir.check_devices(&dev(1), &many).unwrap_err();
         assert_eq!(m.missing, vec![dev(4)]);
         assert_eq!(m.extra.len(), 100);
+    }
+
+    #[test]
+    fn pending_devices_authenticate_but_are_not_recipients() {
+        let bob = AccountId::from_bytes([0xB; 16]);
+        let alice = AccountId::from_bytes([0xA; 16]);
+        let dir = Directory::from_accounts([
+            (dev(1), [0; 32], alice),
+            (dev(3), [0; 32], bob),
+            (dev(4), [0; 32], bob),
+        ])
+        .with_pending([dev(4), dev(9)]);
+        // Still known (it authenticates), but no one must encrypt to it.
+        assert!(dir.contains(&dev(4)));
+        assert_eq!(dir.check_devices(&dev(1), &[dev(3)]), Ok(()));
+        // Addressing it is refused as extra, as for a device that does not exist.
+        let m = dir.check_devices(&dev(1), &[dev(3), dev(4)]).unwrap_err();
+        assert_eq!(m.extra, vec![dev(4)]);
+        assert_eq!(m.missing, Vec::<DeviceId>::new());
+        // The pending device itself may send to its account's listed devices.
+        assert_eq!(dir.check_devices(&dev(4), &[dev(3)]), Ok(()));
     }
 }

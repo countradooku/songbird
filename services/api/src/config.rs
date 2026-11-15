@@ -791,6 +791,102 @@ pub struct KeySettings {
     /// Throttles.
     #[serde(default)]
     pub throttle: KeyThrottle,
+    /// `[api.keys.devices]`: device linking and the signed device list (Prompt 3, M4, D-0052);
+    /// same secret and system key.
+    #[serde(default)]
+    pub devices: DeviceSettings,
+}
+
+/// `[api.keys.devices]` (Prompt 3, M4, D-0052).
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct DeviceSettings {
+    /// Most enabled devices per account, primary included (owner, D-0047: primary + 5, until
+    /// Prompt 11's plans).
+    pub max_devices: u32,
+    /// How long a link token stays valid (seconds).
+    pub link_token_ttl_secs: u64,
+    /// How long a provisioning channel lives (seconds).
+    pub channel_ttl_secs: u64,
+    /// Longest a provisioning read waits for its message (seconds).
+    pub long_poll_secs: u64,
+    /// Provisioning channels opened per hour per IP range, and their burst.
+    pub channels_per_hour: u32,
+    /// Its burst.
+    pub channel_burst: u32,
+    /// Provisioning reads per hour per IP range (each waits up to `long_poll_secs`).
+    pub reads_per_hour: u32,
+    /// Its burst.
+    pub read_burst: u32,
+    /// Link attempts per hour per IP range.
+    pub links_per_hour: u32,
+    /// Its burst.
+    pub link_burst: u32,
+    /// Link tokens and provisioning messages per hour per account.
+    pub tokens_per_hour: u32,
+    /// Its burst.
+    pub token_burst: u32,
+    /// Device-list fetches per hour per requesting account.
+    pub list_fetches_per_hour: u32,
+    /// Its burst.
+    pub list_fetch_burst: u32,
+}
+
+impl Default for DeviceSettings {
+    fn default() -> Self {
+        Self {
+            max_devices: 6,
+            link_token_ttl_secs: 600,
+            channel_ttl_secs: 600,
+            long_poll_secs: 25,
+            channels_per_hour: 60,
+            channel_burst: 10,
+            reads_per_hour: 1_200,
+            read_burst: 120,
+            links_per_hour: 30,
+            link_burst: 10,
+            tokens_per_hour: 20,
+            token_burst: 10,
+            list_fetches_per_hour: 240,
+            list_fetch_burst: 60,
+        }
+    }
+}
+
+impl Validate for DeviceSettings {
+    fn validate(&self, v: &mut Validator) {
+        v.check(
+            usize::try_from(self.max_devices)
+                .is_ok_and(|n| (1..=songbird_proto::devices::MAX_LIST_DEVICES).contains(&n)),
+            "max_devices",
+            "must be in 1..=16",
+        );
+        for (name, n) in [
+            ("link_token_ttl_secs", self.link_token_ttl_secs),
+            ("channel_ttl_secs", self.channel_ttl_secs),
+        ] {
+            v.check((60..=3_600).contains(&n), name, "must be in 60..=3600");
+        }
+        v.check(
+            (1..=55).contains(&self.long_poll_secs),
+            "long_poll_secs",
+            "must be in 1..=55",
+        );
+        for (name, n) in [
+            ("channels_per_hour", self.channels_per_hour),
+            ("channel_burst", self.channel_burst),
+            ("reads_per_hour", self.reads_per_hour),
+            ("read_burst", self.read_burst),
+            ("links_per_hour", self.links_per_hour),
+            ("link_burst", self.link_burst),
+            ("tokens_per_hour", self.tokens_per_hour),
+            ("token_burst", self.token_burst),
+            ("list_fetches_per_hour", self.list_fetches_per_hour),
+            ("list_fetch_burst", self.list_fetch_burst),
+        ] {
+            v.check((1..=3_600_000).contains(&n), name, "must be in 1..=3600000");
+        }
+    }
 }
 
 const fn default_max_stored() -> usize {
@@ -813,6 +909,7 @@ impl Validate for KeySettings {
             "must be at most 1000",
         );
         v.section("throttle", &self.throttle);
+        v.section("devices", &self.devices);
     }
 }
 

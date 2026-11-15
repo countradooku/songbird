@@ -41,6 +41,10 @@ server in plaintext. Adding to this list requires the owner's approval.
 | Per device: its identity key (X25519), signed prekey and last-resort ML-KEM-1024 prekey with their signatures, and its one-time X25519 and ML-KEM-1024 prekeys (public keys only) | Let others start sessions with the device (PQXDH) | Identity key for the device's life; signed and last-resort prekeys until replaced; a one-time prekey until one fetch claims it; all with the device | Prompt 3 (M3), D-0050; the constitution's "public keys", **approved by the owner 2026-11-15** |
 | Keyed hashes (HMAC-SHA256, key from the key directory's secret) of a requesting account, an IP range, a target account and a device, with the next allowed time for fetches and one-time claims, and a one-hour "notice sent" mark, in `valkey-hot`; no identifier | Limit fetches; stop one-time prekeys being drained; send at most one "prekeys low" notice an hour | At most the throttle window (about an hour at the defaults), then expired | Prompt 3 (M3), D-0050; keyed forms of data above, **approved by the owner 2026-11-15** |
 | Per device: its MLS KeyPackages (public HPKE and signature keys, a basic credential holding the device ID, capabilities, lifetime, signatures) and their `KeyPackageRef`s; its last-resort KeyPackage | Let others add the device to MLS groups (Prompt 5) | A single-use package until one fetch claims it or it expires (swept); the last-resort one until replaced; all with the device | Prompt 3 (M3b), D-0051; public keys and the device ID, already listed, **approved by the owner 2026-11-15** |
+| Per account: the signed device list (each device's ID, authentication and identity public keys, which is the primary) with its version; per device: the primary flag, whether it is still pending, and until a list names it a 32-byte link confirmation tag (a MAC under a key the server never sees) | Refuse lists that do not verify or roll back; keep senders to the devices the account vouches for; let the primary check a new device | The list until replaced or with the account; the tag until the device is listed or removed | Prompt 3 (M4), D-0052; public keys and the device list, already listed; **awaiting the owner's approval** |
+| Link token: SHA-256 of a random 32-byte token, the account and the device ID it reserves | Link exactly one new device, once | Until used, or ten minutes (expired ones swept); with the account | Prompt 3 (M4), D-0052; **awaiting the owner's approval** |
+| Provisioning channel in `valkey-hot`: a keyed hash (HMAC-SHA256, key derived from the key directory's secret) of a random channel ID, holding at most one sealed provisioning message (at most 4 KiB, sealed to the new device's key; the server cannot open it); no account or device ID | Carry the QR provisioning message from the primary to the new device | Until read (deleted on read) or ten minutes | Prompt 3 (M4), D-0052; **awaiting the owner's approval** |
+| Keyed hashes (same key) of an IP range or an account, with the next allowed time for channels, channel reads, link attempts, link tokens and list fetches, in `valkey-hot`; no identifier | Throttle provisioning and linking | At most the throttle window (about an hour at the defaults), then expired | Prompt 3 (M4), D-0052; keyed forms of data above; **awaiting the owner's approval** |
 | Deletion journal: per deleted account, an empty tombstone in the backup bucket named by the deletion time and HMAC-SHA256(journal key, account ID); no account ID | A restore must not bring a deleted account back | Write-once, 93 days (the longest backup retention) | Prompt 2 (M6), D-0041; **approved under the owner's delegation** |
 
 Prompt 1 adds two operational views, neither of which is user data on the server:
@@ -265,6 +269,19 @@ the key directory (M3) and key transparency (M6).
 | KeyPackage exhaustion | D | Anyone with an account | The prekey throttles and per-target budget, counted separately; last-resort fall-back; refill notices | `key_packages_are_bound_to_their_device_and_served_once` |
 | The server parser and clients disagree on what a package is | T | Malicious client | Clients validate fully (RFC 9420 §10.1); the server's checks are a strict subset proven against OpenMLS's encodings | `tools/openmls-vectors`; D-0051 |
 
+### 3.12 Devices: linking and the signed device list (Prompt 3, milestone 4)
+
+| Threat | STRIDE | Attacker | Mitigation | Test or proof |
+| --- | --- | --- | --- | --- |
+| **The server (or anyone who sees a link request) links keys of its own** as the user's new device | S | Malicious or compromised server, network | The new device proves its keys with a MAC under a confirmation key that travelled only inside the sealed provisioning message; the primary checks it before signing a list; until listed, the device gets no messages and its keys are not served | `the_confirmation_tag_verifies_with_the_real_transcript` (another identity key fails); `pending_devices_get_no_key_fetches`; `a_linked_device_is_announced_and_joins_the_send_check_only_once_listed` |
+| **Account takeover by linking**: an attacker links a device without the primary | S, E | Anyone, a malicious client | A link needs a single-use token only the account's primary can obtain (hash stored; ten minutes; bound to a server-chosen device ID); both new keys proven over a transcript binding token, device and server; per-range throttle; the primary is told by a signed notice | `link_tokens_are_single_use_bound_to_their_device_and_only_for_the_primary`; `bad_link_proofs_limits_and_self_removal`; `link_requests_need_both_proofs_over_this_server`; `channels_and_links_are_throttled_per_range` |
+| **A forged or rolled-back device list** adds a device or brings back a removed one | S, T | Malicious server, malicious client | Lists signed by the account identity key, checked by the server (and by clients, which keep the highest version seen); versions only grow; every entry must match an enabled device's stored keys; removed devices are disabled and deleted, so they can never be named again | `a_device_links_through_the_qr_flow_and_joins_only_through_a_signed_list` (another key, another account, the same version, a removed device: refused); `lists_only_grow_name_exact_keys_and_remove_what_they_leave_out`; `lists_need_the_account_identity_key_and_the_limit` |
+| Reading the provisioning message (the account, its identity key, the token) | I | Server, network, someone who sees the QR code later | Sealed to a key that never leaves the new device (X25519, HKDF, AES-256-GCM); the channel holds one message, read once, ten minutes; the channel ID is a 128-bit bearer secret stored under a keyed hash | `sealed_messages_open_only_for_their_key_and_unchanged` (wrong recipient, every flipped byte, every truncation); the HTTP flow in `devices_live`; fuzz `devices` |
+| **Exceeding the device limit by racing** token requests or links | E | Malicious client | Every change to an account's devices writes its account row in the same transaction, so concurrent changes conflict and retry; outstanding tokens count toward the limit | `racing_token_requests_never_exceed_the_device_limit` (40 concurrent requests, 8 connections, limit 6: exactly 5; without the account-row write all 40 succeeded); `the_device_limit_counts_outstanding_tokens` |
+| A removed device keeps reading, or its data outlives it | I | Lost or stolen device, compromised server later | Disabled in the same transaction that removes it (authentication refused at once; delivery drops it at its next directory reload and closes its session); the worker deletes its mailbox, push registration, upload grants and objects, rows, prekeys and KeyPackages, and verifies, leaving the account's other devices untouched | `device_removal_is_verified_across_every_store_and_spares_the_rest` |
+| **A linked device, or one linked by phishing a QR scan and still pending, deletes the account or changes its username or invites** before the primary removes it | E, T | Phisher, thief of a linked device | Only the primary deletes the account, checked inside the deletion transaction; pending devices are refused every account-wide change (usernames, username key and link, invites) | `a_pending_device_changes_nothing_account_wide_and_only_the_primary_deletes` |
+| Flooding provisioning channels or link attempts | D | Anyone | Per-IP-range throttles on opening and reading channels and on linking; bounded message size and lifetime | `channels_and_links_are_throttled_per_range` |
+
 ## 4. Server-enforced settings
 
 ## 5. Compliance notes (GDPR, age of digital consent per EU country)
@@ -295,9 +312,10 @@ the key directory (M3) and key transparency (M6).
   acknowledge or forget anything, nor forge system notices.
 - A device sending over both its WebSocket and `PUT /v1/messages` has each path's rate budget
   (the WebSocket's per connection, HTTP's across `api` nodes): at most twice the per-device rate.
-- The system key that signs notices is not deployed yet: no service issues notices until Prompt 3
-  emits "device list changed". It will live in the secrets store of the issuing service only;
-  rotation by `key_id` (apps pin the current and next key).
+- The system key that signs notices is not deployed yet; `api` issues "prekeys low",
+  "KeyPackages low" and "device list changed" notices (Prompt 3) once it is configured. It will
+  live in the secrets store of the issuing service only; rotation by `key_id` (apps pin the
+  current and next key).
 - Valkey holds leases and routing without persistence: losing it costs re-subscribing and re-taking
   leases (seconds), not messages; Iggy's epochs remain the guard against two writers.
 - Iggy is pre-1.0; the Iggy SDK added 153 exempted crates to the audit backlog (D-0030).
@@ -334,3 +352,12 @@ the key directory (M3) and key transparency (M6).
   deployment-wide caps are the backstop. The proof of work's phone timing is an estimate from
   the Mac measurement until the apps exist (D-0048). A registry restore brings back invite codes
   used after the backup, valid again until they expire.
+- Devices (Prompt 3, M4, D-0052): only the account's own devices get a "device list changed"
+  notice. The server keeps no social graph, so contacts learn of a change when the send
+  path's device check refuses a stale send, or when they next fetch the list. The account
+  identity key vouches for lists, but until key transparency (M6) a server could still answer a
+  first-time contact with a different account identity key. A registry restore brings back
+  devices removed after the backup: the restored list is the old one, and clients refuse it as
+  a rollback (they keep the highest version they have seen), so the primary must sign a new list.
+  The deletion journal covers accounts, not single devices. Losing the primary means deleting
+  the account until M4b's recovery (two-step PIN, passkeys) and a primary transfer exist.

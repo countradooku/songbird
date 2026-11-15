@@ -516,6 +516,100 @@ device's last-resort package; the others are single use. Packages are stored und
   device.
 - Clients still validate every package fully before use (RFC 9420 §10.1).
 
+### 4.6 Devices: QR provisioning, linking and the signed device list
+
+Decision D-0052 (M4). An account has one **primary** device (the one holding the account identity
+key, which registered it) and at most five linked devices (owner, D-0047; `max_devices`, until
+Prompt 11's plans). Integers are big-endian.
+
+**Linking a device.**
+
+1. The new device draws an X25519 provisioning key and opens a channel
+   (`POST /v1/provisioning`, unsigned, throttled per IP range). Its QR code shows the channel ID
+   and the provisioning public key.
+2. The primary asks for a link token (`POST /v1/devices/link-token`): 32 random bytes, stored
+   only as `SHA-256("songbird.v1/link-token\0" || token)`, single use, ten minutes. It reserves
+   a server-chosen device ID and counts toward the limit until it is used or expires.
+3. The primary seals the provisioning message to the QR key and puts it in the channel
+   (`PUT /v1/provisioning/<channel>`, signed). Seal: X25519 with a fresh ephemeral key;
+   HKDF-SHA256 (salt `"songbird.v1/provisioning"`, info `ephemeral || recipient`) to an
+   AES-256-GCM key; nonce zero (one key, one message); AAD `version || ephemeral || recipient`.
+   Envelope: `version u8 (1) | ephemeral [32] | ciphertext || tag [16]`, at most 4,096 bytes. A
+   channel holds one message, written once and read once, and lives ten minutes. The server sees
+   only the envelope. Plaintext:
+   `version u8 (1) | account [16] | account_identity [32] | token [32] | device [16] | confirm_key [32] | u8 len | server_name`.
+4. The new device reads it (`GET /v1/provisioning/<channel>`, unsigned; waits up to 25 s, 204
+   when nothing came, 404 once it has been read or the channel is gone) and opens it.
+5. The new device links (`POST /v1/devices/link`, unsigned, throttled per IP range):
+   `version u8 (1) | token [32] | device [16] | auth_key [32] | identity_key [33] | auth_sig [64] | identity_sig [64] | confirm [32]`.
+   The transcript is
+   `context || u8 len(server_name) || server_name || token || device || auth_key || identity_key`.
+   `auth_sig` is Ed25519 by the authentication key with context
+   `"songbird.v1/link-device-auth\0"`; `identity_sig` is XEdDSA by the identity key with context
+   `"songbird.v1/link-device-identity\0"`. `confirm` is
+   `HMAC-SHA256(confirm_key, "songbird.v1/link-confirm\0" || transcript)` over the identity
+   transcript. The server checks both keys are honest and both signatures verify, then consumes
+   the token for exactly that device ID. The device is created **pending**, with its identity key
+   fixed (a later `PUT /v1/keys` cannot change it).
+6. The primary lists the account's devices (`GET /v1/devices`). It checks the pending device's
+   `confirm` tag with the `confirm_key` it sent. The server saw the token but never the
+   confirmation key, so it cannot link keys of its own unnoticed. The primary then signs a list
+   that names the new device.
+
+While pending, a device authenticates but is outside the send check: a send to its account need
+not address it, and a send that does is refused as extra (§3.1). Its keys are not served
+(§4.4, §4.5). Once a list names it, a send that leaves it out is refused as missing, and the
+sender fetches the list again.
+
+**The device list.**
+
+```text
+version u8 (1) | account [16] | list_version u64 | issued_ms u64 | n u8 (1..=16)
+  | n × (device [16] | auth_key [32] | identity_key [33] | flags u8 (1 primary)) | signature [64]
+```
+
+The signature is Ed25519 by the account identity key over `"songbird.v1/device-list\0"` followed
+by every byte before it. Exactly one entry is the primary; no device appears twice.
+
+`PUT /v1/devices/list` accepts a list only if all of these hold:
+
+- it verifies under the account identity key;
+- it names the requester's account;
+- it has at most `max_devices` entries;
+- its version is higher than the stored one (no rollback);
+- every entry is an enabled device of the account with exactly its stored keys, and the primary
+  entry is the account's primary.
+
+On acceptance, devices it names stop being pending. Enabled devices it leaves out are removed:
+they are disabled at once and a `DeleteDevices` job (outbox) deletes them from every store, as
+account deletion does. Clients keep the highest `list_version` they have seen for each account
+and refuse an older one, so a server cannot roll a list back to a device it removed.
+
+A linked device may remove itself (`DELETE /v1/devices/self`); the primary cannot (it deletes the
+account instead). **Only the primary deletes the account** (`DELETE /v1/account` from any other
+device: 403 `{"error": "primary"}`, checked inside the deletion's transaction). **A pending device
+changes nothing account-wide**: claiming, changing or releasing a username, the username key and
+link, and invites answer 403 `{"error": "pending"}` (lookups and reading links are allowed). Linking, a new list and a removal send a `DeviceListChanged` system notice
+(kind 1, §3.9) to the account's other devices.
+
+| Request | Body | Answers |
+| --- | --- | --- |
+| `POST /v1/provisioning` | none (unsigned) | 200 `{"channel": hex, "expires_in": s}`; 429 |
+| `PUT /v1/provisioning/<channel>` | envelope (signed) | 204; 400 `{"error": "size"}`; 404 (unknown, expired or written); 413; 429 |
+| `GET /v1/provisioning/<channel>` | none (unsigned) | 200 envelope; 204 (ask again); 404; 429 |
+| `POST /v1/devices/link-token` | none (the primary) | 200 `{"token": hex, "device": hex, "expires_in": s}`; 409 `{"error": "primary" \| "limit"}`; 429 |
+| `POST /v1/devices/link` | link request (unsigned) | 200 `{"account": hex, "device": hex}`; 400 `{"error": "request" \| "keys" \| "signature"}`; 409 `{"error": "token" \| "limit"}`; 429 |
+| `GET /v1/devices` | none | 200 `{"devices": [{"device", "auth_key", "identity_key", "primary", "pending", "confirm"}], "list_version"}` |
+| `PUT /v1/devices/list` | list | 204; 400 `{"error": "list" \| "account" \| "limit" \| "signature"}`; 409 `{"error": "version" \| "devices" \| "identity"}` |
+| `POST /v1/devices/list/fetch` | `{"account": hex}` | 200 list; 404 (none stored); 429 |
+| `DELETE /v1/devices/self` | none | 204; 409 `{"error": "primary"}` |
+
+Throttles (defaults), all as GCRA records in `valkey-hot` under keyed hashes:
+
+- per IP range: 60 channels an hour, 1,200 channel reads an hour and 30 link attempts an hour;
+- per account: 20 link tokens and provisioning messages an hour;
+- per requesting account: 240 list fetches an hour.
+
 ## 5. Encrypted content schemas (Prompt 4)
 
 ## 6. Groups, roles and channels (MLS) (Prompt 5)

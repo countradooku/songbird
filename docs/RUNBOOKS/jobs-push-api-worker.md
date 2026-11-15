@@ -160,3 +160,26 @@ explicit; none affects existing accounts or messages.
      Kyber1024 (type `0x08`); only ML-KEM-1024 is accepted (owner's decision, D-0050).
 - Rotating `[api.keys] secret` resets the throttles and the notice marks (a burst of notices may
   follow); it invalidates nothing stored.
+
+## Devices: linking failing or removed devices lingering (Prompt 3, M4, D-0052)
+
+- Detection: `api_device_throttled` rising (429s); `api_device_refused` rising against
+  `api_devices_linked`; `worker_deletion_retries` rising with `worker_devices_deleted` flat; 503s
+  with `api_errors`.
+- Causes and actions:
+  1. **`valkey-hot` unreachable**: provisioning channels and every throttled device endpoint
+     answer 503 (throttles fail closed). Restore `valkey-hot`. Open channels are lost, and users
+     scan again.
+  2. **Links refused with `token`**: the token expired (ten minutes), was used, or names another
+     device. The user starts again from the primary. A spike across many accounts points to a
+     client bug, not an attack: tokens are 256 random bits.
+  3. **Lists refused with `devices`**: the client signed a list naming a device that is no longer
+     enabled, or with keys that differ from the registry's. Clients must refetch `GET /v1/devices`
+     and sign again. With `version`, the client is behind the stored version (another of the
+     account's clients published one).
+  4. **Removed devices not deleted**: the `DeleteDevices` job retries while delivery still knows
+     the device or a store is unreachable (the same steps as "Account deletion not completing").
+     A removed device is disabled from the moment it is removed, whatever the job's state.
+- After a registry restore: devices removed after the backup are back and enabled. Clients
+  refuse the restored list as a rollback. Tell affected primaries to sign a new list, which
+  removes those devices again.

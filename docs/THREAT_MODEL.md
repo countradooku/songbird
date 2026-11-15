@@ -49,6 +49,7 @@ server in plaintext. Adding to this list requires the owner's approval.
 | Passkeys: credential ID, public key (ES256 or Ed25519), signature counter, registration time | Require a passkey to link a device (and to recover) | Until removed, or with the account | Prompt 3 (M4b), D-0053; **awaiting the owner's approval** |
 | Per account: the encrypted profile and its version, the unidentified-access key (16 bytes derived from the profile key; reveals nothing of it) and whether anyone may send to it sealed; encrypted avatar objects in RustFS with their random IDs and upload times | Serve profiles and avatars to contacts who hold the key; authorize sealed sends | Until replaced (avatars: an hour after replacement) or with the account | Prompt 3 (M5), D-0054; ciphertext and a derived key; **awaiting the owner's approval** |
 | Keyed hashes (HMAC-SHA256, key from the profiles secret) of a requesting account, an IP range or a recipient account, with the next allowed time for profile and avatar fetches and sealed sends, in `valkey-hot`; no identifier | Throttle fetches and sealed sends | At most the throttle window (about an hour), then expired | Prompt 3 (M5), D-0054; keyed forms; **awaiting the owner's approval** |
+| Key transparency log: per change, a leaf with the kind, a salted HMAC of the account (salt per account, deleted with it), SHA-256 of the identity key or device list or the username hash, and the time; the Merkle tree's hashes; per account the salt, the last logged values and generations | Let anyone check what the server vouches for, and detect a server that shows different keys to different people | The log is append-only and kept for the service's life; a deleted account's salt goes with it, which leaves its leaves unlinkable | Prompt 3 (M6), D-0055; **awaiting the owner's approval** |
 | Deletion journal: per deleted account, an empty tombstone in the backup bucket named by the deletion time and HMAC-SHA256(journal key, account ID); no account ID | A restore must not bring a deleted account back | Write-once, 93 days (the longest backup retention) | Prompt 2 (M6), D-0041; **approved under the owner's delegation** |
 
 Prompt 1 adds two operational views, neither of which is user data on the server:
@@ -310,6 +311,17 @@ the key directory (M3) and key transparency (M6).
 | Sealed sender running before it is verified | E | Configuration error | Off by default; on needs a certificate key; off answers 404 | the e2e test (flag off) |
 | Malformed certificate or profile bytes | T | Malicious client | Strict, bounded decoders; fuzzed | `uploads_and_certificates_round_trip_and_decode_strictly`; fuzz `profile` |
 
+### 3.15 Key transparency (Prompt 3, milestone 6)
+
+| Threat | STRIDE | Attacker | Mitigation | Test or proof |
+| --- | --- | --- | --- | --- |
+| **Key substitution by the server**: a contact is given a different identity key or device list | S, T | Malicious or compelled server | Every key and list is logged; clients check inclusion in a signed head before trusting one, and owners check their own entries | `clients_verify_the_transparency_log`; `changes_are_logged_once_with_proofs_and_deletion_unlinks` |
+| **A forked or rewritten log** (different histories for different people) | T | Malicious server | Clients keep the last verified head and require consistency proofs; heads are signed, so a fork is evidence | `a_forked_or_rewritten_log_is_detected`; `every_proof_of_every_tree_up_to_70_leaves_verifies_and_tampering_fails` |
+| Racing appends corrupting the tree | T | Concurrency | Appends serialized on the head row (size check in the transaction) and on leaf IDs that cannot be created twice | `concurrent_appends_keep_one_consistent_log` (160 appends over 8 connections: indices 0–159, the root equals an in-memory tree of those leaves) |
+| A change never logged | T | Crash, bug | The change bumps a generation in its own transaction; the worker logs until the logged generation catches up | `changes_are_logged_once_with_proofs_and_deletion_unlinks` |
+| The log identifying people forever (GDPR) | I | Anyone reading the log | Leaves carry a salted HMAC of the account; the salt is deleted with the account | the same test (the deleted account's entries no longer resolve) |
+| Malformed proofs or heads | T | Malicious server | Bounded, strict decoders and verifiers (RFC 9162); fuzzed | fuzz `kt` |
+
 ## 4. Server-enforced settings
 
 ## 5. Compliance notes (GDPR, age of digital consent per EU country)
@@ -402,3 +414,10 @@ the key directory (M3) and key transparency (M6).
   profile key, so revoking a contact means rotating the profile key. Spam from one contact is
   bounded by the per-recipient throttle, not by identity. The certificate key is not deployed yet
   (it goes in the secrets store at deployment; rotation by `key_id`).
+- Key transparency (M6, D-0055): the log is a transparency log, not a verifiable map. A server
+  can omit an account's newest entry when answering one person (though it cannot rewrite what it
+  already logged without forking), so this relies on owners checking their own entries and on
+  clients gossiping heads. There are no non-membership proofs and no VRF privacy: whoever has an
+  account ID can ask for its salt and see how many keys and lists it has had. Meta's `akd`
+  (verifiable map, VRF, used by WhatsApp) is the recorded upgrade path behind the same endpoints.
+  The log key is not deployed yet (secrets store; apps pin it). There is no external auditor yet.

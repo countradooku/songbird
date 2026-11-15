@@ -248,6 +248,14 @@ async fn build(
         None => (None, None),
     };
     let profiles = profiles(s, &metrics)?;
+    let kt = match &s.kt {
+        Some(k) => Some(songbird_api::kt::Transparency::new(
+            k.clone(),
+            &*k.secret.resolve_key32()?,
+            &*k.log_key.resolve_key32()?,
+        )?),
+        None => None,
+    };
     let app = Arc::new(App {
         server_name: s.server_name.clone(),
         registry,
@@ -264,6 +272,7 @@ async fn build(
         keys,
         devices,
         profiles,
+        kt,
     });
     Ok((app, tasks))
 }

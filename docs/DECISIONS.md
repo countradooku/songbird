@@ -100,6 +100,41 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0055 — Prompt 3, milestone 6: key transparency as Songbird's own RFC 9162 log; akd recorded as the upgrade path
+
+- Date: 2026-11-15
+- Status: accepted; built (report P03-M6); **awaiting the owner's approval** (the choice of log
+  is an owner-level one; the agent recommends this one and asks)
+- Decided by: agent (rest of Prompt 3 in one pass), for the owner to confirm
+- Options and evidence:
+  - **Meta's `akd` 0.13.0** (MIT/Apache-2.0, used by WhatsApp): a verifiable map with VRF-private
+    labels, non-membership and history proofs. It adds **12 crates** to the tree (`akd`,
+    `akd_core`, `async-recursion`, `ed25519-dalek`, `ed25519`, `protobuf`, `sha2`, …), so a
+    second Ed25519 and SHA-2 stack. It needs its async `Database` trait implemented on
+    SurrealDB, a VRF key with its own lifecycle, and epoch publishing. Weeks of integration.
+  - **An own RFC 9162 log**: about 500 lines, aws-lc-rs only, proofs checkable by any CT
+    library. It is a log, not a map: no non-membership proofs, and a server could withhold an
+    account's newest entry from one reader (but not rewrite history without a detectable fork).
+- Decision (recommended): **the own log now, behind the same endpoints, with `akd` as the
+  upgrade** when non-membership and label privacy are worth its integration.
+  - The log covers identity keys, device lists and usernames.
+  - Subjects are salted HMACs, so deleting an account's salt leaves its entries unlinkable
+    (GDPR), while the log stays append-only.
+  - Logging is driven by a generation bumped in each change's transaction and reconciled by the
+    worker.
+  - Appends are serialized on the head row; only perfect-subtree hashes are stored.
+  - Heads are signed by a dedicated log key at serving time.
+- Evidence:
+  - the CT reference roots (independently recomputed; the size-8 root is the published value);
+  - every inclusion and consistency proof up to 70 leaves, with tampering refused;
+  - a forked log detected;
+  - 160 concurrent appends over 8 connections yield one consistent tree;
+  - logging once per change; deletion unlinks;
+  - a client's checks over HTTP;
+  - fuzz `kt`.
+- Consequences: new crate `songbird-kt`; `[api.kt]` with a log key for the secrets store. No
+  external auditor yet (a later operational decision).
+
 ## D-0054 — Prompt 3, milestone 5: encrypted profiles, avatars and sealed sender behind a flag
 
 - Date: 2026-11-15

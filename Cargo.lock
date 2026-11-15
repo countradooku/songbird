@@ -3099,6 +3099,7 @@ dependencies = [
  "rustls-pki-types",
  "serde",
  "songbird-jobs",
+ "songbird-kt",
  "songbird-surreal",
  "songbird-types",
  "thiserror",
@@ -3166,6 +3167,7 @@ dependencies = [
  "songbird-accounts",
  "songbird-jobs",
  "songbird-keys",
+ "songbird-kt",
  "songbird-link",
  "songbird-mailbox",
  "songbird-pow",
@@ -3314,6 +3316,16 @@ dependencies = [
  "hex",
  "proptest",
  "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "songbird-kt"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "hex",
+ "proptest",
  "thiserror",
 ]
 

@@ -225,6 +225,7 @@ async fn stack(limits: Limits, sends_per_sec: u32, send_burst: u32) -> Option<St
         ),
         // Devices (M4), with the system key, so a link and a new list are announced.
         // Profiles and sealed sender (M5), the flag on.
+        kt: None,
         profiles: Some(
             songbird_api::profiles::Profiles::new(
                 songbird_api::config::ProfileSettings {

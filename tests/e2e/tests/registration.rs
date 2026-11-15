@@ -183,6 +183,7 @@ async fn registered_accounts_connect_and_talk_without_an_operator() {
         registration: Some(reg),
         usernames: None,
         keys: None,
+        kt: None,
         profiles: None,
         devices: None,
     });

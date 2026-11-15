@@ -110,6 +110,7 @@ async fn stack(u: Option<UsernameSettings>) -> Option<Stack> {
         registration: None,
         usernames,
         keys: None,
+        kt: None,
         profiles: None,
         devices: None,
     });

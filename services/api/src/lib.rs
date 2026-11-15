@@ -13,6 +13,7 @@
 //! | `POST /v1/devices/link-token`; `POST /v1/devices/link` | Linking a new device ([`devices`]; the link itself unsigned, both keys proven) |
 //! | `PUT /v1/profile`; `POST /v1/profile/fetch`; `PUT`, `GET /v1/profile/avatar[/<id>]` | Encrypted profiles and avatars ([`profiles`]) |
 //! | `GET /v1/certificate`; `PUT /v1/messages/sealed` | Sealed sender ([`profiles`]; the sealed send unsigned, authorized by access keys) |
+//! | `GET /v1/kt/head`; `POST /v1/kt/account`; `POST /v1/kt/consistency` | Key transparency ([`kt`]) |
 //! | `GET /v1/devices`; `PUT /v1/devices/list`; `POST /v1/devices/list/fetch`; `DELETE /v1/devices/self` | The signed device list and removal ([`devices`]) |
 //! | `PUT /v1/push` | Registers the device's push channel, sealed to the push service's key |
 //! | `DELETE /v1/push` | Removes it |
@@ -36,6 +37,7 @@ pub mod client;
 pub mod config;
 pub mod devices;
 pub mod keys;
+pub mod kt;
 pub mod messages;
 pub mod profiles;
 pub mod registration;
@@ -194,6 +196,8 @@ pub struct App {
     pub devices: Option<devices::Devices>,
     /// Encrypted profiles and sealed sender (absent: those endpoints answer 503).
     pub profiles: Option<profiles::Profiles>,
+    /// Key transparency (absent: those endpoints answer 503).
+    pub kt: Option<kt::Transparency>,
 }
 
 impl std::fmt::Debug for App {
@@ -408,6 +412,7 @@ impl App {
                 None,
             ) => self.keys(req).await,
             (_, p, None) if p.starts_with("/v1/account/") => self.factors(req).await,
+            (_, p, None) if p.starts_with("/v1/kt/") => self.kt(req).await,
             (_, p, None) if p.starts_with("/v1/provisioning") || p.starts_with("/v1/devices") => {
                 self.devices(req).await
             }
@@ -521,6 +526,41 @@ impl App {
             _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
         };
         Ok(profile_outcome(out))
+    }
+
+    /// `/v1/kt/…` ([`kt`]): signed like every device request.
+    async fn kt(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let t = self.kt.as_ref().ok_or_else(unavailable)?;
+        let method = req.method().clone();
+        let path = req.uri().path().to_owned();
+        let (device, body) = self.authenticate_json(req).await?;
+        let account = self
+            .registry
+            .device(&device)
+            .await
+            .map_err(|_| unavailable())?
+            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?
+            .account;
+        let out = match (&method, path.as_str()) {
+            (&Method::GET, "/v1/kt/head") => t.head(&self.registry).await,
+            (&Method::POST, "/v1/kt/account") => {
+                t.account(&self.registry, &self.hot, &account, &body).await
+            }
+            (&Method::POST, "/v1/kt/consistency") => {
+                t.consistency(&self.registry, &self.hot, &account, &body)
+                    .await
+            }
+            _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
+        };
+        Ok(match out {
+            kt::Outcome::Json(v) => json(StatusCode::OK, &v),
+            kt::Outcome::Blob(b) => profile_outcome(profiles::Outcome::Blob(b)),
+            kt::Outcome::Malformed(w) => profile_outcome(profiles::Outcome::Malformed(w)),
+            kt::Outcome::NotFound => empty(StatusCode::NOT_FOUND),
+            kt::Outcome::Throttled(w) => profile_outcome(profiles::Outcome::Throttled(w)),
+            kt::Outcome::Unavailable => empty(StatusCode::SERVICE_UNAVAILABLE),
+        })
     }
 
     /// An avatar object, streamed.

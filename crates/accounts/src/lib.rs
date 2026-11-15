@@ -35,6 +35,7 @@ use songbird_types::{AccountId, DeviceId, JobId};
 
 pub mod devices;
 pub mod journal;
+pub mod kt;
 pub mod profile;
 pub use db::{Db, DbError, SurrealSettings};
 
@@ -122,6 +123,21 @@ DEFINE FIELD IF NOT EXISTS account ON avatar TYPE bytes;
 DEFINE FIELD IF NOT EXISTS at ON avatar TYPE datetime;
 DEFINE INDEX IF NOT EXISTS avatar_account ON avatar FIELDS account;
 DEFINE INDEX IF NOT EXISTS avatar_at ON avatar FIELDS at;
+DEFINE FIELD IF NOT EXISTS kt_gen ON account TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS kt_logged ON account TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS kt_salt ON account TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS kt_v1 ON account TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS kt_v2 ON account TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS kt_v3 ON account TYPE option<bytes>;
+DEFINE INDEX IF NOT EXISTS account_kt ON account FIELDS kt_gen;
+DEFINE TABLE IF NOT EXISTS ktleaf SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS leaf ON ktleaf TYPE bytes;
+DEFINE FIELD IF NOT EXISTS subject ON ktleaf TYPE bytes;
+DEFINE INDEX IF NOT EXISTS ktleaf_subject ON ktleaf FIELDS subject;
+DEFINE TABLE IF NOT EXISTS ktnode SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS h ON ktnode TYPE bytes;
+DEFINE TABLE IF NOT EXISTS kt SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS size ON kt TYPE int;
 DEFINE TABLE IF NOT EXISTS directory SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS version ON directory TYPE int;
 DEFINE TABLE IF NOT EXISTS push_token SCHEMAFULL;
@@ -512,7 +528,7 @@ impl Registry {
             "BEGIN TRANSACTION;
              {invite_sql}
              CREATE account:[$a] SET at = time::now(), deleting = false, identity = $identity,
-               invites = $allowance RETURN NONE;
+               invites = $allowance, kt_gen = 1 RETURN NONE;
              CREATE device:[$d] SET account = $a, key = $k, disabled = false, prim = true,
                at = time::now() RETURN NONE;
              UPDATE directory:v SET version += 1 RETURN NONE;
@@ -765,7 +781,7 @@ impl Registry {
                DELETE ulink WHERE account = $a RETURN NONE;
              };
              UPSERT username:[$h] SET account = $a, held_until = NONE RETURN NONE;
-             UPDATE account:[$a] SET username = $h RETURN NONE;
+             UPDATE account:[$a] SET username = $h, kt_gen = (kt_gen ?? 0) + 1 RETURN NONE;
              COMMIT TRANSACTION;";
         self.retrying(sql, || {
             vec![
@@ -794,7 +810,7 @@ impl Registry {
                  held_until = time::now() + duration::from_secs($hold) RETURN NONE;
              };
              DELETE ulink WHERE account = $a RETURN NONE;
-             UPDATE account:[$a] SET username = NONE RETURN NONE;
+             UPDATE account:[$a] SET username = NONE, kt_gen = (kt_gen ?? 0) + 1 RETURN NONE;
              COMMIT TRANSACTION;";
         self.retrying(sql, || {
             vec![

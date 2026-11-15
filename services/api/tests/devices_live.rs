@@ -31,6 +31,8 @@ use songbird_proto::devices::{
 use songbird_types::{AccountId, DeviceId, Secret};
 
 const SERVER: &str = "api.test";
+/// The transparency log key's seed in these tests.
+const LOG_SEED: [u8; 32] = [0x61; 32];
 
 fn env(name: &str) -> Option<String> {
     let v = std::env::var(name).ok();
@@ -114,6 +116,19 @@ async fn stack(d: DeviceSettings) -> Option<Stack> {
         registration: None,
         usernames: None,
         keys: None,
+        kt: Some(
+            songbird_api::kt::Transparency::new(
+                songbird_api::config::KtSettings {
+                    secret: songbird_types::SecretRef::Env("UNUSED".into()),
+                    log_key: songbird_types::SecretRef::Env("UNUSED".into()),
+                    fetches_per_hour: 600,
+                    fetch_burst: 120,
+                },
+                &rand32(),
+                &LOG_SEED,
+            )
+            .unwrap(),
+        ),
         profiles: None,
         devices: Some(devices),
     });
@@ -1069,4 +1084,157 @@ async fn accounts_sharing_an_installation_stay_apart() {
         songbird_accounts::push_index(&[9; 32], &work.device),
         songbird_accounts::push_index(&[9; 32], &home.device)
     );
+}
+
+/// Prompt 3, M6 (D-0055): what a client checks. The signed head; the account's entries (its
+/// identity key, then each device list) under the subject its salt gives, each included in the
+/// head; and every newer head consistent with the last one it saw.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn clients_verify_the_transparency_log() {
+    use songbird_kt::{Kind, verify_consistency};
+
+    let Some(s) = stack(settings()).await else {
+        return;
+    };
+    let log_public: [u8; 32] = {
+        let k = Ed25519KeyPair::from_seed_unchecked(&LOG_SEED).unwrap();
+        pk(&k)
+    };
+    let p = primary(&s).await;
+    let reg = &s.app.registry;
+    // The worker's pass (run here directly).
+    reg.kt_reconcile(100, 1).await.unwrap();
+    let other = primary(&s).await;
+    let h1 = kt_head(&other.client, &log_public).await;
+    // Another account's device sees p's identity key logged.
+    let (_, e) = kt_entries(&other.client, &log_public, p.account).await;
+    assert_eq!(e.len(), 1);
+    assert_eq!(
+        (e[0].kind, e[0].value),
+        (Kind::Identity, songbird_kt::sha256(&pk(&p.account_key)))
+    );
+    // p links a device and signs a list; the pass logs it.
+    let (_, l) = link_flow(&s, &p, |_| {}).await;
+    let l = l.unwrap();
+    let list = signed_list(&p, 1, &[&l], &p.account_key);
+    assert_eq!(put_list(&p, &list).await.0, 204);
+    reg.kt_reconcile(100, 2).await.unwrap();
+    let (h2, e) = kt_entries(&other.client, &log_public, p.account).await;
+    assert_eq!(e.len(), 2);
+    assert_eq!(
+        (e[1].kind, e[1].value),
+        (Kind::DeviceList, songbird_kt::sha256(&list.encode()))
+    );
+    // The newer head is consistent with the one seen before.
+    let body = format!(r#"{{"from":{},"to":{}}}"#, h1.size, h2.size);
+    let (st, b) = other
+        .client
+        .send("POST", "/v1/kt/consistency", Some(body.as_bytes()))
+        .await
+        .unwrap();
+    assert_eq!(st, 200);
+    let proof: Vec<[u8; 32]> = json(&b)["proof"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| {
+            hex::decode(x.as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(
+        verify_consistency(h1.size, h2.size, &h1.root, &h2.root, &proof),
+        Ok(())
+    );
+    // Sizes out of order, or beyond the log, are refused.
+    let bad = format!(r#"{{"from":{},"to":{}}}"#, h2.size, h1.size);
+    assert_eq!(
+        other
+            .client
+            .send("POST", "/v1/kt/consistency", Some(bad.as_bytes()))
+            .await
+            .unwrap()
+            .0,
+        400
+    );
+    // An account with nothing logged yet.
+    let fresh = AccountId::random().unwrap();
+    let body = format!(r#"{{"account":"{}"}}"#, fresh.to_hex_unredacted());
+    assert_eq!(
+        other
+            .client
+            .send("POST", "/v1/kt/account", Some(body.as_bytes()))
+            .await
+            .unwrap()
+            .0,
+        404
+    );
+}
+
+async fn kt_head(c: &ApiClient, log_public: &[u8; 32]) -> songbird_kt::TreeHead {
+    let (st, b) = c.send("GET", "/v1/kt/head", None).await.unwrap();
+    assert_eq!(st, 200);
+    let h = songbird_kt::TreeHead::decode(&b).unwrap();
+    assert!(songbird_keys::ed25519_verify(
+        log_public,
+        &h.signed_bytes(),
+        &h.signature
+    ));
+    h
+}
+
+async fn kt_entries(
+    c: &ApiClient,
+    log_public: &[u8; 32],
+    account: AccountId,
+) -> (songbird_kt::TreeHead, Vec<songbird_kt::Leaf>) {
+    use songbird_kt::{Leaf, TreeHead, verify_inclusion};
+    let body = format!(r#"{{"account":"{}"}}"#, account.to_hex_unredacted());
+    let (st, b) = c
+        .send("POST", "/v1/kt/account", Some(body.as_bytes()))
+        .await
+        .unwrap();
+    assert_eq!(st, 200);
+    let v = json(&b);
+    let salt: [u8; 32] = hex::decode(v["salt"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let h = TreeHead::decode(&hex::decode(v["head"].as_str().unwrap()).unwrap()).unwrap();
+    assert!(songbird_keys::ed25519_verify(
+        log_public,
+        &h.signed_bytes(),
+        &h.signature
+    ));
+    let subject = songbird_kt::subject(&salt, account.as_bytes());
+    let mut out = Vec::new();
+    for e in v["entries"].as_array().unwrap() {
+        let leaf = Leaf::decode(&hex::decode(e["leaf"].as_str().unwrap()).unwrap()).unwrap();
+        let proof: Vec<[u8; 32]> = e["proof"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| {
+                hex::decode(x.as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(leaf.subject, subject, "an entry about someone else");
+        assert_eq!(
+            verify_inclusion(
+                &leaf.hash(),
+                e["index"].as_u64().unwrap(),
+                h.size,
+                &proof,
+                &h.root
+            ),
+            Ok(())
+        );
+        out.push(leaf);
+    }
+    (h, out)
 }

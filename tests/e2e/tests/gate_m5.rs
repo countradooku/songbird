@@ -249,6 +249,7 @@ async fn account_deletion_is_verified_across_every_store() {
         registration: None,
         usernames: None,
         keys: None,
+        kt: None,
         profiles: None,
         devices: None,
     });
@@ -550,6 +551,7 @@ async fn device_removal_is_verified_across_every_store_and_spares_the_rest() {
         registration: None,
         usernames: None,
         keys: None,
+        kt: None,
         profiles: None,
         devices: Some(
             songbird_api::devices::Devices::new(
@@ -808,6 +810,7 @@ async fn an_offline_device_receives_a_push_end_to_end() {
         registration: None,
         usernames: None,
         keys: None,
+        kt: None,
         profiles: None,
         devices: None,
     });
@@ -1027,6 +1030,7 @@ async fn m5_numbers() {
         registration: None,
         usernames: None,
         keys: None,
+        kt: None,
         profiles: None,
         devices: None,
     });

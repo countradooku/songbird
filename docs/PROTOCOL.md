@@ -712,6 +712,55 @@ version u8 (1) | profile_version u64 | access_key [16] | flags u8 (1 anyone may 
   - Throttles: per IP range and per recipient account.
   - The server learns who receives, never who sent.
 
+### 4.9 Key transparency and security notifications
+
+Decision D-0055 (M6). The server keeps an append-only Merkle log (RFC 9162 §2.1) of what it
+vouches for about each account: the account identity key, every device list, the username.
+
+- **Leaf**: `version u8 (1) | kind u8 (1 identity, 2 device list, 3 username) | subject [32] |
+  value [32] | time_ms u64`.
+  - `subject = HMAC-SHA256(salt, "songbird.v1/kt-subject\0" || account)`, with a random
+    per-account salt. Whoever asks about the account receives the salt. It is deleted with the
+    account, which leaves that account's entries unlinkable while the log stays append-only.
+  - `value` is SHA-256 of the identity key or of the signed device list, or the username hash
+    (32 zero bytes once released).
+- **Hashes**: `SHA-256(0x00 || leaf)`, `SHA-256(0x01 || left || right)`; the empty tree's root is
+  `SHA-256("")`.
+- **Signed tree head**: `version u8 (1) | size u64 | root [32] | time_ms u64 | signature [64]`.
+  The signature is Ed25519 by the log key over `"songbird.v1/kt-head\0"` followed by the bytes
+  before it. Apps pin the log key.
+- **Logging**: a registration, a new device list, or a username claimed or released bumps the
+  account's generation in its own transaction. The worker appends a leaf for each value that
+  changed since the last one it logged, so nothing is missed and a crash only delays it.
+
+| Request | Body | Answers |
+| --- | --- | --- |
+| `GET /v1/kt/head` | none | 200 signed tree head |
+| `POST /v1/kt/account` | `{"account": hex}` | 200 `{"salt": hex, "head": hex, "entries": [{"index", "leaf": hex, "proof": [hex]}]}` (the newest 256, proofs at the head's size); 404 (nothing logged); 429 |
+| `POST /v1/kt/consistency` | `{"from", "to"}` | 200 `{"proof": [hex]}`; 400 for sizes out of order or beyond the log; 429 |
+
+**What clients do:**
+
+- Keep the newest head they have verified, and check every newer head with a consistency
+  proof. Two heads that no proof joins are evidence of a fork: show it and stop trusting the
+  server.
+- Before trusting a contact's identity key or device list, check that the log holds it,
+  under the contact's subject, included in a verified head.
+- Owners check their own account's entries regularly: an entry they did not make (another device
+  list) is the warning.
+
+**Security notifications.** An account identity key is never replaced (a new one is a new
+account), and a device's identity key is fixed when it is linked. What changes is the device
+list, and changes reach clients by three paths:
+
+- the account's own devices get a signed `DeviceListChanged` notice (§3.9);
+- a contact's next send is refused as stale by the device check (§3.1), and the contact fetches
+  the signed list;
+- the change appears in the transparency log.
+
+In each case the app compares the new list with the last one it accepted and warns the user
+about new devices.
+
 ## 5. Encrypted content schemas (Prompt 4)
 
 ## 6. Groups, roles and channels (MLS) (Prompt 5)
@@ -818,3 +867,9 @@ e2ba85e62f8006c7ff540bbed16ff64f1636cb28133f05da28b9604b0d4d32596d486dd773916abf
 
 WebAuthn (Prompt 3, D-0053): `crates/keys/tests/webauthn_vectors.rs` carries the W3C WebAuthn
 Level 3 test vectors (§16.2, §16.11) verbatim.
+
+Key transparency (Prompt 3, D-0055), from `crates/kt/tests/kt_vectors.rs`: the trees of the
+Certificate Transparency reference leaf set (`""`, `00`, `10`, `2021`, `3031`, `40414243`,
+`50…57`, `60…6f`) have the roots of RFC 6962's reference implementation. The size-8 root is
+`5dc9da79a70659a9ad559cb701ded9a2ab9d823aad2f4960cfe370eff4604328`. The roots were recomputed with
+an independent Python implementation.

@@ -278,7 +278,8 @@ impl Registry {
                RETURN NONE;
              UPDATE device SET pending = NONE, lconf = NONE
                WHERE account = $a AND meta::id(id)[0] INSIDE $ids RETURN NONE;
-             UPDATE account:[$a] SET dlist = $blob, dlist_v = $v RETURN NONE;
+             UPDATE account:[$a] SET dlist = $blob, dlist_v = $v, kt_gen = (kt_gen ?? 0) + 1
+               RETURN NONE;
              IF array::len($removed) > 0 {
                UPSERT outbox:[$j] SET job = $job, at = time::now() RETURN NONE;
              };

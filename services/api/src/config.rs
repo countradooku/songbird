@@ -118,6 +118,36 @@ pub struct ApiSettings {
     /// those endpoints answer 503.
     #[serde(default)]
     pub profiles: Option<ProfileSettings>,
+    /// `[api.kt]`: key transparency (Prompt 3, M6, D-0055). Absent: those endpoints answer 503.
+    #[serde(default)]
+    pub kt: Option<KtSettings>,
+}
+
+/// `[api.kt]` (Prompt 3, M6, D-0055).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KtSettings {
+    /// 32 bytes (64 hex characters), the same on every `api` node: keys the throttle records.
+    pub secret: SecretRef,
+    /// The log key's Ed25519 seed (64 hex characters); clients pin its public key.
+    pub log_key: SecretRef,
+    /// Account and consistency answers per hour per requesting account.
+    #[serde(default = "default_profile_fetches")]
+    pub fetches_per_hour: u32,
+    /// Its burst.
+    #[serde(default = "default_profile_fetch_burst")]
+    pub fetch_burst: u32,
+}
+
+impl Validate for KtSettings {
+    fn validate(&self, v: &mut Validator) {
+        for (name, n) in [
+            ("fetches_per_hour", self.fetches_per_hour),
+            ("fetch_burst", self.fetch_burst),
+        ] {
+            v.check((1..=3_600_000).contains(&n), name, "must be in 1..=3600000");
+        }
+    }
 }
 
 /// `[api.profiles]` (Prompt 3, M5, D-0054).
@@ -255,6 +285,9 @@ impl Validate for ApiSettings {
         }
         if let Some(p) = &self.profiles {
             v.section("profiles", p);
+        }
+        if let Some(k) = &self.kt {
+            v.section("kt", k);
         }
         if let Some(k) = &self.keys {
             v.section("keys", k);

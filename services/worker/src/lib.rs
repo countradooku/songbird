@@ -516,6 +516,13 @@ impl Worker {
             }
             Err(e) => tracing::warn!(error = %e, "avatar sweep failed"),
         }
+        // Key transparency (Prompt 3, M6): log what changed since the last pass.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        if let Err(e) = self.registry.kt_reconcile(SWEEP_BATCH, now).await {
+            tracing::warn!(error = %e, "transparency log pass failed");
+        }
         // Expired link tokens are refused already; this only stops them taking space.
         if let Err(e) = self.registry.delete_expired_link_tokens(SWEEP_BATCH).await {
             tracing::warn!(error = %e, "link token sweep failed");

@@ -103,6 +103,7 @@ async fn stack(k: Option<KeySettings>) -> Option<Stack> {
         registration: None,
         usernames: None,
         keys,
+        kt: None,
         profiles: None,
         devices: None,
     });

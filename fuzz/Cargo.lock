@@ -2765,6 +2765,7 @@ dependencies = [
  "libfuzzer-sys",
  "serde",
  "songbird-keys",
+ "songbird-kt",
  "songbird-mailbox",
  "songbird-pow",
  "songbird-proto",
@@ -2780,6 +2781,14 @@ dependencies = [
  "aws-lc-rs",
  "curve25519-dalek",
  "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "songbird-kt"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
  "thiserror",
 ]
 

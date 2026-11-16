@@ -21,9 +21,10 @@ use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use songbird_groups::crypto::GROUP_CIPHERSUITE;
+use songbird_groups::ds::ds_external_senders;
 use songbird_groups::roles::{self, Policy, ROLES_EXTENSION, Roles};
 use songbird_groups::wire::{Bundle, LogEntry, log_signed_content};
-use songbird_groups::{Directory, Group};
+use songbird_groups::{Directory, Group, Limits};
 use songbird_types::{AccountId, DeviceId};
 
 thread_local! {
@@ -60,6 +61,8 @@ pub struct Device {
     pub signer: SignatureKeyPair,
     pub cred: CredentialWithKey,
     pub group: Option<MlsGroup>,
+    /// The delivery service's external-sender key new groups name (D-0075), if any.
+    pub ds_key: Option<[u8; 32]>,
     raw_key: (Vec<u8>, Vec<u8>),
 }
 
@@ -94,12 +97,14 @@ impl Device {
     /// platform keystore): same ID, same signature key.
     #[must_use]
     pub fn restored(other: &Self) -> Self {
-        Self::with_key(
+        let mut d = Self::with_key(
             other.id,
             other.account,
             OpenMlsRustCrypto::default(),
             other.raw_key.clone(),
-        )
+        );
+        d.ds_key = other.ds_key;
+        d
     }
 
     /// A device the directory does not know.
@@ -131,6 +136,7 @@ impl Device {
             signer,
             cred,
             group: None,
+            ds_key: None,
             raw_key,
         }
     }
@@ -178,7 +184,10 @@ impl Device {
             .ciphersuite(suite())
             .max_past_epochs(1)
             .capabilities(caps())
-            .with_group_context_extensions(roles_extensions(&roles))
+            .with_group_context_extensions(context_extensions(
+                &roles,
+                self.ds_key.as_ref().map(ds_external_senders),
+            ))
             .build();
         let group = MlsGroup::new_with_group_id(
             &self.provider,
@@ -236,6 +245,27 @@ impl Device {
         update: bool,
         roles: Option<&Roles>,
     ) -> Vec<u8> {
+        // A context change carries the group's external senders over unchanged (D-0075).
+        let external = self
+            .group
+            .as_ref()
+            .unwrap()
+            .extensions()
+            .external_senders()
+            .cloned();
+        let exts = roles.map(|r| context_extensions(r, external));
+        self.commit_ext(adds, removes, update, exts)
+    }
+
+    /// A commit with adds, removals, a key update and, if given, these context extensions
+    /// exactly (tests of what the server refuses).
+    pub fn commit_ext(
+        &mut self,
+        adds: Vec<KeyPackage>,
+        removes: &[u32],
+        update: bool,
+        exts: Option<Extensions<GroupContext>>,
+    ) -> Vec<u8> {
         let (p, s) = (&self.provider, &self.signer);
         let g = self.group.as_mut().unwrap();
         let mut builder = g
@@ -243,10 +273,8 @@ impl Device {
             .propose_adds(adds)
             .propose_removals(removes.iter().map(|l| LeafNodeIndex::new(*l)))
             .force_self_update(update);
-        if let Some(r) = roles {
-            builder = builder
-                .propose_group_context_extensions(roles_extensions(r))
-                .unwrap();
+        if let Some(e) = exts {
+            builder = builder.propose_group_context_extensions(e).unwrap();
         }
         let bundle = builder
             .load_psks(p.storage())
@@ -373,10 +401,24 @@ impl Device {
                 _ => None,
             })
             .collect();
+        // The delivery service may propose removals only (D-0075); `external` collects the
+        // still-listed devices it would remove, which `authorize` refuses.
+        let mut server_removed = Vec::new();
+        for q in staged.queued_proposals() {
+            match (q.sender(), q.proposal()) {
+                (Sender::External(_), Proposal::Remove(r)) => server_removed.push(r.removed()),
+                (Sender::External(_) | Sender::NewMemberProposal, _) => {
+                    return Err("an outsider's proposal other than a server removal".into());
+                }
+                _ => {}
+            }
+        }
         for m in g.members() {
             if let Some(a) = account(&m.credential) {
                 change.before.insert(a);
-                if self_removed.contains(&m.index) {
+                if server_removed.contains(&m.index) {
+                    change.external.insert(a);
+                } else if self_removed.contains(&m.index) {
                     change.left.insert(a);
                 } else if removed.contains(&m.index) {
                     change.lost.insert(a);
@@ -464,6 +506,41 @@ impl Device {
             }
             _ => panic!("expected a proposal"),
         }
+    }
+
+    /// A proposal from the delivery service (D-0075), checked as apps check it before storing
+    /// it for their next commit: a `Remove` from the group's external sender, of a device that
+    /// is no longer in its account's signed device list (`dir`, this client's view). Anything
+    /// else is dropped (not stored) and reported.
+    pub fn receive_server_proposal(&mut self, msg: &[u8], dir: &Dir) -> Result<(), String> {
+        let msg = MlsMessageIn::tls_deserialize_exact(msg).map_err(|e| e.to_string())?;
+        let p = &self.provider;
+        let g = self.group.as_mut().unwrap();
+        let processed = g
+            .process_message(
+                p,
+                msg.try_into_protocol_message().map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+        if !matches!(processed.sender(), Sender::External(_)) {
+            return Err("not the delivery service's".into());
+        }
+        let ProcessedMessageContent::ProposalMessage(q) = processed.into_content() else {
+            return Err("not a proposal".into());
+        };
+        let Proposal::Remove(r) = q.proposal() else {
+            return Err("the delivery service may only propose removals".into());
+        };
+        let listed = g
+            .member(r.removed())
+            .and_then(|c| DeviceId::from_slice(c.serialized_content()).ok())
+            .and_then(|d| dir.account_of(&d))
+            .is_some();
+        if listed {
+            return Err("a server removal of a device that is still listed".into());
+        }
+        g.store_pending_proposal(p.storage(), *q)
+            .map_err(|e| e.to_string())
     }
 
     /// Processes another member's commit (from the bundle the server fanned out).
@@ -604,15 +681,27 @@ pub fn caps() -> Capabilities {
 /// (OpenMLS accepts a change to a custom extension only if it is required) and the roles.
 #[must_use]
 pub fn roles_extensions(roles: &Roles) -> Extensions<GroupContext> {
-    Extensions::from_vec(vec![
+    context_extensions(roles, None)
+}
+
+/// [`roles_extensions`] plus, if given, the delivery service's `external_senders` (D-0075).
+#[must_use]
+pub fn context_extensions(
+    roles: &Roles,
+    external: Option<ExternalSendersExtension>,
+) -> Extensions<GroupContext> {
+    let mut v = vec![
         Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
             &[ExtensionType::Unknown(ROLES_EXTENSION)],
             &[ProposalType::SelfRemove],
             &[CredentialType::Basic],
         )),
         Extension::Unknown(ROLES_EXTENSION, UnknownExtension(roles.encode())),
-    ])
-    .unwrap()
+    ];
+    if let Some(e) = external {
+        v.push(Extension::ExternalSenders(e));
+    }
+    Extensions::from_vec(v).unwrap()
 }
 
 /// A copy of `bundle` carrying the change-log entry `log`.
@@ -638,6 +727,26 @@ pub fn welcome_of(bundle: &[u8]) -> Vec<u8> {
 
 /// Server helper: start tracking a device's new group.
 pub fn server_create(creator: &mut Device, dir: &Dir) -> Group {
+    server_create_with(creator, dir, &Limits::default())
+}
+
+/// Server helper: start tracking a device's new group under `limits` (the delivery service's
+/// external-sender key among them, D-0075: set `creator.ds_key` to the same key).
+pub fn server_create_with(creator: &mut Device, dir: &Dir, limits: &Limits) -> Group {
     let (gi, tree) = creator.create();
-    Group::create(GID, &creator.id, &gi, &tree, dir).unwrap()
+    Group::create(GID, &creator.id, &gi, &tree, dir, limits).unwrap()
+}
+
+/// The delivery service's signer as an OpenMLS client signer, for building proposals a
+/// malicious server could send (tests of the members' rule). The private half is the seed.
+#[must_use]
+pub fn ds_client_signer(seed: &[u8; 32]) -> SignatureKeyPair {
+    let public = songbird_groups::external::DsSigner::from_seed(seed)
+        .unwrap()
+        .public_key();
+    SignatureKeyPair::from_raw(
+        GROUP_CIPHERSUITE.signature_algorithm(),
+        seed.to_vec(),
+        public.to_vec(),
+    )
 }

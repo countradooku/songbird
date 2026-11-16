@@ -521,3 +521,93 @@ async fn racing_pin_guesses_never_exceed_the_free_attempts() {
         Err(songbird_accounts::devices::PinRefusal::NoPin)
     );
 }
+
+/// A registry roster (format 2): the policy, then each device with role 1.
+fn roster(devices: &[DeviceId]) -> Vec<u8> {
+    let mut r = vec![2, 1, 1, 1, 3, 1, 1, 0];
+    for d in devices {
+        r.extend_from_slice(d.as_bytes());
+        r.push(1);
+    }
+    r
+}
+
+#[tokio::test]
+async fn departing_devices_mark_the_groups_that_hold_them() {
+    // D-0075: every way a device leaves the directory marks the groups holding it (with that
+    // group's departed devices only), for `api` to propose their removal; the marks are
+    // forgotten only if no later mark came, and deletion strips the device IDs from them.
+    let Some(r) = registry().await else { return };
+    let n = account(&r).await;
+    let (d2, k2) = link(&r, &n, 6).await.unwrap();
+    let (d3, k3) = link(&r, &n, 6).await.unwrap();
+    let other = account(&r).await;
+    let (g1, g2, g3) = ([1u8; 16], [2u8; 16], [3u8; 16]);
+    r.create_group(&g1, b"state", &roster(&[n.device, d2]))
+        .await
+        .unwrap();
+    r.create_group(&g2, b"state", &roster(&[d3, other.device]))
+        .await
+        .unwrap();
+    r.create_group(&g3, b"state", &roster(&[other.device]))
+        .await
+        .unwrap();
+    let a = n.account;
+    let entry = |device, auth_key| ListEntry {
+        device,
+        auth_key,
+        identity: ik(2),
+        primary: false,
+    };
+    r.put_device_list(
+        &a,
+        1,
+        &[primary_entry(&n), entry(d2, k2), entry(d3, k3)],
+        b"v1",
+        &job(&a),
+    )
+    .await
+    .unwrap();
+    assert!(r.groups_to_prune(10).await.unwrap().is_empty());
+
+    // The primary's list leaves d3 out: only g2 is marked, naming d3.
+    r.put_device_list(&a, 2, &[primary_entry(&n), entry(d2, k2)], b"v2", &job(&a))
+        .await
+        .unwrap();
+    let marks = r.groups_to_prune(10).await.unwrap();
+    assert_eq!(marks.len(), 1);
+    assert_eq!((marks[0].group, &marks[0].gone[..]), (g2, &[d3][..]));
+    // d2 removes itself: g1 is marked too.
+    r.remove_device(&d2, &job(&a)).await.unwrap();
+    let marks = r.groups_to_prune(10).await.unwrap();
+    assert_eq!(marks.len(), 2);
+    let m1 = marks.iter().find(|m| m.group == g1).unwrap().clone();
+    assert_eq!(m1.gone, vec![d2]);
+    // A later mark survives forgetting an earlier read of it.
+    let del = Job::new(Work::DeleteAccount { account: a }).unwrap();
+    r.begin_account_deletion(&a, &del).await.unwrap();
+    r.group_pruned(&g1, m1.n).await.unwrap();
+    let marks = r.groups_to_prune(10).await.unwrap();
+    let again = marks.iter().find(|m| m.group == g1).unwrap();
+    assert!(again.n > m1.n);
+    assert!(again.gone.contains(&n.device) && again.gone.contains(&d2));
+    r.group_pruned(&g1, again.n).await.unwrap();
+    assert!(
+        r.groups_to_prune(10)
+            .await
+            .unwrap()
+            .iter()
+            .all(|m| m.group != g1)
+    );
+    // Deletion strips the devices from the marks that remain: nothing names them after.
+    r.delete_device_rows(&[d3]).await.unwrap();
+    r.delete_account_rows(&a).await.unwrap();
+    let left = r.remnants(&a, &[n.device, d2, d3], &[]).await.unwrap();
+    assert!(left.is_empty(), "{left:?}");
+    let g2_mark = r.groups_to_prune(10).await.unwrap();
+    assert_eq!(g2_mark.len(), 1);
+    assert!(
+        g2_mark[0].gone.is_empty(),
+        "the mark keeps the group, not the device"
+    );
+}

@@ -179,6 +179,9 @@ pub enum Denied {
     Stale,
     #[error("the actor is not in the group")]
     NotMember,
+    /// A server (external sender) proposal removes a device its account still lists (D-0075).
+    #[error("a server proposal removes a device that is still listed")]
+    Listed,
 }
 
 impl Roles {
@@ -277,6 +280,10 @@ pub struct Change {
     /// Accounts whose devices left by their own proposal (leaving the group): authorized by
     /// the leaver, not the committer.
     pub left: BTreeSet<AccountId>,
+    /// Accounts with a device that a server proposal (the delivery service as an MLS external
+    /// sender, D-0075) removes although the account still lists it. Any is refused: the server
+    /// may only propose removing devices that left the directory.
+    pub external: BTreeSet<AccountId>,
 }
 
 /// The permission matrix for a commit by `actor`, from roles `old` to roles `new`.
@@ -293,6 +300,9 @@ pub struct Change {
 ///   one, or an owner (who may make other owners). Lowering one's own role is always allowed.
 /// - Afterwards the group keeps at least one owner while it has members, and the list names
 ///   only accounts still in the group.
+/// - **Server removals** (D-0075): a removal proposed by the delivery service (an MLS external
+///   sender) is committed only for a device no longer in its account's signed device list. One
+///   for a listed device refuses the whole commit, whoever commits it.
 pub fn authorize(
     actor: &AccountId,
     old: &Roles,
@@ -301,6 +311,9 @@ pub fn authorize(
 ) -> Result<(), Denied> {
     if !change.before.contains(actor) {
         return Err(Denied::NotMember);
+    }
+    if !change.external.is_empty() {
+        return Err(Denied::Listed);
     }
     let r = old.role(actor);
 
@@ -714,6 +727,22 @@ mod tests {
         n.explicit.remove(&acc(3));
         assert_eq!(authorize(&acc(1), &r, &n, &c), Ok(()));
         assert_eq!(authorize(&acc(9), &r, &n, &c), Err(Denied::NotMember));
+    }
+
+    #[test]
+    fn server_removals_are_only_for_devices_that_left() {
+        // D-0075: a server proposal removing a still-listed device refuses the commit, even an
+        // owner's (`ds` and clients put such accounts in `external`).
+        let r = roles();
+        let mut c = change();
+        c.external = set(&[5]);
+        assert_eq!(authorize(&acc(1), &r, &r, &c), Err(Denied::Listed));
+        assert_eq!(authorize(&acc(4), &r, &r, &c), Err(Denied::Listed));
+        // A device that left the directory has no account here: removing it needs no role.
+        let mut gone = change();
+        gone.before.remove(&acc(5));
+        gone.after.remove(&acc(5));
+        assert_eq!(authorize(&acc(4), &r, &r, &gone), Ok(()));
     }
 
     #[test]

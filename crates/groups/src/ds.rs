@@ -53,6 +53,12 @@ pub struct Limits {
     pub max_channel_members: usize,
     /// Largest commit bundle accepted, checked before parsing.
     pub max_bundle: usize,
+    /// The delivery service's external-sender key (D-0075). When set, every group's context
+    /// must name exactly this key (with [`crate::external::DS_IDENTITY`]) as its only external
+    /// sender, from creation and after every commit, so the service can propose removing
+    /// devices that left the directory. When unset (tests of other rules), a group may name no
+    /// external sender at all. `api` always sets it.
+    pub external_sender: Option<[u8; 32]>,
 }
 
 impl Default for Limits {
@@ -61,6 +67,7 @@ impl Default for Limits {
             max_members: 1_024,
             max_channel_members: 2_048,
             max_bundle: 4 << 20,
+            external_sender: None,
         }
     }
 }
@@ -152,9 +159,20 @@ fn verify_log(
         .map_err(|_| GroupError::LogSignature)
 }
 
-/// Only the roles extension (and `required_capabilities`) may be in a group's context.
-fn extensions_allowed(ctx: &GroupContext) -> bool {
+/// The `external_senders` extension naming the delivery service's key (D-0075).
+#[must_use]
+pub fn ds_external_senders(key: &[u8; 32]) -> ExternalSendersExtension {
+    vec![ExternalSender::new(
+        SignaturePublicKey::from(&key[..]),
+        BasicCredential::new(crate::external::DS_IDENTITY.to_vec()).into(),
+    )]
+}
+
+/// Only the roles extension, `required_capabilities` and (exactly as `ds`, when set) the
+/// delivery service's `external_senders` may be in a group's context.
+fn extensions_allowed(ctx: &GroupContext, ds: Option<&[u8; 32]>) -> bool {
     let mut required = false;
+    let mut external = false;
     ctx.extensions().iter().all(|e| match e {
         Extension::Unknown(t, _) => *t == ROLES_EXTENSION,
         // Exactly Songbird's: every member supports the roles extension, `SelfRemove` and basic
@@ -165,8 +183,15 @@ fn extensions_allowed(ctx: &GroupContext) -> bool {
                 && r.credential_types() == [CredentialType::Basic];
             required
         }
+        // Exactly the delivery service, alone: no member may add another external sender (who
+        // could then propose), or drop the service (and keep departed devices' leaves).
+        Extension::ExternalSenders(s) => {
+            external = ds.is_some_and(|k| *s == ds_external_senders(k));
+            external
+        }
         _ => false,
     }) && required
+        && external == ds.is_some()
 }
 
 /// One leaf of the roster.
@@ -246,6 +271,15 @@ pub struct Applied {
     /// Each added KeyPackage's reference, with its device: the caller checks that the device
     /// published it (D-0074), before storing the commit.
     pub key_packages: Vec<(DeviceId, [u8; 32])>,
+}
+
+/// What [`Group::propose_removals`] did (D-0075).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerProposals {
+    /// Every server removal queued at this epoch (`MLSMessage` bytes), to fan out.
+    pub messages: Vec<Vec<u8>>,
+    /// How many of them this call queued: the state changed (store it) only if not zero.
+    pub queued: usize,
 }
 
 /// The stored form of a group: what the registry keeps under the group ID, compared and set
@@ -332,13 +366,15 @@ fn check_group_info(
 
 impl Group {
     /// Starts tracking a group its creator just made: epoch 0, the creator as the only leaf, a
-    /// Songbird ciphersuite, the requested ID.
+    /// Songbird ciphersuite, the requested ID, and (when `limits` names one) the delivery
+    /// service as its only external sender.
     pub fn create(
         id: [u8; GROUP_ID_LEN],
         creator: &DeviceId,
         group_info: &[u8],
         ratchet_tree: &[u8],
         dir: &impl Directory,
+        limits: &Limits,
     ) -> Result<Self, GroupError> {
         let Some(creator_account) = dir.account_of(creator) else {
             return Err(GroupError::Credential);
@@ -353,7 +389,7 @@ impl Group {
         if !GROUP_CIPHERSUITES.contains(&ctx.ciphersuite()) {
             return Err(GroupError::Ciphersuite);
         }
-        if ctx.epoch().as_u64() != 0 || !extensions_allowed(ctx) {
+        if ctx.epoch().as_u64() != 0 || !extensions_allowed(ctx, limits.external_sender.as_ref()) {
             return Err(GroupError::Kind);
         }
         // The creator's account is the only owner, and the only entry.
@@ -453,6 +489,15 @@ impl Group {
                 _ => None,
             })
             .collect();
+        // Leaves removed by the delivery service's proposal (D-0075): only devices that left
+        // the directory, whoever commits it.
+        let server_removed: BTreeSet<u32> = staged
+            .queued_proposals()
+            .filter_map(|q| match (q.proposal(), q.sender()) {
+                (Proposal::Remove(r), Sender::External(_)) => Some(r.removed().u32()),
+                _ => None,
+            })
+            .collect();
         let mut c = Change::default();
         let mut removed_devices = BTreeSet::new();
         for idx in removed_leaves {
@@ -463,7 +508,9 @@ impl Group {
             let device = device_of(leaf.credential())?;
             removed_devices.insert(device);
             if let Some(a) = dir.account_of(&device) {
-                if self_removed.contains(idx) {
+                if server_removed.contains(idx) {
+                    c.external.insert(a);
+                } else if self_removed.contains(idx) {
                     c.left.insert(a);
                 } else {
                     c.lost.insert(a);
@@ -522,6 +569,16 @@ impl Group {
         dir: &impl Directory,
     ) -> Result<BTreeSet<u32>, GroupError> {
         for q in staged.queued_proposals() {
+            // Who proposed it: the committer (inline) or a member (by reference), or the
+            // delivery service (by reference, D-0075), which may only propose removals. No
+            // other outsider proposes (no `NewMemberProposal`), and an external commit
+            // carries nothing by reference.
+            match q.sender() {
+                Sender::Member(_) | Sender::NewMemberCommit => {}
+                Sender::External(_) if !external && matches!(q.proposal(), Proposal::Remove(_)) => {
+                }
+                _ => return Err(GroupError::Proposal),
+            }
             match q.proposal() {
                 Proposal::Add(_)
                 | Proposal::Remove(_)
@@ -708,6 +765,88 @@ impl Group {
         Ok((self, sha256(msg)))
     }
 
+    /// The delivery service proposes removing every leaf whose device left the directory
+    /// (D-0075): an external `Remove` per leaf, signed by `signer`, checked by this group's own
+    /// validation (the signature against the context's `external_senders`) and queued like a
+    /// member's proposal. Leaves a queued proposal already removes are skipped, so calling it
+    /// again queues nothing new. A group that does not name `signer` gets nothing; a full
+    /// proposal queue stops early (the rest follow the next commit).
+    ///
+    /// The answer lists every server removal queued at this epoch, new or not, as the bytes to
+    /// fan out: signing is deterministic, so a proposal is the same bytes each time (one
+    /// idempotency key), and a fan-out that failed after the state was stored is finished by
+    /// the next call.
+    ///
+    /// `dir` must answer from the registry, not a cached snapshot: members refuse, and the
+    /// server refuses to commit, a server removal of a device that is still listed.
+    ///
+    /// On error the group is dropped, as for a commit.
+    pub fn propose_removals(
+        mut self,
+        dir: &impl Directory,
+        signer: &crate::external::DsSigner,
+    ) -> Result<(Self, ServerProposals), GroupError> {
+        let mut out = ServerProposals::default();
+        let named = self
+            .public
+            .group_context()
+            .extensions()
+            .external_senders()
+            .is_some_and(|s| *s == ds_external_senders(&signer.public_key()));
+        if !named {
+            return Ok((self, out));
+        }
+        let epoch = self.epoch();
+        let mut pending = BTreeSet::new();
+        for (_, q) in self.public.queued_proposals(&self.state)? {
+            match (q.proposal(), q.sender()) {
+                (Proposal::Remove(r), Sender::External(_)) => {
+                    let leaf = r.removed().u32();
+                    pending.insert(leaf);
+                    out.messages.push(crate::external::remove_proposal(
+                        &self.id, epoch, leaf, signer,
+                    ));
+                }
+                (Proposal::Remove(r), _) => {
+                    pending.insert(r.removed().u32());
+                }
+                (Proposal::SelfRemove, Sender::Member(i)) => {
+                    pending.insert(i.u32());
+                }
+                _ => {}
+            }
+        }
+        let dead: Vec<u32> = self
+            .roster
+            .leaves
+            .iter()
+            .filter(|l| dir.account_of(&l.device).is_none() && !pending.contains(&l.index))
+            .map(|l| l.index)
+            .collect();
+        for leaf in dead {
+            let msg = crate::external::remove_proposal(&self.id, epoch, leaf, signer);
+            let MlsMessageBodyIn::PublicMessage(pm) = mls_message(&msg)? else {
+                return Err(GroupError::Kind);
+            };
+            let processed = self
+                .public
+                .process_message(&CRYPTO, pm)
+                .map_err(|_| GroupError::Invalid)?;
+            let ProcessedMessageContent::ProposalMessage(q) = processed.into_content() else {
+                return Err(GroupError::Kind);
+            };
+            match self.public.add_proposal(&self.state, *q) {
+                Ok(()) => {
+                    out.messages.push(msg);
+                    out.queued += 1;
+                }
+                Err(StateError::TooManyProposals) => break,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok((self, out))
+    }
+
     /// Validates, authorizes and merges a commit bundle sent by `sender`. On success the group
     /// is at the next epoch; on error it is dropped, and the caller reloads its record.
     pub fn apply_commit(
@@ -790,7 +929,7 @@ impl Group {
         // Roles (D-0070): the commit's new roles extension must be valid and the change allowed
         // for the committer's role. External commits cannot change extensions, and only rejoin.
         let new_context = staged.group_context().clone();
-        if !extensions_allowed(&new_context) {
+        if !extensions_allowed(&new_context, limits.external_sender.as_ref()) {
             return Err(GroupError::Proposal);
         }
         let new_roles = roles_of(&new_context)?;

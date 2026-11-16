@@ -118,6 +118,98 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0075 — Prompt 5 follow-up 1: the delivery service as every group's MLS external sender, proposing to remove devices that left the directory
+
+- Date: 2026-11-17
+- Status: proposed; built and passing live (report `P05-followups.md`); **the threat-model rows
+  await the owner's approval**
+- Decided by: agent, on the owner's approval of the follow-up at the Prompt 5 gate (2026-11-17)
+- Context: D-0073 left a gap. When an account is deleted or a device removed, its leaves (device
+  ID, public keys, and for an account that held a role, its account ID in the roles extension)
+  stay in every group's MLS state until a member happens to commit their removal. The server
+  cannot edit a group's state without forking it.
+- Options considered:
+  - **The server rewriting group state** stays rejected (D-0073): it forks every member.
+  - **Apps noticing on their own** (a member removes leaves whose device left the directory)
+    was already allowed (D-0070's "dead devices"), but nothing makes it happen, and every
+    member would race to do it.
+  - **A server signing key inside the verify-only provider** was rejected: that provider's
+    property is that it signs nothing (D-0066). The key lives in
+    `crates/groups/src/external.rs`, used for one message type.
+  - **OpenMLS's `ExternalProposal::new_remove`** needs a full client provider type (storage,
+    randomness), which the server crates do not link. The proposal is encoded by hand (RFC 9420
+    §6: 42 bytes, then the signature), then run through the service's own `PublicGroup` before it
+    is queued, so an encoding mistake is refused, never stored.
+  - **Trusting the server's word on who left** was rejected. The trust rule is the apps':
+    commit a server removal only for a device no longer in its account's signed device list.
+  - **Making commits include every queued server proposal** was rejected: a member who has
+    not fetched the proposal yet would be refused. Instead the service proposes again after
+    every commit that leaves a departed device in the group.
+  - **Failing closed on a stale directory** (403) was rejected for the server's own check. The
+    service proposes only removals the registry confirmed, and devices never come back, so a
+    commit removing a device this node still lists means the node's snapshot is behind: the
+    answer is 503 (retry).
+- Decision:
+  - **The key.** Ed25519, from the cluster secret (HKDF-SHA-256, salt `songbird.v1/groups`, info
+    `external-sender`): every `api` node signs with the key every group names.
+    `POST /v1/groups/ds` serves the public half; apps should also pin it.
+  - **Every group names it.** Its context carries `external_senders` with exactly one entry: the
+    key, with the basic credential `songbird.v1/ds`. Checked at creation and after every commit
+    (`Limits::external_sender`): a member can neither drop the service nor add a second external
+    sender.
+  - **What the server may propose:** `Remove` only. External `Add`, context changes and every
+    other kind are refused by the server and by apps. No other outsider proposes
+    (`NewMemberProposal` refused).
+  - **The trust rule** (`roles::Change::external`, `roles::Denied::Listed`): a commit that
+    includes a server removal of a still-listed device is refused, whoever commits it, even an
+    owner who could remove that person by role. Apps check a server proposal before storing it
+    (`receive_server_proposal` in the harness), and check commits with the same rule.
+  - **When.** Every registry transaction that disables devices (a primary's new device list,
+    a linked device removing itself, both ways an account deletion starts) marks the groups
+    holding them (`grp_prune:[group]`, with that group's departed devices). So does a commit
+    that leaves a departed device in its group. `api`'s re-drive loop (every 5 s):
+    - confirms each candidate in the registry, never on its cached snapshot alone;
+    - queues one proposal per departed leaf (compare-and-set on epoch and revision, as
+      leaving does);
+    - fans them out to the listed members;
+    - forgets the mark, unless a later mark came.
+
+    Signing is deterministic, so a retried proposal is the same bytes under the same fan-out
+    key.
+  - **Apps** commit pending server removals soon after receiving them (with a random delay,
+    so members do not race), or with their next commit. The removal needs no role.
+  - **GDPR:** the marks hold group IDs and the departed devices' IDs for seconds. The final
+    deletion strips the IDs from any mark left (`remnants` counts them).
+- Evidence (Windows 11, `rustc 1.99.1`; live: SurrealDB v4.0.1 and Valkey 9.1.3 under podman):
+  - `tests/groups/tests/server_removals.rs`, 4 tests:
+    - a departed device is proposed once (again: no new proposal, the same bytes), members
+      accept it, and the next commit removes it on the server and every client;
+    - a server removal of a listed device is refused by a member checking it, and when
+      committed anyway, by the server (`Forbidden(Listed)`) and by clients, even when the
+      owner commits it;
+    - an external `Add` signed with the service's key is refused by apps, by `/propose`
+      and when committed;
+    - groups must name exactly the service: none, another key, the key on a server without
+      one, dropping it and adding a second are all refused.
+  - `roles` unit test `server_removals_are_only_for_devices_that_left`; `external` unit tests
+    (the RFC layout, the signature, determinism).
+  - Live:
+    - `devices_live::departing_devices_mark_the_groups_that_hold_them`: each disabling path
+      marks exactly the right groups; a later mark survives; deletion strips the IDs;
+    - `gate_p05::departed_devices_are_removed_through_server_proposals`, with the HTTP key
+      endpoint: Carol's account deletion, the proposal confirmed in the registry while the
+      node's snapshot is stale, members accepting it, Bob's commit answered 503 until the
+      snapshot follows, then 200 with Carol's leaf gone, and nothing naming her after deletion.
+- Consequences:
+  - Threat-model §1 gains two rows (the service key in every group's context and its queued
+    removals; the prune marks). They await the owner's approval.
+  - The GDPR gap of D-0073 closes once a member is online: a departed device's leaf goes with
+    the next commit. A group none of whose members comes back keeps the leaves (threat model
+    §6).
+  - Rotating the key means a context change in every group; not built (§6).
+  - Review finding 3's edge (D-0074): an owner whose devices are gone is now removed by the
+    next commit, so succession happens then, not whenever someone happens to remove the leaf.
+
 ## D-0074 — Prompt 5: the security review's fixes
 
 - Date: 2026-11-17

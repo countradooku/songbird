@@ -443,6 +443,7 @@ impl App {
                 | "/v1/groups/requests"
                 | "/v1/groups/requests/list"
                 | "/v1/groups/requests/decline"
+                | "/v1/groups/ds"
                 | "/v1/communities"
                 | "/v1/communities/groups/add"
                 | "/v1/communities/groups/remove"
@@ -675,7 +676,7 @@ impl App {
         }
         let budget = match path.as_str() {
             // Reads rebuild the tree: their own budget (D-0074).
-            "/v1/groups/state" | "/v1/groups/log" | "/v1/communities/state" => {
+            "/v1/groups/state" | "/v1/groups/log" | "/v1/communities/state" | "/v1/groups/ds" => {
                 Some((g.read_record(&device), g.reads_per_sec, g.read_burst))
             }
             // Anything a link opens has its own, smaller budget per account (D-0071), shared by
@@ -710,6 +711,7 @@ impl App {
             "/v1/groups/requests" => g.request(r, m, device, body).await,
             "/v1/groups/requests/list" => g.requests(r, device, body).await,
             "/v1/groups/requests/decline" => g.decline(r, device, body).await,
+            "/v1/groups/ds" => g.ds_key(&body),
             "/v1/communities" => g.create_community(r, device, body).await,
             "/v1/communities/groups/add" => g.add_community_group(r, device, body).await,
             "/v1/communities/groups/remove" => g.remove_community_group(r, device, body).await,

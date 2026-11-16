@@ -29,6 +29,8 @@ server in plaintext. Adding to this list requires the owner's approval.
 | Per MLS group: change-log entries (`grp_log`): ciphertext (≤ 2 KiB) and the committer's signature, keyed by the commit's epoch; the newest 1,000 | Show "View member changes" on devices that join later; the signature lets the server refuse forgeries | The newest 1,000 entries, or with the group | Prompt 5 (M2), D-0070; approved by the owner on 2026-11-17 (the Prompt 5 gate) |
 | Per MLS group, its invite links (`grp_link`): a random handle, `SHA-256(auth)` (never the link's secret, nor the key to the group's info), whether joins need approval, a use count, a limit and an expiry; at most 16 | Let a person holding a link open and join the group, while the link is usable (D-0071) | Until revoked or expired (swept hourly); used-up ones until the group's next link is made; or with the group | Prompt 5 (M3), D-0071; approved by the owner on 2026-11-17 (the Prompt 5 gate) |
 | Per MLS group, its pending join requests (`grp_req`): **the account asking to join**, and when it asked; at most 256 | Let members with the `add` role approve (add) or decline | Until approved, declined, or 7 days | Prompt 5 (M3), D-0071; approved by the owner on 2026-11-17 (the Prompt 5 gate) |
+| Per MLS group, in its context (part of the group state): the delivery service's external-sender public key (one key for every group) with its credential `songbird.v1/ds`; and, until the next commit, the service's queued `Remove` proposals, each naming the leaf of a device that left the directory | Propose removing departed devices' leaves, so they do not outlive the account or the device in group state (D-0075) | As the group state; a proposal until the next commit | Prompt 5 follow-up 1, D-0075; **awaiting the owner's approval** |
+| Prune marks (`grp_prune`): per group holding a device that left the directory, the group ID, **the IDs of its devices that left**, a counter and the time | Let any `api` node propose their removal within seconds (D-0075) | Until proposed (seconds); the device IDs are stripped at the account's or device's final deletion | Prompt 5 follow-up 1, D-0075; **awaiting the owner's approval** |
 | Per community (`cmty`, `cmty_grp`): its ID, **which group is its announcement group and which groups belong to it** (opaque IDs; at most 100), and its encrypted info (name, description, picture: ciphertext under a key the members share) with its version | Let the announcement group's admins run the community; show its members the community's groups | Until a group is unlinked or the community deleted | Prompt 5 (M4), D-0072; approved by the owner on 2026-11-17 (the Prompt 5 gate) |
 | Push registration (APNs, FCM or Web Push token / endpoint), **sealed to the push service's X25519 key** and stored under a keyed hash (HMAC-SHA256, push-index secret) of the device ID; `api` and `worker` hold only the public key | Wake an offline device | Until replaced, reported unregistered by the provider, or the device is deleted | Prompt 2 (M5), D-0036; **approved by the owner 2026-11-12** |
 | Attachment record: random 32-byte object ID, padded size, expiry, fetches still due; **no link to the uploading account** once uploaded. Before upload, a grant names the uploading device (at most 1 h) | Accept exactly the granted upload; delete after the last fetch or 30 days | Until the last fetch or 30 days; grant at most 1 h | Prompt 2 (M5), D-0036; **approved by the owner 2026-11-12** |
@@ -425,6 +427,16 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
 | Stale stamps or a retired key | T | Anyone | A 30-day window; old franking keys verify only while listed | `tampering_keys_and_windows_are_refused` |
 | Oversized or malformed reports | D | Anyone | Signed request, length checked before the body is read; strict decoder; fuzzed | `reports_round_trip_and_decode_strictly`; fuzz `franking` |
 
+### 3.22 Prompt 5 follow-ups (D-0075 to D-0077)
+
+| Threat | STRIDE | Attacker | Mitigation | Test or proof |
+| --- | --- | --- | --- | --- |
+| The server removing a member who is still listed, through its external-sender power | T, E | Compromised server or operator; a node with a stale directory | Apps keep and commit a server removal only for a device no longer in its account's signed device list; a commit carrying one for a listed device is refused by clients and the server, whoever commits it; the server confirms candidates in the registry, and a stale node answers 503 | `a_server_removal_of_a_listed_device_is_refused_by_members_and_the_server`; `server_removals_are_only_for_devices_that_left`; live `departed_devices_are_removed_through_server_proposals` |
+| The server admitting someone, or reshaping a group, by external proposal | E | Compromised server | Apps and the server take only `Remove` from the external sender; `NewMemberProposal` is refused | `the_service_may_only_propose_removals` |
+| A member dropping the service (to keep departed leaves) or adding an external sender of its own (to propose) | T, E | Malicious member | The context must name exactly the service's key, at creation and after every commit | `groups_name_exactly_the_service` |
+| Theft of the external-sender key | S | Insider, host compromise | It can only propose removals of departed devices (apps refuse the rest); it is derived from the cluster secret, which is not rotated while groups exist until key rotation is built (`docs/RUNBOOKS/secrets-rotation.md`) | the trust-rule tests above |
+| Departed devices' leaves outliving the account | I | Anyone reading group state later | Marks in the transactions that disable devices; proposals within seconds; again after each commit; the IDs stripped from marks at deletion | `departing_devices_mark_the_groups_that_hold_them`; live `departed_devices_are_removed_through_server_proposals` |
+
 ## 4. Server-enforced settings
 
 | Setting | Who changes it | Enforced where |
@@ -557,6 +569,16 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
   roles and requests; deletion removes its requests, and group messages skip its devices, but
   its devices' leaves (and an account ID in the roles, if it held one) stay in each group's MLS
   state until a member commits their removal: the server cannot edit a group without forking it.
+  Since D-0075 the server proposes that removal within seconds, and the next commit by any
+  member includes it. Still open:
+  - a group none of whose members comes back keeps the leaves;
+  - a member can fill the 64-proposal queue so the service's proposals wait for the next
+    commit;
+  - rotating the service's key needs a context change in every group, which is not built
+    (it follows the cluster secret).
+
+  A member whose view of a device list is stale refuses a valid server removal until it
+  refreshes (apps refresh before refusing).
 - Invite links (Prompt 5, M3; D-0071): the server alone decides whether a joiner held a usable
   link. A malicious server can admit an account to a group by external commit. It cannot hide
   the join from the members: every member sees the new leaf, its account and its default role,

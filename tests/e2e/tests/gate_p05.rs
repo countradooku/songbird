@@ -12,6 +12,7 @@
     clippy::too_many_lines,
     clippy::large_futures,
     clippy::many_single_char_names,
+    clippy::assert_is_empty,
     reason = "tests"
 )]
 
@@ -225,6 +226,14 @@ async fn stack(people: usize) -> Option<Stack> {
         64,
         stop_rx,
     ));
+    let ds_key = app
+        .messages
+        .as_ref()
+        .unwrap()
+        .groups
+        .as_ref()
+        .unwrap()
+        .external_sender();
     let people = keys
         .into_iter()
         .map(|(id, seed, account)| Person {
@@ -234,7 +243,12 @@ async fn stack(people: usize) -> Option<Stack> {
                 id,
                 Ed25519KeyPair::from_seed_unchecked(&seed).unwrap(),
             ),
-            mls: Device::unregistered(id, account),
+            mls: {
+                // Every group names the delivery service as its external sender (D-0075).
+                let mut d = Device::unregistered(id, account);
+                d.ds_key = Some(ds_key);
+                d
+            },
         })
         .collect();
     Some(Stack {
@@ -545,7 +559,7 @@ async fn a_lost_answer_is_recognised_and_an_interrupted_fan_out_is_redriven() {
     };
     let (g, applied) = songbird_groups::Group::load(rec)
         .unwrap()
-        .apply_commit(&s.people[0].mls.id, &b, &dir, &Limits::default())
+        .apply_commit(&s.people[0].mls.id, &b, &dir, &s.groups().limits)
         .unwrap();
     let parts = songbird_groups::wire::Bundle::parse(&b, usize::MAX).unwrap();
     let plan = postcard::to_stdvec(&(
@@ -567,6 +581,7 @@ async fn a_lost_answer_is_recognised_and_an_interrupted_fan_out_is_redriven() {
                 log: None,
                 link: None,
                 joined: &[],
+                prune: &[],
             },
         )
         .await
@@ -1249,4 +1264,94 @@ async fn outsiders_get_the_answer_for_no_group() {
         .await
         .unwrap();
     assert_eq!(st, 404);
+}
+
+/// The members' view of the directory: these people's devices and accounts.
+fn client_dir(s: &Stack, who: &[usize]) -> songbird_groups_harness::Dir {
+    songbird_groups_harness::Dir(
+        who.iter()
+            .map(|&i| (s.people[i].mls.id, s.people[i].mls.account))
+            .collect(),
+    )
+}
+
+#[tokio::test]
+async fn departed_devices_are_removed_through_server_proposals() {
+    // D-0075: Carol's account is deleted. The deletion marks the group; `api` proposes her
+    // leaf's removal as the group's external sender (confirmed in the registry, although this
+    // node's directory snapshot is stale); members check it and the next commit removes her.
+    let Some(mut s) = stack(3).await else { return };
+    let (alice, bob, carol) = (0, 1, 2);
+    let (st, key) = s.people[alice]
+        .api
+        .send("POST", "/v1/groups/ds", Some(&[1]))
+        .await
+        .unwrap();
+    assert_eq!((st, &key[..]), (200, &s.groups().external_sender()[..]));
+    create(&mut s, alice).await;
+    add(&mut s, &[bob, carol]).await;
+    assert_eq!(s.groups().prune_once(&s.registry, s.messages()).await, 0);
+
+    let account = s.people[carol].mls.account;
+    let job = songbird_jobs::Job::new(songbird_jobs::Work::DeleteAccount { account }).unwrap();
+    assert!(
+        s.registry
+            .begin_account_deletion(&account, &job)
+            .await
+            .unwrap()
+    );
+    assert_eq!(s.registry.groups_to_prune(10).await.unwrap().len(), 1);
+    assert_eq!(s.groups().prune_once(&s.registry, s.messages()).await, 1);
+    assert!(s.registry.groups_to_prune(10).await.unwrap().is_empty());
+
+    let members = client_dir(&s, &[alice, bob]);
+    for i in [alice, bob] {
+        let p = s.pending(i).await.pop().expect("the server's proposal");
+        s.people[i]
+            .mls
+            .receive_server_proposal(&p, &members)
+            .unwrap();
+    }
+    let b = s.people[bob].mls.update();
+    // This node's directory snapshot still lists Carol (nothing here follows the registry):
+    // the commit is answered "retry", not refused, and stores nothing.
+    let (st, _) = commit(&s, bob, &b).await;
+    assert_eq!(st, 503);
+    assert_eq!(s.registry.group(&GID).await.unwrap().unwrap().epoch, 1);
+    // Once the snapshot follows the registry, the same bundle goes through.
+    s.shared
+        .directory
+        .store(Directory::from_registry(&s.registry).await.unwrap());
+    let (st, reply) = commit(&s, bob, &b).await;
+    assert_eq!(st, 200, "{reply}");
+    s.people[bob].mls.merge();
+    let c = s.pending(alice).await.pop().unwrap();
+    s.people[alice]
+        .mls
+        .receive_checked(
+            &songbird_groups::wire::Bundle {
+                commit: &c,
+                welcome: None,
+                group_info: b"-",
+                log: None,
+            }
+            .encode(),
+            &members,
+        )
+        .unwrap();
+    let row = s.registry.group(&GID).await.unwrap().unwrap();
+    let roster = songbird_send::Roster::from_bytes(row.epoch, &row.roster).unwrap();
+    assert_eq!(roster.members.len(), 2);
+    assert!(
+        !roster.contains(&s.people[carol].mls.id),
+        "Carol's leaf is gone"
+    );
+    assert_eq!(s.people[alice].mls.roster(), s.people[bob].mls.roster());
+    assert!(s.registry.groups_to_prune(10).await.unwrap().is_empty());
+
+    // Her account's rows go; nothing names her devices any more.
+    let devices = s.registry.account_devices(&account).await.unwrap();
+    s.registry.delete_account_rows(&account).await.unwrap();
+    let left = s.registry.remnants(&account, &devices, &[]).await.unwrap();
+    assert!(left.is_empty(), "{left:?}");
 }

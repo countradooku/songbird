@@ -23,6 +23,19 @@
 //! row, D-0036).
 #![forbid(unsafe_code)]
 
+/// `SurrealQL`, inside a transaction that disables or deletes the devices in `$gone`: marks every
+/// group holding one of them with those of its devices, so `api` proposes their removal as the
+/// groups' external sender (D-0075, `groups::Registry::groups_to_prune`). The mark lives until
+/// `api` has proposed (seconds).
+macro_rules! mark_prune {
+    () => {
+        "FOR $pg IN (SELECT meta::id(id)[0] AS g, devs FROM grp WHERE devs CONTAINSANY $gone) {
+           UPSERT grp_prune:[$pg.g] SET n = (n ?? 0) + 1, at = time::now(),
+             gone = array::union(gone ?? [], array::intersect($pg.devs, $gone)) RETURN NONE;
+         };"
+    };
+}
+
 mod db;
 pub mod push_token;
 
@@ -225,6 +238,11 @@ DEFINE TABLE IF NOT EXISTS cmty_grp SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS cmty ON cmty_grp TYPE bytes;
 DEFINE FIELD IF NOT EXISTS ann ON cmty_grp TYPE bool;
 DEFINE INDEX IF NOT EXISTS cmty_grp_cmty ON cmty_grp FIELDS cmty;
+DEFINE TABLE IF NOT EXISTS grp_prune SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS n ON grp_prune TYPE int;
+DEFINE FIELD IF NOT EXISTS at ON grp_prune TYPE datetime;
+DEFINE FIELD IF NOT EXISTS gone ON grp_prune TYPE array<bytes> DEFAULT [];
+DEFINE INDEX IF NOT EXISTS grp_prune_at ON grp_prune FIELDS at;
 UPSERT directory:v SET version = version ?? 1 RETURN NONE;
 DEFINE TABLE IF NOT EXISTS store SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS generation ON store TYPE int;
@@ -470,6 +488,8 @@ pub struct Remnants {
     pub prekeys: u64,
     /// Pending requests to join groups (Prompt 5, D-0073).
     pub group_requests: u64,
+    /// Group prune marks still naming the devices (D-0075).
+    pub group_marks: u64,
 }
 
 impl Remnants {
@@ -1706,13 +1726,17 @@ impl Registry {
         let v = self
             .db
             .query(
-                "BEGIN TRANSACTION;
+                concat!(
+                    "BEGIN TRANSACTION;
                  IF !record::exists(account:[$a]) { THROW 'no_account' };
                  UPDATE account:[$a] SET deleting = true RETURN NONE;
-                 UPDATE device SET disabled = true WHERE account = $a RETURN NONE;
-                 UPDATE directory:v SET version += 1 RETURN NONE;
+                 LET $gone = (SELECT VALUE meta::id(id)[0] FROM device WHERE account = $a);
+                 UPDATE device SET disabled = true WHERE account = $a RETURN NONE;",
+                    mark_prune!(),
+                    "UPDATE directory:v SET version += 1 RETURN NONE;
                  UPSERT outbox:[$j] SET job = $job, at = time::now() RETURN NONE;
-                 COMMIT TRANSACTION;",
+                 COMMIT TRANSACTION;"
+                ),
                 vec![
                     var("a", bytes(account.as_bytes())),
                     var("j", bytes(job.id.as_bytes())),
@@ -1748,15 +1772,19 @@ impl Registry {
         let v = self
             .db
             .query(
-                "BEGIN TRANSACTION;
+                concat!(
+                    "BEGIN TRANSACTION;
                  LET $row = (SELECT account, disabled, prim FROM ONLY device:[$d]);
                  IF $row = NONE OR $row.disabled OR $row.prim != true OR $row.account != $a
                    { THROW 'songbird:primary' };
                  UPDATE account:[$a] SET deleting = true, dgen = (dgen ?? 0) + 1 RETURN NONE;
-                 UPDATE device SET disabled = true WHERE account = $a RETURN NONE;
-                 UPDATE directory:v SET version += 1 RETURN NONE;
+                 LET $gone = (SELECT VALUE meta::id(id)[0] FROM device WHERE account = $a);
+                 UPDATE device SET disabled = true WHERE account = $a RETURN NONE;",
+                    mark_prune!(),
+                    "UPDATE directory:v SET version += 1 RETURN NONE;
                  UPSERT outbox:[$j] SET job = $job, at = time::now() RETURN NONE;
-                 COMMIT TRANSACTION;",
+                 COMMIT TRANSACTION;"
+                ),
                 vec![
                     var("d", bytes(device.as_bytes())),
                     var("a", bytes(row.account.as_bytes())),
@@ -1796,6 +1824,8 @@ impl Registry {
                  DELETE passkey WHERE account = $a RETURN NONE;
                  DELETE avatar WHERE account = $a RETURN NONE;
                  DELETE grp_req WHERE acct = $a RETURN NONE;
+                 UPDATE grp_prune SET gone = array::complement(gone, $devs)
+                   WHERE gone CONTAINSANY $devs RETURN NONE;
                  DELETE account:[$a] RETURN NONE;
                  UPDATE directory:v SET version += 1 RETURN NONE;
                  COMMIT TRANSACTION;",
@@ -1836,7 +1866,8 @@ impl Registry {
                    + count(SELECT id FROM otkem WHERE device IN $ds)
                    + count(SELECT id FROM mlskp WHERE device IN $ds)
                    + count(SELECT id FROM mlskp_used WHERE device IN $ds);
-                 RETURN count(SELECT id FROM grp_req WHERE acct = $a);",
+                 RETURN count(SELECT id FROM grp_req WHERE acct = $a);
+                 RETURN count(SELECT id FROM grp_prune WHERE gone CONTAINSANY $ds);",
                 vec![
                     var("a", bytes(account.as_bytes())),
                     var("ds", Value::Array(ds)),
@@ -1859,6 +1890,7 @@ impl Registry {
             links: n(5)?,
             prekeys: n(6)?,
             group_requests: n(7)?,
+            group_marks: n(8)?,
         })
     }
 

@@ -20,6 +20,14 @@ hosts that need them. Nothing secret is in config files, logs or images.
    - `tofu_state_passphrase`: OpenTofu re-encrypts on the next apply when both old and new keys are
      configured (`fallback` key provider); follow OpenTofu's key-rotation procedure, then remove the old one.
    - Deploy SSH key: add the new public key with `site.yml`, verify access, then remove the old one.
+   - **The router's `cluster_secret`: do not rotate it while MLS groups exist** (D-0075). `api`
+     derives the delivery service's external-sender key from it, and every group's context
+     names that key: with another key, every commit to every existing group is refused
+     (`400 proposal`) and departed devices are no longer proposed for removal. Rotating it needs
+     the key-rotation step D-0075 records as not built (each group commits a context change to
+     the new key while the old one is still accepted). If it is exposed, treat it as an
+     incident: the key can only propose removals of departed devices (apps refuse the rest),
+     but fan-out keys and Valkey channel names also derive from it.
 3. Commit the re-encrypted file.
 
 ## Rotate the SOPS data key (all values re-encrypted)

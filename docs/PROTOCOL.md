@@ -1265,8 +1265,9 @@ channels follow in M2–M4.
 `version u8 (1) | group [16] | info_len u32 | GroupInfo | tree_len u32 | ratchet tree`, both parts
 `MLSMessage`/TLS as OpenMLS exports them, at most 4 MiB in all.
 
-- The group is at epoch 0, uses `0x004F`, carries no group-context extension (until M2), and its
-  only leaf is the requesting device, which signed the `GroupInfo`.
+- The group is at epoch 0, uses `0x004F`, and its only leaf is the requesting device, which
+  signed the `GroupInfo`. Its context carries the extensions of §6.6 and `external_senders`
+  naming the delivery service, exactly (§6.11).
 - Answers:
   - 204;
   - 409 `exists`;
@@ -1286,8 +1287,9 @@ The server validates the commit fully (RFC 9420, OpenMLS `PublicGroup`), then ch
 1. a member's commit is signed by the leaf whose credential is the requesting device;
 2. every added KeyPackage names a listed device that is not already in the group;
 3. updates keep their leaf's identity;
-4. the proposals are add, remove, update or self-remove only. Pre-shared keys, re-init,
-   group-context changes and custom proposals are refused until M2 defines them;
+4. the proposals are add, remove, update, self-remove and (§6.6) group-context changes only.
+   Pre-shared keys, re-init and custom proposals are refused. A proposal by reference is a
+   member's, or a `Remove` from the delivery service (§6.11);
 5. an external commit comes from a device whose account already has a device in the group, and
    removes at most that device's own old leaf. A reinstalled device (a new device ID) joins
    without removing anything, and a member then removes the dead leaf;
@@ -1389,6 +1391,7 @@ apply the same rule to a commit (`songbird_groups::roles::authorize`):
 | Add a device of an account already in it | Member and above (one's own: anyone) |
 | Remove another person's device | An admin or owner who outranks that person |
 | Remove one's own devices, or a device no longer listed | Anyone |
+| Commit the delivery service's proposal to remove a device (§6.11) | Anyone, and only for a device no longer in its account's signed list: one for a listed device refuses the commit, whoever commits it |
 | Change the policy (send, add, edit info, links, call, default role, flags) | Admin and above |
 | Change someone's role | An admin who outranks both the old and the new role, or an owner (who may make owners) |
 | Lower one's own role | Anyone |
@@ -1524,6 +1527,38 @@ one, by their own links.
   | Small group | up to 32 | every device | if enabled | 1 s |
   | Large group | 33 and more | the primary device only | if enabled | 10 s |
   | Channel | any | none | none | — |
+
+### 6.11 Server-proposed removals (D-0075)
+
+When a device leaves the directory (its account is deleted, its primary's new list leaves it
+out, or it removes itself), its leaf would stay in every group until a member removed it. The
+delivery service proposes that removal itself, as the group's MLS external sender
+(RFC 9420 §12.1.8.1). It can only propose; a member commits.
+
+- **The service's key:** Ed25519, the same on every node. `POST /v1/groups/ds` with `version u8
+  (1)` answers it (32 bytes); apps should also pin it.
+- **Every group names it.** Its context's `external_senders` holds exactly one entry: that key
+  with the basic credential `songbird.v1/ds`. The server refuses a group created without it
+  (400 `kind`), and a commit that drops it or adds another sender (400 `proposal`).
+- **The proposal:** a `PublicMessage` from `external(0)` carrying `Remove(leaf)`, at the
+  group's current epoch, signed by the key (`SignWithLabel(…, "FramedContentTBS", …)`, no
+  membership tag). The server queues it in the group's state and stores it in every listed
+  member's mailbox. Signing is deterministic: the same leaf at the same epoch is the same
+  bytes.
+- **When:** within seconds of the device leaving, confirmed against the registry; and again
+  after any commit that leaves a departed device in the group (proposals do not outlive an
+  epoch).
+- **What apps do** (the trust rule, `songbird_groups::roles::authorize`):
+  1. On receiving a proposal from `external(0)`: keep it (`store_pending_proposal`) only if it
+     is a `Remove` whose leaf's device is no longer in its account's signed device list (after
+     refreshing that list). Drop anything else: the service may propose nothing but removals.
+  2. Commit kept proposals soon (after a random delay of a few seconds, so members do not race;
+     another member's commit may include them first). Committing them needs no role.
+  3. Refuse a commit that includes a server removal of a still-listed device, whoever commits
+     it, and any external proposal that is not a `Remove`.
+- **The server applies the same rule** to commits. A commit removing a device the node's
+  directory still lists is answered 503 (retry): the service proposes only removals the
+  registry confirmed, and devices never come back, so that node's directory is seconds behind.
 
 ## 7. Attachments and packs (Prompt 6)
 

@@ -82,6 +82,7 @@ async fn stack() -> Option<Stack> {
     let (push_private, push_public) = push_token::key_pair(&[0x77; 32]).unwrap();
     let app = Arc::new(App {
         requests: None,
+        reports: None,
         server_name: SERVER.into(),
         registry,
         s3,

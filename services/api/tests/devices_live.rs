@@ -94,6 +94,7 @@ async fn stack(d: DeviceSettings) -> Option<Stack> {
     .unwrap();
     let app = Arc::new(App {
         requests: None,
+        reports: None,
         server_name: SERVER.into(),
         registry,
         s3: songbird_s3::Client::new(songbird_s3::Config::new(

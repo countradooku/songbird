@@ -273,15 +273,21 @@ impl GateKeys {
         first16(hmac::sign(&self.owner, blocker.as_bytes()).as_ref())
     }
 
-    /// A throttle record name in `valkey-hot`: `q:<kind>:<keyed hash>`.
+    /// A keyed tag of `subject` for `kind` (throttle records, report IDs).
     #[must_use]
-    pub fn record(&self, kind: &str, subject: &[&[u8]]) -> String {
+    pub fn tag(&self, kind: &str, subject: &[&[u8]]) -> [u8; 16] {
         let mut ctx = hmac::Context::with_key(&self.throttle);
         ctx.update(kind.as_bytes());
         for s in subject {
             ctx.update(s);
         }
-        format!("q:{kind}:{}", hex::encode(first16(ctx.sign().as_ref())))
+        first16(ctx.sign().as_ref())
+    }
+
+    /// A throttle record name in `valkey-hot`: `q:<kind>:<keyed hash>`.
+    #[must_use]
+    pub fn record(&self, kind: &str, subject: &[&[u8]]) -> String {
+        format!("q:{kind}:{}", hex::encode(self.tag(kind, subject)))
     }
 }
 

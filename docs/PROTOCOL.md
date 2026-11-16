@@ -1165,7 +1165,54 @@ tag = HMAC-SHA256(franking key, "songbird.v1/franking-stamp\0" || key_id || comm
 
 ### 5.14 Reporting
 
-Filled in by M5 (D-0063).
+Decision D-0063 (M5). A recipient shows the server one message it received; nothing else about
+the conversation is revealed.
+
+```
+POST /v1/reports (a listed device, signed body, at most 61,602 bytes):
+version u8 (1) | reason u8 (1 spam, 2 harassment, 3 illegal, 4 impersonation, 5 other)
+  | key_id [8] | commitment [32] | stamped_at_ms u64 | tag [32]     (the stamp, §5.13)
+  | sender [16] | franking_key [32] | content_len u32 | content       (1 to 61,440 bytes)
+```
+
+The app keeps each franked message's stamp and franking key, and its encoded `Content` exactly
+as received. To report, it sends them with the sender it decrypted. The server then checks, in
+order:
+
+1. **The reporter's budget:** 20 reports an hour, burst 10, keyed in `valkey-hot`. It is spent
+   before anything else, so reports cannot probe stamps. Over it: 429.
+2. **The franking key:** the current key or one still accepted (`[api.send]
+   previous_franking_keys`). Otherwise 403 `key`.
+3. **The window:** the stamp is at most 30 days old (`window_days`) and not from the future.
+   Otherwise 403 `expired`.
+4. **The stamp,** which binds the sender and the recipient. The MAC must verify for the named
+   sender (attested), else for no sender (a sealed send: the sender is only the reporter's claim);
+   and for the reporter's account, else for no recipient (a group's shared body, which any member
+   may report). Otherwise 403 `stamp`. So a message can be reported only by a recipient, and
+   only against the sender who sent it.
+5. **The commitment:** it must open to the content under the franking key (constant time).
+   Otherwise 403 `commitment`.
+
+Then the server seals a **minimal report** to the moderation key and queues it (204):
+
+```json
+{"version": 1, "reason": "harassment", "sender": hex, "sender_attested": true,
+ "conversation": "direct" | "group", "stamped_at_ms": …, "reported_at_ms": …, "content": hex}
+```
+
+- **Sealing:** X25519 with a fresh ephemeral key, HKDF-SHA256 under the domain
+  `songbird.v1/report`, AES-256-GCM (`songbird_keys::provisioning::seal_with`), to
+  `[api.reports] moderation_key`. The private half stays offline with the moderators
+  (`songbird-admin reports keygen`).
+- **What the report leaves out:** the reporter, any other message, the conversation's members.
+- **Storage:** the row is named by a keyed hash of the stamp's tag, so the same message is
+  reported once (409 `duplicate`). Rows are kept `retention_days` (30 by default, at most 90),
+  then swept by the worker.
+- **Moderators** list, open (decrypt, and decode the content with `songbird-content`) and
+  delete reports with `songbird-admin reports`.
+- **In memory only:** `api` holds the content in memory while it verifies a report; it never
+  decodes it, and never stores it unsealed.
+- **A report does not block:** an app that reports usually also blocks the sender (§5.11).
 
 ## 6. Groups, roles and channels (MLS) (Prompt 5)
 

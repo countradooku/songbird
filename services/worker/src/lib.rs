@@ -550,6 +550,12 @@ impl Worker {
     /// One sweep: attachments past 30 days or fully fetched, expired grants, expired invite
     /// codes, expired KeyPackages, expired link tokens, released usernames whose hold ended, the outbox.
     pub async fn sweep(&self) {
+        // Queued reports past their retention (Prompt 4, D-0063).
+        if let Ok(n) = self.registry.sweep_reports().await
+            && n > 0
+        {
+            tracing::info!(n, "expired reports deleted");
+        }
         match self.registry.expired_attachments(SWEEP_BATCH).await {
             Ok(objects) => {
                 for o in objects {

@@ -14,6 +14,7 @@
     clippy::indexing_slicing,
     clippy::too_many_lines,
     clippy::many_single_char_names,
+    clippy::large_futures,
     reason = "tests"
 )]
 
@@ -181,6 +182,7 @@ async fn stack(limits: Limits, sends_per_sec: u32, send_burst: u32) -> Option<St
     };
     let app = Arc::new(App {
         requests: None,
+        reports: None,
         server_name: API.into(),
         registry,
         // Unused by these tests (attachments and deletion are M5's).

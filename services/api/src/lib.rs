@@ -42,6 +42,7 @@ pub mod kt;
 pub mod messages;
 pub mod profiles;
 pub mod registration;
+pub mod reports;
 pub mod requests;
 pub mod server;
 pub mod usernames;
@@ -107,6 +108,8 @@ pub struct ApiMetrics {
     pub profiles: profiles::ProfileMetrics,
     /// Blocks and the request policy.
     pub blocks: requests::RequestsMetrics,
+    /// Reports.
+    pub reports: reports::ReportMetrics,
 }
 
 impl ApiMetrics {
@@ -165,6 +168,7 @@ impl ApiMetrics {
         self.devices.register(m)?;
         self.profiles.register(m)?;
         self.blocks.register(m)?;
+        self.reports.register(m)?;
         self.send.register(m, "api")
     }
 }
@@ -205,6 +209,8 @@ pub struct App {
     pub kt: Option<kt::Transparency>,
     /// Blocks and the message-request policy (absent: those endpoints answer 503).
     pub requests: Option<requests::Requests>,
+    /// Reporting with message franking (absent: `POST /v1/reports` answers 503).
+    pub reports: Option<reports::Reports>,
 }
 
 impl std::fmt::Debug for App {
@@ -419,6 +425,7 @@ impl App {
                 None,
             ) => self.keys(req).await,
             (_, "/v1/blocks" | "/v1/account/requests", None) => self.requests(req).await,
+            (&Method::POST, "/v1/reports", None) => self.report(req).await,
             (_, p, None) if p.starts_with("/v1/account/") => self.factors(req).await,
             (_, p, None) if p.starts_with("/v1/kt/") => self.kt(req).await,
             (_, p, None) if p.starts_with("/v1/provisioning") || p.starts_with("/v1/devices") => {
@@ -622,6 +629,27 @@ impl App {
             );
         }
         Ok(v)
+    }
+
+    /// `POST /v1/reports` ([`reports`], Prompt 4).
+    async fn report(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let r = self.reports.as_ref().ok_or_else(unavailable)?;
+        let (device, body) = self
+            .authenticate_body(req, songbird_proto::report::MAX_LEN)
+            .await?;
+        let row = self
+            .registry
+            .device(&device)
+            .await
+            .map_err(|_| unavailable())?
+            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        Ok(device_outcome(
+            r.submit(&self.registry, &self.hot, &row, &body, now).await,
+        ))
     }
 
     /// `/v1/blocks` and `/v1/account/requests` ([`requests`], Prompt 4).

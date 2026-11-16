@@ -98,6 +98,10 @@ struct Stack {
     ws: SocketAddr,
     api: SocketAddr,
     franker: Franker,
+    keys: GateKeys,
+    /// The moderators' offline key.
+    moderation: songbird_keys::provisioning::ProvisioningKey,
+    worker: songbird_worker::Worker,
     _stop: tokio::sync::watch::Sender<bool>,
 }
 
@@ -196,15 +200,33 @@ async fn stack(limits: RequestLimits) -> Option<Stack> {
         .await
         .unwrap(),
     );
+    let moderation = songbird_keys::provisioning::ProvisioningKey::generate().unwrap();
+    let report_settings = songbird_api::config::ReportSettings {
+        moderation_key: hex::encode(moderation.public()),
+        retention_days: 30,
+        window_days: 30,
+        per_hour: 1,
+        burst: 5,
+    };
     let app = Arc::new(App {
+        reports: Some(songbird_api::reports::Reports::new(
+            songbird_send::Frankers {
+                current: Franker::from_secret(&secret).unwrap(),
+                previous: Vec::new(),
+            },
+            keys.clone(),
+            moderation.public(),
+            report_settings,
+            songbird_api::reports::ReportMetrics::default(),
+        )),
         requests: Some(songbird_api::requests::Requests::new(
-            keys,
+            keys.clone(),
             songbird_api::requests::RequestsMetrics::default(),
         )),
         server_name: API.into(),
         registry: Arc::clone(&registry),
-        s3,
-        queue,
+        s3: s3.clone(),
+        queue: Arc::clone(&queue),
         hot: songbird_valkey::ValkeyConn::connect(redis::Client::open(hot.as_str()).unwrap())
             .await
             .unwrap(),
@@ -232,7 +254,16 @@ async fn stack(limits: RequestLimits) -> Option<Stack> {
         registration: None,
         usernames: None,
         keys: None,
-        devices: None,
+        devices: Some(
+            songbird_api::devices::Devices::new(
+                songbird_api::config::DeviceSettings::default(),
+                &songbird_api::config::KeyThrottle::default(),
+                &rand32(),
+                None,
+                songbird_api::devices::DeviceMetrics::default(),
+            )
+            .unwrap(),
+        ),
         profiles: None,
         kt: None,
     });
@@ -245,12 +276,30 @@ async fn stack(limits: RequestLimits) -> Option<Stack> {
         64,
         stop_rx,
     ));
+    s3.create_bucket().await.unwrap();
+    let worker = songbird_worker::Worker {
+        block_keys: Some(keys.clone()),
+        registry: Arc::clone(&registry),
+        s3,
+        queue,
+        delivery: songbird_worker::DeliveryLink::Direct(songbird_delivery::internal::handler(
+            Arc::clone(&shared),
+        )),
+        push_index_secret: [0x31; 32],
+        journal: None,
+        propagation: Duration::from_millis(200),
+        kt: None,
+        metrics: songbird_worker::WorkerMetrics::default(),
+    };
     Some(Stack {
         registry,
         shared,
         ws,
         api,
         franker,
+        keys,
+        moderation,
+        worker,
         _stop: stop,
     })
 }
@@ -686,5 +735,225 @@ async fn request_floods_are_held_across_the_cluster_and_a_block_does_not_show() 
         pending(&s, &y.devices[0]).await,
         0,
         "a block stores nothing"
+    );
+}
+
+/// Carol's message to Bob as a franked request: what Bob's app keeps for a report.
+async fn franked_request(
+    s: &Stack,
+    from: &songbird_client::Client,
+    to_person: &Person,
+    ev: &mut mpsc::Receiver<Event>,
+    content: &[u8],
+) -> (Stamp, [u8; 32]) {
+    let mut fk = [0u8; 32];
+    aws_lc_rs::rand::fill(&mut fk).unwrap();
+    // The server's commitment code and the apps' (songbird-content) agree.
+    let commitment = songbird_api::reports::commitment(&fk, content);
+    assert_eq!(commitment, songbird_content::commitment(&fk, content));
+    let st = from
+        .send_hinted(key(), request(commitment), to_all(to_person, b"ciphertext"))
+        .await
+        .unwrap();
+    assert_eq!(st, SendStatus::Accepted);
+    let got = delivery_within(ev, 5_000).await.unwrap();
+    let (stamp, _) = Stamp::split(&got).unwrap();
+    let _ = s;
+    (stamp, fk)
+}
+
+fn report_of(stamp: Stamp, sender: &Person, fk: [u8; 32], content: &[u8]) -> Vec<u8> {
+    songbird_proto::report::Report {
+        reason: songbird_proto::report::Reason::Harassment,
+        stamp,
+        sender: *sender.account.as_bytes(),
+        franking_key: fk,
+        content: content.to_vec(),
+    }
+    .encode()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_recipient_reports_a_message_and_only_moderators_can_read_it() {
+    let Some(s) = stack(RequestLimits::default()).await else {
+        return;
+    };
+    let bob = person(&s, 2).await;
+    let carol = person(&s, 1).await;
+    let dave = person(&s, 1).await;
+    followed(&s, &[&bob, &carol, &dave]).await;
+    let (_b1, mut b1_ev) = connect(&s, &bob.devices[0]).await;
+    let (c1, _c1_ev) = connect(&s, &carol.devices[0]).await;
+    let content = b"the harassing words, as encoded content".to_vec();
+    let (stamp, fk) = franked_request(&s, &c1, &bob, &mut b1_ev, &content).await;
+
+    let b1 = bob.devices[0].api(&s);
+    let body = report_of(stamp, &carol, fk, &content);
+    assert_eq!(
+        b1.send("POST", "/v1/reports", Some(&body)).await.unwrap().0,
+        204
+    );
+    assert_eq!(s.registry.report_count().await.unwrap(), 1);
+    // The same message once only (from any of Bob's devices).
+    let b2 = bob.devices[1].api(&s);
+    let (st, why) = b2.send("POST", "/v1/reports", Some(&body)).await.unwrap();
+    assert_eq!((st, &why[..]), (409, &br#"{"error":"duplicate"}"#[..]));
+    // Someone who did not receive it (a forwarded opening) cannot report it.
+    let d1 = dave.devices[0].api(&s);
+    let (st, why) = d1.send("POST", "/v1/reports", Some(&body)).await.unwrap();
+    assert_eq!((st, &why[..]), (403, &br#"{"error":"stamp"}"#[..]));
+    // Other words than the ones Carol committed to.
+    let mut other = content.clone();
+    other[0] ^= 1;
+    let (st, why) = b1
+        .send(
+            "POST",
+            "/v1/reports",
+            Some(&report_of(stamp, &carol, fk, &other)),
+        )
+        .await
+        .unwrap();
+    assert_eq!((st, &why[..]), (403, &br#"{"error":"commitment"}"#[..]));
+    // Blaming someone else.
+    let (st, why) = b1
+        .send(
+            "POST",
+            "/v1/reports",
+            Some(&report_of(stamp, &dave, fk, &content)),
+        )
+        .await
+        .unwrap();
+    assert_eq!((st, &why[..]), (403, &br#"{"error":"stamp"}"#[..]));
+    // Garbage.
+    assert_eq!(
+        b1.send("POST", "/v1/reports", Some(b"junk"))
+            .await
+            .unwrap()
+            .0,
+        400
+    );
+    assert_eq!(s.registry.report_count().await.unwrap(), 1);
+
+    // What is queued: ciphertext only the moderation key opens, holding the minimal report.
+    let queued = s.registry.queued_reports(10).await.unwrap();
+    assert_eq!(queued.len(), 1);
+    let sealed = &queued[0].sealed;
+    assert!(
+        !sealed
+            .windows(content.len())
+            .any(|w| w == content.as_slice()),
+        "the content is not in the clear"
+    );
+    let other_key = songbird_keys::provisioning::ProvisioningKey::generate().unwrap();
+    assert!(
+        songbird_keys::provisioning::open_with(
+            songbird_api::reports::SEAL_DOMAIN,
+            &other_key,
+            sealed
+        )
+        .is_err()
+    );
+    let plain = songbird_keys::provisioning::open_with(
+        songbird_api::reports::SEAL_DOMAIN,
+        &s.moderation,
+        sealed,
+    )
+    .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+    assert_eq!(v["reason"], "harassment");
+    assert_eq!(v["sender"], carol.hex());
+    assert_eq!(v["sender_attested"], true);
+    assert_eq!(v["conversation"], "direct");
+    assert_eq!(v["stamped_at_ms"], stamp.stamped_at_ms);
+    assert_eq!(v["content"], hex::encode(&content));
+    // Nothing names the reporter, and nothing else about the conversation is there.
+    let text = String::from_utf8(plain).unwrap();
+    assert!(!text.contains(&bob.hex()));
+    assert_eq!(v.as_object().unwrap().len(), 8, "{text}");
+    // A moderator deletes it once dealt with.
+    s.registry.delete_report(&queued[0].id).await.unwrap();
+    assert_eq!(s.registry.report_count().await.unwrap(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn report_floods_are_throttled_per_reporter() {
+    let Some(s) = stack(RequestLimits::default()).await else {
+        return;
+    };
+    let eve = person(&s, 1).await;
+    let mallory = person(&s, 1).await;
+    followed(&s, &[&eve, &mallory]).await;
+    let (_e1, mut e1_ev) = connect(&s, &eve.devices[0]).await;
+    let (m1, _m1_ev) = connect(&s, &mallory.devices[0]).await;
+    let content = b"one message".to_vec();
+    let (stamp, fk) = franked_request(&s, &m1, &eve, &mut e1_ev, &content).await;
+    let api = eve.devices[0].api(&s);
+    let body = report_of(stamp, &mallory, fk, &content);
+    // Every attempt spends the budget (5), valid, duplicate or not: then 429.
+    let mut codes = Vec::new();
+    for _ in 0..7 {
+        codes.push(
+            api.send("POST", "/v1/reports", Some(&body))
+                .await
+                .unwrap()
+                .0,
+        );
+    }
+    assert_eq!(codes, vec![204, 409, 409, 409, 409, 429, 429]);
+    assert_eq!(s.registry.report_count().await.unwrap(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn prompt_4_stores_are_exported_and_deleted_with_the_account() {
+    let Some(s) = stack(RequestLimits::default()).await else {
+        return;
+    };
+    let bob = person(&s, 1).await;
+    let carol = person(&s, 1).await;
+    followed(&s, &[&bob, &carol]).await;
+    let b1 = bob.devices[0].api(&s);
+    let body = json(&format!(r#"{{"account":"{}"}}"#, carol.hex()));
+    assert_eq!(
+        b1.send("PUT", "/v1/blocks", Some(&body)).await.unwrap().0,
+        204
+    );
+    assert_eq!(
+        b1.send(
+            "PUT",
+            "/v1/account/requests",
+            Some(&json(r#"{"from":"nobody"}"#))
+        )
+        .await
+        .unwrap()
+        .0,
+        204
+    );
+    let (st, export) = b1.send("GET", "/v1/account/export", None).await.unwrap();
+    assert_eq!(st, 200);
+    let v: serde_json::Value = serde_json::from_slice(&export).unwrap();
+    assert_eq!(v["message_requests"]["from"], "nobody");
+    assert_eq!(v["message_requests"]["blocks"], 1);
+    // The export names nobody Bob blocked: only a count.
+    assert!(!String::from_utf8_lossy(&export).contains(&carol.hex()));
+
+    // Deletion: Bob's block rows go (found by his keyed tag) and are verified gone.
+    let owner = s.keys.owner(&bob.account);
+    assert_eq!(s.registry.block_count(&owner).await.unwrap(), 1);
+    s.worker.delete_account(&bob.account).await.unwrap();
+    assert_eq!(s.registry.block_count(&owner).await.unwrap(), 0);
+    assert!(
+        s.registry
+            .device(&bob.devices[0].id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // Carol is untouched.
+    assert!(
+        s.registry
+            .device(&carol.devices[0].id)
+            .await
+            .unwrap()
+            .is_some()
     );
 }

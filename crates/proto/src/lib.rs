@@ -17,6 +17,7 @@
 //! - [`devices`]: the signed device list and the link request (Prompt 3).
 //! - [`profile`]: encrypted profiles and sender certificates (Prompt 3).
 //! - [`keys`]: the key directory's upload and fetch formats (PQXDH prekeys, Prompt 3).
+//! - [`report`]: a report with message franking (Prompt 4).
 //! - [`registration`]: the registration request, the transcripts its keys sign, and invite codes
 //!   (`POST /v1/registration`, Prompt 3).
 //!
@@ -33,6 +34,7 @@ pub mod frame;
 pub mod keys;
 pub mod profile;
 pub mod registration;
+pub mod report;
 pub mod system;
 
 pub use close::CloseCode;

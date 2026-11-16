@@ -61,6 +61,23 @@ impl ProvisioningKey {
         Ok(Self { private, public })
     }
 
+    /// The key from its 32-byte private scalar (an operator's offline key, such as the
+    /// moderation key that opens sealed reports, Prompt 4).
+    ///
+    /// # Errors
+    /// The bytes are not an X25519 private key.
+    pub fn from_private(private: &[u8; 32]) -> Result<Self, ProvisioningError> {
+        let private =
+            PrivateKey::from_private_key(&X25519, private).map_err(|_| ProvisioningError)?;
+        let public = private
+            .compute_public_key()
+            .map_err(|_| ProvisioningError)?
+            .as_ref()
+            .try_into()
+            .map_err(|_| ProvisioningError)?;
+        Ok(Self { private, public })
+    }
+
     /// The public key for the QR code.
     #[must_use]
     pub fn public(&self) -> [u8; PUBLIC_LEN] {
@@ -69,6 +86,7 @@ impl ProvisioningKey {
 }
 
 fn aead_key(
+    salt: &[u8],
     shared: &[u8],
     ephemeral: &[u8; PUBLIC_LEN],
     recipient: &[u8; PUBLIC_LEN],
@@ -81,7 +99,7 @@ fn aead_key(
     info[..PUBLIC_LEN].copy_from_slice(ephemeral);
     info[PUBLIC_LEN..].copy_from_slice(recipient);
     let mut k = [0u8; 32];
-    hkdf::Salt::new(hkdf::HKDF_SHA256, SALT)
+    hkdf::Salt::new(hkdf::HKDF_SHA256, salt)
         .extract(shared)
         .expand(&[&info], &AES_256_GCM)
         .and_then(|o| o.fill(&mut k))
@@ -105,6 +123,19 @@ fn aad(ephemeral: &[u8; PUBLIC_LEN], recipient: &[u8; PUBLIC_LEN]) -> [u8; 1 + 2
 /// # Errors
 /// A dishonest recipient key or a random-source failure.
 pub fn seal(recipient: &[u8; PUBLIC_LEN], plaintext: &[u8]) -> Result<Vec<u8>, ProvisioningError> {
+    seal_with(SALT, recipient, plaintext)
+}
+
+/// [`seal`] under another domain (the HKDF salt): the same construction for another purpose
+/// (sealed reports, Prompt 4), so an envelope sealed for one purpose never opens for another.
+///
+/// # Errors
+/// As [`seal`].
+pub fn seal_with(
+    domain: &[u8],
+    recipient: &[u8; PUBLIC_LEN],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, ProvisioningError> {
     if !x25519_public_key_ok(recipient) {
         return Err(ProvisioningError);
     }
@@ -113,7 +144,7 @@ pub fn seal(recipient: &[u8; PUBLIC_LEN], plaintext: &[u8]) -> Result<Vec<u8>, P
         &eph.private,
         UnparsedPublicKey::new(&X25519, recipient),
         ProvisioningError,
-        |shared| aead_key(shared, &eph.public, recipient),
+        |shared| aead_key(domain, shared, &eph.public, recipient),
     )?;
     let mut out = Vec::with_capacity(OVERHEAD + plaintext.len());
     out.push(VERSION);
@@ -135,6 +166,18 @@ pub fn seal(recipient: &[u8; PUBLIC_LEN], plaintext: &[u8]) -> Result<Vec<u8>, P
 /// [`ProvisioningError`] for another key, any changed byte, a truncation, a dishonest
 /// ephemeral key.
 pub fn open(key: &ProvisioningKey, envelope: &[u8]) -> Result<Vec<u8>, ProvisioningError> {
+    open_with(SALT, key, envelope)
+}
+
+/// [`open`] under another domain ([`seal_with`]).
+///
+/// # Errors
+/// As [`open`], and for an envelope sealed under another domain.
+pub fn open_with(
+    domain: &[u8],
+    key: &ProvisioningKey,
+    envelope: &[u8],
+) -> Result<Vec<u8>, ProvisioningError> {
     let (&version, rest) = envelope.split_first().ok_or(ProvisioningError)?;
     let (eph, ct) = rest.split_at_checked(PUBLIC_LEN).ok_or(ProvisioningError)?;
     let eph: [u8; PUBLIC_LEN] = eph.try_into().map_err(|_| ProvisioningError)?;
@@ -145,7 +188,7 @@ pub fn open(key: &ProvisioningKey, envelope: &[u8]) -> Result<Vec<u8>, Provision
         &key.private,
         UnparsedPublicKey::new(&X25519, &eph),
         ProvisioningError,
-        |shared| aead_key(shared, &eph, &key.public),
+        |shared| aead_key(domain, shared, &eph, &key.public),
     )?;
     let mut body = ct.to_vec();
     let plain = aead
@@ -210,6 +253,15 @@ mod tests {
         );
         // A low-order recipient key is refused.
         assert!(seal(&[0; 32], b"x").is_err());
+    }
+
+    #[test]
+    fn a_domain_seals_for_its_purpose_only() {
+        let k = ProvisioningKey::generate().unwrap();
+        let e = seal_with(b"songbird.v1/report", &k.public(), b"report").unwrap();
+        assert_eq!(open_with(b"songbird.v1/report", &k, &e).unwrap(), b"report");
+        assert!(open(&k, &e).is_err(), "not a provisioning message");
+        assert!(open_with(b"songbird.v1/report", &k, &seal(&k.public(), b"p").unwrap()).is_err());
     }
 
     #[test]

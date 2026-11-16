@@ -39,6 +39,7 @@ pub mod gdpr;
 pub mod journal;
 pub mod kt;
 pub mod profile;
+pub mod reports;
 pub use db::{Db, DbError, SurrealSettings};
 
 /// Ed25519 public key length.
@@ -145,6 +146,11 @@ DEFINE FIELD IF NOT EXISTS at ON block TYPE datetime;
 DEFINE INDEX IF NOT EXISTS block_owner ON block FIELDS owner;
 DEFINE TABLE IF NOT EXISTS blockctr SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS n ON blockctr TYPE int;
+DEFINE TABLE IF NOT EXISTS report SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS sealed ON report TYPE bytes;
+DEFINE FIELD IF NOT EXISTS at ON report TYPE datetime;
+DEFINE FIELD IF NOT EXISTS expires ON report TYPE datetime;
+DEFINE INDEX IF NOT EXISTS report_expires ON report FIELDS expires;
 DEFINE TABLE IF NOT EXISTS directory SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS version ON directory TYPE int;
 DEFINE TABLE IF NOT EXISTS push_token SCHEMAFULL;

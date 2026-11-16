@@ -56,6 +56,8 @@ server in plaintext. Adding to this list requires the owner's approval.
 | Block rows: per (blocker, blocked) pair a keyed hash (HMAC-SHA256 under a key derived from the requests secret), a keyed tag of the blocker, the time; per blocker a counter; **no account ID** | Drop message requests from blocked senders (D-0062) | Until unblocked, or the blocker's account is deleted (rows found by its tag, verified gone) | Prompt 4 (M4), D-0062; **awaiting the owner's approval** |
 | Per account: whether it refuses message requests (`requests_off`); with its access key and "anyone may send" flag, held in every delivery and `api` node's directory snapshot (memory) | Classify every send without a store round trip; drop requests the account refuses | With the account (snapshot: until the next reload) | Prompt 4 (M4), D-0062; the access key and flag were approved with profiles (D-0054), their use in the send path is new; **awaiting the owner's approval** |
 | Keyed hashes (HMAC-SHA256, key from the requests secret) of a sender account, a (sender, recipient) pair or a recipient account, with the next allowed time for requests and broadcasts, in `valkey-hot`; no identifier | Hold message requests and broadcasts to their budgets across every node | At most the budget window (hours at the defaults), then expired | Prompt 4 (M4), D-0062; keyed forms; **awaiting the owner's approval** |
+| A report's minimal content, **sealed to the offline moderation key** (X25519, AES-256-GCM): the reason, the reported sender and whether the server attests it, direct or group, the stamp's time, the report's time, and the reported message's content (plaintext the reporter chose to reveal); the row named by a keyed hash of the stamp; **no reporter**. `api` sees the content in memory while verifying | Moderate abuse a recipient reports (D-0063) | 30 days (configurable up to 90), or until a moderator deletes it; in registry backups (sealed) until they expire | Prompt 4 (M5), D-0063; **awaiting the owner's approval** |
+| Keyed hashes (HMAC-SHA256, key from the requests secret) of a reporting account, with its next allowed report time, in `valkey-hot`; no identifier | Hold reporting to its budget | At most the budget window (hours), then expired | Prompt 4 (M5), D-0063; keyed form; **awaiting the owner's approval** |
 | Deletion journal: per deleted account, an empty tombstone in the backup bucket named by the deletion time and HMAC-SHA256(journal key, account ID); no account ID | A restore must not bring a deleted account back | Write-once, 93 days (the longest backup retention) | Prompt 2 (M6), D-0041; **approved under the owner's delegation** |
 
 Prompt 1 adds two operational views, neither of which is user data on the server:
@@ -397,6 +399,20 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
 | Bypassing the gate with a shared body or ephemeral frames | E | Spammer | Stated: groups are authorized by Prompt 5; ephemeral frames are encrypted and dropped without a session, and per-connection limited | PROTOCOL §5.10 |
 | A request's timing (stored or not) revealing a block | I | A blocked sender measuring latency | Not hidden: a dropped request skips the durable store (milliseconds faster) | Open risk §6 |
 
+### 3.21 Reporting with message franking (Prompt 4, milestone 5; D-0063)
+
+| Threat | STRIDE | Attacker | Mitigation | Test or proof |
+| --- | --- | --- | --- | --- |
+| Framing someone with words they never sent | S, R | Malicious reporter | The server's stamp binds the commitment and time to the sender; the commitment must open to the reported content under the franking key | `tampering_keys_and_windows_are_refused`; `a_recipient_reports_a_message…` (other words, another sender refused) |
+| Reporting a message one never received (a forwarded opening) | S | Malicious third party | The stamp binds the recipient's account (zero only for a group's shared body) | `a_recipients_report_of_an_identified_send_attests_the_sender`; the live test (403 for Dave) |
+| A sender escaping a report by committing to other words | R | Malicious sender | Recipients drop franked messages whose commitment does not open (§5.3) | M1 `sealed_plaintexts_open_and_franking_verifies` |
+| Sealed senders blamed on a claim | R | Malicious reporter | A sealed send's stamp has no sender; the report says `sender_attested: false` | `sealed_and_group_messages_verify_with_what_the_stamp_names` |
+| Report floods, repeated reports, probing stamps | D, I | Malicious client | A per-account budget spent before verification; one report per message (keyed stamp ID) | `report_floods_are_throttled_per_reporter` |
+| The moderation queue read by an insider, a seized database or a backup | I | Insider, seized server | Reports sealed to an offline key the servers never hold; rows named by keyed hashes; no reporter | the live test (another key cannot open; content not in the clear) |
+| Reporters exposed to the reported or to moderators | I | Reported sender, moderator | The report holds no reporter identifier | the live test (the plaintext has eight fields, none the reporter) |
+| Stale stamps or a retired key | T | Anyone | A 30-day window; old franking keys verify only while listed | `tampering_keys_and_windows_are_refused` |
+| Oversized or malformed reports | D | Anyone | Signed request, length checked before the body is read; strict decoder; fuzzed | `reports_round_trip_and_decode_strictly`; fuzz `franking` |
+
 ## 4. Server-enforced settings
 
 | Setting | Who changes it | Enforced where |
@@ -513,3 +529,8 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
   (contacts are unaffected). Every node's directory snapshot now holds every account's access
   key (memory only), and reloads on profile changes as on device changes (an incremental reload
   is Prompt 13's). A stranger's MLS Welcome and ephemeral frames are not gated until Prompt 5.
+- Reporting (Prompt 4, D-0063): `api` sees a reported message's content in memory while it
+  verifies the report (never decoded, never stored unsealed). A sealed sender cannot be attested,
+  only claimed. The moderation key's private half must stay offline: whoever holds it can read
+  every queued report; rotating it is a configuration change, and reports sealed to the old key
+  need the old key.

@@ -251,6 +251,44 @@ async fn requests(
     ))
 }
 
+/// `[api.reports]` (Prompt 4, D-0063), if configured: the franking keys reports are verified
+/// against (`[api.send]`: current and previous), the gate's keys and the moderation key.
+fn reports(
+    s: &ApiSettings,
+    metrics: &ApiMetrics,
+) -> Result<Option<songbird_api::reports::Reports>, BoxError> {
+    let (Some(r), Some(req), Some(send)) = (&s.reports, &s.requests, &s.send) else {
+        return Ok(None);
+    };
+    let franker = |k: &songbird_types::SecretRef| -> Result<songbird_send::Franker, BoxError> {
+        let secret = k.resolve_key32()?;
+        songbird_send::Franker::from_secret(&secret)
+            .map_err(|_| BoxError::from("franking key derivation failed"))
+    };
+    let current = franker(
+        send.franking_key
+            .as_ref()
+            .ok_or("[api.reports] needs [api.send] franking_key")?,
+    )?;
+    let previous = send
+        .previous_franking_keys
+        .iter()
+        .map(franker)
+        .collect::<Result<Vec<_>, _>>()?;
+    let secret = req.secret.resolve_key32()?;
+    let keys = songbird_send::GateKeys::from_cluster_secret(&secret)
+        .map_err(|_| BoxError::from("gate key derivation failed"))?;
+    let mut moderation = [0u8; 32];
+    hex::decode_to_slice(&r.moderation_key, &mut moderation)?;
+    Ok(Some(songbird_api::reports::Reports::new(
+        songbird_send::Frankers { current, previous },
+        keys,
+        moderation,
+        r.clone(),
+        metrics.reports.clone(),
+    )))
+}
+
 async fn build(
     s: &ApiSettings,
     metrics: ApiMetrics,
@@ -326,7 +364,9 @@ async fn build(
     };
     let profiles = profiles(s, &metrics)?;
     let kt = transparency(s).await?;
+    let reports = reports(s, &metrics)?;
     let app = Arc::new(App {
+        reports,
         requests,
         server_name: s.server_name.clone(),
         registry,

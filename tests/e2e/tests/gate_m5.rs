@@ -235,6 +235,7 @@ async fn account_deletion_is_verified_across_every_store() {
     let (_, push_public) = songbird_accounts::push_token::key_pair(&[0x23; 32]).unwrap();
     let app = Arc::new(App {
         requests: None,
+        reports: None,
         server_name: API.into(),
         registry: Arc::clone(&registry),
         s3: s3.clone(),
@@ -546,6 +547,7 @@ async fn device_removal_is_verified_across_every_store_and_spares_the_rest() {
     let (_, push_public) = songbird_accounts::push_token::key_pair(&[0x23; 32]).unwrap();
     let app = Arc::new(App {
         requests: None,
+        reports: None,
         server_name: API.into(),
         registry: Arc::clone(&registry),
         s3: s3.clone(),
@@ -808,6 +810,7 @@ async fn an_offline_device_receives_a_push_end_to_end() {
     let (_, push_public) = songbird_accounts::push_token::key_pair(&push_key).unwrap();
     let app = Arc::new(App {
         requests: None,
+        reports: None,
         server_name: API.into(),
         registry: Arc::clone(&registry),
         s3,
@@ -1029,6 +1032,7 @@ async fn m5_numbers() {
     let (_, push_public) = songbird_accounts::push_token::key_pair(&[0x24; 32]).unwrap();
     let app = Arc::new(App {
         requests: None,
+        reports: None,
         server_name: API.into(),
         registry: Arc::clone(&registry),
         s3,

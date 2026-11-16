@@ -20,6 +20,10 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 4 (`P04-gate.md`): delivered receipts in groups above 32 members from primaries only
+  (34 % of envelopes instead of 47 % in the busy case of the M2 load test), or from every device
+  (recommended until Prompt 5's group tiers).
+
 - Public channels: build or not (Prompt 5).
 - WhatsApp interop legal gate (Prompt 14).
 - Second EU provider (D-0009): Hetzner only for now (D-0042); the Scaleway code stays dormant.
@@ -101,6 +105,53 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0063 — Prompt 4, milestone 5: reporting with message franking; reports sealed to an offline moderation key
+
+- Date: 2026-11-16
+- Status: accepted; built (report `P04-M5.md`, and the Prompt 4 gate `P04-gate.md`); awaiting the
+  owner's approval of the gate and the two threat-model §1 rows
+- Decided by: agent, under the owner's plan (D-0058) and standing instruction (Proton-level bar)
+- Context: Prompt 4: "The reporter submits the plaintext and the franking opening; the server
+  verifies the commitment it stamped at send time, then queues a minimal report for moderation
+  with short retention. Nothing else about the conversation is revealed."
+- Options considered:
+  - **Storing reports in the clear** for moderators was rejected: the registry and its backups
+    would hold message plaintext. Reports are sealed to a moderation key whose private half stays
+    offline, so the servers can verify and queue but never read them back.
+  - **Naming the reporter in the report** was rejected as more than moderation needs; repeat
+    reports are stopped by the keyed stamp ID and the budget.
+  - **Several messages (context) per report** was rejected: the prompt says nothing else about
+    the conversation, and each message carries its own stamp, so an app may send several reports.
+  - **Decoding the content on the server** to check it is a message was rejected (the server
+    never links `songbird-content`); moderators decode it in `songbird-admin`.
+- Decision:
+  - `POST /v1/reports` with the binary body of PROTOCOL §5.14 (`songbird_proto::report`, fuzzed).
+  - **Checks, in order:** the reporter's budget (spent first), the franking key, the 30-day
+    window, the stamp (sender attested or sealed; this recipient or a group), then the commitment
+    (constant time).
+  - **The minimal report:** eight fields, sealed with `seal_with("songbird.v1/report", …)`. The
+    row is named by a keyed hash of the stamp's tag (one per message), kept 30 days (at most 90),
+    and swept by the worker.
+  - **`songbird-admin reports`:** `keygen`, `list`, `open` (decrypt and decode) and `delete`
+    (audit-logged).
+  - `[api.reports]` is required in staging and production, and needs `[api.requests]` and
+    `[api.send] franking_key`.
+- Evidence (Apple M5 Pro, macOS 27.2.1):
+  - verification known answers (identified, sealed, group, other reporter, other sender, other
+    words or key or commitment or time, forged tag, unknown or previous key, too old, future);
+  - the commitment's known answer equals `songbird_content`'s, and the live test checks both
+    implementations agree on random keys;
+  - `gate_p04` live:
+    - a request reported by its recipient, queued sealed;
+    - duplicate 409; another reporter, other words or another sender 403; garbage 400;
+    - only the moderation key opens it, the content is not in the clear, and no reporter is in
+      it;
+    - floods give 204, 409 ×4, 429 ×2;
+    - export and deletion of Prompt 4's stores;
+  - admin seal and open tests; fuzz `franking` (with reports), 60 s: 27,774,418 runs.
+- Consequences: a moderation key for the owner to generate and hold offline; two threat-model §1
+  rows. Reports of sealed sends name a claimed sender only.
 
 ## D-0062 — Prompt 4, milestone 4: the contact gate, message requests, blocking, rate limits per conversation type, broadcast lists
 

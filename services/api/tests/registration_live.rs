@@ -113,6 +113,7 @@ async fn stack_with(reg: Option<RegistrationSettings>) -> Option<Stack> {
         reg.map(|r| Registration::new(r, &secret, RegistrationMetrics::default()).unwrap());
     let app = Arc::new(App {
         requests: None,
+        reports: None,
         server_name: SERVER.into(),
         registry,
         s3,

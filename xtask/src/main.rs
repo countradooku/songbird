@@ -618,11 +618,11 @@ fn sha256(path: &str) -> Result<String> {
 
 // ---------------------------------------------------------------- local environment
 
+/// `bytes` from the operating system's CSPRNG (the `getrandom` crate: the `getrandom(2)` system
+/// call on Linux, `ProcessPrng` on Windows), as hex.
 fn random_hex(bytes: usize) -> Result<String> {
     let mut buf = vec![0u8; bytes];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut buf))
-        .map_err(|e| format!("/dev/urandom: {e}"))?;
+    getrandom::fill(&mut buf).map_err(|e| format!("system random source: {e}"))?;
     Ok(buf
         .iter()
         .fold(String::with_capacity(bytes * 2), |mut s, b| {
@@ -669,31 +669,53 @@ fn dev_env(force: bool) -> Result {
     opts.open(path)
         .and_then(|mut f| f.write_all(text.as_bytes()))
         .map_err(|e| e.to_string())?;
-    eprintln!("wrote .env (mode 0600)");
+    // Elsewhere (Windows) the file takes the directory's ACL: the user's own profile.
+    eprintln!("wrote .env{}", if cfg!(unix) { " (mode 0600)" } else { "" });
     Ok(())
 }
 
 /// Development override for Podman (`deploy/compose/compose.podman.yaml`, D-0029).
 const COMPOSE_PODMAN: &str = "deploy/compose/compose.podman.yaml";
 
-/// Whether `docker` is Podman's (its `docker version` names the Podman Engine).
-/// `SONGBIRD_COMPOSE_PODMAN=1` or `=0` forces the answer.
+/// Whether `program --version` runs and succeeds.
+fn has_command(program: &str) -> bool {
+    Command::new(program)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// The compose front end: `docker compose` where a `docker` command exists (Docker's, or Podman's
+/// `docker` shim), else `podman compose` (Podman alone, as Podman Desktop installs it on Windows).
+fn compose_program() -> &'static str {
+    if has_command("docker") {
+        "docker"
+    } else {
+        "podman"
+    }
+}
+
+/// Whether the engine is Podman: there is no `docker` command, or `docker version` names the
+/// Podman Engine. `SONGBIRD_COMPOSE_PODMAN=1` or `=0` forces the answer.
 fn engine_is_podman() -> bool {
     match std::env::var("SONGBIRD_COMPOSE_PODMAN").as_deref() {
         Ok("1") => return true,
         Ok("0") => return false,
         _ => {}
     }
-    Command::new("docker")
-        .arg("version")
-        .stderr(Stdio::null())
-        .output()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("Podman Engine"))
+    compose_program() == "podman"
+        || Command::new("docker")
+            .arg("version")
+            .stderr(Stdio::null())
+            .output()
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("Podman Engine"))
 }
 
-/// `docker compose` with the compose file(s) and `.env`.
+/// `docker compose` (or `podman compose`) with the compose file(s) and `.env`.
 fn compose_cmd() -> Command {
-    let mut c = Command::new("docker");
+    let mut c = Command::new(compose_program());
     c.args(["compose", "-f", "deploy/compose/compose.yaml"]);
     if engine_is_podman() {
         c.args(["-f", COMPOSE_PODMAN]);
@@ -703,6 +725,17 @@ fn compose_cmd() -> Command {
 }
 
 fn compose(args: &[String]) -> Result {
+    let r = compose_inner(args);
+    if r.is_err() && compose_program() == "podman" {
+        eprintln!(
+            "hint: `podman compose` runs Docker Compose against the Podman machine's API; if it \
+             cannot connect to it, `podman machine stop` then `podman machine start` restores it"
+        );
+    }
+    r
+}
+
+fn compose_inner(args: &[String]) -> Result {
     match args.first().map(String::as_str) {
         Some("up") => {
             dev_env(false)?;
@@ -732,18 +765,10 @@ const AUTOBAHN_OVERSIZE: &[&str] = &[
 ];
 
 fn container_runtime() -> Result<&'static str> {
-    for rt in ["docker", "podman"] {
-        if Command::new(rt)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-        {
-            return Ok(rt);
-        }
-    }
-    Err("autobahn needs docker or podman".into())
+    ["docker", "podman"]
+        .into_iter()
+        .find(|rt| has_command(rt))
+        .ok_or_else(|| "autobahn needs docker or podman".into())
 }
 
 /// Parses wstest's `index.json` into (case, behavior) pairs without a JSON dependency: the file

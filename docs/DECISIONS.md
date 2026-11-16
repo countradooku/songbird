@@ -141,9 +141,23 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   those three one at a time with `-j 1` as CI runs them: 52/52, 12/12, 7/7. In one
   workspace-wide run, those three crates fight the e2e tests over the shared job streams (on any
   platform), and the jobs left in persistent valkey-jobs then fail the next run's deletion tests.
-- Consequences: no test is skipped or weakened on Linux. Not covered: `cargo xtask dev-env`
-  reads `/dev/urandom` and so does not run on Windows, and `cargo xtask compose` needs a `docker`
-  command (Podman alone does not provide one); the Iggy live suites were not run on Windows.
+- **`cargo xtask dev-env`** read `/dev/urandom`, which Windows lacks: its secrets now come from
+  `getrandom::fill` (the `getrandom(2)` system call on Linux, `ProcessPrng` on Windows).
+  `getrandom` 0.4.3 was already a workspace dependency, so xtask adds an edge, not a crate. On
+  Windows `.env` takes its directory's ACL (the user's profile) instead of mode 0600.
+- **`cargo xtask compose`** ran `docker compose`, and Podman Desktop on Windows installs no
+  `docker` command: with none, it now runs `podman compose` (which drives Docker Compose through
+  the Podman machine's API) and applies the Podman override. On a failure there, it says how to
+  restore the machine's API (`podman machine stop`, then `start`). On the owner's machine that
+  restart alone did not help: `win-sshproxy` refused to start because a stale
+  `%TEMP%\podman\podman-machine-default-api.sock` from an earlier run could not be bound again.
+  Deleting it, then restarting the machine, restored the API.
+- Verified on Windows: `cargo xtask dev-env --force`, then `cargo xtask compose up` (all seven
+  services healthy, Iggy and LiveKit included), `ps` and `down`. With the whole stack and CI's
+  variables, Iggy's included (`SONGBIRD_REQUIRE_IGGY=1`), the same partitioned run passed again:
+  497/497, 52/52, 12/12 and 7/7.
+- Consequences: no test is skipped or weakened on Linux, and Linux with `docker` takes the same
+  path as before.
 
 ## D-0064 — Prompt 4: the independent security review's findings, fixed
 

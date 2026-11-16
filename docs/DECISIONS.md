@@ -20,11 +20,11 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
-- Prompt 5 (deferred from Prompt 4 by the owner on 2026-11-16, `P04-gate.md`): delivered receipts
-  in groups above 32 members from primaries only (34 % of envelopes instead of 47 % in the busy
-  case of the M2 load test), or from every device (as built). Decide with the group tiers.
-
-- Public channels: build or not (Prompt 5).
+- Prompt 5 plan (`P05-plan.md`, D-0065): **approved by the owner on 2026-11-16** ("Approve
+  all"), every recommendation. Delivered receipts in large groups: primaries only from 33
+  members (D-0065 §5).
+- Public channels: not in Prompt 5 (D-0065 §4); whether to build them stays the owner's, after
+  legal review.
 - WhatsApp interop legal gate (Prompt 14).
 - Second EU provider (D-0009): Hetzner only for now (D-0042); the Scaleway code stays dormant.
 - Public domains: the owner holds `songbird.chat` (D-0046). Still to decide: which names under it
@@ -105,6 +105,37 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0065 — Prompt 5: the plan, and the owner's decisions it needed
+
+- Date: 2026-11-16
+- Status: accepted (owner, 2026-11-16: "Approve all")
+- Decided by: owner (every recommendation below), on the agent's plan `docs/reports/P05-plan.md`
+- Context:
+  - Prompt 5 asks for "OpenMLS for validation", but D-0051 kept OpenMLS off the server
+    (194 crates with its crypto providers).
+  - Server-side authorization needs a roster, which is group metadata.
+  - Issue #24 asks for post-quantum groups.
+  - Public channels and delivered receipts in large groups are open owner decisions.
+- Options considered and evidence: in the plan ("Findings"). In short:
+  - OpenMLS's core needs no crypto backend; aws-lc-rs 1.19.0 has ML-KEM-768 and SHA3-256 for
+    X-Wing.
+  - Two permission cells (pin, delete others' messages) live inside ciphertext the server never
+    sees.
+- Decisions (the agent's recommendations, all accepted by the owner):
+  1. OpenMLS `PublicGroup` on the server with Songbird's own aws-lc-rs provider; D-0051's parser
+     stays the upload check.
+  2. The server keeps the roster (devices, accounts, roles, epoch) and nothing else in the
+     clear; a new threat-model row.
+  3. X-Wing by default for every new group, unless the 1,024-member benchmark says otherwise.
+  4. No public channels in Prompt 5.
+  5. Delivered receipts from every device up to 32 members, primaries only from 33 to 1,024,
+     none in channels.
+  6. Pinning and deleting others' messages are enforced by clients only.
+  7. One branch, one PR, a commit per milestone (M1 to M5).
+- Consequences: OpenMLS (core only) joins the workspace behind a Songbird provider on aws-lc-rs;
+  new groups are post-quantum; a roster row goes to threat model §1 for approval with M1; public
+  channels stay an open owner decision for a later prompt.
 
 ## D-0064 — Prompt 4: the independent security review's findings, fixed
 

@@ -836,3 +836,153 @@ async fn without_a_gate_requests_and_broadcasts_are_unavailable() {
     .await;
     assert_eq!(st, SendStatus::Accepted);
 }
+
+/// A group application message (`PrivateMessage`) of group `g` at `epoch`.
+fn group_message(g: [u8; 16], epoch: u64, content_type: u8) -> Bytes {
+    let mut m = vec![0, 1, 0, 2, 16];
+    m.extend_from_slice(&g);
+    m.extend_from_slice(&epoch.to_be_bytes());
+    m.push(content_type);
+    m.extend_from_slice(&[0, 1, 0xAA, 3, 1, 2, 3]);
+    Bytes::from(m)
+}
+
+fn group_send(g: [u8; 16], body: Bytes) -> SendFrame {
+    SendFrame {
+        req_id: 9,
+        idempotency_key: [0x77; 16],
+        mls: None,
+        hints: songbird_proto::frame::SendHints {
+            group: Some(g),
+            ..Default::default()
+        },
+        payload: SendPayload::Shared {
+            devices: Vec::new(),
+            body,
+        },
+    }
+}
+
+fn with_rosters(f: &mut Fixture, g: [u8; 16], epoch: u64, devices: &[DeviceId]) {
+    let r = MemoryRosters::default();
+    r.set(g, epoch, devices.to_vec());
+    f.policy.rosters = Some(Arc::new(r));
+}
+
+#[tokio::test]
+async fn group_messages_go_to_the_roster_and_only_from_members() {
+    const G: [u8; 16] = [0x5B; 16];
+    let mut f = Fixture::new();
+    // Device 3 (Bob's second device) is not in the group: it never receives, and members
+    // need no access keys (membership replaces D-0064's interim rule).
+    with_rosters(&mut f, G, 4, &[dev(1), dev(2)]);
+    let mut scratch = Vec::new();
+    let st = f
+        .path()
+        .send(
+            &dev(1),
+            group_send(G, group_message(G, 4, 1)),
+            Instant::now(),
+            &mut scratch,
+        )
+        .await;
+    assert_eq!(st, SendStatus::Accepted, "{st:?}");
+    assert_eq!(f.mailbox.count_pending(&dev(2)).await.unwrap(), 1);
+    assert_eq!(f.mailbox.count_pending(&dev(3)).await.unwrap(), 0);
+    assert_eq!(
+        f.mailbox.count_pending(&dev(1)).await.unwrap(),
+        0,
+        "not to the sender"
+    );
+
+    // The previous epoch is still accepted (sent just before a commit landed).
+    let mut prev = group_send(G, group_message(G, 3, 1));
+    prev.idempotency_key = [0x78; 16];
+    let st = f
+        .path()
+        .send(&dev(2), prev, Instant::now(), &mut scratch)
+        .await;
+    assert_eq!(st, SendStatus::Accepted, "{st:?}");
+
+    let refused = |reason| SendStatus::Rejected {
+        reason,
+        retry_after_ms: 0,
+    };
+    let cases = [
+        // A device outside the roster.
+        (
+            dev(3),
+            group_send(G, group_message(G, 4, 1)),
+            refused(RejectReason::NotMember),
+        ),
+        // An unknown group: the same answer.
+        (
+            dev(1),
+            group_send([9; 16], group_message([9; 16], 4, 1)),
+            refused(RejectReason::NotMember),
+        ),
+        // Too old, or ahead of the roster.
+        (
+            dev(1),
+            group_send(G, group_message(G, 2, 1)),
+            refused(RejectReason::StaleEpoch),
+        ),
+        (
+            dev(1),
+            group_send(G, group_message(G, 5, 1)),
+            refused(RejectReason::StaleEpoch),
+        ),
+        // Another group's message under this group's flag; a handshake; not MLS at all.
+        (
+            dev(1),
+            group_send(G, group_message([9; 16], 4, 1)),
+            refused(RejectReason::InvalidGroupMessage),
+        ),
+        (
+            dev(1),
+            group_send(G, group_message(G, 4, 3)),
+            refused(RejectReason::InvalidGroupMessage),
+        ),
+        (
+            dev(1),
+            group_send(G, Bytes::from_static(b"hello")),
+            refused(RejectReason::InvalidGroupMessage),
+        ),
+    ];
+    for (i, (sender, frame, want)) in cases.into_iter().enumerate() {
+        let mut frame = frame;
+        frame.idempotency_key = [u8::try_from(i).unwrap(); 16];
+        let st = f
+            .path()
+            .send(&sender, frame, Instant::now(), &mut scratch)
+            .await;
+        assert_eq!(st, want, "case {i}");
+    }
+    assert_eq!(
+        f.mailbox.count_pending(&dev(2)).await.unwrap(),
+        1,
+        "nothing refused was stored"
+    );
+}
+
+#[tokio::test]
+async fn group_messages_without_rosters_are_unavailable() {
+    let f = Fixture::new();
+    let g = [0x5B; 16];
+    let st = f
+        .path()
+        .send(
+            &dev(1),
+            group_send(g, group_message(g, 1, 1)),
+            Instant::now(),
+            &mut Vec::new(),
+        )
+        .await;
+    assert!(matches!(
+        st,
+        SendStatus::Rejected {
+            reason: RejectReason::Unavailable,
+            ..
+        }
+    ));
+}

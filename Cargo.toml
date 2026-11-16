@@ -70,6 +70,7 @@ songbird-pow = { path = "crates/pow" }
 songbird-akd = { path = "crates/akd" }
 songbird-keys = { path = "crates/keys" }
 songbird-content = { path = "crates/content" }
+songbird-groups = { path = "crates/groups" }
 
 anyhow = "1.0.104"
 aws-lc-rs = { version = "1.19.0", default-features = false, features = ["aws-lc-sys"] }

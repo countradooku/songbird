@@ -292,6 +292,16 @@ impl Directory {
         self.devices.get(device).map(|d| d.account)
     }
 
+    /// The account of a device its account's signed list vouches for: `None` for an unknown or
+    /// still pending device (groups admit listed devices only, Prompt 5).
+    #[must_use]
+    pub fn listed_account(&self, device: &DeviceId) -> Option<AccountId> {
+        if self.pending.contains(device) {
+            return None;
+        }
+        self.account_of(device)
+    }
+
     /// Whether `signature` over `msg` verifies under `device`'s key. An unknown device and a bad
     /// signature are indistinguishable to the caller (no device-existence oracle).
     #[must_use]
@@ -366,6 +376,13 @@ impl From<Directory> for LiveDirectory {
 }
 
 impl LiveDirectory {
+    /// The current snapshot, owned (off the hot path: an `Arc` to keep across `await`s or
+    /// threads).
+    #[must_use]
+    pub fn snapshot(&self) -> std::sync::Arc<Directory> {
+        self.current.load_full()
+    }
+
     /// The current snapshot.
     pub fn load(&self) -> arc_swap::Guard<std::sync::Arc<Directory>> {
         self.current.load()

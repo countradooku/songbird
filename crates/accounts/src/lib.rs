@@ -36,6 +36,7 @@ use songbird_types::{AccountId, DeviceId, JobId};
 pub mod blocks;
 pub mod devices;
 pub mod gdpr;
+pub mod groups;
 pub mod journal;
 pub mod kt;
 pub mod profile;
@@ -174,6 +175,15 @@ DEFINE TABLE IF NOT EXISTS outbox SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS job ON outbox TYPE bytes;
 DEFINE FIELD IF NOT EXISTS at ON outbox TYPE datetime;
 DEFINE INDEX IF NOT EXISTS outbox_at ON outbox FIELDS at;
+DEFINE TABLE IF NOT EXISTS grp SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS epoch ON grp TYPE int;
+DEFINE FIELD IF NOT EXISTS state ON grp TYPE bytes;
+DEFINE FIELD IF NOT EXISTS roster ON grp TYPE bytes;
+DEFINE FIELD IF NOT EXISTS last ON grp TYPE bytes;
+DEFINE TABLE IF NOT EXISTS grp_fanout SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS body ON grp_fanout TYPE bytes;
+DEFINE FIELD IF NOT EXISTS at ON grp_fanout TYPE datetime;
+DEFINE INDEX IF NOT EXISTS grp_fanout_at ON grp_fanout FIELDS at;
 UPSERT directory:v SET version = version ?? 1 RETURN NONE;
 DEFINE TABLE IF NOT EXISTS store SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS generation ON store TYPE int;
@@ -232,6 +242,10 @@ pub enum RegistryError {
     /// keys, or another primary.
     #[error("device list does not match the account's devices")]
     ListMismatch,
+    /// An MLS commit made from an epoch the group is no longer at (another commit won), or for
+    /// a group that does not exist.
+    #[error("stale group epoch")]
+    StaleEpoch,
 }
 
 /// One device's stored keys (opaque stored forms, `songbird_proto::keys`).

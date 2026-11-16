@@ -74,13 +74,19 @@ pub const SEND_FLAG_FRANKED: u8 = 0x10;
 /// `Send` flag: the disappearing hint follows, a deadline in seconds from the store (Prompt 4,
 /// M3).
 pub const SEND_FLAG_EXPIRES: u8 = 0x20;
+/// `Send` flag: a group application message (Prompt 5, D-0067): the group ID follows, and the
+/// shared body is one MLS `PrivateMessage` that the server fans out to the group's roster, so
+/// the frame lists no devices. Needs [`SEND_FLAG_SHARED`]; not with [`SEND_FLAG_MLS`],
+/// [`SEND_FLAG_ACCESS`] or [`SEND_FLAG_REQUEST`] (membership is the authorization).
+pub const SEND_FLAG_GROUP: u8 = 0x40;
 /// Every `Send` flag this version knows; other bits are refused.
 pub const SEND_FLAGS: u8 = SEND_FLAG_MLS
     | SEND_FLAG_SHARED
     | SEND_FLAG_ACCESS
     | SEND_FLAG_REQUEST
     | SEND_FLAG_FRANKED
-    | SEND_FLAG_EXPIRES;
+    | SEND_FLAG_EXPIRES
+    | SEND_FLAG_GROUP;
 /// Longest disappearing hint: the 30 days an envelope is kept anyway.
 pub const MAX_EXPIRE_AFTER_S: u32 = 30 * 24 * 3600;
 /// Length of an access key.
@@ -269,6 +275,9 @@ pub struct SendHints {
     /// Delete undelivered envelopes this many seconds after the store, and never deliver them
     /// later (`EXPIRES`, 1 to [`MAX_EXPIRE_AFTER_S`]).
     pub expire_after_s: Option<u32>,
+    /// The group of a group application message (`GROUP`, Prompt 5): the server fans the shared
+    /// body out to this group's roster.
+    pub group: Option<[u8; 16]>,
 }
 
 impl std::fmt::Debug for SendHints {
@@ -278,6 +287,7 @@ impl std::fmt::Debug for SendHints {
             .field("request", &self.request)
             .field("franked", &self.commitment.is_some())
             .field("expire_after_s", &self.expire_after_s)
+            .field("group", &self.group.is_some())
             .finish()
     }
 }
@@ -314,6 +324,7 @@ impl SendFrame {
                 request: false,
                 commitment: None,
                 expire_after_s: None,
+                group: None,
             },
             payload: SendPayload::PerDevice(recipients),
         }
@@ -381,6 +392,12 @@ pub enum RejectReason {
     /// A message request that breaks the request rules: not franked, or addressed to more than
     /// one other account (Prompt 4).
     InvalidRequest,
+    /// A group message from a device that is not in the group's roster, or to a group that does
+    /// not exist (Prompt 5; one answer for both).
+    NotMember,
+    /// A group message whose body is not an MLS `PrivateMessage` application message of the
+    /// frame's group (Prompt 5).
+    InvalidGroupMessage,
     /// A code this version does not know (forward compatibility).
     Other(u16),
 }
@@ -401,6 +418,8 @@ impl RejectReason {
             Self::ReservedEnvelope => 9,
             Self::AccessRequired => 10,
             Self::InvalidRequest => 11,
+            Self::NotMember => 12,
+            Self::InvalidGroupMessage => 13,
             Self::Other(c) => c,
         }
     }
@@ -420,6 +439,8 @@ impl RejectReason {
             9 => Self::ReservedEnvelope,
             10 => Self::AccessRequired,
             11 => Self::InvalidRequest,
+            12 => Self::NotMember,
+            13 => Self::InvalidGroupMessage,
             c => Self::Other(c),
         }
     }
@@ -654,6 +675,9 @@ fn decode_send_blocks(
         // or an MLS commit.
         || (has(SEND_FLAG_ACCESS) && has(SEND_FLAG_REQUEST))
         || (has(SEND_FLAG_REQUEST) && (has(SEND_FLAG_SHARED) || has(SEND_FLAG_MLS)))
+        // A group message is one shared body for the roster; membership authorizes it.
+        || (has(SEND_FLAG_GROUP)
+            && (!has(SEND_FLAG_SHARED) || has(SEND_FLAG_MLS) || has(SEND_FLAG_ACCESS)))
     {
         return Err(FrameError::Control("send.flags"));
     }
@@ -684,11 +708,17 @@ fn decode_send_blocks(
     } else {
         None
     };
+    let group = if has(SEND_FLAG_GROUP) {
+        Some(c.array::<16>()?)
+    } else {
+        None
+    };
     let hints = SendHints {
         access,
         request: has(SEND_FLAG_REQUEST),
         commitment,
         expire_after_s,
+        group,
     };
     Ok((mls, hints))
 }
@@ -701,8 +731,14 @@ fn decode_send(msg: &Bytes, limits: &Limits) -> Result<SendFrame, FrameError> {
     let [flags] = c.array::<1>()?;
     let (mls, hints) = decode_send_blocks(&mut c, flags)?;
     let count = usize::from(c.u16()?);
-    if count == 0 {
-        return Err(FrameError::NoRecipients);
+    // A group message lists no devices (the server takes the roster); every other send lists
+    // at least one.
+    if (count == 0) != hints.group.is_some() {
+        return Err(if count == 0 {
+            FrameError::NoRecipients
+        } else {
+            FrameError::Control("send.group")
+        });
     }
     check_len("recipients", count, limits.max_recipients)?;
     let payload = if flags & SEND_FLAG_SHARED == 0 {
@@ -772,7 +808,7 @@ fn encode_send(s: &SendFrame, out: &mut BytesMut) {
     };
     out.reserve(
         SEND_HEADER_LEN
-            .saturating_add(24 + 16 + 32 + 4)
+            .saturating_add(24 + 16 + 32 + 4 + 16)
             .saturating_add(body),
     );
     out.put_u8(ty::SEND);
@@ -798,6 +834,9 @@ fn encode_send(s: &SendFrame, out: &mut BytesMut) {
     if h.expire_after_s.is_some() {
         flags |= SEND_FLAG_EXPIRES;
     }
+    if h.group.is_some() {
+        flags |= SEND_FLAG_GROUP;
+    }
     out.put_u8(flags);
     if let Some(m) = &s.mls {
         out.put_slice(&m.group);
@@ -811,6 +850,9 @@ fn encode_send(s: &SendFrame, out: &mut BytesMut) {
     }
     if let Some(t) = h.expire_after_s {
         out.put_u32(t);
+    }
+    if let Some(g) = &h.group {
+        out.put_slice(g);
     }
     out.put_u16(u16::try_from(s.payload.len()).unwrap_or(u16::MAX));
     match &s.payload {
@@ -1005,6 +1047,7 @@ mod tests {
                             request,
                             commitment,
                             expire_after_s: expire,
+                            group: None,
                         };
                         ClientFrame::Send(s)
                     }
@@ -1086,6 +1129,66 @@ mod tests {
                 }
             )),
         ]
+    }
+
+    #[test]
+    fn group_messages_name_the_group_and_list_no_devices() {
+        let frame = |flags: u8, extra: &[u8], devices: u16| {
+            let mut b = BytesMut::new();
+            b.put_u8(ty::SEND);
+            b.put_u32(1);
+            b.put_slice(&[3; 16]);
+            b.put_u8(flags);
+            b.put_slice(extra);
+            b.put_u16(devices);
+            for _ in 0..devices {
+                b.put_slice(&[2; 16]);
+            }
+            b.put_u32(1);
+            b.put_u8(b'x');
+            ClientFrame::decode(&b.freeze(), &Limits::DEFAULT)
+        };
+        let g = SEND_FLAG_GROUP | SEND_FLAG_SHARED;
+        let Ok(ClientFrame::Send(s)) = frame(g, &[0x5B; 16], 0) else {
+            panic!("a group message")
+        };
+        assert_eq!(s.hints.group, Some([0x5B; 16]));
+        assert!(matches!(&s.payload, SendPayload::Shared { devices, .. } if devices.is_empty()));
+        let mut out = BytesMut::new();
+        encode_send(&s, &mut out);
+        assert_eq!(
+            ClientFrame::decode(&out.freeze(), &Limits::DEFAULT),
+            Ok(ClientFrame::Send(s))
+        );
+        // Franked and disappearing group messages: the blocks come before the group.
+        let mut extra = vec![9; 32];
+        extra.extend_from_slice(&60u32.to_be_bytes());
+        extra.extend_from_slice(&[0x5B; 16]);
+        assert!(frame(g | SEND_FLAG_FRANKED | SEND_FLAG_EXPIRES, &extra, 0).is_ok());
+
+        let refused = Err(FrameError::Control("send.flags"));
+        assert_eq!(
+            frame(SEND_FLAG_GROUP, &[0x5B; 16], 0),
+            refused,
+            "needs a shared body"
+        );
+        assert_eq!(
+            frame(g | SEND_FLAG_ACCESS, &[0; 32], 0),
+            refused,
+            "membership, not keys"
+        );
+        assert_eq!(frame(g | SEND_FLAG_REQUEST, &[0x5B; 16], 0), refused);
+        assert_eq!(frame(g | SEND_FLAG_MLS, &[0; 40], 0), refused);
+        // The roster is the server's: a listed device is refused, and only a group message may
+        // list none.
+        assert_eq!(
+            frame(g, &[0x5B; 16], 1),
+            Err(FrameError::Control("send.group"))
+        );
+        assert_eq!(
+            frame(SEND_FLAG_SHARED, &[], 0),
+            Err(FrameError::NoRecipients)
+        );
     }
 
     #[test]

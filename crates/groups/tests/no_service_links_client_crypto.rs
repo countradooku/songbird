@@ -1,5 +1,5 @@
 //! The server runs OpenMLS's core only, behind Songbird's verify-only aws-lc-rs provider
-//! (D-0065 §1, D-0066). OpenMLS's own crypto providers (RustCrypto, libcrux) and the client
+//! (D-0065 §1, D-0066). OpenMLS's own crypto providers (`RustCrypto`, libcrux) and the client
 //! harness built on them are for tests and apps: no service, and no crate a service links, may
 //! depend on them. Checked from the manifests, so a new dependency fails here before review.
 #![allow(clippy::unwrap_used, clippy::panic, reason = "tests")]

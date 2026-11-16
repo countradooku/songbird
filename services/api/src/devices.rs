@@ -129,6 +129,8 @@ pub enum Outcome {
     NotFound,
     /// 409 with a reason.
     Conflict(&'static str),
+    /// 409 `stale` with the epoch the group is at (an MLS commit another one beat; Prompt 5).
+    Stale(u64),
     /// 403 with a reason.
     Forbidden(&'static str),
     /// 403 `locked`: the PIN is locked for this many seconds (`None`: until a new PIN).

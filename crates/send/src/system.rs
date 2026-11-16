@@ -177,3 +177,56 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
         Ok(())
     }
 }
+
+impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
+    /// Stores one body the server assembled (Prompt 5: a commit's fan-out, a Welcome) for
+    /// `devices`, once, under `key`, then routes it. Not a user send: no lane, gate, stamp or
+    /// device-list rule. Devices no longer in the directory (deleted since) are skipped. A retry
+    /// with the same key and devices stores nothing twice.
+    ///
+    /// # Errors
+    /// The status to retry on (unavailable), or an idempotency conflict.
+    pub async fn send_server_shared(
+        &self,
+        devices: &[DeviceId],
+        body: bytes::Bytes,
+        key: [u8; 16],
+    ) -> Result<(), SendStatus> {
+        let devices: Vec<DeviceId> = {
+            let dir = self.directory.load();
+            devices
+                .iter()
+                .filter(|d| dir.contains(d))
+                .copied()
+                .collect()
+        };
+        if devices.is_empty() {
+            return Ok(());
+        }
+        let req = StoreRequest {
+            expires_after: None,
+            idempotency_key: Some(key),
+            mls: None,
+            payload: Payload::Shared {
+                devices: devices.clone(),
+                body: body.clone(),
+            },
+        };
+        let outcome = self.mailbox.store_send(req).await.map_err(|e| {
+            self.metrics.mailbox_errors.inc();
+            match e {
+                songbird_mailbox::MailboxError::IdempotencyConflict => SendStatus::Rejected {
+                    reason: RejectReason::IdempotencyConflict,
+                    retry_after_ms: 0,
+                },
+                _ => SendStatus::Rejected {
+                    reason: RejectReason::Unavailable,
+                    retry_after_ms: RETRY_MS,
+                },
+            }
+        })?;
+        self.route(SendPayload::Shared { devices, body }, outcome.seqs)
+            .await;
+        Ok(())
+    }
+}

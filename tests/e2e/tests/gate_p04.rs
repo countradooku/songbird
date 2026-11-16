@@ -150,6 +150,7 @@ async fn stack(limits: RequestLimits) -> Option<Stack> {
         franking: Some(Franker::from_secret(&secret).unwrap()),
         gate: Some(Arc::clone(&gate)),
         max_broadcast_accounts: limits.max_broadcast_accounts,
+        rosters: None,
     };
     let mailbox = Arc::new(test_mailbox().await);
     let router = Arc::new(LocalRouter::new());
@@ -249,6 +250,7 @@ async fn stack(limits: RequestLimits) -> Option<Stack> {
             group_send_burst: 1_000,
             rate_key: songbird_api::messages::rate_key(&rand32()).unwrap(),
             metrics: metrics.send.clone(),
+            groups: None,
         }),
         metrics,
         registration: None,

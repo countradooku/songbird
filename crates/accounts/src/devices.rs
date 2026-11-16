@@ -59,7 +59,7 @@ pub struct ListChange {
 }
 
 impl Registry {
-    async fn retry<T>(
+    pub(crate) async fn retry<T>(
         &self,
         sql: &str,
         vars: impl Fn() -> Vec<(String, Value)>,

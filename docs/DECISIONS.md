@@ -106,6 +106,63 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0067 — Prompt 5, milestone 1 (integration): groups in the registry, commits over `api`, group messages fanned out from the roster
+
+- Date: 2026-11-16
+- Status: accepted; built, **live tests not yet run** (no SurrealDB or Valkey on the build
+  machine); the M1 gate waits for them, the fuzz runs and the owner
+- Decided by: agent, under D-0065 (owner) and the standing instruction (Proton-level bar)
+- Context: D-0066's core needed a home for each group's state, an authority for its epoch, a
+  way for commits and Welcomes to reach devices, and a send path for group messages.
+- Options considered:
+  - **Keep the epoch in the mailbox** (D-0026, flag `0x01`). Rejected: a commit must be
+    validated against the group's state before anyone stores it, and that state lives with the
+    registry, not in each mailbox partition. The flag is retired before the gate.
+  - **Fan out from a worker job.** Rejected: the worker has no send path, `api` does (D-0044).
+    `api` fans out itself and re-drives what a crash interrupted.
+  - **Let clients list a group message's recipients,** as a shared body does today. Rejected:
+    the server knows the roster. Fanning out from it means a removed device never receives a
+    byte, and membership replaces D-0064's interim contact-key rule.
+  - **Fan-out keys from the group and epoch alone.** Rejected: a member could send something
+    under the same key to the same devices first, and the real commit would be dropped as a
+    replay. The keys are an HMAC under a key derived from the cluster secret.
+  - **Delivery reads `PrivateMessage`s through `crates/groups`.** Rejected: delivery would link
+    OpenMLS. The allocation-free prefix parser moved to `songbird-proto` (`mls.rs`).
+- Decision:
+  - **Registry** (`crates/accounts/src/groups.rs`): `grp:[group]` holds the epoch, the
+    D-0066 record, the roster (16 bytes per device, sorted) and the hash of the last commit.
+    `commit_group` compares and sets the epoch and writes `grp_fanout:[group, epoch]` in one
+    transaction (the `put_device_list` pattern).
+  - **`api`** (`services/api/src/groups.rs`, PROTOCOL §6.2–6.4): `POST /v1/groups`,
+    `/v1/groups/commit` and `/v1/groups/state`.
+    - A per-device commit budget (2 a second, burst 10, keyed records).
+    - CPU work in `spawn_blocking`.
+    - The answer only after every recipient's mailbox stored the fan-out.
+    - A retried winning commit answered 200 again.
+    - `redrive` every 5 s for fan-outs older than 10 s.
+  - **Send path** (`crates/send/src/groups.rs`, PROTOCOL §6.5): the `GROUP` flag `0x40` and
+    the `Rosters` trait, with a per-node cache (papaya, at most 1 s, refreshed at once for a
+    newer epoch). The message's epoch may be the roster's or the one before. New reasons:
+    12 not a member, 13 invalid group message.
+  - Pending devices count as unknown to groups (`Directory::listed_account`).
+- Evidence (Windows 11, `rustc 1.99.1`):
+  - `crates/send`: `group_messages_go_to_the_roster_and_only_from_members` (roster only, not
+    the sender, previous epoch accepted, seven refusals with nothing stored) and
+    `group_messages_without_rosters_are_unavailable`.
+  - `crates/proto`: `group_messages_name_the_group_and_list_no_devices` (round trip, every flag
+    rule) and the prefix parser's tests.
+  - 219 tests across the changed crates pass; clippy `-D warnings` is clean on them.
+  - `tests/e2e/tests/gate_p05.rs` (live), **written but skipped here**:
+    - create, add, Welcome, state, a group message, removal, and a removed device refused
+      after the roster cache's second;
+    - five members committing concurrently over HTTP, one winner per epoch, no fork;
+    - a retried commit answered once; an interrupted fan-out re-driven exactly once.
+- Consequences:
+  - Threat model §1 gains two rows (below in the M1 report), for the owner.
+  - The second-long window for removed devices is an open risk (§6).
+  - Groups are not yet in the GDPR export and deletion; they get there with M2's roles, since
+    an account's deletion must also remove its leaves.
+
 ## D-0066 — Prompt 5, milestone 1 (core): OpenMLS `PublicGroup` behind a verify-only aws-lc-rs provider; X-Wing `0x004F`; group state as postcard; commits over HTTP
 
 - Date: 2026-11-16

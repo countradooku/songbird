@@ -89,6 +89,7 @@ fn send_frames_with_hints() {
         request: true,
         commitment: Some([0x55; 32]),
         expire_after_s: Some(3600),
+        group: None,
     };
     let mut contact = SendFrame::per_device(10, [0x11; 16], one(b"z"));
     contact.hints.access = Some([0x66; 16]);

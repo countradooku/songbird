@@ -72,44 +72,23 @@ impl<'a> Reader<'a> {
         Ok(u32::from_be_bytes(b))
     }
 
-    fn u64(&mut self) -> Result<u64, WireError> {
-        let b: [u8; 8] = self.take(8)?.try_into().map_err(|_| WireError::Truncated)?;
-        Ok(u64::from_be_bytes(b))
-    }
-
-    /// RFC 9420 §2.1.2 variable-length integer, minimal encoding only.
+    /// RFC 9420 §2.1.2 variable-length integer, minimal encoding only (here: the `GroupInfo`
+    /// signature length).
     fn varint(&mut self) -> Result<usize, WireError> {
         let first = self.u8()?;
-        let (len, value) = match first >> 6 {
+        let value = match first >> 6 {
             0 => return Ok(usize::from(first)),
             1 => {
                 let v = (u32::from(first & 0x3f) << 8) | u32::from(self.u8()?);
                 if v < 64 {
                     return Err(WireError::NotMinimal);
                 }
-                (2, v)
+                v
             }
-            2 => {
-                let rest = self.take(3)?;
-                let mut v = u32::from(first & 0x3f);
-                for b in rest {
-                    v = (v << 8) | u32::from(*b);
-                }
-                if v < 16_384 {
-                    return Err(WireError::NotMinimal);
-                }
-                (4, v)
-            }
-            // 8-byte lengths are refused by RFC 9420 §2.1.2.
+            // Longer lengths never precede a 64-byte signature.
             _ => return Err(WireError::TooLarge),
         };
-        let _ = len;
         usize::try_from(value).map_err(|_| WireError::TooLarge)
-    }
-
-    fn vec(&mut self) -> Result<&'a [u8], WireError> {
-        let n = self.varint()?;
-        self.take(n)
     }
 
     fn finish(&self) -> Result<(), WireError> {
@@ -121,37 +100,9 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// What the server reads from a `PrivateMessage` without decrypting it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PrivatePrefix {
-    pub group: [u8; GROUP_ID_LEN],
-    pub epoch: u64,
-    pub content_type: u8,
-}
-
-/// Parses a whole `MLSMessage` carrying a `PrivateMessage`: every field, no trailing bytes,
-/// no allocation.
-pub fn private_prefix(msg: &[u8]) -> Result<PrivatePrefix, WireError> {
-    let mut r = Reader { buf: msg };
-    if r.u16()? != MLS10 {
-        return Err(WireError::Version);
-    }
-    if r.u16()? != WIRE_PRIVATE {
-        return Err(WireError::WireFormat);
-    }
-    let group: [u8; GROUP_ID_LEN] = r.vec()?.try_into().map_err(|_| WireError::GroupId)?;
-    let epoch = r.u64()?;
-    let content_type = r.u8()?;
-    let _aad = r.vec()?;
-    let _sender_data = r.vec()?;
-    let _ciphertext = r.vec()?;
-    r.finish()?;
-    Ok(PrivatePrefix {
-        group,
-        epoch,
-        content_type,
-    })
-}
+/// The `PrivateMessage` prefix the send path reads lives in `songbird-proto`, so delivery never
+/// links OpenMLS (D-0067).
+pub use songbird_proto::mls::{PrivatePrefix, private_prefix};
 
 /// Songbird's commit bundle (PROTOCOL §6): what a committer uploads.
 ///
@@ -239,56 +190,6 @@ pub fn group_info_signer(msg: &[u8]) -> Result<u32, WireError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn private(group: &[u8], epoch: u64, ct: u8) -> Vec<u8> {
-        let mut m = vec![0, 1, 0, 2, u8::try_from(group.len()).unwrap()];
-        m.extend_from_slice(group);
-        m.extend_from_slice(&epoch.to_be_bytes());
-        m.push(ct);
-        m.extend_from_slice(&[0, 1, 0xaa, 2, 0xbb, 0xcc]);
-        m
-    }
-
-    #[test]
-    fn private_prefix_reads_group_epoch_and_type() {
-        let m = private(&[7; 16], 42, CONTENT_APPLICATION);
-        assert_eq!(
-            private_prefix(&m),
-            Ok(PrivatePrefix {
-                group: [7; 16],
-                epoch: 42,
-                content_type: CONTENT_APPLICATION
-            })
-        );
-    }
-
-    #[test]
-    fn private_prefix_refuses_every_malformation() {
-        let good = private(&[7; 16], 1, 1);
-        assert_eq!(
-            private_prefix(&private(&[7; 15], 1, 1)),
-            Err(WireError::GroupId)
-        );
-        let mut v = good.clone();
-        v[1] = 2;
-        assert_eq!(private_prefix(&v), Err(WireError::Version));
-        let mut w = good.clone();
-        w[3] = 1;
-        assert_eq!(private_prefix(&w), Err(WireError::WireFormat));
-        let mut t = good.clone();
-        t.push(0);
-        assert_eq!(private_prefix(&t), Err(WireError::Trailing));
-        for cut in 0..good.len() {
-            assert!(
-                private_prefix(&good[..cut]).is_err(),
-                "prefix of {cut} bytes accepted"
-            );
-        }
-        // A one-byte length written in two bytes is not minimal.
-        let mut nm = vec![0, 1, 0, 2, 0x40, 16];
-        nm.extend_from_slice(&good[5..]);
-        assert_eq!(private_prefix(&nm), Err(WireError::NotMinimal));
-    }
 
     #[test]
     fn bundles_round_trip_and_are_bounded() {

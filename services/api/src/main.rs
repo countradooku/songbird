@@ -155,6 +155,10 @@ async fn build_messages(
                     |(_, n)| *n,
                 ),
                 gate: gate.map(|(g, _)| g),
+                rosters: Some(Arc::new(songbird_send::RegistryRosters::new(
+                    Arc::clone(registry),
+                    songbird_send::groups::ROSTER_TTL,
+                ))),
             },
         }),
         limits: s.limits.limits(),
@@ -165,6 +169,12 @@ async fn build_messages(
         rate_key: songbird_api::messages::rate_key(&cluster_secret)
             .map_err(|_| "rate-limit key derivation failed")?,
         metrics: metrics.send.clone(),
+        // MLS groups (Prompt 5): keys derived from the cluster secret, so every `api` node
+        // computes the same fan-out keys; limits at their defaults (1,024 devices, 4 MiB).
+        groups: Some(
+            songbird_api::groups::Groups::new(&cluster_secret, songbird_groups::Limits::default())
+                .ok_or("groups key derivation failed")?,
+        ),
     };
     Ok((messages, vec![follower, pusher]))
 }
@@ -454,6 +464,12 @@ impl Service for Api {
                 stop_rx.clone(),
             )));
         }
+        // Group commit fan-outs a crash interrupted (Prompt 5).
+        let redrive = tokio::spawn(songbird_api::groups::redrive(
+            Arc::clone(&app.registry),
+            Arc::clone(&app),
+            stop_rx.clone(),
+        ));
         let relay_app = Arc::clone(&app);
         let mut relay_stop = stop_rx.clone();
         let relay = tokio::spawn(async move {
@@ -476,6 +492,7 @@ impl Service for Api {
         let _ = stop_tx.send(true);
         let _ = server.await;
         let _ = relay.await;
+        let _ = redrive.await;
         for t in send_tasks {
             let _ = t.await;
         }

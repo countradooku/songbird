@@ -21,7 +21,7 @@ Implemented in `crates/proto` (shared by server and clients); decisions D-0019, 
 
 | Type | Direction | Frame | Body |
 | --- | --- | --- | --- |
-| `0x01` | C→S | `Send` | `req_id u32`, `idempotency_key [16]`, `flags u8`, [if flag `0x01`: `group [16]`, `epoch u64`], [if `0x04`: `access_key [16]`], [if `0x10`: `commitment [32]`], [if `0x20`: `expire_after_s u32`], `count u16` (≥ 1), then per device (no flag `0x02`) `count ×` (`device_id [16]`, `len u32` (≥ 1), `envelope [len]`), or shared (flag `0x02`) `count × device_id [16]`, `len u32` (≥ 1), `body [len]` |
+| `0x01` | C→S | `Send` | `req_id u32`, `idempotency_key [16]`, `flags u8`, [if flag `0x01`: `group [16]`, `epoch u64`], [if `0x04`: `access_key [16]`], [if `0x10`: `commitment [32]`], [if `0x20`: `expire_after_s u32`], [if `0x40`: `group [16]`], `count u16` (≥ 1; 0 with `0x40`), then per device (no flag `0x02`) `count ×` (`device_id [16]`, `len u32` (≥ 1), `envelope [len]`), or shared (flag `0x02`) `count × device_id [16]`, `len u32` (≥ 1), `body [len]` |
 | `0x02` | C→S | `Ack` | `up_to_seq u64` |
 | `0x03` | C→S | `Ephemeral` | `to [16]`, `payload` (≥ 1 byte) |
 | `0x10` | C→S | `Auth` | protobuf `Auth` (§2) |
@@ -43,6 +43,7 @@ above, so every frame has one encoding):
 | `0x08` | `REQUEST`: a message request (§5.10) | Not with `0x04`, `0x02` or `0x01` |
 | `0x10` | `FRANKED`: the sender's franking commitment (§5.3), stamped by the server (§5.13) | |
 | `0x20` | `EXPIRES`: the disappearing hint, 1 s to 30 days (§5.13) | Zero or more than 30 days refused |
+| `0x40` | `GROUP`: a group message; `group [16]` follows every other block, `count` is 0 and the server fans the shared body out to the group's roster (§6.5) | Needs `0x02`; not with `0x01`, `0x04` or `0x08` |
 
 Rejection reasons: 1 rate limited, 2 too large, 3 too many recipients, 4 unknown recipient
 (unused since milestone 2: unknown devices are reported in a device mismatch), 5 duplicate
@@ -53,7 +54,8 @@ MLS epoch (the group moved on; process the winning commit, then retry from the n
 envelope begins with `F5 53 42`, the prefix reserved for what the server writes (system frames
 §3.9, franking stamps §5.13; never retryable), 10 access required (a send to another account with
 neither its access key, nor the right one, nor `REQUEST`: fetch the profile key again or send a
-request, §5.10), 11 an invalid request (not franked, or for more than one other account, §5.10).
+request, §5.10), 11 an invalid request (not franked, or for more than one other account, §5.10),
+12 not a member of the group (or no such group, §6.5), 13 an invalid group message (§6.5).
 1 and 6 are retryable after `retry_after_ms`, with the
 same idempotency key. Unknown reason codes are kept (forward compatibility).
 
@@ -1235,6 +1237,117 @@ Then the server seals a **minimal report** to the moderation key and queues it (
 - **A report does not block:** an app that reports usually also blocks the sender (§5.11).
 
 ## 6. Groups, roles and channels (MLS) (Prompt 5)
+
+Decisions D-0065 (the owner's), D-0066 (the delivery-service core) and D-0067 (its integration).
+Milestone 1: groups, commits, Welcomes and group messages. Roles, invite links, communities and
+channels follow in M2–M4.
+
+### 6.1 The model
+
+- **Members are devices.** Each device is one MLS leaf whose basic credential is its 16-byte
+  device ID, and only devices their account's signed list vouches for (§4.6) may be in a group.
+- **Every group uses X-Wing**, `MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519` (`0x004F`):
+  post-quantum key exchange and Ed25519 signatures. KeyPackages for it are published as in
+  §4.5.
+- **Handshakes are `PublicMessage`s** (OpenMLS's pure-plaintext wire policy), so the server can
+  check them. **Application messages are `PrivateMessage`s**; the server reads only their group,
+  epoch and content type.
+- **The server keeps** each group's public state (OpenMLS `PublicGroup`), its epoch, its roster
+  (member devices), the `GroupInfo` of the current epoch, and the hash of the commit that made
+  it. Never a group secret, a name or any content (threat model §1).
+
+### 6.2 Creating a group: `POST /v1/groups`
+
+`version u8 (1) | group [16] | info_len u32 | GroupInfo | tree_len u32 | ratchet tree`, both parts
+`MLSMessage`/TLS as OpenMLS exports them, at most 4 MiB in all.
+
+- The group is at epoch 0, uses `0x004F`, carries no group-context extension (until M2), and its
+  only leaf is the requesting device, which signed the `GroupInfo`.
+- Answers:
+  - 204;
+  - 409 `exists`;
+  - 400 with one of `request`, `malformed`, `kind`, `group`, `ciphersuite`, `sender`,
+    `credential`, `group_info` or `invalid`;
+  - 403 `pending`;
+  - 429 after the per-device commit budget (2 a second, burst 10, shared with commits).
+
+### 6.3 Committing: `POST /v1/groups/commit`
+
+`version u8 (1) | group [16] | bundle`, where the bundle is
+`version u8 (1) | commit_len u32 | commit | welcome_len u32 | Welcome | info_len u32 | GroupInfo`
+(`welcome_len` is 0 when nobody is added).
+
+The server validates the commit fully (RFC 9420, OpenMLS `PublicGroup`), then checks that:
+
+1. a member's commit is signed by the leaf whose credential is the requesting device;
+2. every added KeyPackage names a listed device that is not already in the group;
+3. updates keep their leaf's identity;
+4. the proposals are add, remove, update or self-remove only. Pre-shared keys, re-init,
+   group-context changes and custom proposals are refused until M2 defines them;
+5. an external commit comes from a device whose account already has a device in the group, and
+   removes at most that device's own old leaf. A reinstalled device (a new device ID) joins
+   without removing anything, and a member then removes the dead leaf;
+6. the group stays within 1,024 leaves;
+7. the Welcome holds exactly one secret per added KeyPackage, and nothing else;
+8. the `GroupInfo` is the new epoch's, signed by the committer's leaf.
+
+The new state is written only if the group is still at the commit's epoch, in the same
+transaction as its fan-out. So of several concurrent commits from one epoch exactly one wins.
+
+**Fan-out.** The commit (`MLSMessage` bytes, as uploaded) goes to every device in the group
+before or after it, except the committer and the added devices. Removed devices get it, so they
+learn they were removed. The Welcome goes to the added devices.
+
+The answer comes only once every recipient's mailbox holds it (invariant 1):
+
+- 200 `{"epoch": n}`, the new epoch;
+- 409 `{"error": "stale", "epoch": n}`: another commit won. Process it (it is in your mailbox),
+  then commit again from epoch `n`;
+- 404: no such group;
+- 400 with a reason (as §6.2, plus `proposal`, `external`, `duplicate`, `size`, `welcome`);
+- 403 `pending`;
+- 429 or 503: retry the same bundle.
+
+A commit that already won is answered 200 again, with its fan-out finished. Fan-outs a crash
+interrupted are finished by every `api` node within seconds. They are stored under idempotency
+keys only the servers can derive, so a member cannot pre-empt them.
+
+### 6.4 Joining: `POST /v1/groups/state`
+
+`version u8 (1) | group [16]`. Answers 200 `epoch u64 | info_len u32 | GroupInfo | tree_len u32 |
+ratchet tree` to:
+
+- a device in the group (a device added by a Welcome fetches the tree here);
+- a listed device of an account with a device in the group (it joins by external commit, §6.3,
+  rule 5).
+
+Anyone else gets 404, the same answer as for no group.
+
+### 6.5 Group messages: `Send` with `GROUP` (`0x40`)
+
+Flags `SHARED | GROUP`; the `GROUP` block (`group [16]`) comes after every other block; `count`
+is 0 and no device is listed. The shared body is one `MLSMessage` carrying a `PrivateMessage`.
+The server reads its prefix, never decrypting it, and requires:
+
+- that it is an application message of the frame's group;
+- that the sending device is in the roster;
+- that its epoch is the group's current epoch or the one before (a message sent just as a commit
+  landed).
+
+It stores the body once for the roster minus the sender. `FRANKED` and `EXPIRES` may be set;
+`ACCESS`, `REQUEST` and `MLS` may not. Refusals:
+
+- 12 not a member (also for no such group);
+- 13 an invalid group message;
+- 8 a stale epoch;
+- 6 unavailable.
+
+Delivery nodes cache rosters for at most a second, or less when a message names a newer epoch.
+A removed device can therefore still post at its last epoch for up to a second on a node that
+has not refreshed. Members who processed the removal know it was removed.
+
+The flag `0x01` (the MLS commit in a `Send`, D-0026) is superseded by §6.3 and is retired before
+the M1 gate.
 
 ## 7. Attachments and packs (Prompt 6)
 

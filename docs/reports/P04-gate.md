@@ -2,8 +2,9 @@
 
 - Date: 2026-11-16
 - Prompt: [04-messaging.md](../prompts/04-messaging.md).
-- Status: **built; awaiting the owner's approval** of the gate, M1–M5 and the **seven
-  threat-model §1 rows** (two from M3, three from M4, two from M5).
+- Status: **the Prompt 4 gate approved by the owner on 2026-11-16**, with M1–M5 and the seven
+  threat-model §1 rows (two from M3, three from M4, two from M5); PR #57, all 7 checks green on
+  `d065ac2`. Delivered receipts in large groups: deferred to Prompt 5 by the owner.
 - Reports: `P04-plan.md` (agreed, D-0058), `P04-M1.md` to `P04-M5.md`, and this report.
 - Decisions: D-0058 to D-0064 (D-0064: the security review's fixes).
 - Branch: `claude/p04-messaging-202813`, one PR at the owner's request (D-0058).
@@ -139,8 +140,11 @@ Gathered from the milestone reports and threat model §6:
 
 ## The owner's decisions
 
+Answered on 2026-11-16: 1 and 2 approved, 3 deferred to Prompt 5 (every device keeps sending
+delivered receipts). 4 stands for deployment.
+
 1. **Approve the Prompt 4 gate** (this report) and M1–M5 (D-0059 to D-0063).
-2. **Approve the threat-model §1 rows**, each marked "awaiting the owner's approval":
+2. **Approve the threat-model §1 rows** (now marked approved):
    - M3: a disappearing envelope's deadline; franking stamps;
    - M4: block rows; the request-policy flag and the access keys in every node's snapshot; keyed
      request and broadcast budget records;

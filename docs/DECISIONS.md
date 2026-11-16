@@ -20,9 +20,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
-- Prompt 4 (`P04-gate.md`): delivered receipts in groups above 32 members from primaries only
-  (34 % of envelopes instead of 47 % in the busy case of the M2 load test), or from every device
-  (recommended until Prompt 5's group tiers).
+- Prompt 5 (deferred from Prompt 4 by the owner on 2026-11-16, `P04-gate.md`): delivered receipts
+  in groups above 32 members from primaries only (34 % of envelopes instead of 47 % in the busy
+  case of the M2 load test), or from every device (as built). Decide with the group tiers.
 
 - Public channels: build or not (Prompt 5).
 - WhatsApp interop legal gate (Prompt 14).
@@ -110,7 +110,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 - Date: 2026-11-16
 - Status: accepted; built (report `P04-gate.md`, "Security review"); amends D-0059, D-0061,
-  D-0062 and D-0063; awaiting the owner's approval with the gate
+  D-0062 and D-0063; **approved by the owner on 2026-11-16** with the Prompt 4 gate
 - Decided by: agent, at the owner's bar
 - Context: the review of `120c7a5..HEAD`, by an independent read-only reviewer, found one high,
   two medium, one low–medium and two low issues, all confirmed against the code.
@@ -172,8 +172,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0063 — Prompt 4, milestone 5: reporting with message franking; reports sealed to an offline moderation key
 
 - Date: 2026-11-16
-- Status: accepted; built (report `P04-M5.md`, and the Prompt 4 gate `P04-gate.md`); awaiting the
-  owner's approval of the gate and the two threat-model §1 rows
+- Status: accepted; built (report `P04-M5.md`, and the Prompt 4 gate `P04-gate.md`); the gate
+  and the two threat-model §1 rows **approved by the owner on 2026-11-16**
 - Decided by: agent, under the owner's plan (D-0058) and standing instruction (Proton-level bar)
 - Context: Prompt 4: "The reporter submits the plaintext and the franking opening; the server
   verifies the commitment it stamped at send time, then queues a minimal report for moderation
@@ -219,8 +219,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0062 — Prompt 4, milestone 4: the contact gate, message requests, blocking, rate limits per conversation type, broadcast lists
 
 - Date: 2026-11-16
-- Status: accepted; built (report `P04-M4.md`); awaiting the owner's approval of the gate and the
-  three threat-model §1 rows
+- Status: accepted; built (report `P04-M4.md`); the gate and the three threat-model §1
+  rows **approved by the owner on 2026-11-16**
 - Decided by:
   - owner: access key or request (D-0058 §3); tighten from any listed device, loosen from the
     primary (D-0058 §4);
@@ -289,8 +289,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0061 — Prompt 4, milestone 3: franking stamps and disappearing envelopes; the `Send` frame's hints
 
 - Date: 2026-11-16
-- Status: accepted; built (report `P04-M3.md`); awaiting the owner's approval of the gate and the
-  two threat-model §1 rows
+- Status: accepted; built (report `P04-M3.md`); the gate and the two threat-model §1 rows
+  **approved by the owner on 2026-11-16**
 - Decided by: agent, under the owner's plan (D-0058) and standing instruction (Proton-level bar)
 - Context: Prompt 4 asks for reporting with message franking (the server verifies the commitment
   it stamped at send time) and for an envelope flag that expires undelivered envelopes early.
@@ -343,7 +343,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0060 — Prompt 4, milestone 2: order-independent chat state and message status; receipt batching sized by measurement
 
 - Date: 2026-11-16
-- Status: accepted; built (report `P04-M2.md`); awaiting the owner's approval of the gate
+- Status: accepted; built (report `P04-M2.md`); **gate approved by the owner on 2026-11-16**
 - Decided by:
   - owner: group read receipts follow the setting; 24-hour edit and delete windows (D-0058);
   - agent: the semantics below.
@@ -397,7 +397,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0059 — Prompt 4, milestone 1: the encrypted content schema (`crates/content`), never linked by a service
 
 - Date: 2026-11-16
-- Status: accepted; built (report `P04-M1.md`); awaiting the owner's approval of the gate
+- Status: accepted; built (report `P04-M1.md`); **gate approved by the owner on 2026-11-16**
 - Decided by: agent, under the owner's plan (D-0058) and standing instruction (Proton-level bar)
 - Context: Prompt 4 asks for the content inside the encrypted payload, "specified so future apps
   interoperate exactly": protobuf, versioned, tolerant of unknown fields, never decoded by the

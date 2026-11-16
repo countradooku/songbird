@@ -2,7 +2,7 @@
 
 - Date: 2026-11-16
 - Decision: the owner's, on 2026-11-16 ("we can use akd now"), replacing D-0055's own log.
-- Status: **built; awaiting the owner's approval.**
+- Status: **built (PR #55); approved by the owner on 2026-11-16** ("Approve D-0057").
 - Branch: `feat/p03-akd`, on `feat/p03-rest` (PR #54).
 
 ## A correction first
@@ -114,6 +114,9 @@ medium findings, all fixed.**
   later behind the same store.
 - There is no external auditor yet. The log and VRF keys are not deployed; apps pin both.
 
-## The owner's decisions (asked)
+## The owner's decisions (decided 2026-11-16)
 
-1. **Approve the `akd` integration** (this report, D-0057), with the corrected supply-chain cost?
+The owner answered "Approve D-0057":
+
+1. **Decided: the `akd` integration is approved** (this report, D-0057), with the corrected
+   supply-chain cost (27 new cargo-vet exemptions).

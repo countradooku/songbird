@@ -94,7 +94,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   M4b (D-0053), M5 (D-0054), M6 (D-0055) and M7 (D-0056, the final gate `P03-gate.md`) on one
   branch and one PR (#54). **Approved by the owner on 2026-11-16** ("i approve everything"): the
   Prompt 3 gate, M4b–M7 and the six threat-model §1 rows. The owner also decided to **adopt
-  `akd` for key transparency now** (D-0057, built on branch `feat/p03-akd`, awaiting approval).
+  `akd` for key transparency now** (D-0057, built in PR #55, **approved by the owner on 2026-11-16**).
+  Prompt 3 is done.
 - D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
   tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
   `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment
@@ -105,7 +106,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0057 — Key transparency on Meta's akd (supersedes D-0055's own log)
 
 - Date: 2026-11-16
-- Status: accepted; built (report `P03-akd.md`); **awaiting the owner's approval of the build**
+- Status: accepted; built (report `P03-akd.md`, PR #55); **approved by the owner on 2026-11-16**
+  ("Approve D-0057"), with the corrected supply-chain cost; supersedes D-0055's own log
 - Decided by:
   - owner: adopt `akd` now ("we can use akd now", 2026-11-16);
   - agent: the integration below.

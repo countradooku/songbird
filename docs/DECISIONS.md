@@ -20,7 +20,6 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
-- Group read receipts follow the read-receipt setting or not (Prompt 4).
 - Public channels: build or not (Prompt 5).
 - WhatsApp interop legal gate (Prompt 14).
 - Second EU provider (D-0009): Hetzner only for now (D-0042); the Scaleway code stays dormant.
@@ -102,6 +101,31 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0058 — Prompt 4: the plan, and the owner's decisions it needed
+
+- Date: 2026-11-16
+- Status: accepted (owner, 2026-11-16)
+- Decided by: owner (each answer below), on the agent's plan `docs/reports/P04-plan.md`
+- Context: Prompt 4 leaves group read receipts to the owner (the open decision above); its
+  message-request rule changes how identified sends are admitted (PROTOCOL §3.1); blocks and the
+  request policy are account-wide changes (D-0052); edit and delete limits are product choices.
+- Decisions:
+  1. **Plan agreed:** five milestones on one branch and one PR (the owner's request for speed):
+     M1 the content schema (`crates/content`); M2 convergence and message status; M3 franking
+     and disappearing envelopes; M4 message requests, blocking, rate limits per conversation
+     type, broadcast lists; M5 reporting and the Prompt 4 gate.
+  2. **Group read receipts follow the read-receipt setting**, reciprocal, as in Signal.
+  3. **Contact gate:** every send to another account carries that account's access key (the
+     account is open, or the key is in the send) or goes as a message request: rate-limited,
+     franked, blockable. Blocking rotates the profile key (a client rule).
+  4. **Blocks and the request policy:** any listed device may tighten them (block, refuse
+     requests); only the primary may loosen them (unblock, accept requests again). Pending
+     devices change nothing.
+  5. **Edit window and delete for everyone: 24 hours each**, as in Signal.
+- Consequences: identified sends between accounts need the access key from Prompt 4 on, so every
+  account should publish a profile (with its access key) at registration; apps must handle the new
+  refusal reason by sending a request or fetching the new profile key.
 
 ## D-0057 — Key transparency on Meta's akd (supersedes D-0055's own log)
 

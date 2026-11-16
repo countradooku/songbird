@@ -407,7 +407,15 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
             return Err(reject(RejectReason::RateLimited, ms));
         }
         devices.clear();
-        devices.extend(roster.devices().filter(|d| *d != sender).copied());
+        // A deleted account's or removed device stays in the roster until a member commits its
+        // removal; it gets nothing meanwhile (D-0073).
+        let dir = self.directory.load();
+        devices.extend(
+            roster
+                .devices()
+                .filter(|d| *d != sender && dir.contains(d))
+                .copied(),
+        );
         Ok(())
     }
 

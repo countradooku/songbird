@@ -1099,3 +1099,27 @@ fn the_channel_budget_refills() {
     assert!(b.take(&[2; 16], t).is_ok());
     assert!(b.take(&[1; 16], t + Duration::from_millis(500)).is_ok());
 }
+
+#[tokio::test]
+async fn devices_gone_from_the_directory_get_no_group_messages() {
+    // Device 0x77 was deleted (its account is gone) but no member has committed its removal
+    // yet: it stays in the roster and gets nothing (D-0073).
+    const G: [u8; 16] = [0x5E; 16];
+    let mut f = Fixture::new();
+    let r = MemoryRosters::default();
+    r.set(G, 4, vec![dev(1), dev(2), dev(0x77)]);
+    f.policy.rosters = Some(Arc::new(r));
+    let mut scratch = Vec::new();
+    let st = f
+        .path()
+        .send(
+            &dev(1),
+            group_send(G, group_message(G, 4, 1)),
+            Instant::now(),
+            &mut scratch,
+        )
+        .await;
+    assert_eq!(st, SendStatus::Accepted);
+    assert_eq!(f.mailbox.count_pending(&dev(2)).await.unwrap(), 1);
+    assert_eq!(f.mailbox.count_pending(&dev(0x77)).await.unwrap(), 0);
+}

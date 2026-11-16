@@ -111,6 +111,61 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0073 — Prompt 5, milestone 5: groups in the GDPR export and deletion
+
+- Date: 2026-11-16
+- Status: accepted; built and passing live (report `P05-gate.md`); part of the Prompt 5 PR
+- Decided by: agent, under D-0056 (GDPR, Prompt 3) and the standing instruction
+- Context: every new store must be in the account export and go with the account (constitution;
+  D-0056).
+  - The stores are `grp`, `grp_fanout`, `grp_log`, `grp_link`, `grp_req`, `cmty` and
+    `cmty_grp`.
+  - Unlike the others, a group's MLS state is shared: the members' apps hold the same tree, and
+    a server that edited it would fork the group (every later commit would fail for them).
+- Options considered:
+  - **The server rewriting the group's state** on deletion (dropping the leaves) was rejected:
+    it forks the group for every member.
+  - **The server as an MLS external sender** (RFC 9420 `external_senders`) proposing the
+    removal, for the next committer to include, would remove the leaves within a commit. It was
+    not built now:
+    - it adds a server signing key to every group;
+    - apps must decide which server proposals to trust (only for devices absent from the
+      directory), which is a trust decision for the owner.
+
+    It is offered as a follow-up.
+  - **Scanning every group** for an account's devices on export was rejected (cost grows with
+    the service): `grp` gains an indexed `devs` array, written with every commit.
+- Decision:
+  - **Export** (`Registry::export`):
+    - `groups`: each group the account's devices are in, its epoch, the devices with their
+      roles, and its community;
+    - `group_requests`: pending requests to join, with their time;
+    - the "not attributable" list explains what stays in groups after deletion.
+  - **Deletion** (`delete_account_rows`, checked by `remnants`):
+    - the account's join requests go (`grp_req.acct`, indexed);
+    - group messages are no longer stored for devices the directory does not know (deleted
+      accounts, removed devices). Commit fan-outs already skipped them.
+    - **What stays** until a member commits the removal: the devices' leaves (device ID,
+      public keys) and, for an account that held a role, its account ID in the roles extension.
+      Apps commit the removal of devices that left the directory; anyone may drop a departed
+      account's role entry (D-0070). Once the account's rows are gone, these no longer lead to
+      the person on the server.
+  - **Not attributable:** change-log entries (members' ciphertext, signed by a leaf key) and
+    invite links (hashes; no creator recorded). Communities hold group IDs only.
+  - **Fuzzing:** a `group_records` target for the decoders added since M1 (roles extension,
+    registry roster, change-log entry, stored record), in the nightly run with `mls_wire` and
+    `mls_commit`. The M3 and M4 request bodies are fixed-size splits with no indexing (clippy
+    denies it), checked by their tests.
+- Evidence:
+  - `gate_p05` live: `groups_are_in_the_export_and_requests_go_with_the_account`. The export
+    names the group, the device and its role (owner, member) and the pending request. After
+    deletion, `remnants` is empty and the request list is empty.
+  - Send: `devices_gone_from_the_directory_get_no_group_messages`.
+  - Fuzz: `group_records` (numbers in `P05-gate.md`).
+- Consequences:
+  - A threat-model §6 note: what stays in group state after deletion, and why.
+  - Follow-up for the owner: server-proposed removals (`external_senders`).
+
 ## D-0072 — Prompt 5, milestone 4: communities as opaque links run by the announcement group's admins; private channels capped at 2,048 devices with a rate class; receipt tiers
 
 - Date: 2026-11-16

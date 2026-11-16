@@ -1130,3 +1130,47 @@ async fn communities_are_run_by_the_announcement_groups_admins() {
     // The announcement group is free again.
     assert_eq!(post_ids(&s, alice, path, &[&c2, &ann], &[]).await, 204);
 }
+
+#[tokio::test]
+async fn groups_are_in_the_export_and_requests_go_with_the_account() {
+    let Some(mut s) = stack(3).await else { return };
+    let (alice, bob, carol) = (0, 1, 2);
+    create(&mut s, alice).await;
+    add(&mut s, &[bob]).await;
+    let ask = Link::new();
+    assert_eq!(ask.create(&s, alice, 0, 0, true).await, 204);
+    assert_eq!(
+        post(&s, carol, "/v1/groups/requests", &ask.open()).await.0,
+        204
+    );
+
+    // Alice's export names the group, her device and its role; Bob's his; Carol's her request.
+    let gid = hex::encode(GID);
+    let export = |who: usize| {
+        let account = s.people[who].mls.account;
+        let r = Arc::clone(&s.registry);
+        async move { r.export(&account, &[9; 32]).await.unwrap() }
+    };
+    let e = export(alice).await;
+    assert_eq!(e["groups"][0]["group"], gid.as_str());
+    assert_eq!(e["groups"][0]["devices"][0]["role"], "owner");
+    assert_eq!(
+        e["groups"][0]["devices"][0]["id"],
+        s.people[alice].mls.id.to_hex_unredacted().as_str()
+    );
+    assert!(e["groups"][0]["community"].is_null());
+    let e = export(bob).await;
+    assert_eq!(e["groups"][0]["devices"][0]["role"], "member");
+    let e = export(carol).await;
+    assert_eq!(e["groups"].as_array().unwrap().len(), 0);
+    assert_eq!(e["group_requests"][0]["group"], gid.as_str());
+
+    // Deleting Carol's account deletes her request; nothing of hers is left in the registry.
+    let account = s.people[carol].mls.account;
+    let devices = s.registry.account_devices(&account).await.unwrap();
+    s.registry.delete_account_rows(&account).await.unwrap();
+    let left = s.registry.remnants(&account, &devices, &[]).await.unwrap();
+    assert!(left.is_empty(), "{left:?}");
+    let (_, l) = list(&s, alice).await;
+    assert_eq!(&l[..], &[0u8, 0][..], "the request is gone");
+}

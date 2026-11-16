@@ -801,7 +801,9 @@ Decision D-0056 (M7).
     transparency salt, last use and the inactivity period;
   - username links, passkeys and avatars;
   - every device: keys, flags, prekey and KeyPackage counts, whether a sealed push registration
-    exists, pending uploads.
+    exists, pending uploads;
+  - groups (Prompt 5, D-0073): each group the account's devices are in, its epoch, those
+    devices with their roles and its community; pending requests to join groups.
   Secrets derived from what the user knows (the PIN and username-key verifiers) are reported as
   present, not handed out. What cannot be attributed to the account (mailbox ciphertext, sent
   attachments, keyed throttle records, transparency leaves once the salt is gone, encrypted
@@ -813,7 +815,10 @@ Decision D-0056 (M7).
   - devices, prekeys, KeyPackages and passkeys;
   - username (held 30 days, unlinked) and links;
   - link tokens;
-  - the profile, device list, PIN and transparency salt on the account row.
+  - the profile, device list, PIN and transparency salt on the account row;
+  - pending requests to join groups (Prompt 5). Group messages are no longer stored for the
+    devices. Their leaves, and the account ID if it held a role, stay in each group's MLS state
+    until a member commits the removal (D-0073).
   Encrypted backups keep the data until they expire (at most 93 days); a restore deletes it
   again through the journal (D-0041).
 - **Inactivity** (owner, D-0047): each account chooses 6, 12 or 24 months

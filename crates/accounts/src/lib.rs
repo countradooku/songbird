@@ -188,6 +188,8 @@ DEFINE INDEX IF NOT EXISTS grp_fanout_at ON grp_fanout FIELDS at;
 DEFINE FIELD IF NOT EXISTS rev ON grp TYPE int;
 DEFINE FIELD IF NOT EXISTS meta ON grp TYPE bytes;
 DEFINE FIELD IF NOT EXISTS meta_v ON grp TYPE int;
+DEFINE FIELD IF NOT EXISTS devs ON grp TYPE array<bytes> DEFAULT [];
+DEFINE INDEX IF NOT EXISTS grp_devs ON grp FIELDS devs;
 DEFINE TABLE IF NOT EXISTS grp_log SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS entry ON grp_log TYPE bytes;
 DEFINE FIELD IF NOT EXISTS at ON grp_log TYPE datetime;
@@ -206,6 +208,8 @@ DEFINE FIELD IF NOT EXISTS at ON grp_req TYPE datetime;
 DEFINE FIELD IF NOT EXISTS grp ON grp_req TYPE bytes;
 DEFINE INDEX IF NOT EXISTS grp_req_grp ON grp_req FIELDS grp;
 DEFINE INDEX IF NOT EXISTS grp_req_at ON grp_req FIELDS at;
+DEFINE FIELD IF NOT EXISTS acct ON grp_req TYPE bytes;
+DEFINE INDEX IF NOT EXISTS grp_req_acct ON grp_req FIELDS acct;
 DEFINE INDEX IF NOT EXISTS grp_link_expires ON grp_link FIELDS expires;
 DEFINE TABLE IF NOT EXISTS cmty SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS ann ON cmty TYPE bytes;
@@ -458,6 +462,8 @@ pub struct Remnants {
     pub links: u64,
     /// One-time prekeys (both kinds) and single-use KeyPackages of the devices.
     pub prekeys: u64,
+    /// Pending requests to join groups (Prompt 5, D-0073).
+    pub group_requests: u64,
 }
 
 impl Remnants {
@@ -1763,6 +1769,7 @@ impl Registry {
                  DELETE ltoken WHERE account = $a RETURN NONE;
                  DELETE passkey WHERE account = $a RETURN NONE;
                  DELETE avatar WHERE account = $a RETURN NONE;
+                 DELETE grp_req WHERE acct = $a RETURN NONE;
                  DELETE account:[$a] RETURN NONE;
                  UPDATE directory:v SET version += 1 RETURN NONE;
                  COMMIT TRANSACTION;",
@@ -1801,7 +1808,8 @@ impl Registry {
                    + count(SELECT id FROM avatar WHERE account = $a);
                  RETURN count(SELECT id FROM otpk WHERE device IN $ds)
                    + count(SELECT id FROM otkem WHERE device IN $ds)
-                   + count(SELECT id FROM mlskp WHERE device IN $ds);",
+                   + count(SELECT id FROM mlskp WHERE device IN $ds);
+                 RETURN count(SELECT id FROM grp_req WHERE acct = $a);",
                 vec![
                     var("a", bytes(account.as_bytes())),
                     var("ds", Value::Array(ds)),
@@ -1823,6 +1831,7 @@ impl Registry {
             usernames: n(4)?,
             links: n(5)?,
             prekeys: n(6)?,
+            group_requests: n(7)?,
         })
     }
 

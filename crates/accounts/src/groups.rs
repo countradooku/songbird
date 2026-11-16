@@ -97,8 +97,8 @@ impl Registry {
         state: &[u8],
         roster: &[u8],
     ) -> Result<(), RegistryError> {
-        let sql = "CREATE grp:[$g] SET epoch = 0, rev = 0, state = $s, roster = $r, last = $z,
-                   meta = $z, meta_v = 0 RETURN NONE;";
+        let sql = "CREATE grp:[$g] SET epoch = 0, rev = 0, state = $s, roster = $r, devs = $d,
+                   last = $z, meta = $z, meta_v = 0 RETURN NONE;";
         self.retry(
             sql,
             || {
@@ -106,6 +106,7 @@ impl Registry {
                     var("g", bytes(group)),
                     var("s", bytes(state)),
                     var("r", bytes(roster)),
+                    var("d", roster_devices(roster)),
                     var("z", bytes(&[])),
                 ]
             },
@@ -195,7 +196,8 @@ impl Registry {
         // that many epochs older.
         let sql = "BEGIN TRANSACTION;
              IF ((SELECT VALUE epoch FROM ONLY grp:[$g]) ?? -1) != $e { THROW 'songbird:stale' };
-             UPDATE grp:[$g] SET epoch = $e + 1, rev += 1, state = $s, roster = $r, last = $l
+             UPDATE grp:[$g] SET epoch = $e + 1, rev += 1, state = $s, roster = $r, devs = $d,
+               last = $l
                RETURN NONE;
              UPSERT grp_fanout:[$g, $e] SET body = $f, at = time::now() RETURN NONE;
              IF $has_log {
@@ -220,6 +222,7 @@ impl Registry {
                     var("e", int(from_epoch)),
                     var("s", bytes(commit.state)),
                     var("r", bytes(commit.roster)),
+                    var("d", roster_devices(commit.roster)),
                     var("l", bytes(commit.last)),
                     var("f", bytes(commit.fanout)),
                     var("has_log", Value::Bool(commit.log.is_some())),
@@ -532,7 +535,7 @@ impl Registry {
                THROW 'songbird:full'
              };
              IF !record::exists(grp_req:[$g, $a]) {
-               CREATE grp_req:[$g, $a] SET grp = $g, at = time::now() RETURN NONE
+               CREATE grp_req:[$g, $a] SET grp = $g, acct = $a, at = time::now() RETURN NONE
              };
              COMMIT TRANSACTION;";
         self.retry(
@@ -620,4 +623,23 @@ impl Registry {
             .await?;
         Ok(())
     }
+}
+
+/// The devices of a registry roster (format 2, `version 2 | policy [7] | n × (device [16] | role
+/// u8)`, written by `songbird_groups`), as an indexed array: an account's groups are found by
+/// its devices (GDPR export, D-0073). An unreadable roster names nobody.
+fn roster_devices(roster: &[u8]) -> Value {
+    let devices = roster
+        .split_first()
+        .filter(|(v, _)| **v == 2)
+        .and_then(|(_, rest)| rest.get(7..))
+        .map(|rest| {
+            rest.as_chunks::<17>()
+                .0
+                .iter()
+                .map(|c| bytes(&c[..16]))
+                .collect()
+        })
+        .unwrap_or_default();
+    Value::Array(devices)
 }

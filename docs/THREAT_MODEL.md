@@ -552,7 +552,10 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
   refreshed. Members that processed the removal see who sent it. The registry holds every
   group's roster and public ratchet tree: whoever reads it learns which devices (and, through
   the device lists, which accounts) share a group, the constitution's "group membership
-  changes it must order" (D-0065 §2). Groups are not yet in the GDPR export or deletion (M5).
+  changes it must order" (D-0065 §2). GDPR (D-0073): the export lists the account's groups,
+  roles and requests; deletion removes its requests, and group messages skip its devices, but
+  its devices' leaves (and an account ID in the roles, if it held one) stay in each group's MLS
+  state until a member commits their removal: the server cannot edit a group without forking it.
 - Invite links (Prompt 5, M3; D-0071): the server alone decides whether a joiner held a usable
   link. A malicious server can admit an account to a group by external commit. It cannot hide
   the join from the members: every member sees the new leaf, its account and its default role,

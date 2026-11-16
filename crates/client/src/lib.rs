@@ -37,7 +37,9 @@ use bytes::{Bytes, BytesMut};
 use sockudo_ws::client::WebSocketClient;
 use sockudo_ws::{Http1, Message, WebSocketStream};
 use songbird_proto::close::{self, Reconnect};
-use songbird_proto::frame::{MlsCommitRef, Recipient, SendFrame, SendPayload, SendStatus};
+use songbird_proto::frame::{
+    MlsCommitRef, Recipient, SendFrame, SendHints, SendPayload, SendStatus,
+};
 use songbird_proto::{ClientFrame, CloseCode, Limits, PROTOCOL_VERSION, ServerFrame, control};
 use songbird_types::DeviceId;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -198,6 +200,7 @@ enum Command {
     Send {
         idempotency_key: [u8; 16],
         mls: Option<MlsCommitRef>,
+        hints: SendHints,
         payload: SendPayload,
         reply: oneshot::Sender<Result<SendStatus, ClientError>>,
     },
@@ -293,6 +296,26 @@ impl Client {
             .await
     }
 
+    /// Sends per-device envelopes with hints (Prompt 4): a contact's access key, a message
+    /// request, a franking commitment, the disappearing hint.
+    ///
+    /// # Errors
+    /// As [`Client::send`].
+    pub async fn send_hinted(
+        &self,
+        idempotency_key: [u8; 16],
+        hints: SendHints,
+        recipients: Vec<Recipient>,
+    ) -> Result<SendStatus, ClientError> {
+        self.command(
+            idempotency_key,
+            None,
+            hints,
+            SendPayload::PerDevice(recipients),
+        )
+        .await
+    }
+
     /// Sends any payload (a shared body for a group, an MLS commit) and waits for the result.
     ///
     /// # Errors
@@ -303,11 +326,23 @@ impl Client {
         mls: Option<MlsCommitRef>,
         payload: SendPayload,
     ) -> Result<SendStatus, ClientError> {
+        self.command(idempotency_key, mls, SendHints::default(), payload)
+            .await
+    }
+
+    async fn command(
+        &self,
+        idempotency_key: [u8; 16],
+        mls: Option<MlsCommitRef>,
+        hints: SendHints,
+        payload: SendPayload,
+    ) -> Result<SendStatus, ClientError> {
         let (reply, rx) = oneshot::channel();
         self.cmds
             .send(Command::Send {
                 idempotency_key,
                 mls,
+                hints,
                 payload,
                 reply,
             })
@@ -414,6 +449,7 @@ enum Conn {
 struct Pending {
     key: [u8; 16],
     mls: Option<MlsCommitRef>,
+    hints: SendHints,
     payload: SendPayload,
     /// The app's waiter; `None` for a resend after a restore.
     reply: Option<oneshot::Sender<Result<SendStatus, ClientError>>>,
@@ -422,6 +458,7 @@ struct Pending {
 /// One logged message.
 struct Logged {
     mls: Option<MlsCommitRef>,
+    hints: SendHints,
     payload: SendPayload,
     at: Instant,
 }
@@ -448,6 +485,7 @@ impl SendLog {
         &mut self,
         key: [u8; 16],
         mls: Option<MlsCommitRef>,
+        hints: SendHints,
         payload: SendPayload,
         cfg: &ClientConfig,
     ) {
@@ -473,6 +511,7 @@ impl SendLog {
             key,
             Logged {
                 mls,
+                hints,
                 payload,
                 at: now,
             },
@@ -672,6 +711,7 @@ impl Task {
         ws: &mut WebSocketStream<S>,
         idempotency_key: [u8; 16],
         mls: Option<MlsCommitRef>,
+        hints: SendHints,
         payload: SendPayload,
         reply: Option<oneshot::Sender<Result<SendStatus, ClientError>>>,
     ) -> Result<(), ()>
@@ -681,7 +721,7 @@ impl Task {
         let req_id = self.next_req;
         self.next_req = self.next_req.wrapping_add(1);
         let f = ClientFrame::Send(SendFrame {
-            hints: songbird_proto::frame::SendHints::default(),
+            hints,
             req_id,
             idempotency_key,
             mls,
@@ -692,6 +732,7 @@ impl Task {
             Pending {
                 key: idempotency_key,
                 mls,
+                hints,
                 payload,
                 reply,
             },
@@ -712,8 +753,8 @@ impl Task {
             let Some(e) = self.log.entries.get(&key) else {
                 continue;
             };
-            let (mls, payload) = (e.mls, e.payload.clone());
-            self.send_frame(ws, key, mls, payload, None).await?;
+            let (mls, hints, payload) = (e.mls, e.hints, e.payload.clone());
+            self.send_frame(ws, key, mls, hints, payload, None).await?;
         }
         Ok(())
     }
@@ -886,8 +927,8 @@ impl Task {
                             self.log.confirm(key);
                             Ok(())
                         }
-                        Some(Command::Send { idempotency_key, mls, payload, reply }) => {
-                            self.send_frame(&mut ws, idempotency_key, mls, payload, Some(reply)).await
+                        Some(Command::Send { idempotency_key, mls, hints, payload, reply }) => {
+                            self.send_frame(&mut ws, idempotency_key, mls, hints, payload, Some(reply)).await
                         }
                     };
                     if r.is_err() {
@@ -927,7 +968,7 @@ impl Task {
                 match (&status, p.reply) {
                     // A first send: logged once accepted, then answered.
                     (SendStatus::Accepted, Some(reply)) => {
-                        self.log.insert(p.key, p.mls, p.payload, &self.cfg);
+                        self.log.insert(p.key, p.mls, p.hints, p.payload, &self.cfg);
                         let _ = reply.send(Ok(status));
                     }
                     (_, Some(reply)) => {
@@ -993,13 +1034,13 @@ mod send_log_tests {
         let c = cfg(3, Duration::from_secs(60));
         let mut log = SendLog::default();
         for k in 1..=3u8 {
-            log.insert([k; 16], None, empty(), &c);
+            log.insert([k; 16], None, SendHints::default(), empty(), &c);
         }
         // A replayed send keeps its entry (and its place).
-        log.insert([1; 16], None, empty(), &c);
+        log.insert([1; 16], None, SendHints::default(), empty(), &c);
         assert_eq!(log.len(), 3);
         // Full: the oldest goes.
-        log.insert([4; 16], None, empty(), &c);
+        log.insert([4; 16], None, SendHints::default(), empty(), &c);
         assert_eq!(log.len(), 3);
         assert!(!log.entries.contains_key(&[1; 16]));
         // A receipt removes one.
@@ -1009,7 +1050,7 @@ mod send_log_tests {
         log.prune(Instant::now() + Duration::from_secs(61), &c);
         assert_eq!(log.len(), 0);
         // A removed key re-sent later is logged again.
-        log.insert([2; 16], None, empty(), &c);
+        log.insert([2; 16], None, SendHints::default(), empty(), &c);
         assert_eq!(log.len(), 1);
     }
 
@@ -1019,10 +1060,10 @@ mod send_log_tests {
         let mut log = SendLog::default();
         // The recipient confirmed before this client read its `SendResult`.
         log.confirm([7; 16]);
-        log.insert([7; 16], None, empty(), &c);
+        log.insert([7; 16], None, SendHints::default(), empty(), &c);
         assert_eq!(log.len(), 0);
         // Remembered once: a later send with that key is logged as usual.
-        log.insert([7; 16], None, empty(), &c);
+        log.insert([7; 16], None, SendHints::default(), empty(), &c);
         assert_eq!(log.len(), 1);
         // Early receipts are bounded.
         for i in 0..=EARLY_RECEIPTS {

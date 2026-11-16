@@ -116,6 +116,7 @@ async fn stack() -> Option<Stack> {
     ));
     let (_, push_public) = songbird_accounts::push_token::key_pair(&[0x33; 32]).unwrap();
     let app = Arc::new(App {
+        requests: None,
         server_name: API.into(),
         registry: Arc::clone(&registry),
         s3: s3.clone(),
@@ -175,6 +176,7 @@ async fn stack() -> Option<Stack> {
         rx,
     ));
     let worker = Worker {
+        block_keys: None,
         registry: Arc::clone(&registry),
         s3: s3.clone(),
         queue,

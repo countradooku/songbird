@@ -55,6 +55,11 @@ impl Validate for ApiConfig {
                 "api.valkey_hot.tls_ca",
                 "and api.jobs.valkey.tls_ca are required in staging and production",
             );
+            v.check(
+                api.requests.is_some(),
+                "api.requests",
+                "is required in staging and production (blocks, message requests)",
+            );
             if let Some(s) = &api.send {
                 v.check(
                     s.franking_key.is_some(),
@@ -126,6 +131,23 @@ pub struct ApiSettings {
     /// `[api.kt]`: key transparency (Prompt 3, M6, D-0055). Absent: those endpoints answer 503.
     #[serde(default)]
     pub kt: Option<KtSettings>,
+    /// `[api.requests]` (Prompt 4, D-0062): blocks, the request policy, and the gate of message
+    /// requests and broadcasts on `PUT /v1/messages`. Absent: those endpoints answer 503, and
+    /// requests and broadcasts over HTTP are refused as unavailable.
+    #[serde(default)]
+    pub requests: Option<RequestsSettings>,
+}
+
+/// `[api.requests]` and `[delivery.requests]` (Prompt 4, D-0062).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestsSettings {
+    /// 64 hex characters, the same on every `api` and delivery node: the keys of block rows and
+    /// request budgets derive from it.
+    pub secret: SecretRef,
+    /// The budgets.
+    #[serde(default)]
+    pub limits: songbird_send::RequestLimits,
 }
 
 /// `[api.kt]` (Prompt 3, M6, D-0055).
@@ -268,6 +290,9 @@ impl Validate for ApiSettings {
         v.section("jobs", &self.jobs);
         v.section("s3", &self.s3);
         v.section("attachments", &self.attachments);
+        if let Some(r) = &self.requests {
+            v.section("requests.limits", &r.limits);
+        }
         let mut k = [0u8; 32];
         v.check(
             hex::decode_to_slice(&self.push_public_key, &mut k).is_ok(),
@@ -453,6 +478,13 @@ pub struct SendSettings {
     /// Send burst: the delivery nodes' `session.send_burst`.
     #[serde(default = "default_send_burst")]
     pub send_burst: u32,
+    /// Group sends (shared bodies) per second per device: the delivery nodes'
+    /// `session.group_sends_per_sec`.
+    #[serde(default = "default_group_sends_per_sec")]
+    pub group_sends_per_sec: u32,
+    /// Group send burst: the delivery nodes' `session.group_send_burst`.
+    #[serde(default = "default_group_send_burst")]
+    pub group_send_burst: u32,
     /// Iggy stream of the mailbox: the delivery nodes' `mailbox.iggy.stream`.
     pub stream: String,
     /// Iggy topic: the delivery nodes' `mailbox.iggy.topic`.
@@ -497,6 +529,12 @@ pub struct SendSettings {
 
 const fn default_sends_per_sec() -> u32 {
     50
+}
+const fn default_group_sends_per_sec() -> u32 {
+    10
+}
+const fn default_group_send_burst() -> u32 {
+    40
 }
 const fn default_send_burst() -> u32 {
     200

@@ -69,11 +69,36 @@ pub struct Mismatch {
     pub extra: Vec<DeviceId>,
 }
 
+/// An account's send settings (Prompt 4, D-0062): who may send to it without a request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Access {
+    /// Its unidentified-access key, if it set a profile: a sender holding it is a contact.
+    pub key: Option<[u8; 16]>,
+    /// Anyone may send to it without a request (the profile's "anyone may send").
+    pub open: bool,
+    /// Message requests to it are dropped (silently).
+    pub requests_off: bool,
+}
+
+impl Access {
+    /// An open account: what a static development directory gives every account, so sends
+    /// between its devices need no keys.
+    pub const OPEN: Self = Self {
+        key: None,
+        open: true,
+        requests_off: false,
+    };
+}
+
 /// Known devices, their accounts and Ed25519 authentication public keys.
 #[derive(Default)]
 pub struct Directory {
     devices: HashMap<DeviceId, Device>,
     accounts: HashMap<AccountId, Vec<DeviceId>>,
+    /// Accounts' send settings (from their profiles and request policy).
+    access: HashMap<AccountId, Access>,
+    /// For an account with no entry: open in a static directory, closed from the registry.
+    default_access: Access,
     /// Linked devices not yet in their account's signed list (D-0052): they authenticate, but
     /// no sender is asked to encrypt to them and a send addressing one is refused as extra.
     pending: HashSet<DeviceId>,
@@ -85,6 +110,8 @@ impl std::fmt::Debug for Directory {
             .field("devices", &self.devices.len())
             .field("accounts", &self.accounts.len())
             .field("pending", &self.pending.len())
+            .field("access", &self.access.len())
+            .field("default_access", &self.default_access)
             .finish()
     }
 }
@@ -146,10 +173,15 @@ impl Directory {
         Ok(dir)
     }
 
+    /// A static directory: every account open (development, CI and tests only; refused in
+    /// staging and production by configuration validation).
     fn from_entries(
         entries: impl IntoIterator<Item = (DeviceId, [u8; PUBLIC_KEY_LEN], AccountId)>,
     ) -> Self {
-        let mut dir = Self::default();
+        let mut dir = Self {
+            default_access: Access::OPEN,
+            ..Self::default()
+        };
         for (id, key, account) in entries {
             if dir.devices.insert(id, Device { key, account }).is_none() {
                 dir.accounts.entry(account).or_default().push(id);
@@ -162,6 +194,24 @@ impl Directory {
     #[must_use]
     pub fn from_keys(keys: impl IntoIterator<Item = (DeviceId, [u8; PUBLIC_KEY_LEN])>) -> Self {
         Self::from_entries(keys.into_iter().map(|(d, k)| (d, k, own_account(&d))))
+    }
+
+    /// Sets accounts' send settings; an account without one is closed (no key, requests
+    /// allowed). What the registry gives.
+    #[must_use]
+    pub fn with_access(mut self, rows: impl IntoIterator<Item = (AccountId, Access)>) -> Self {
+        self.default_access = Access::default();
+        self.access = rows.into_iter().collect();
+        self
+    }
+
+    /// An account's send settings.
+    #[must_use]
+    pub fn access(&self, account: &AccountId) -> Access {
+        self.access
+            .get(account)
+            .copied()
+            .unwrap_or(self.default_access)
     }
 
     /// Builds a directory with explicit accounts (tests).
@@ -198,10 +248,21 @@ impl Directory {
     ) -> Result<Self, songbird_accounts::RegistryError> {
         // One snapshot for both, so a device removed in between is never loaded as a recipient.
         let rows = registry.load_directory_full().await?;
+        let access = registry.load_access().await?;
         let pending: Vec<DeviceId> = rows.iter().filter(|r| r.3).map(|r| r.0).collect();
         Ok(
             Self::from_accounts(rows.into_iter().map(|(d, a, k, _)| (d, k, a)))
-                .with_pending(pending),
+                .with_pending(pending)
+                .with_access(access.into_iter().map(|r| {
+                    (
+                        r.account,
+                        Access {
+                            key: r.key,
+                            open: r.open,
+                            requests_off: r.requests_off,
+                        },
+                    )
+                })),
         )
     }
 

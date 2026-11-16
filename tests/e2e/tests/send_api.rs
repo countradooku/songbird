@@ -174,10 +174,13 @@ async fn stack(limits: Limits, sends_per_sec: u32, send_burst: u32) -> Option<St
         limits,
         sends_per_sec,
         send_burst,
+        group_sends_per_sec: sends_per_sec,
+        group_send_burst: send_burst,
         rate_key: songbird_api::messages::rate_key(&random32()).unwrap(),
         metrics: metrics.send.clone(),
     };
     let app = Arc::new(App {
+        requests: None,
         server_name: API.into(),
         registry,
         // Unused by these tests (attachments and deletion are M5's).
@@ -849,6 +852,11 @@ async fn a_linked_device_is_announced_and_joins_the_send_check_only_once_listed(
     )
     .await
     .unwrap();
+    // Carol's profile lets anyone write to her (Prompt 4: otherwise only contacts with her
+    // access key, or a message request; this test is about devices).
+    reg.put_profile(&account, 1, b"profile", &[0xCA; 16], true)
+        .await
+        .unwrap();
     reload().await;
     let (_carol_ws, mut carol_events) = connect(&s, &carol).await;
     let carol_api = carol.api(&s);

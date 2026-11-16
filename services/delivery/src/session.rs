@@ -89,6 +89,11 @@ pub async fn run<S, M, R>(
                     shared.config.session.frame_burst,
                     std::time::Instant::now(),
                 ),
+                group_sends: Bucket::new(
+                    shared.config.session.group_sends_per_sec,
+                    shared.config.session.group_send_burst,
+                    std::time::Instant::now(),
+                ),
                 ephemerals: Bucket::new(
                     shared.config.session.ephemeral_per_sec,
                     shared.config.session.ephemeral_burst,
@@ -247,6 +252,8 @@ struct Session<M, R> {
     shared: Arc<Shared<M, R>>,
     sends: Bucket,
     frames: Bucket,
+    /// Group sends (shared bodies): their own budget within `sends` (Prompt 4).
+    group_sends: Bucket,
     ephemerals: Bucket,
     /// A drain failed (store unavailable) and must be retried.
     needs_drain: bool,
@@ -588,7 +595,14 @@ impl<M: Mailbox, R: Router> Session<M, R> {
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        if let Err(wait) = self.sends.take(now) {
+        let group = matches!(s.payload, frame::SendPayload::Shared { .. });
+        if let Err(wait) = self.sends.take(now).and_then(|()| {
+            if group {
+                self.group_sends.take(now)
+            } else {
+                Ok(())
+            }
+        }) {
             let ms = u32::try_from(wait.as_millis()).unwrap_or(u32::MAX).max(1);
             // The path counts its own refusals; this one is the session's.
             self.shared.metrics.sends_rejected.inc();

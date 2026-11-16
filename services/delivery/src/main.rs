@@ -350,6 +350,23 @@ impl Service for Delivery {
         let (stop_tx, stop_rx) = watch::channel(false);
         let (directory, follow) = load_directory(self.registry, self.directory).await?;
         let franking = franker(self.settings.franking_key.as_ref())?;
+        let gate = match (&self.settings.requests, &follow) {
+            (Some(r), Some((registry, ..))) => {
+                let secret = r.secret.resolve_key32()?;
+                let keys = songbird_send::GateKeys::from_cluster_secret(&secret)
+                    .map_err(|_| BoxError::from("gate key derivation failed"))?;
+                let gate: Arc<dyn songbird_send::Gate> =
+                    Arc::new(songbird_send::RegistryGate::new(
+                        Arc::clone(registry),
+                        songbird_valkey::ValkeyConn::connect(r.valkey.client()?).await?,
+                        keys,
+                        r.limits,
+                    ));
+                tracing::info!("message requests and broadcasts enabled");
+                Some((gate, r.limits.max_broadcast_accounts))
+            }
+            _ => None,
+        };
         let mut shared = Shared::new(
             self.settings,
             directory,
@@ -357,7 +374,14 @@ impl Service for Delivery {
             router,
             self.metrics.clone(),
         );
-        shared = shared.with_policy(songbird_delivery::Policy { franking });
+        shared = shared.with_policy(songbird_delivery::Policy {
+            franking,
+            max_broadcast_accounts: gate.as_ref().map_or(
+                songbird_send::RequestLimits::default().max_broadcast_accounts,
+                |(_, n)| *n,
+            ),
+            gate: gate.map(|(g, _)| g),
+        });
         let mut pusher_task = None;
         if let Some(jobs) = self.jobs {
             let (pusher, task) = start_pusher(jobs, &self.metrics, stop_rx.clone()).await?;

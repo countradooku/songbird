@@ -42,6 +42,7 @@ pub mod kt;
 pub mod messages;
 pub mod profiles;
 pub mod registration;
+pub mod requests;
 pub mod server;
 pub mod usernames;
 
@@ -62,7 +63,7 @@ use songbird_accounts::push_token::{self, Registration};
 use songbird_accounts::{Grant, Registry, push_index};
 use songbird_jobs::{Job, ObjectKey, Queue, Work};
 use songbird_service::telemetry::sharded::ShardedCounter as Counter;
-use songbird_types::DeviceId;
+use songbird_types::{AccountId, DeviceId};
 use songbird_valkey::ValkeyConn;
 
 pub use config::{ApiConfig, ApiSettings};
@@ -104,6 +105,8 @@ pub struct ApiMetrics {
     pub devices: devices::DeviceMetrics,
     /// Profiles and sealed sender.
     pub profiles: profiles::ProfileMetrics,
+    /// Blocks and the request policy.
+    pub blocks: requests::RequestsMetrics,
 }
 
 impl ApiMetrics {
@@ -161,6 +164,7 @@ impl ApiMetrics {
         self.keys.register(m)?;
         self.devices.register(m)?;
         self.profiles.register(m)?;
+        self.blocks.register(m)?;
         self.send.register(m, "api")
     }
 }
@@ -199,6 +203,8 @@ pub struct App {
     pub profiles: Option<profiles::Profiles>,
     /// Key transparency (absent: those endpoints answer 503).
     pub kt: Option<kt::Transparency>,
+    /// Blocks and the message-request policy (absent: those endpoints answer 503).
+    pub requests: Option<requests::Requests>,
 }
 
 impl std::fmt::Debug for App {
@@ -412,6 +418,7 @@ impl App {
                 "/v1/keys" | "/v1/keys/fetch" | "/v1/keypackages" | "/v1/keypackages/fetch",
                 None,
             ) => self.keys(req).await,
+            (_, "/v1/blocks" | "/v1/account/requests", None) => self.requests(req).await,
             (_, p, None) if p.starts_with("/v1/account/") => self.factors(req).await,
             (_, p, None) if p.starts_with("/v1/kt/") => self.kt(req).await,
             (_, p, None) if p.starts_with("/v1/provisioning") || p.starts_with("/v1/devices") => {
@@ -589,6 +596,61 @@ impl App {
         Ok(r)
     }
 
+    /// The GDPR export (M7, D-0056) with Prompt 4's stores: the request policy and how many
+    /// blocks the account holds (their rows are keyed hashes; the list itself is the user's
+    /// encrypted sync).
+    async fn export(
+        &self,
+        account: &AccountId,
+    ) -> Result<serde_json::Value, songbird_accounts::RegistryError> {
+        let mut v = self
+            .registry
+            .export(account, &self.push_index_secret)
+            .await?;
+        let off = self.registry.requests_off(account).await?;
+        let blocks = match &self.requests {
+            Some(r) => Some(self.registry.block_count(&r.owner(account)).await?),
+            None => None,
+        };
+        if let Some(o) = v.as_object_mut() {
+            o.insert(
+                "message_requests".into(),
+                serde_json::json!({
+                    "from": if off { "nobody" } else { "everyone" },
+                    "blocks": blocks,
+                }),
+            );
+        }
+        Ok(v)
+    }
+
+    /// `/v1/blocks` and `/v1/account/requests` ([`requests`], Prompt 4).
+    async fn requests(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let r = self.requests.as_ref().ok_or_else(unavailable)?;
+        let method = req.method().clone();
+        let path = req.uri().path().to_owned();
+        let (device, body) = self.authenticate_json(req).await?;
+        let row = self
+            .registry
+            .device(&device)
+            .await
+            .map_err(|_| unavailable())?
+            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+        let out = match (&method, path.as_str()) {
+            (&Method::PUT, "/v1/blocks") => r.block(&self.registry, &row, &body).await,
+            (&Method::DELETE, "/v1/blocks") => r.unblock(&self.registry, &row, &body).await,
+            (&Method::GET, "/v1/account/requests") => {
+                requests::Requests::policy(&self.registry, &row).await
+            }
+            (&Method::PUT, "/v1/account/requests") => {
+                requests::Requests::set_policy(&self.registry, &row, &body).await
+            }
+            _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
+        };
+        Ok(device_outcome(out))
+    }
+
     /// `/v1/account/…`: second factors ([`devices`], M4b), the export and the inactivity period
     /// (M7); the primary's to change.
     async fn factors(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
@@ -629,7 +691,7 @@ impl App {
             (&Method::GET, "/v1/account/factors") => d.factors(&self.registry, &row.account).await,
             // GDPR (M7): the export and the inactivity period, the primary's.
             (&Method::GET, "/v1/account/export") => match primary {
-                Some(a) => match self.registry.export(&a, &self.push_index_secret).await {
+                Some(a) => match self.export(&a).await {
                     Ok(v) => devices::Outcome::Json(v),
                     Err(_) => devices::Outcome::Unavailable,
                 },
@@ -1027,7 +1089,11 @@ impl App {
         let frame =
             messages::decode(&body, &m.limits).ok_or(Refusal::Status(StatusCode::BAD_REQUEST))?;
         let req_id = frame.req_id;
-        let status = match self.rate(m, &device).await {
+        let group = matches!(
+            frame.payload,
+            songbird_proto::frame::SendPayload::Shared { .. }
+        );
+        let status = match self.rate(m, &device, group).await {
             Ok(0) => m.path.submit(&device, frame, received).await,
             Ok(wait_us) => {
                 m.metrics.sends_rejected.inc();
@@ -1055,16 +1121,41 @@ impl App {
         Ok(r)
     }
 
-    /// The device's send rate (GCRA in `valkey-hot`): 0 if allowed, else microseconds to wait.
-    async fn rate(&self, m: &messages::Messages, device: &DeviceId) -> Result<u64, ()> {
-        let interval_us = 1_000_000 / u64::from(m.sends_per_sec.max(1));
-        let tolerance_us = interval_us.saturating_mul(u64::from(m.send_burst.max(1)));
+    /// The device's send rate (GCRA in `valkey-hot`), and for a group send its group rate too:
+    /// 0 if allowed, else microseconds to wait.
+    async fn rate(
+        &self,
+        m: &messages::Messages,
+        device: &DeviceId,
+        group: bool,
+    ) -> Result<u64, ()> {
+        let wait = self
+            .gcra(
+                &messages::rate_record(&m.rate_key, device),
+                m.sends_per_sec,
+                m.send_burst,
+            )
+            .await?;
+        if wait > 0 || !group {
+            return Ok(wait);
+        }
+        self.gcra(
+            &messages::group_rate_record(&m.rate_key, device),
+            m.group_sends_per_sec,
+            m.group_send_burst,
+        )
+        .await
+    }
+
+    async fn gcra(&self, record: &str, per_sec: u32, burst: u32) -> Result<u64, ()> {
+        let interval_us = 1_000_000 / u64::from(per_sec.max(1));
+        let tolerance_us = interval_us.saturating_mul(u64::from(burst.max(1)));
         self.hot
             .query::<i64>(
                 redis::cmd("EVAL")
                     .arg(messages::GCRA)
                     .arg(1)
-                    .arg(messages::rate_record(&m.rate_key, device))
+                    .arg(record)
                     .arg(interval_us)
                     .arg(tolerance_us),
             )
@@ -1132,7 +1223,7 @@ impl App {
 
     /// Records that the account is in use, at most once a day (inactivity deletion, M7): a
     /// keyed daily mark in `valkey-hot`, then the registry. Best effort.
-    async fn touch(&self, account: &songbird_types::AccountId) {
+    async fn touch(&self, account: &AccountId) {
         let k = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, &self.push_index_secret);
         let mut ctx = aws_lc_rs::hmac::Context::with_key(&k);
         ctx.update(b"songbird.v1/last-seen\0");

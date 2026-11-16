@@ -48,6 +48,7 @@ impl Fixture {
             metrics: SendMetrics::default(),
             policy: Policy {
                 franking: Some(Franker::from_secret(&[0x46; 32]).unwrap()),
+                ..Policy::default()
             },
         }
     }
@@ -434,4 +435,328 @@ async fn the_disappearing_hint_reaches_the_mailbox() {
         f.mailbox.fetch_after(&dev(2), 0, 10).await.unwrap().len(),
         0
     );
+}
+
+// ---- Prompt 4, M4: the contact gate ----------------------------------------------------------
+
+const ALICE: [u8; 16] = [0xA; 16];
+const BOB: [u8; 16] = [0xB; 16];
+const CAROL: [u8; 16] = [0xC; 16];
+const DAVE: [u8; 16] = [0xD; 16];
+
+/// Alice (devices 1, 4), Bob (2, 3), Carol (5), Dave (6), Erin (7, no profile), Olga (8, open).
+/// Every account is closed (as from the registry) unless said otherwise.
+fn gated(limits: RequestLimits) -> (Fixture, Arc<MemoryGate>) {
+    use crate::directory::Access;
+    let acct = AccountId::from_bytes;
+    let erin = acct([0xE; 16]);
+    let olga = acct([0x0F; 16]);
+    let key = |b: u8| Access {
+        key: Some([b; 16]),
+        open: false,
+        requests_off: false,
+    };
+    let gate = Arc::new(MemoryGate::new(limits));
+    let mut f = Fixture::new();
+    f.directory = Directory::from_accounts([
+        (dev(1), [0; 32], acct(ALICE)),
+        (dev(4), [0; 32], acct(ALICE)),
+        (dev(2), [0; 32], acct(BOB)),
+        (dev(3), [0; 32], acct(BOB)),
+        (dev(5), [0; 32], acct(CAROL)),
+        (dev(6), [0; 32], acct(DAVE)),
+        (dev(7), [0; 32], erin),
+        (dev(8), [0; 32], olga),
+    ])
+    .with_access([
+        (acct(ALICE), key(0x1A)),
+        (acct(BOB), key(0x1B)),
+        (
+            acct(CAROL),
+            Access {
+                requests_off: true,
+                ..key(0x1C)
+            },
+        ),
+        (acct(DAVE), key(0x1D)),
+        (olga, Access::OPEN),
+    ])
+    .into();
+    f.policy.gate = Some(gate.clone());
+    f.policy.max_broadcast_accounts = limits.max_broadcast_accounts;
+    (f, gate)
+}
+
+fn status_of(st: &SendStatus) -> Option<RejectReason> {
+    match st {
+        SendStatus::Rejected { reason, .. } => Some(*reason),
+        _ => None,
+    }
+}
+
+async fn go(f: &Fixture, sender: u8, s: SendFrame) -> SendStatus {
+    f.path()
+        .send(&dev(sender), s, Instant::now(), &mut Vec::new())
+        .await
+}
+
+fn hinted(devices: &[u8], key: u8, f: impl FnOnce(&mut SendFrame)) -> SendFrame {
+    let ds: Vec<DeviceId> = devices.iter().map(|b| dev(*b)).collect();
+    let mut s = to(&ds, "m");
+    s.idempotency_key = [key; 16];
+    f(&mut s);
+    s
+}
+
+#[tokio::test]
+async fn a_send_to_another_account_needs_its_access_key_or_a_request() {
+    let (f, _) = gated(RequestLimits::default());
+    let access_required = Some(RejectReason::AccessRequired);
+    // No key, no request.
+    let st = go(&f, 1, hinted(&[2, 3], 1, |_| {})).await;
+    assert_eq!(status_of(&st), access_required);
+    // A wrong key.
+    let st = go(
+        &f,
+        1,
+        hinted(&[2, 3], 2, |s| s.hints.access = Some([0x1C; 16])),
+    )
+    .await;
+    assert_eq!(status_of(&st), access_required);
+    // Bob's key: a contact.
+    let st = go(
+        &f,
+        1,
+        hinted(&[2, 3, 4], 3, |s| s.hints.access = Some([0x1B; 16])),
+    )
+    .await;
+    assert_eq!(st, SendStatus::Accepted);
+    // A request must be franked.
+    let st = go(&f, 1, hinted(&[2, 3], 4, |s| s.hints.request = true)).await;
+    assert_eq!(status_of(&st), Some(RejectReason::InvalidRequest));
+    let st = go(
+        &f,
+        1,
+        hinted(&[2, 3], 5, |s| {
+            s.hints.request = true;
+            s.hints.commitment = Some([7; 32]);
+        }),
+    )
+    .await;
+    assert_eq!(st, SendStatus::Accepted);
+    assert_eq!(f.metrics.requests.get(), 1);
+    // Erin has no profile: no key can work, only a request.
+    let st = go(&f, 1, hinted(&[7], 6, |s| s.hints.access = Some([0; 16]))).await;
+    assert_eq!(status_of(&st), access_required);
+    // Olga is open: no key needed.
+    assert_eq!(
+        go(&f, 1, hinted(&[8], 7, |_| {})).await,
+        SendStatus::Accepted
+    );
+    // Alice's own other device (a sync message): no key needed.
+    assert_eq!(
+        go(&f, 1, hinted(&[4], 8, |_| {})).await,
+        SendStatus::Accepted
+    );
+    // Nothing refused was stored.
+    assert_eq!(f.mailbox.count_pending(&dev(2)).await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn a_request_addresses_one_account_only() {
+    let (f, _) = gated(RequestLimits::default());
+    let st = go(
+        &f,
+        1,
+        hinted(&[2, 3, 6], 1, |s| {
+            s.hints.request = true;
+            s.hints.commitment = Some([7; 32]);
+        }),
+    )
+    .await;
+    assert_eq!(status_of(&st), Some(RejectReason::InvalidRequest));
+}
+
+#[tokio::test]
+async fn requests_from_a_blocked_sender_or_to_an_account_refusing_them_are_dropped_silently() {
+    let (f, gate) = gated(RequestLimits::default());
+    gate.block(AccountId::from_bytes(BOB), AccountId::from_bytes(ALICE));
+    let request = |key: u8, devices: &[u8]| {
+        hinted(devices, key, |s| {
+            s.hints.request = true;
+            s.hints.commitment = Some([7; 32]);
+        })
+    };
+    // Accepted, as if delivered; Bob's devices get nothing; Alice's own device its transcript.
+    assert_eq!(
+        go(&f, 1, request(1, &[2, 3, 4])).await,
+        SendStatus::Accepted
+    );
+    assert_eq!(f.mailbox.count_pending(&dev(2)).await.unwrap(), 0);
+    assert_eq!(f.mailbox.count_pending(&dev(3)).await.unwrap(), 0);
+    assert_eq!(f.mailbox.count_pending(&dev(4)).await.unwrap(), 1);
+    // Carol refuses requests: the same answer, nothing stored.
+    assert_eq!(go(&f, 1, request(2, &[5])).await, SendStatus::Accepted);
+    assert_eq!(f.mailbox.count_pending(&dev(5)).await.unwrap(), 0);
+    assert_eq!(f.metrics.requests_dropped.get(), 2);
+    assert_eq!(f.metrics.requests.get(), 0);
+    // Dave has not blocked Alice.
+    assert_eq!(go(&f, 1, request(3, &[6])).await, SendStatus::Accepted);
+    assert_eq!(f.mailbox.count_pending(&dev(6)).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn request_floods_are_held_to_their_budgets_and_a_block_does_not_show() {
+    let limits = RequestLimits {
+        per_sender_burst: 3,
+        per_pair_burst: 2,
+        per_recipient_burst: 4,
+        ..RequestLimits::default()
+    };
+    let request = |key: u8, devices: &[u8]| {
+        hinted(devices, key, |s| {
+            s.hints.request = true;
+            s.hints.commitment = Some([7; 32]);
+        })
+    };
+    let limited = Some(RejectReason::RateLimited);
+    // One sender to many recipients: the sender's budget (3).
+    let (f, _) = gated(limits);
+    for (i, d) in [6u8, 7, 6].into_iter().enumerate() {
+        let st = go(&f, 1, request(u8::try_from(i).unwrap(), &[d])).await;
+        assert_eq!(st, SendStatus::Accepted, "{i}");
+    }
+    assert_eq!(status_of(&go(&f, 1, request(9, &[7])).await), limited);
+    // One pair: its own budget (2), whoever else the sender writes to.
+    let (f, _) = gated(limits);
+    assert_eq!(go(&f, 1, request(1, &[6])).await, SendStatus::Accepted);
+    assert_eq!(go(&f, 1, request(2, &[6])).await, SendStatus::Accepted);
+    assert_eq!(status_of(&go(&f, 1, request(3, &[6])).await), limited);
+    // Many senders to one recipient: the recipient's budget (4).
+    let (f, _) = gated(limits);
+    let mut accepted = 0;
+    for (i, sender) in [1u8, 2, 5, 7, 8].into_iter().enumerate() {
+        let st = go(&f, sender, request(u8::try_from(i).unwrap(), &[6])).await;
+        if st == SendStatus::Accepted {
+            accepted += 1;
+        } else {
+            assert_eq!(status_of(&st), limited);
+        }
+    }
+    assert_eq!(accepted, 4);
+    // A blocked sender meets exactly the same budgets: blocking cannot be probed by flooding.
+    let (f, gate) = gated(limits);
+    gate.block(AccountId::from_bytes(DAVE), AccountId::from_bytes(ALICE));
+    assert_eq!(go(&f, 1, request(1, &[6])).await, SendStatus::Accepted);
+    assert_eq!(go(&f, 1, request(2, &[6])).await, SendStatus::Accepted);
+    assert_eq!(status_of(&go(&f, 1, request(3, &[6])).await), limited);
+    assert_eq!(f.mailbox.count_pending(&dev(6)).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn broadcasts_need_every_contacts_key_and_respect_their_budget() {
+    let limits = RequestLimits {
+        max_broadcast_accounts: 3,
+        broadcast_burst: 5,
+        ..RequestLimits::default()
+    };
+    let (f, _) = gated(limits);
+    let xor = |keys: &[u8]| {
+        let mut k = [0u8; 16];
+        for b in keys {
+            for x in &mut k {
+                *x ^= b;
+            }
+        }
+        k
+    };
+    // Bob and Dave (closed) and Olga (open): the XOR of Bob's and Dave's keys.
+    let to3 = |key: u8, access: Option<[u8; 16]>| {
+        hinted(&[2, 3, 6, 8], key, move |s| s.hints.access = access)
+    };
+    assert_eq!(
+        status_of(&go(&f, 1, to3(1, Some(xor(&[0x1B])))).await),
+        Some(RejectReason::AccessRequired)
+    );
+    assert_eq!(
+        status_of(&go(&f, 1, to3(2, None)).await),
+        Some(RejectReason::AccessRequired)
+    );
+    assert_eq!(
+        go(&f, 1, to3(3, Some(xor(&[0x1B, 0x1D])))).await,
+        SendStatus::Accepted
+    );
+    assert_eq!(f.metrics.broadcasts.get(), 1);
+    // Erin has no profile: never part of a broadcast.
+    let st = go(
+        &f,
+        1,
+        hinted(&[2, 3, 7], 4, |s| s.hints.access = Some(xor(&[0x1B]))),
+    )
+    .await;
+    assert_eq!(status_of(&st), Some(RejectReason::AccessRequired));
+    // More accounts than allowed.
+    let st = go(
+        &f,
+        1,
+        hinted(&[2, 3, 5, 6, 8], 5, |s| {
+            s.hints.access = Some(xor(&[0x1B, 0x1C, 0x1D]));
+        }),
+    )
+    .await;
+    assert_eq!(status_of(&st), Some(RejectReason::TooManyRecipients));
+    // The budget: 5 accounts, 3 spent; 3 more is over it.
+    let st = go(&f, 1, to3(6, Some(xor(&[0x1B, 0x1D])))).await;
+    assert_eq!(status_of(&st), Some(RejectReason::RateLimited));
+}
+
+#[tokio::test]
+async fn groups_and_sealed_sends_are_not_classified_as_strangers() {
+    let (f, _) = gated(RequestLimits::default());
+    // A shared body (MLS group): Prompt 5 authorizes membership.
+    let shared = SendFrame {
+        hints: songbird_proto::frame::SendHints::default(),
+        req_id: 1,
+        idempotency_key: [1; 16],
+        mls: None,
+        payload: SendPayload::Shared {
+            devices: vec![dev(2), dev(3), dev(5)],
+            body: Bytes::from_static(b"group"),
+        },
+    };
+    assert_eq!(f.path().lane(&dev(1), &shared), Ok(Lane::Group));
+    assert_eq!(go(&f, 1, shared).await, SendStatus::Accepted);
+    // A sealed send: the sealed endpoint checked the access keys.
+    let s = hinted(&[2, 3], 2, |_| {});
+    assert_eq!(f.path().lane(&SEALED_SENDER, &s), Ok(Lane::Sealed));
+    assert_eq!(
+        f.path()
+            .send(&SEALED_SENDER, s, Instant::now(), &mut Vec::new())
+            .await,
+        SendStatus::Accepted
+    );
+}
+
+#[tokio::test]
+async fn without_a_gate_requests_and_broadcasts_are_unavailable() {
+    let (mut f, _) = gated(RequestLimits::default());
+    f.policy.gate = None;
+    let st = go(
+        &f,
+        1,
+        hinted(&[2, 3], 1, |s| {
+            s.hints.request = true;
+            s.hints.commitment = Some([7; 32]);
+        }),
+    )
+    .await;
+    assert_eq!(status_of(&st), Some(RejectReason::Unavailable));
+    // A contact's send never needs the gate.
+    let st = go(
+        &f,
+        1,
+        hinted(&[2, 3], 2, |s| s.hints.access = Some([0x1B; 16])),
+    )
+    .await;
+    assert_eq!(st, SendStatus::Accepted);
 }

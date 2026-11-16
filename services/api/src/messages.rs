@@ -131,6 +131,10 @@ pub struct Messages {
     pub sends_per_sec: u32,
     /// Burst (the WebSocket's `send_burst`).
     pub send_burst: u32,
+    /// Group sends (shared bodies) per second per device, within the above (Prompt 4).
+    pub group_sends_per_sec: u32,
+    /// Group send burst.
+    pub group_send_burst: u32,
     /// Keys the per-device rate-limit records, so `valkey-hot` cannot link them to device IDs.
     pub rate_key: hmac::Key,
     /// Counters.
@@ -161,9 +165,19 @@ pub fn rate_key(cluster_secret: &[u8; 32]) -> Result<hmac::Key, aws_lc_rs::error
 /// The `valkey-hot` key of a device's send rate: a keyed hash (no device ID).
 #[must_use]
 pub fn rate_record(key: &hmac::Key, device: &DeviceId) -> String {
+    class_record(key, "r:", device)
+}
+
+/// The `valkey-hot` key of a device's group-send rate (Prompt 4).
+#[must_use]
+pub fn group_rate_record(key: &hmac::Key, device: &DeviceId) -> String {
+    class_record(key, "g:", device)
+}
+
+fn class_record(key: &hmac::Key, prefix: &str, device: &DeviceId) -> String {
     let tag = hmac::sign(key, device.as_bytes());
     let mut k = String::with_capacity(34);
-    k.push_str("r:");
+    k.push_str(prefix);
     k.push_str(&hex::encode(tag.as_ref().get(..16).unwrap_or_default()));
     k
 }

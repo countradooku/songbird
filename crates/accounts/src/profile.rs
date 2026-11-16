@@ -20,7 +20,9 @@ pub struct AccessKey {
 
 impl Registry {
     /// Stores an account's encrypted profile, its access key and whether anyone may send to it
-    /// sealed; the version must exceed the stored one.
+    /// (sealed or identified, without a request); the version must exceed the stored one. Bumps
+    /// the directory version: the send path checks access keys from the directory snapshot
+    /// (Prompt 4, D-0062).
     ///
     /// # Errors
     /// [`RegistryError::Rollback`].
@@ -40,6 +42,7 @@ impl Registry {
                  IF (account:[$a].profile_v ?? -1) >= $v { THROW 'songbird:rollback' };
                  UPDATE account:[$a] SET profile = $p, profile_v = $v, uak = $k, uak_open = $o
                    RETURN NONE;
+                 UPDATE directory:v SET version += 1 RETURN NONE;
                  COMMIT TRANSACTION;",
                 vec![
                     var("a", bytes(account.as_bytes())),

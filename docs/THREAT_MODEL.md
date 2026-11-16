@@ -53,6 +53,9 @@ server in plaintext. Adding to this list requires the owner's approval.
 | Per account: last use (a day's precision), the chosen inactivity period and which warnings were sent; a keyed daily "seen" mark in `valkey-hot` (no identifier) | Delete accounts after the inactivity period the user chose, warning twice first | Last use until the next use or the account's deletion; the mark 24 hours | Prompt 3 (M7), D-0056; **approved by the owner on 2026-11-16** |
 | Per stored envelope of a send with the disappearing hint: its deadline (store time plus the client's `expire_after_s`) | Never deliver it after the deadline; delete it then even if no device connected | As the envelope row (deleted at the deadline at the latest) | Prompt 4 (M3), D-0061; **awaiting the owner's approval** |
 | Franking stamp in front of each franked envelope for another account: the franking key's ID, the sender's commitment (an HMAC of the content under a key the server never sees), the server's stamp time, and a MAC binding them to the sender's and recipient's accounts; **neither account in the clear**. Whoever holds the franking key could test candidate senders against an envelope still undelivered | Let a recipient prove to the server, in a report, who sent what and when (§5.14) | As the envelope row: gone from the server at acknowledgement or expiry; the recipient keeps it | Prompt 4 (M3), D-0061; **awaiting the owner's approval** |
+| Block rows: per (blocker, blocked) pair a keyed hash (HMAC-SHA256 under a key derived from the requests secret), a keyed tag of the blocker, the time; per blocker a counter; **no account ID** | Drop message requests from blocked senders (D-0062) | Until unblocked, or the blocker's account is deleted (rows found by its tag, verified gone) | Prompt 4 (M4), D-0062; **awaiting the owner's approval** |
+| Per account: whether it refuses message requests (`requests_off`); with its access key and "anyone may send" flag, held in every delivery and `api` node's directory snapshot (memory) | Classify every send without a store round trip; drop requests the account refuses | With the account (snapshot: until the next reload) | Prompt 4 (M4), D-0062; the access key and flag were approved with profiles (D-0054), their use in the send path is new; **awaiting the owner's approval** |
+| Keyed hashes (HMAC-SHA256, key from the requests secret) of a sender account, a (sender, recipient) pair or a recipient account, with the next allowed time for requests and broadcasts, in `valkey-hot`; no identifier | Hold message requests and broadcasts to their budgets across every node | At most the budget window (hours at the defaults), then expired | Prompt 4 (M4), D-0062; keyed forms; **awaiting the owner's approval** |
 | Deletion journal: per deleted account, an empty tombstone in the backup bucket named by the deletion time and HMAC-SHA256(journal key, account ID); no account ID | A restore must not bring a deleted account back | Write-once, 93 days (the longest backup retention) | Prompt 2 (M6), D-0041; **approved under the owner's delegation** |
 
 Prompt 1 adds two operational views, neither of which is user data on the server:
@@ -378,7 +381,29 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
 | A disappearing message delivered after its timer, or kept for a device that never returns | I | Server retention, a lost device | The deadline is stored with each envelope in every mailbox; never fetched after it; swept (Iggy: key punctured, absent after a restart) | `an_envelope_past_its_deadline_is_skipped_then_deleted`; `the_disappearing_hint_skips_then_deletes` (SurrealDB); `the_disappearing_hint_skips_drops_and_survives_a_restart` (Iggy, CI); `entries_past_their_deadline_are_dropped_wherever_they_are` |
 | Malformed hints or stamps | T, D | Malicious client, insider | Strict frame decoder (flag rules, bounds, one encoding); fuzzed | `send_hint_flags_are_exclusive_and_bounded`; fuzz `proto_client_frame`, `franking` |
 
+### 3.20 Message requests, blocking and lanes (Prompt 4, milestone 4; D-0062)
+
+| Threat | STRIDE | Attacker | Mitigation | Test or proof |
+| --- | --- | --- | --- | --- |
+| A stranger messaging anyone at will (spam, harassment) | S, E, D | Anyone with an account | A send to a closed account needs its access key (only contacts hold it) or goes as a request: franked, identified, budgeted per sender, pair and recipient, blockable | `a_send_to_another_account_needs_its_access_key_or_a_request`; `contacts_requests_blocks_and_the_request_policy_end_to_end` |
+| Request floods: one sender to many, many to one, one pair | D | Spammer, sybil accounts | Three budgets in `valkey-hot`, shared by every node and both transports (fail closed) | `request_floods_are_held_to_their_budgets…` (unit); `request_floods_are_held_across_the_cluster…` (live) |
+| Detecting a block (or the request policy) from the answers | I | A blocked sender | Blocked and refused requests are accepted and dropped; budgets are spent before the check, so the answers and rate limits are identical | `…_dropped_silently`; `…a_block_does_not_show` |
+| A blocked contact keeps writing with the access key | E | Blocked contact | Blocking rotates the profile key (client rule), so the old key fails (reason 10) and only the request lane is left | PROTOCOL §5.11; `a_send_to_another_account…` (a wrong key refused) |
+| A stolen linked device unblocking a stalker or reopening requests | E | Thief of a linked device | Loosening (unblock, accept requests) only from the primary; pending devices change nothing (D-0058) | `contacts_requests_blocks…` (403 from the linked device) |
+| Block rows revealing who blocked whom | I | Database or backup thief | Rows named by keyed hashes; no account ID; a key holder can still test pairs (stated) | `blocks_are_keyed_pairs_bounded…`; `records_and_tags_are_keyed…` |
+| Filling the block table | D | Malicious client | 1,000 per owner, enforced by a per-owner counter row written in each change's transaction (concurrent adds conflict) | `blocks_are_keyed_pairs_bounded_per_owner…` (1,020 racing adds) |
+| A broadcast to non-contacts | E | Spammer | Every closed account's key must be in the combined key; accounts without a profile can never be in a broadcast; budget per sender | `broadcasts_need_every_contacts_key…` (unit and live) |
+| Guessing an access key | S | Anyone | 128-bit keys compared in constant time; a wrong key is refused like a missing one | `ct_eq` in the send path; `a_send_to_another_account…` |
+| Bypassing the gate with a shared body or ephemeral frames | E | Spammer | Stated: groups are authorized by Prompt 5; ephemeral frames are encrypted and dropped without a session, and per-connection limited | PROTOCOL §5.10 |
+| A request's timing (stored or not) revealing a block | I | A blocked sender measuring latency | Not hidden: a dropped request skips the durable store (milliseconds faster) | Open risk §6 |
+
 ## 4. Server-enforced settings
+
+| Setting | Who changes it | Enforced where |
+| --- | --- | --- |
+| Message requests from everyone or nobody (Prompt 4, D-0062) | Refusing: any listed device; accepting again: the primary | The send path (requests dropped silently) |
+| Blocks (Prompt 4, D-0062) | Blocking: any listed device; unblocking: the primary | The send path (requests from blocked senders dropped) |
+| "Anyone may send" (Prompt 3, D-0054; widened by D-0062) | Any listed device, with the profile | The send path and the sealed endpoint |
 
 ## 5. Compliance notes (GDPR, age of digital consent per EU country)
 
@@ -481,3 +506,10 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
   devices receive anyway); `api` has no read path into it. A device that only holds a WebSocket
   and never calls `api` would not count as use; the apps call `api` at least daily (prekey and
   KeyPackage counts). Inactivity warnings are wake-up pushes: a device without push gets none.
+- Message requests (Prompt 4, D-0062): a dropped request (blocked or refused) skips the durable
+  store, so it is answered a few milliseconds faster than a stored one; a blocked sender
+  measuring latency carefully could guess the block. The answers and budgets are identical. The
+  recipient budget lets a set of sybil accounts use up an account's requests for an hour
+  (contacts are unaffected). Every node's directory snapshot now holds every account's access
+  key (memory only), and reloads on profile changes as on device changes (an incremental reload
+  is Prompt 13's). A stranger's MLS Welcome and ephemeral frames are not gated until Prompt 5.

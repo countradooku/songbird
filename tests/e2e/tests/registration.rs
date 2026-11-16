@@ -26,7 +26,7 @@ use songbird_client::{ClientConfig, DeviceKey, ResumeState, State};
 use songbird_delivery::{DeliveryMetrics, Directory, Shared, server};
 use songbird_e2e::{SERVER_NAME, key, next_delivery, settings, test_mailbox, to};
 use songbird_jobs::{Queue, QueueConfig};
-use songbird_proto::frame::SendStatus;
+use songbird_proto::frame::{Recipient, RejectReason, SendHints, SendStatus};
 use songbird_proto::registration::{INVITE_LEN, invite};
 use songbird_router::LocalRouter;
 use songbird_types::{DeviceId, Secret, SecretRef};
@@ -154,6 +154,7 @@ async fn registered_accounts_connect_and_talk_without_an_operator() {
     )
     .unwrap();
     let app = Arc::new(App {
+        requests: None,
         server_name: API.into(),
         registry: Arc::clone(&registry),
         s3: songbird_s3::Client::new(songbird_s3::Config::new(
@@ -234,16 +235,41 @@ async fn registered_accounts_connect_and_talk_without_an_operator() {
     tokio::time::timeout(Duration::from_secs(10), b.wait_for(State::Connected))
         .await
         .expect("bob connects");
+    // Prompt 4 (D-0062): strangers cannot simply write to each other. Without a profile (and
+    // its access key) Bob is reachable by a message request only.
     let r = a
-        .send(key(), vec![to(bob.device.unwrap(), "hello bob")])
+        .send(key(), vec![to(bob.device.unwrap(), "no key")])
         .await
         .unwrap();
+    assert_eq!(
+        r,
+        SendStatus::Rejected {
+            reason: RejectReason::AccessRequired,
+            retry_after_ms: 0
+        }
+    );
+    // Each publishes a profile with its access key, and they exchange profile keys (out of band
+    // here): from then on each writes to the other as a contact.
+    let account_of = async |d: DeviceId| registry.device(&d).await.unwrap().unwrap().account;
+    let (alice_account, bob_account) = (
+        account_of(alice.device.unwrap()).await,
+        account_of(bob.device.unwrap()).await,
+    );
+    for (acct, k) in [(alice_account, [0xA1; 16]), (bob_account, [0xB1; 16])] {
+        registry
+            .put_profile(&acct, 1, b"profile", &k, false)
+            .await
+            .unwrap();
+    }
+    let r = send_as_contact(&a, [0xB1; 16], vec![to(bob.device.unwrap(), "hello bob")]).await;
     assert_eq!(r, SendStatus::Accepted);
     assert_eq!(&next_delivery(&mut b_ev).await.1[..], b"hello bob");
-    let r = b
-        .send(key(), vec![to(alice.device.unwrap(), "hello alice")])
-        .await
-        .unwrap();
+    let r = send_as_contact(
+        &b,
+        [0xA1; 16],
+        vec![to(alice.device.unwrap(), "hello alice")],
+    )
+    .await;
     assert_eq!(r, SendStatus::Accepted);
     assert_eq!(&next_delivery(&mut a_ev).await.1[..], b"hello alice");
 
@@ -262,4 +288,32 @@ async fn registered_accounts_connect_and_talk_without_an_operator() {
         .await
         .expect("the stranger gives up");
     assert_eq!(state, State::Failed);
+}
+
+/// Sends as a contact (with the recipient's access key), waiting for the directory to follow a
+/// profile just published: until then the send is refused as access required and stores nothing.
+async fn send_as_contact(
+    c: &songbird_client::Client,
+    access: [u8; 16],
+    recipients: Vec<Recipient>,
+) -> SendStatus {
+    let k = key();
+    for _ in 0..200 {
+        let hints = SendHints {
+            access: Some(access),
+            ..SendHints::default()
+        };
+        let st = c.send_hinted(k, hints, recipients.clone()).await.unwrap();
+        if !matches!(
+            st,
+            SendStatus::Rejected {
+                reason: RejectReason::AccessRequired,
+                ..
+            }
+        ) {
+            return st;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the directory never followed the profiles")
 }

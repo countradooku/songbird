@@ -1009,13 +1009,105 @@ app to refuse exporting the chat and saving its media automatically. Apps enforc
 server only carries it, and a modified app can ignore it.** It is a courtesy between honest apps,
 not a protection against a participant: anyone can photograph a screen.
 
-### 5.10 Message requests and profile keys
+### 5.10 Message requests, contacts and lanes
 
-Filled in by M4 (D-0062).
+Decisions D-0058 (the owner's rules) and D-0062 (M4).
+
+**Contacts are proven by the access key.** An account's access key is derived from its profile key
+(§4.8), and the profile key goes only to contacts:
+
+- when a request is accepted (`RequestResponse{ACCEPT}` with `Content.profile_key`);
+- or when users meet by username, link or QR code;
+- or with every message to an existing contact after a rotation.
+
+The server keeps no contact list: a send carries the proof.
+
+**Every send to another account** (identified, over the WebSocket or `PUT /v1/messages`) falls
+in one lane, decided from the directory snapshot alone, so the hot path makes no store round
+trip:
+
+| Lane | What the server sees | Rule |
+| --- | --- | --- |
+| Sync | Only the sender's own other devices | Always allowed |
+| Direct | One other account | It is open, or the send carries `ACCESS` with its access key |
+| Broadcast | Several other accounts (per-device envelopes) | Every closed one has an access key, and `ACCESS` carries their XOR; at most 256 accounts by default; a budget of accounts per hour |
+| Request | One other closed account, `REQUEST` set | Must be `FRANKED`; budgets per sender, per (sender, recipient) and per recipient; dropped silently if blocked or refused |
+| Group | A shared body | Prompt 5 authorizes membership |
+| Sealed | `PUT /v1/messages/sealed` | The sealed endpoint checks the access keys (§4.8); `ACCESS` and `REQUEST` are refused there |
+
+- A send to a closed account with neither a valid key nor `REQUEST` is refused with reason 10
+  ("access required"). The app then fetches the profile key again (if it had one) or sends a
+  request.
+- An account with no profile (no access key) is reachable by requests only. **Every app
+  publishes a profile, with its access key, at registration.**
+- A request addressed to more than one other account, or not franked, is refused with reason
+  11.
+- A request is never sealed, so it can be blocked and reported with a sender the server can
+  attest.
+
+**Answering a request** (all inside encrypted content, §5.8):
+
+- **accept**: share the profile key with the requester; from then on it sends as a contact;
+- **delete**: nothing reaches the requester;
+- **block**: §5.11;
+- **report**: §5.14.
+
+Every response is synced to the user's own devices.
+
+**The request policy** (`GET`/`PUT /v1/account/requests`, `{"from": "everyone" | "nobody"}`):
+with "nobody", requests are accepted and dropped silently; contacts are unaffected. Refusing
+requests may be done from any listed device, accepting them again only from the primary (D-0058).
+
+**Budgets** (`[api.requests]` and `[delivery.requests] limits`, kept in `valkey-hot` under keyed
+names, shared by every node and transport):
+
+| Budget | Default |
+| --- | --- |
+| Requests per sender account | 20 an hour, burst 10 |
+| Requests per (sender, recipient) | 10 an hour, burst 5 |
+| Requests per recipient account | 100 an hour, burst 30 |
+| Broadcast accounts per sender | 1,024 an hour, burst 256; at most 256 a send |
+
+Over budget: reason 1 with a retry hint. The budgets are spent **before** the block and policy
+checks, so a blocked sender gets exactly the answers an unblocked one gets.
+
+**Rate limits per conversation type** (the prompt's requirement), counted per device unless said:
+
+| Lane | Limit |
+| --- | --- |
+| Every send | 50 a second, burst 200 (per connection, and across `api` nodes for HTTP) |
+| Group sends (shared bodies) | Also 10 a second, burst 40 |
+| Requests and broadcasts | The budgets above, per account across the cluster |
+| Channels | Prompt 5, once the server can tell a channel from a group |
+
+What is not gated, stated plainly:
+
+- **Ephemeral frames** (typing) to a stranger's device are not checked. They are end-to-end
+  encrypted, so a client without a session with the sender drops them; per-connection limits
+  bound them.
+- **A stranger's MLS Welcome** sent as a shared body passes as a group send until Prompt 5;
+  apps show an invitation from a non-contact as a request.
 
 ### 5.11 Blocking
 
-Filled in by M4 (D-0062).
+- **`PUT /v1/blocks`** `{"account": hex}` (any listed device) and **`DELETE /v1/blocks`** (the
+  primary only, D-0058).
+- **What the server keeps:** one row named by `HMAC(k_pair, blocker ‖ blocked)[..16]`, a keyed
+  tag of the owner `HMAC(k_owner, blocker)[..16]`, the time, and a per-owner counter (at most
+  1,000). No account ID is stored. The keys derive from the requests secret every node holds,
+  so the server (with its key) can test whether one account blocked another; a database or
+  backup thief cannot.
+- **What it does:** a request from a blocked account is accepted and stored nowhere. A blocked
+  contact still holding the access key is cut off by a client rule: **blocking rotates the
+  profile key**, sharing the new one with every remaining contact (as Signal does), so the old
+  access key fails (reason 10) and only the request lane, where the block applies, is left.
+- **Sealed senders** are blocked by the client: it drops sealed messages whose certificate names
+  a blocked account. Rotating the profile key also ends their sealed access.
+- **The full block list** (accounts and groups) syncs between the user's own devices as an
+  encrypted `blocked` sync message (§5.8).
+- **Deletion:** an account's block rows are deleted with it (found by its owner tag) and
+  verified. A blocked account's deletion leaves the rows naming it as keyed hashes until the
+  blocker unblocks or is deleted.
 
 ### 5.12 Client-only features
 

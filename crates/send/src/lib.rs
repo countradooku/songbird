@@ -32,6 +32,7 @@
 pub mod config;
 pub mod directory;
 pub mod franking;
+pub mod gate;
 pub mod push;
 pub mod system;
 
@@ -46,20 +47,69 @@ use songbird_proto::frame::{RejectReason, SendFrame, SendPayload, SendStatus};
 use songbird_router::{Live, Routed, Router};
 use songbird_service::telemetry::sharded::{ShardedCounter as Counter, ShardedHistogram};
 use songbird_service::telemetry::{Metrics, TelemetryError};
-use songbird_types::DeviceId;
+use songbird_types::{AccountId, DeviceId};
+use std::sync::Arc;
 
 pub use config::LimitsConfig;
 pub use directory::{Directory, LiveDirectory, Mismatch};
 pub use franking::{Franker, Frankers};
+pub use gate::{Admit, Gate, GateKeys, MemoryGate, RegistryGate, RequestLimits};
 pub use push::{PushMetrics, Pusher};
+
+/// The device a sealed send (`PUT /v1/messages/sealed`, D-0054) passes as its sender: no real
+/// device has this ID, and the sealed endpoint has already checked the recipients' access keys.
+pub const SEALED_SENDER: DeviceId = DeviceId::from_bytes([0; 16]);
 
 /// What the send path enforces beyond limits and the device list (Prompt 4). One per service,
 /// borrowed by every send.
-#[derive(Debug, Default)]
 pub struct Policy {
     /// Stamps franked sends. Without it a franked send is refused as unavailable (a deployment
     /// must configure it; configuration validation requires it outside development).
     pub franking: Option<Franker>,
+    /// The cluster-wide checks of requests and broadcasts. Without it those sends are refused as
+    /// unavailable (only a registry directory has closed accounts, and deployments configure
+    /// it).
+    pub gate: Option<Arc<dyn Gate>>,
+    /// Most other accounts one broadcast may address.
+    pub max_broadcast_accounts: u32,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self {
+            franking: None,
+            gate: None,
+            max_broadcast_accounts: RequestLimits::default().max_broadcast_accounts,
+        }
+    }
+}
+
+impl std::fmt::Debug for Policy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Policy")
+            .field("franking", &self.franking)
+            .field("gate", &self.gate.is_some())
+            .field("max_broadcast_accounts", &self.max_broadcast_accounts)
+            .finish()
+    }
+}
+
+/// What kind of conversation a send belongs to (Prompt 4, D-0062), from what the server can see:
+/// the addressed accounts, the frame's flags and the directory snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lane {
+    /// Only the sender's own other devices (sync messages).
+    Sync,
+    /// One other account: a contact (its access key is in the send) or an open account.
+    Direct,
+    /// Several other accounts, each a contact or open: a broadcast list.
+    Broadcast(u32),
+    /// A shared body: a group or channel (Prompt 5 authorizes membership).
+    Group,
+    /// A message request to one closed account.
+    Request(AccountId),
+    /// A sealed send: the sealed endpoint checked the access keys.
+    Sealed,
 }
 
 /// Retry hint (milliseconds) for a send refused because the store is unavailable.
@@ -83,6 +133,12 @@ pub struct SendMetrics {
     pub routes_offline: Counter,
     /// Stores that failed (mailbox full or unavailable).
     pub mailbox_errors: Counter,
+    /// Message requests stored.
+    pub requests: Counter,
+    /// Message requests accepted and dropped (blocked, or requests refused).
+    pub requests_dropped: Counter,
+    /// Broadcast sends stored.
+    pub broadcasts: Counter,
     /// From the request read to the send durably stored, group commit included.
     pub store_seconds: ShardedHistogram,
 }
@@ -121,6 +177,13 @@ impl SendMetrics {
                 "Sends that failed in the mailbox",
                 &self.mailbox_errors,
             ),
+            ("requests", "Message requests stored", &self.requests),
+            (
+                "requests_dropped",
+                "Message requests dropped silently (blocked or refused)",
+                &self.requests_dropped,
+            ),
+            ("broadcasts", "Broadcast sends stored", &self.broadcasts),
         ] {
             m.register(&format!("{prefix}_{name}"), help, c.clone())?;
         }
@@ -195,6 +258,28 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
             m.sends_rejected.inc();
             return Err(status);
         }
+        let lane = match self.lane(sender, s) {
+            Ok(l) => l,
+            Err(status) => {
+                m.sends_rejected.inc();
+                return Err(status);
+            }
+        };
+        match self.admit(sender, lane, &mut s.payload).await {
+            // Dropped silently and nothing left (no sync transcript): answered as accepted,
+            // nothing stored.
+            Ok(false) if s.payload.is_empty() => {
+                return Ok(StoreOutcome {
+                    seqs: Vec::new(),
+                    replayed: false,
+                });
+            }
+            Ok(_) => {}
+            Err(status) => {
+                m.sends_rejected.inc();
+                return Err(status);
+            }
+        }
         if let Some(c) = s.hints.commitment {
             let Some(f) = &self.policy.franking else {
                 m.sends_rejected.inc();
@@ -265,6 +350,146 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
             }));
         }
         Ok(())
+    }
+
+    /// The send's lane (D-0062), from the directory snapshot alone: no store round trip, and no
+    /// allocation unless the send addresses several other accounts (a broadcast).
+    ///
+    /// # Errors
+    /// Access required (no key, a wrong one, or an account without a profile), an invalid
+    /// request, or too many accounts for a broadcast.
+    pub fn lane(&self, sender: &DeviceId, s: &SendFrame) -> Result<Lane, SendStatus> {
+        if matches!(s.payload, SendPayload::Shared { .. }) {
+            return Ok(Lane::Group);
+        }
+        if *sender == SEALED_SENDER {
+            return Ok(Lane::Sealed);
+        }
+        let dir = self.directory.load();
+        let from = dir.account_of(sender);
+        let (mut first, mut several) = (None, false);
+        for d in s.payload.devices() {
+            let a = dir.account_of(d);
+            if a == from {
+                continue;
+            }
+            match first {
+                None => first = a,
+                Some(f) if Some(f) != a => {
+                    several = true;
+                    break;
+                }
+                Some(_) => {}
+            }
+        }
+        let Some(first) = first else {
+            return Ok(Lane::Sync);
+        };
+        let h = &s.hints;
+        if !several {
+            let acc = dir.access(&first);
+            if acc.open {
+                return Ok(Lane::Direct);
+            }
+            if let Some(k) = h.access {
+                return if acc.key.is_some_and(|key| ct_eq(&key, &k)) {
+                    Ok(Lane::Direct)
+                } else {
+                    Err(reject(RejectReason::AccessRequired, 0))
+                };
+            }
+            if h.request {
+                if h.commitment.is_none() {
+                    return Err(reject(RejectReason::InvalidRequest, 0));
+                }
+                return Ok(Lane::Request(first));
+            }
+            return Err(reject(RejectReason::AccessRequired, 0));
+        }
+        // A broadcast: every other account a contact (one combined key) or open.
+        if h.request {
+            return Err(reject(RejectReason::InvalidRequest, 0));
+        }
+        let mut accounts: Vec<AccountId> = s
+            .payload
+            .devices()
+            .filter_map(|d| dir.account_of(d))
+            .filter(|a| Some(*a) != from)
+            .collect();
+        accounts.sort_unstable();
+        accounts.dedup();
+        let n = u32::try_from(accounts.len()).unwrap_or(u32::MAX);
+        if n > self.policy.max_broadcast_accounts {
+            return Err(reject(RejectReason::TooManyRecipients, 0));
+        }
+        let mut combined = [0u8; 16];
+        let mut closed = false;
+        for a in &accounts {
+            let acc = dir.access(a);
+            if acc.open {
+                continue;
+            }
+            let Some(key) = acc.key else {
+                return Err(reject(RejectReason::AccessRequired, 0));
+            };
+            closed = true;
+            combined.iter_mut().zip(key).for_each(|(c, k)| *c ^= k);
+        }
+        if closed && !h.access.is_some_and(|k| ct_eq(&combined, &k)) {
+            return Err(reject(RejectReason::AccessRequired, 0));
+        }
+        Ok(Lane::Broadcast(n))
+    }
+
+    /// The cluster-wide part of a request or broadcast ([`gate`]). `Ok(true)`: store as is.
+    /// `Ok(false)`: the recipient's devices were removed from `payload` (dropped silently).
+    async fn admit(
+        &self,
+        sender: &DeviceId,
+        lane: Lane,
+        payload: &mut SendPayload,
+    ) -> Result<bool, SendStatus> {
+        let (Lane::Request(_) | Lane::Broadcast(_)) = lane else {
+            return Ok(true);
+        };
+        let Some(gate) = &self.policy.gate else {
+            return Err(reject(RejectReason::Unavailable, RETRY_MS));
+        };
+        let (from, refused) = {
+            let dir = self.directory.load();
+            let from = dir
+                .account_of(sender)
+                .ok_or(reject(RejectReason::Unavailable, 0))?;
+            let refused = match lane {
+                Lane::Request(r) => dir.access(&r).requests_off,
+                _ => false,
+            };
+            (from, refused)
+        };
+        let admit = match lane {
+            Lane::Request(r) => gate.request(&from, &r, refused).await,
+            Lane::Broadcast(n) => gate.broadcast(&from, n).await,
+            _ => Admit::Allow,
+        };
+        match admit {
+            Admit::Allow => {
+                match lane {
+                    Lane::Request(_) => self.metrics.requests.inc(),
+                    _ => self.metrics.broadcasts.inc(),
+                }
+                Ok(true)
+            }
+            Admit::Drop => {
+                self.metrics.requests_dropped.inc();
+                if let (Lane::Request(r), SendPayload::PerDevice(rs)) = (lane, payload) {
+                    let dir = self.directory.load();
+                    rs.retain(|x| dir.account_of(&x.device) != Some(r));
+                }
+                Ok(false)
+            }
+            Admit::Limited(ms) => Err(reject(RejectReason::RateLimited, ms)),
+            Admit::Unavailable => Err(reject(RejectReason::Unavailable, RETRY_MS)),
+        }
     }
 
     /// Stamps every envelope for another account (a shared body once, for no one in particular);
@@ -358,6 +583,11 @@ fn reserved(payload: &SendPayload) -> bool {
         SendPayload::PerDevice(rs) => rs.iter().any(|r| is_reserved(&r.envelope)),
         SendPayload::Shared { body, .. } => is_reserved(body),
     }
+}
+
+/// Constant-time comparison of two access keys.
+fn ct_eq(a: &[u8; 16], b: &[u8; 16]) -> bool {
+    aws_lc_rs::constant_time::verify_slices_are_equal(a, b).is_ok()
 }
 
 fn now_ms() -> u64 {

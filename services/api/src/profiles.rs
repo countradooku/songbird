@@ -32,7 +32,7 @@ use crate::registration::{Registration, range_of};
 
 /// The "sender" a sealed send passes to the send path: no real device has this ID, so the
 /// device-list check leaves no device out on its account.
-pub const SEALED_SENDER: DeviceId = DeviceId::from_bytes([0; 16]);
+pub const SEALED_SENDER: DeviceId = songbird_send::SEALED_SENDER;
 
 /// Counters (aggregate only).
 #[derive(Debug, Clone, Default)]
@@ -424,6 +424,11 @@ impl Profiles {
         };
         if frame.mls.is_some() {
             return Outcome::Malformed("mls");
+        }
+        // The access keys are in the header; a sealed send is never a request (requests are
+        // identified, so they can be blocked and reported, D-0062).
+        if frame.hints.access.is_some() || frame.hints.request {
+            return Outcome::Malformed("hints");
         }
         let devices: Vec<DeviceId> = frame.payload.devices().copied().collect();
         let Ok(keys) = registry.access_keys(&devices).await else {

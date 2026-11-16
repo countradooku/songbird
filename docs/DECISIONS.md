@@ -102,6 +102,76 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0062 — Prompt 4, milestone 4: the contact gate, message requests, blocking, rate limits per conversation type, broadcast lists
+
+- Date: 2026-11-16
+- Status: accepted; built (report `P04-M4.md`); awaiting the owner's approval of the gate and the
+  three threat-model §1 rows
+- Decided by:
+  - owner: access key or request (D-0058 §3); tighten from any listed device, loosen from the
+    primary (D-0058 §4);
+  - agent: the design below.
+- Context: Prompt 4's server part: message requests the recipient controls, rate-limited; a
+  server-side drop of blocked identified senders with block lists stored as little as possible;
+  rate limits per conversation type; broadcast lists rate-limited as bulk.
+- Options considered:
+  - **A contact list on the server** was rejected: it is a social graph. The sender proves
+    contact by holding the recipient's access key, which only contacts hold (D-0054).
+  - **Checking access keys with a store query per send** was rejected (hot path). The directory
+    snapshot every node already holds (D-0036) gains each account's key, open flag and request
+    policy; profile and policy changes bump its version.
+  - **Blocks as account IDs** were rejected. They are keyed hashes of the pair, with a keyed
+    owner tag and a per-owner counter, and the full list syncs between the user's devices in
+    encrypted content.
+  - **Telling a blocked sender** was rejected (WhatsApp does not either). To keep the block
+    invisible:
+    - its requests are accepted and dropped;
+    - the budgets are spent before the block check;
+    - the timing difference is stated as an open risk.
+  - **Requests over HTTP only** were rejected: one gate behind a trait (`songbird_send::Gate`),
+    used by the WebSocket and `PUT /v1/messages` alike.
+- Decision:
+  - **Lanes** (PROTOCOL §5.10): sync, direct, broadcast, request, group, sealed, decided from the
+    snapshot. No allocation for 1:1 sends; access keys compared in constant time. Reason 10
+    ("access required") and 11 ("invalid request").
+  - **The gate** (`RegistryGate`):
+    - budgets per sender, per pair and per recipient for requests, and accounts per hour for
+      broadcasts. These use a cost-weighted GCRA in `valkey-hot` under keyed names and fail
+      closed;
+    - then the request policy and the block row in SurrealDB.
+    The keys derive from `[api.requests]` and `[delivery.requests] secret` (and the worker's
+    `requests_secret`).
+  - **Endpoints:** `PUT`/`DELETE /v1/blocks`, `GET`/`PUT /v1/account/requests`, with D-0058's
+    tighten/loosen rule.
+  - **Per-class rate limits:** group sends get their own budget within the per-device one (10 a
+    second, burst 40, on both transports). Requests and broadcasts are budgeted per account
+    across the cluster. Channels wait for Prompt 5.
+  - **GDPR:**
+    - the worker deletes an account's block rows by owner tag and verifies none are left;
+    - the export reports the policy and the block count;
+    - the policy flag goes with the account row.
+  - **Static development directories** treat every account as open, so the delivery invariants,
+    load and allocation tests are unchanged; a registry directory is closed by default.
+  - `SEALED_SENDER` moves into `songbird-send`; the sealed endpoint refuses `ACCESS`/`REQUEST`.
+- Evidence (Apple M5 Pro, macOS 27.2.1; compose stack under podman without Iggy):
+  - `crates/send`, 22 tests, among them every lane's rules, silent drops, floods (one to many,
+    many to one, one pair), a blocked sender seeing the same budgets, broadcasts (keys, size,
+    budget), groups and sealed sends unaffected, and no gate meaning unavailable;
+  - `blocks_live` (2): keyed rows; 1,020 racing adds never exceed 1,000; deletion by owner; the
+    policy and profiles bump the directory;
+  - `gate_p04` (2, live): every rule end to end over the WebSocket and HTTP, with
+    stamps verified, the linked device refused to loosen, and floods held cluster-wide;
+  - the earlier live tests updated to the contact flow (`registration`, `gate_m5`, `send_api`)
+    pass, and the non-live suite passes (555).
+- Consequences:
+  - Apps must publish a profile at registration and handle reasons 10 and 11.
+  - Blocking rotates the profile key (a client rule).
+  - Three threat-model §1 rows.
+  - `[api.requests]`, `[delivery.requests]` and the worker's `requests_secret` are required in
+    staging and production.
+  - The open risks (timing, sybil recipient budget, snapshot reloads, Welcomes and ephemeral
+    frames until Prompt 5) are in threat model §6.
+
 ## D-0061 — Prompt 4, milestone 3: franking stamps and disappearing envelopes; the `Send` frame's hints
 
 - Date: 2026-11-16

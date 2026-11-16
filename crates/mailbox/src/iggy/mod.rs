@@ -283,6 +283,8 @@ struct StoreJob {
     /// Idempotency tag and the fingerprint of the send's whole recipient set.
     tag: Option<([u8; 32], [u8; 16])>,
     mls: Option<MlsCommit>,
+    /// The send's deadline (ms), from the disappearing hint.
+    expires_ms: Option<u64>,
     local: LocalReq,
     remote: Vec<Remote>,
     reply: oneshot::Sender<PartResult>,
@@ -300,7 +302,7 @@ enum Job {
     Forget(Vec<DeviceId>, oneshot::Sender<bool>),
     /// Entries read by the compactor, to copy forward; `last` ends the pass.
     Relocated {
-        items: Vec<(DeviceId, u64, u64, Bytes)>,
+        items: Vec<(DeviceId, u64, u64, u64, Bytes)>,
         last: bool,
     },
 }
@@ -479,7 +481,7 @@ impl Shared {
             }
             Meta::Relocate { .. } => {
                 let plain = self.slot(s, i)?.ok_or(MailboxError::Unavailable)?;
-                sealed::decode_relocated(&plain)
+                sealed::decode_relocated(&plain, s.version())
                     .ok()
                     .and_then(|e| e.envelope)
                     .ok_or(MailboxError::Unavailable)
@@ -656,7 +658,8 @@ pub fn fuzz_record(data: &[u8]) {
     let src = Bytes::copy_from_slice(data);
     let _ = Sealed::parse(&src);
     let _ = sealed::decode_entry(data, false);
-    let _ = sealed::decode_relocated(data);
+    let _ = sealed::decode_relocated(data, sealed::VERSION);
+    let _ = sealed::decode_relocated(data, 4);
     let _ = sealed::decode_remote(data, 0);
     keys::fuzz_decode(data);
     wire::fuzz(data);
@@ -1039,6 +1042,7 @@ fn open_fact(
             (
                 Fact::Store {
                     at_ms: m.at_ms,
+                    expires_ms: m.expires_ms,
                     tag: m.tag,
                     mls: m.mls,
                     entries,
@@ -1051,8 +1055,14 @@ fn open_fact(
             let mut entries = Vec::new();
             for i in 0..n {
                 if let Some(plain) = s.slot(ring, p, i)? {
-                    let e = sealed::decode_relocated(&plain)?;
-                    entries.push((e.device, e.seq, e.at_ms.unwrap_or(0), s.first_leaf + i));
+                    let e = sealed::decode_relocated(&plain, s.version())?;
+                    entries.push((
+                        e.device,
+                        e.seq,
+                        e.at_ms.unwrap_or(0),
+                        e.expires_ms,
+                        s.first_leaf + i,
+                    ));
                 }
             }
             (Fact::Relocate { entries }, None)
@@ -1086,6 +1096,7 @@ fn fact_of(rec: &Record, first_leaf: u32) -> Fact {
         Record::Store {
             tag,
             at_ms,
+            expires_ms,
             mls,
             local,
             ..
@@ -1098,6 +1109,7 @@ fn fact_of(rec: &Record, first_leaf: u32) -> Fact {
                 .collect();
             Fact::Store {
                 at_ms: *at_ms,
+                expires_ms: *expires_ms,
                 tag: *tag,
                 mls: *mls,
                 entries,
@@ -1108,7 +1120,7 @@ fn fact_of(rec: &Record, first_leaf: u32) -> Fact {
             entries: items
                 .iter()
                 .zip(first_leaf..)
-                .map(|((d, s, at, _), leaf)| (*d, *s, *at, leaf))
+                .map(|((d, s, at, exp, _), leaf)| (*d, *s, *at, *exp, leaf))
                 .collect(),
         },
         other => fact_of_plain(other.clone()),
@@ -1791,6 +1803,7 @@ impl Writer {
         records.push(Record::Store {
             tag: job.tag,
             at_ms: now,
+            expires_ms: job.expires_ms,
             mls,
             local,
             remote: job.remote.clone(),
@@ -1825,11 +1838,15 @@ impl Writer {
     /// Starts a compaction pass (also from `expire_older_than` with an age): expired entries are
     /// acknowledged (written, then their leaves punctured); the compactor task reads the pending
     /// entries older than `relocate_after` off the write path and hands them back to be re-sealed
-    /// forward ([`Job::Relocated`]). Returns how many entries expired.
+    /// forward ([`Job::Relocated`]). Returns how many entries expired (too old, or past their
+    /// own deadline).
     async fn start_compaction(&mut self, age_ms: Option<u64>) -> u64 {
         let now = now_ms();
         let max_age = age_ms.unwrap_or_else(|| ms(MAX_ENVELOPE_AGE));
         let cutoff = now.saturating_sub(max_age);
+        // Entries past their own deadline go first, wherever they are in a device's queue
+        // (punctured, not acknowledged: their `seq` is skipped).
+        let dropped = self.shared.lock().drop_expired(now);
         let (expired, count) = {
             let st = self.shared.lock();
             let e = st.expired(cutoff);
@@ -1841,7 +1858,7 @@ impl Writer {
                     })
                 })
                 .sum();
-            (e, n)
+            (e, n + dropped)
         };
         if !expired.is_empty()
             && self
@@ -1849,7 +1866,7 @@ impl Writer {
                 .await
                 .is_none()
         {
-            return 0;
+            return dropped;
         }
         let mut moves = {
             let st = self.shared.lock();
@@ -1944,7 +1961,7 @@ impl Writer {
         }
     }
 
-    async fn relocate(&mut self, items: Vec<(DeviceId, u64, u64, Bytes)>) -> bool {
+    async fn relocate(&mut self, items: Vec<(DeviceId, u64, u64, u64, Bytes)>) -> bool {
         let n = n64(items.len());
         if self
             .write_records(vec![Record::Relocate(items)])
@@ -2075,7 +2092,7 @@ async fn compactor(shared: Arc<Shared>, moves: Vec<(DeviceId, Entry)>, writer: m
                 continue;
             };
             bytes += env.len() + 40;
-            items.push((*d, e.seq, e.at_ms, env));
+            items.push((*d, e.seq, e.at_ms, e.expires_ms, env));
             if bytes >= COMPACTION_RECORD_BYTES {
                 let full = std::mem::take(&mut items);
                 bytes = 0;
@@ -2114,14 +2131,15 @@ async fn redrive_with(shared: &Shared, parts: &Partitions, home: &mpsc::Sender<J
                     pending.push((slot, r));
                 }
             }
-            Ok((m.tag, pending))
+            Ok((m.tag, m.expires_ms, pending))
         });
         match opened {
-            Ok((tag, pending)) => {
+            Ok((tag, expires_ms, pending)) => {
                 for (slot, r) in pending {
                     let p = r.partition;
                     let job = wire::JobData {
                         tag,
+                        expires_ms,
                         mls: None,
                         local: LocalReq::from_remote(r),
                         remote: vec![],
@@ -2257,8 +2275,13 @@ async fn store_on(
         }
     }
     let mut seq_of: HashMap<DeviceId, u64> = HashMap::with_capacity(devices.len());
+    // One absolute deadline for every partition of the send.
+    let expires_ms = req
+        .expires_after
+        .map(|t| now_ms().saturating_add(u64::try_from(t.as_millis()).unwrap_or(u64::MAX)));
     let job = wire::JobData {
         tag,
+        expires_ms,
         mls: req.mls,
         local,
         remote: remote.clone(),
@@ -2276,6 +2299,7 @@ async fn store_on(
         let p = r.partition;
         let job = wire::JobData {
             tag,
+            expires_ms,
             mls: None,
             local: LocalReq::from_remote(r),
             remote: vec![],

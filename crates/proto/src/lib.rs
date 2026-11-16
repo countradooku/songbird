@@ -12,6 +12,8 @@
 //! - [`auth`]: the domain-separated transcript a device signs to authenticate.
 //! - [`system`]: server-signed system frames (notices such as "your device list changed"),
 //!   delivered as mailbox envelopes in a reserved format no user envelope may take.
+//! - [`envelope`]: the prefix reserved for what the server writes into envelopes, and the
+//!   franking stamp (Prompt 4).
 //! - [`devices`]: the signed device list and the link request (Prompt 3).
 //! - [`profile`]: encrypted profiles and sender certificates (Prompt 3).
 //! - [`keys`]: the key directory's upload and fetch formats (PQXDH prekeys, Prompt 3).
@@ -26,6 +28,7 @@ pub mod auth;
 pub mod close;
 pub mod control;
 pub mod devices;
+pub mod envelope;
 pub mod frame;
 pub mod keys;
 pub mod profile;

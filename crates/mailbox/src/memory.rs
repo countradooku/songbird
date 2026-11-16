@@ -24,9 +24,9 @@ use crate::{
 struct DeviceBox {
     /// Last `seq` allocated; never decreases, so a `seq` is never reused.
     last_seq: u64,
-    /// Unacknowledged envelopes, ascending by `seq` and by store time. Shared bodies are the
-    /// same `Bytes` for every device (one allocation).
-    entries: VecDeque<(u64, Instant, Bytes)>,
+    /// Unacknowledged envelopes, ascending by `seq` and by store time, with their own deadline
+    /// if the send had one. Shared bodies are the same `Bytes` for every device (one allocation).
+    entries: VecDeque<(u64, Instant, Option<Instant>, Bytes)>,
 }
 
 /// An idempotency record: when, and which (device, seq) the send stored.
@@ -154,6 +154,7 @@ impl MemoryMailbox {
                 return Err(MailboxError::Full);
             }
         }
+        let deadline = req.expires_after.and_then(|t| now.checked_add(t));
         let mut seqs = Vec::with_capacity(devices.len());
         for (i, d) in devices.iter().enumerate() {
             let env = req
@@ -163,7 +164,7 @@ impl MemoryMailbox {
                 .ok_or(MailboxError::Unavailable)?;
             let b = inner.boxes.entry(**d).or_default();
             b.last_seq = b.last_seq.checked_add(1).ok_or(MailboxError::Unavailable)?;
-            b.entries.push_back((b.last_seq, now, env));
+            b.entries.push_back((b.last_seq, now, deadline, env));
             seqs.push(b.last_seq);
         }
         if let Some(m) = req.mls {
@@ -187,14 +188,12 @@ impl MemoryMailbox {
         let mut inner = self.lock();
         let mut removed = 0u64;
         for b in inner.boxes.values_mut() {
-            while b
-                .entries
-                .front()
-                .is_some_and(|(_, at, _)| now.saturating_duration_since(*at) > age)
-            {
-                b.entries.pop_front();
-                removed += 1;
-            }
+            let before = b.entries.len();
+            // Too old (a prefix), or past the send's own deadline (anywhere).
+            b.entries.retain(|(_, at, deadline, _)| {
+                now.saturating_duration_since(*at) <= age && deadline.is_none_or(|d| d > now)
+            });
+            removed += u64::try_from(before - b.entries.len()).unwrap_or(u64::MAX);
         }
         inner
             .idempotency
@@ -219,12 +218,14 @@ impl Mailbox for MemoryMailbox {
         limit: usize,
     ) -> impl Future<Output = Result<Vec<Stored>, MailboxError>> + Send {
         let inner = self.lock();
+        let now = Instant::now();
         let out = inner.boxes.get(device).map_or_else(Vec::new, |b| {
-            let start = b.entries.partition_point(|(s, _, _)| *s <= after_seq);
+            let start = b.entries.partition_point(|(s, _, _, _)| *s <= after_seq);
             b.entries
                 .range(start..)
+                .filter(|(_, _, deadline, _)| deadline.is_none_or(|d| d > now))
                 .take(limit)
-                .map(|(seq, _, e)| Stored {
+                .map(|(seq, _, _, e)| Stored {
                     seq: *seq,
                     envelope: e.clone(),
                 })
@@ -240,7 +241,11 @@ impl Mailbox for MemoryMailbox {
     ) -> impl Future<Output = Result<(), MailboxError>> + Send {
         let mut inner = self.lock();
         if let Some(b) = inner.boxes.get_mut(device) {
-            while b.entries.front().is_some_and(|(s, _, _)| *s <= up_to_seq) {
+            while b
+                .entries
+                .front()
+                .is_some_and(|(s, _, _, _)| *s <= up_to_seq)
+            {
                 b.entries.pop_front();
             }
         }
@@ -284,7 +289,7 @@ impl Mailbox for MemoryMailbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MlsCommit, NewEnvelope, Payload};
+    use crate::{MAX_ENVELOPE_AGE, MlsCommit, NewEnvelope, Payload};
     use proptest::prelude::*;
 
     fn d(b: u8) -> DeviceId {
@@ -300,6 +305,7 @@ mod tests {
 
     fn per(items: Vec<NewEnvelope>) -> StoreRequest {
         StoreRequest {
+            expires_after: None,
             idempotency_key: None,
             mls: None,
             payload: Payload::PerDevice(items),
@@ -308,6 +314,7 @@ mod tests {
 
     fn keyed(k: u8, items: Vec<NewEnvelope>) -> StoreRequest {
         StoreRequest {
+            expires_after: None,
             idempotency_key: Some([k; 16]),
             ..per(items)
         }
@@ -382,6 +389,7 @@ mod tests {
         let m = MemoryMailbox::new(10, 1);
         let body = Bytes::from(vec![9u8; 1000]);
         let req = StoreRequest {
+            expires_after: None,
             idempotency_key: None,
             mls: None,
             payload: Payload::Shared {
@@ -400,6 +408,7 @@ mod tests {
     async fn mls_commits_are_ordered_by_epoch() {
         let m = MemoryMailbox::new(10, 1);
         let commit = |epoch| StoreRequest {
+            expires_after: None,
             idempotency_key: None,
             mls: Some(MlsCommit {
                 group: [5; 16],
@@ -426,6 +435,33 @@ mod tests {
             1
         );
         assert_eq!(m.pending(&d(1)), 1);
+    }
+
+    #[tokio::test]
+    async fn an_envelope_past_its_deadline_is_skipped_then_deleted() {
+        let m = MemoryMailbox::new(100, 1);
+        let dev = d(1);
+        m.store(per(vec![env(dev, "a")])).await.unwrap();
+        let mut short = per(vec![env(dev, "gone")]);
+        short.expires_after = Some(Duration::from_millis(30));
+        m.store(short).await.unwrap();
+        let mut long = per(vec![env(dev, "c")]);
+        long.expires_after = Some(Duration::from_hours(1));
+        m.store(long).await.unwrap();
+        assert_eq!(m.fetch_after(&dev, 0, 10).await.unwrap().len(), 3);
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        // Never delivered after its deadline: seq 2 is skipped.
+        let got: Vec<u64> = m
+            .fetch_after(&dev, 0, 10)
+            .await
+            .unwrap()
+            .iter()
+            .map(|s| s.seq)
+            .collect();
+        assert_eq!(got, vec![1, 3]);
+        // The sweep deletes it although the device never fetched it; the others stay.
+        assert_eq!(m.expire_older_than(MAX_ENVELOPE_AGE).await.unwrap(), 1);
+        assert_eq!(m.pending(&dev), 2);
     }
 
     proptest! {

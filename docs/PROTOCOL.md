@@ -21,7 +21,7 @@ Implemented in `crates/proto` (shared by server and clients); decisions D-0019, 
 
 | Type | Direction | Frame | Body |
 | --- | --- | --- | --- |
-| `0x01` | C→S | `Send` | `req_id u32`, `idempotency_key [16]`, `flags u8`, [if flag `0x01`: `group [16]`, `epoch u64`], `count u16` (≥ 1), then per device (no flag `0x02`) `count ×` (`device_id [16]`, `len u32` (≥ 1), `envelope [len]`), or shared (flag `0x02`) `count × device_id [16]`, `len u32` (≥ 1), `body [len]` |
+| `0x01` | C→S | `Send` | `req_id u32`, `idempotency_key [16]`, `flags u8`, [if flag `0x01`: `group [16]`, `epoch u64`], [if `0x04`: `access_key [16]`], [if `0x10`: `commitment [32]`], [if `0x20`: `expire_after_s u32`], `count u16` (≥ 1), then per device (no flag `0x02`) `count ×` (`device_id [16]`, `len u32` (≥ 1), `envelope [len]`), or shared (flag `0x02`) `count × device_id [16]`, `len u32` (≥ 1), `body [len]` |
 | `0x02` | C→S | `Ack` | `up_to_seq u64` |
 | `0x03` | C→S | `Ephemeral` | `to [16]`, `payload` (≥ 1 byte) |
 | `0x10` | C→S | `Auth` | protobuf `Auth` (§2) |
@@ -32,7 +32,17 @@ Implemented in `crates/proto` (shared by server and clients); decisions D-0019, 
 | `0x91` | S→C | `AuthOk` | protobuf `AuthOk` |
 | `0x92` | S→C | `Error` | protobuf `Error` (`code u32`, `retry_after_ms u32`), sent before a close when needed |
 
-`Send` flags: `0x01` MLS commit, `0x02` shared body; other bits must be zero.
+`Send` flags (other bits must be zero; each optional block appears only with its flag, in the order
+above, so every frame has one encoding):
+
+| Flag | Meaning | Rules |
+| --- | --- | --- |
+| `0x01` | MLS commit (§3.1) | |
+| `0x02` | One shared body for every device | |
+| `0x04` | `ACCESS`: the XOR of the access keys of every addressed account that is not open (§5.10) | Not with `0x08` or `0x02` |
+| `0x08` | `REQUEST`: a message request (§5.10) | Not with `0x04`, `0x02` or `0x01` |
+| `0x10` | `FRANKED`: the sender's franking commitment (§5.3), stamped by the server (§5.13) | |
+| `0x20` | `EXPIRES`: the disappearing hint, 1 s to 30 days (§5.13) | Zero or more than 30 days refused |
 
 Rejection reasons: 1 rate limited, 2 too large, 3 too many recipients, 4 unknown recipient
 (unused since milestone 2: unknown devices are reported in a device mismatch), 5 duplicate
@@ -40,7 +50,10 @@ recipient, 6 store unavailable, 7 idempotency key already used for other recipie
 when the earlier send shares a mailbox partition with this one; a reuse that cannot be detected is
 stored as a new send, never dropped), 8 stale
 MLS epoch (the group moved on; process the winning commit, then retry from the new epoch), 9 an
-envelope begins with the prefix reserved for server-signed system frames (§3.8; never retryable).
+envelope begins with `F5 53 42`, the prefix reserved for what the server writes (system frames
+§3.9, franking stamps §5.13; never retryable), 10 access required (a send to another account with
+neither its access key, nor the right one, nor `REQUEST`: fetch the profile key again or send a
+request, §5.10), 11 an invalid request (not franked, or for more than one other account, §5.10).
 1 and 6 are retryable after `retry_after_ms`, with the
 same idempotency key. Unknown reason codes are kept (forward compatibility).
 
@@ -1016,7 +1029,47 @@ in the protocol prevents them, and the server gains nothing for them:
 
 ### 5.13 Franking stamps and disappearing envelopes (server)
 
-Filled in by M3 (D-0061).
+Decision D-0061 (M3).
+
+**Franking stamps.** For a `FRANKED` send, the server stores every envelope addressed to another
+account behind a stamp; the sender's own devices get their envelopes as sent:
+
+```
+magic F5 53 42 46 52 4B 00 01 | version u8 (1) | key_id [8] | commitment [32]
+  | stamped_at_ms u64 | tag [32] | the client's envelope
+tag = HMAC-SHA256(franking key, "songbird.v1/franking-stamp\0" || key_id || commitment
+                  || stamped_at_ms || sender account [16] || recipient account [16])
+```
+
+- The sender account is all zeros for a sealed send (the server does not know it). The recipient
+  is all zeros for a shared body, which is stamped once.
+- `key_id` names the franking key: `HKDF-SHA256(salt "songbird.v1", secret, info "franking")`,
+  identified by the first 8 bytes of `SHA-256("songbird.v1/franking-key-id\0" || key)`. Every
+  node that sends holds the current key (secrets store); `api` also keeps earlier keys for
+  reports.
+- The tag is a MAC only the server can check. It names neither account in the clear; whoever
+  holds the key could test candidate senders for an envelope still undelivered (threat model
+  §1).
+- A recipient app splits off the stamp (`songbird_proto::envelope::Stamp::split`), decrypts, and
+  **drops the message unless the stamped commitment opens to the content** (§5.3). It keeps the
+  stamp with the message: a report needs it (§5.14). `stamped_at_ms` is the server's time, used
+  for the edit and delete windows (§5.4).
+- User envelopes beginning with `F5 53 42` are refused (reason 9), so no client can forge a stamp
+  or a system frame.
+
+**Disappearing envelopes.** An `EXPIRES` send gives each of its envelopes a deadline,
+`expire_after_s` after the store:
+
+- every mailbox (in memory, SurrealDB, Iggy) **never delivers it after the deadline**, and its
+  `seq` is skipped, as §3.3 allows for expired envelopes;
+- the mailbox **deletes it at the next sweep** even if no device ever connected. In Iggy its key is
+  punctured, so it cannot be read again, nor come back on a restart;
+- apps set it to the chat's disappearing timer for messages in a chat with one, and for view-once
+  media. Nothing about such an envelope is kept beyond delivery: the server keeps no copy of any
+  delivered envelope, and backups never hold the mailbox (D-0040). View-once attachments are
+  deleted after one fetch by Prompt 6's upload grants;
+- a resend after a restore (§3.6) carries the time left, and apps do not resend what has already
+  disappeared.
 
 ### 5.14 Reporting
 
@@ -1155,3 +1208,16 @@ produce. `tools/content-vectors` checks with an independent compiler (protox) th
 - `plaintext_franked`: that content under franking key 32 × `42`, padded to 160 bytes; its
   commitment is `4cc19e38508a8cdbcbac905629cee83e217741cf3cc0878bd00fee0bb9fb2c50`
   (recomputed with Python's `hmac`).
+
+Send frames with hints (Prompt 4, D-0061), from `crates/proto/tests/vectors.rs`:
+
+| Frame | Encoding |
+| --- | --- |
+| A franked message request that disappears after an hour: `Send{req_id 9, key 11…11, REQUEST, commitment 55…55, expires 3600, to 22…22 "abc"}` | `01 00000009 11111111111111111111111111111111 38 5555555555555555555555555555555555555555555555555555555555555555 00000e10 0001 22222222222222222222222222222222 00000003 616263` |
+| A contact's send: `Send{req_id 10, key 11…11, ACCESS 66…66, to 22…22 "z"}` | `01 0000000a 11111111111111111111111111111111 04 66666666666666666666666666666666 0001 22222222222222222222222222222222 00000001 7a` |
+
+Franking stamp (D-0061), from `crates/send/src/franking.rs` `stamp_known_answer`, recomputed
+independently with Python's `hmac` and `hashlib`: secret 32 × `46`, commitment 32 × `01`, time
+1,800,000,000,000 ms, sender 16 × `0a`, recipient 16 × `0b`. The key ID is
+`3df2c8855889e63b` and the tag is
+`114c33cc2b8f1a5e0ad8943b34ebb738c10f3397504e858b44b8e06e45a8b3b6`.

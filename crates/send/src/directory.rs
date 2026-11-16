@@ -223,6 +223,12 @@ impl Directory {
         self.devices.contains_key(device)
     }
 
+    /// The account `device` belongs to.
+    #[must_use]
+    pub fn account_of(&self, device: &DeviceId) -> Option<AccountId> {
+        self.devices.get(device).map(|d| d.account)
+    }
+
     /// Whether `signature` over `msg` verifies under `device`'s key. An unknown device and a bad
     /// signature are indistinguishable to the caller (no device-existence oracle).
     #[must_use]

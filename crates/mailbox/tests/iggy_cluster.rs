@@ -183,6 +183,7 @@ async fn sender(e: &Env, name: &str) -> IggySender {
 
 fn to(d: DeviceId, body: &'static str) -> StoreRequest {
     StoreRequest {
+        expires_after: None,
         idempotency_key: None,
         mls: None,
         payload: Payload::PerDevice(vec![NewEnvelope {
@@ -263,6 +264,7 @@ async fn a_node_reaches_partitions_owned_by_another() {
     // A send across devices on several partitions, from B: one seq each.
     let out = b
         .store(StoreRequest {
+            expires_after: None,
             idempotency_key: Some([3; 16]),
             mls: None,
             payload: Payload::PerDevice(
@@ -566,6 +568,7 @@ async fn a_send_only_node_stores_on_the_owners_and_may_do_nothing_else() {
     // A send across partitions, then the same send through a delivery node: the sender computes
     // the same idempotency tag, so the retry is a replay (the WebSocket after HTTP).
     let multi = || StoreRequest {
+        expires_after: None,
         idempotency_key: Some([5; 16]),
         mls: None,
         payload: Payload::PerDevice(

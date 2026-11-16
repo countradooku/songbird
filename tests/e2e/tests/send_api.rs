@@ -169,6 +169,7 @@ async fn stack(limits: Limits, sends_per_sec: u32, send_burst: u32) -> Option<St
             router: Arc::clone(&router),
             push,
             metrics: metrics.send.clone(),
+            policy: songbird_send::Policy::default(),
         }),
         limits,
         sends_per_sec,

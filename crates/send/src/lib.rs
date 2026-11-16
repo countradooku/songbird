@@ -17,7 +17,11 @@
 //! - **Routing never blocks on a recipient**, and a device with no session anywhere gets a
 //!   debounced push wake-up ([`Pusher`]); the message waits in the mailbox either way.
 //! - **System frames are never user messages** ([`system`]): user envelopes that begin with the
-//!   reserved system-frame prefix are refused, and server notices are signed.
+//!   prefix reserved for what the server writes are refused, and server notices are signed.
+//! - **Franking** ([`franking`], Prompt 4): a franked send's envelopes for other accounts are
+//!   stored behind a stamp the server MACs, so a recipient can later report them.
+//! - **The disappearing hint** (Prompt 4): a send's deadline goes to the mailbox, which never
+//!   delivers its envelopes after it and deletes them then.
 //!
 //! The hot path (one delivery core) allocates nothing here that it did not allocate before the
 //! extraction: [`SendPath`] is a set of borrows built per send, the recipient scratch list is the
@@ -27,10 +31,11 @@
 
 pub mod config;
 pub mod directory;
+pub mod franking;
 pub mod push;
 pub mod system;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use songbird_mailbox::{
@@ -45,7 +50,17 @@ use songbird_types::DeviceId;
 
 pub use config::LimitsConfig;
 pub use directory::{Directory, LiveDirectory, Mismatch};
+pub use franking::{Franker, Frankers};
 pub use push::{PushMetrics, Pusher};
+
+/// What the send path enforces beyond limits and the device list (Prompt 4). One per service,
+/// borrowed by every send.
+#[derive(Debug, Default)]
+pub struct Policy {
+    /// Stamps franked sends. Without it a franked send is refused as unavailable (a deployment
+    /// must configure it; configuration validation requires it outside development).
+    pub franking: Option<Franker>,
+}
 
 /// Retry hint (milliseconds) for a send refused because the store is unavailable.
 pub const RETRY_MS: u32 = 1_000;
@@ -129,6 +144,8 @@ pub struct SendPath<'a, M, R> {
     pub push: &'a Pusher,
     /// Counters.
     pub metrics: &'a SendMetrics,
+    /// Franking and (M4) the contact gate.
+    pub policy: &'a Policy,
 }
 
 impl<M, R> std::fmt::Debug for SendPath<'_, M, R> {
@@ -157,6 +174,9 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
     /// caller acknowledges it, then calls [`route`](Self::route) with the frame's payload and the
     /// returned `seq`s. `Err` is the status to answer; nothing was stored.
     ///
+    /// A franked send's payload is replaced, in `s`, by the stamped envelopes that were stored, so
+    /// the caller routes exactly what the mailbox holds.
+    ///
     /// `received` is when the request was read (the store latency metric starts there).
     /// `scratch` is the caller's reusable recipient list (no allocation per send).
     ///
@@ -166,7 +186,7 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
     pub async fn store(
         &self,
         sender: &DeviceId,
-        s: &SendFrame,
+        s: &mut SendFrame,
         received: Instant,
         scratch: &mut Vec<DeviceId>,
     ) -> Result<StoreOutcome, SendStatus> {
@@ -174,6 +194,13 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
         if let Err(status) = self.check(sender, &s.payload, scratch) {
             m.sends_rejected.inc();
             return Err(status);
+        }
+        if let Some(c) = s.hints.commitment {
+            let Some(f) = &self.policy.franking else {
+                m.sends_rejected.inc();
+                return Err(reject(RejectReason::Unavailable, RETRY_MS));
+            };
+            self.stamp(f, sender, &c, &mut s.payload);
         }
         let req = store_request(s);
         let recipients = req.payload.len();
@@ -240,6 +267,39 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
         Ok(())
     }
 
+    /// Stamps every envelope for another account (a shared body once, for no one in particular);
+    /// the sender's own devices get their envelopes as sent. The sender is all zeros for a sealed
+    /// send (no device of it is in the directory). One allocation per stamped envelope.
+    fn stamp(
+        &self,
+        f: &Franker,
+        sender: &DeviceId,
+        commitment: &[u8; 32],
+        payload: &mut SendPayload,
+    ) {
+        let dir = self.directory.load();
+        let from = dir.account_of(sender);
+        let sender_account = from.map_or([0; 16], |a| *a.as_bytes());
+        let now = now_ms();
+        match payload {
+            SendPayload::PerDevice(rs) => {
+                for r in rs.iter_mut() {
+                    let to = dir.account_of(&r.device);
+                    if to.is_none() || to == from {
+                        continue;
+                    }
+                    let recipient = to.map_or([0; 16], |a| *a.as_bytes());
+                    let st = f.stamp(commitment, now, &sender_account, &recipient);
+                    r.envelope = st.prepend(&r.envelope);
+                }
+            }
+            SendPayload::Shared { body, .. } => {
+                let st = f.stamp(commitment, now, &sender_account, &[0; 16]);
+                *body = st.prepend(body);
+            }
+        }
+    }
+
     /// Routes a stored send to its recipients' sessions, wherever they are; a device with no
     /// session gets a push wake-up (debounced, never blocking the caller).
     pub async fn route(&self, payload: SendPayload, seqs: Vec<u64>) {
@@ -276,11 +336,11 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
     pub async fn send(
         &self,
         sender: &DeviceId,
-        s: SendFrame,
+        mut s: SendFrame,
         received: Instant,
         scratch: &mut Vec<DeviceId>,
     ) -> SendStatus {
-        match self.store(sender, &s, received, scratch).await {
+        match self.store(sender, &mut s, received, scratch).await {
             Ok(outcome) => {
                 self.route(s.payload, outcome.seqs).await;
                 SendStatus::Accepted
@@ -290,14 +350,20 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
     }
 }
 
-/// Whether any envelope begins with the reserved system-frame prefix.
+/// Whether any envelope begins with the prefix reserved for what the server writes (system
+/// frames, franking stamps).
 fn reserved(payload: &SendPayload) -> bool {
+    use songbird_proto::envelope::is_reserved;
     match payload {
-        SendPayload::PerDevice(rs) => rs
-            .iter()
-            .any(|r| songbird_proto::system::is_system(&r.envelope)),
-        SendPayload::Shared { body, .. } => songbird_proto::system::is_system(body),
+        SendPayload::PerDevice(rs) => rs.iter().any(|r| is_reserved(&r.envelope)),
+        SendPayload::Shared { body, .. } => is_reserved(body),
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// The mailbox request for a decoded `Send` (payload bytes are shared, not copied).
@@ -318,6 +384,10 @@ pub fn store_request(s: &SendFrame) -> StoreRequest {
         },
     };
     StoreRequest {
+        expires_after: s
+            .hints
+            .expire_after_s
+            .map(|t| Duration::from_secs(u64::from(t))),
         idempotency_key: Some(s.idempotency_key),
         mls: s.mls.map(|c| MlsCommit {
             group: c.group,

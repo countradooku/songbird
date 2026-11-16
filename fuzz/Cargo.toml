@@ -150,3 +150,10 @@ path = "fuzz_targets/content.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "franking"
+path = "fuzz_targets/franking.rs"
+test = false
+doc = false
+bench = false

@@ -57,6 +57,11 @@ impl Validate for ApiConfig {
             );
             if let Some(s) = &api.send {
                 v.check(
+                    s.franking_key.is_some(),
+                    "api.send.franking_key",
+                    "is required in staging and production (franked sends, reports)",
+                );
+                v.check(
                     s.valkey.tls(),
                     "api.send.valkey.tls_ca",
                     "is required in staging and production",
@@ -481,6 +486,13 @@ pub struct SendSettings {
     /// At most one push job per device per this window, milliseconds.
     #[serde(default = "default_push_debounce_ms")]
     pub push_debounce_ms: u64,
+    /// The delivery nodes' `franking_key` (64 hex characters; Prompt 4, D-0061): franked sends
+    /// over HTTP are stamped with it, and reports are verified against it.
+    #[serde(default)]
+    pub franking_key: Option<SecretRef>,
+    /// Earlier franking keys, still accepted when verifying reports (rotation).
+    #[serde(default)]
+    pub previous_franking_keys: Vec<SecretRef>,
 }
 
 const fn default_sends_per_sec() -> u32 {

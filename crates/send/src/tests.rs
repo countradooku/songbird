@@ -28,6 +28,7 @@ struct Fixture {
     router: LocalRouter,
     push: Pusher,
     metrics: SendMetrics,
+    policy: Policy,
 }
 
 impl Fixture {
@@ -45,6 +46,9 @@ impl Fixture {
             router: LocalRouter::new(),
             push: Pusher::disabled(),
             metrics: SendMetrics::default(),
+            policy: Policy {
+                franking: Some(Franker::from_secret(&[0x46; 32]).unwrap()),
+            },
         }
     }
 
@@ -55,6 +59,7 @@ impl Fixture {
             router: &self.router,
             push: &self.push,
             metrics: &self.metrics,
+            policy: &self.policy,
         }
     }
 }
@@ -171,6 +176,7 @@ async fn user_envelopes_in_the_system_frame_format_are_refused() {
     assert_eq!(f.mailbox.count_pending(&dev(2)).await.unwrap(), 0);
     // Shared bodies too.
     let shared = SendFrame {
+        hints: songbird_proto::frame::SendHints::default(),
         req_id: 1,
         idempotency_key: [4; 16],
         mls: None,
@@ -265,5 +271,167 @@ async fn system_notices_are_signed_per_device_stored_once_and_verify() {
             )
             .await
             .is_err()
+    );
+}
+
+/// Alice has two devices (1 and 4), Bob two (2 and 3).
+fn two_device_fixture() -> Fixture {
+    let alice = AccountId::from_bytes([0xA; 16]);
+    let bob = AccountId::from_bytes([0xB; 16]);
+    Fixture {
+        directory: Directory::from_accounts([
+            (dev(1), [0; 32], alice),
+            (dev(4), [0; 32], alice),
+            (dev(2), [0; 32], bob),
+            (dev(3), [0; 32], bob),
+        ])
+        .into(),
+        ..Fixture::new()
+    }
+}
+
+fn franked(devices: &[DeviceId], commitment: [u8; 32]) -> SendFrame {
+    let mut s = to(devices, "ciphertext");
+    s.hints.commitment = Some(commitment);
+    s
+}
+
+#[tokio::test]
+async fn franked_envelopes_for_other_accounts_are_stamped_and_own_devices_are_not() {
+    use songbird_proto::envelope::Stamp;
+    let f = two_device_fixture();
+    let st = f
+        .path()
+        .send(
+            &dev(1),
+            franked(&[dev(2), dev(3), dev(4)], [7; 32]),
+            Instant::now(),
+            &mut Vec::new(),
+        )
+        .await;
+    assert_eq!(st, SendStatus::Accepted);
+    let franker = f.policy.franking.as_ref().unwrap();
+    for d in [dev(2), dev(3)] {
+        let got = f.mailbox.fetch_after(&d, 0, 10).await.unwrap();
+        let (stamp, env) = Stamp::split(&got[0].envelope).unwrap();
+        assert_eq!(env, b"ciphertext");
+        assert_eq!(stamp.commitment, [7; 32]);
+        // Bound to Alice as sender and Bob as recipient, nobody else.
+        assert!(franker.verify(&stamp, &[0xA; 16], &[0xB; 16]));
+        assert!(!franker.verify(&stamp, &[0xA; 16], &[0xA; 16]));
+        assert!(!franker.verify(&stamp, &[0; 16], &[0xB; 16]));
+    }
+    // Alice's own other device gets the envelope as sent (a sync transcript is not franked).
+    let own = f.mailbox.fetch_after(&dev(4), 0, 10).await.unwrap();
+    assert_eq!(&own[0].envelope[..], b"ciphertext");
+
+    // A shared body is stamped once, for no recipient in particular.
+    let mut shared = franked(&[dev(2)], [8; 32]);
+    shared.idempotency_key = [9; 16];
+    shared.payload = SendPayload::Shared {
+        devices: vec![dev(2), dev(3), dev(4)],
+        body: Bytes::from_static(b"group"),
+    };
+    assert_eq!(
+        f.path()
+            .send(&dev(1), shared, Instant::now(), &mut Vec::new())
+            .await,
+        SendStatus::Accepted
+    );
+    let got = f.mailbox.fetch_after(&dev(4), 1, 10).await.unwrap();
+    let (stamp, env) = Stamp::split(&got[0].envelope).unwrap();
+    assert_eq!(env, b"group");
+    assert!(franker.verify(&stamp, &[0xA; 16], &[0; 16]));
+}
+
+#[tokio::test]
+async fn a_sealed_franked_send_is_stamped_without_a_sender() {
+    use songbird_proto::envelope::Stamp;
+    let f = two_device_fixture();
+    // No device of the sender is known (the sealed endpoint's sentinel).
+    let st = f
+        .path()
+        .send(
+            &dev(0xEE),
+            franked(&[dev(2), dev(3)], [7; 32]),
+            Instant::now(),
+            &mut Vec::new(),
+        )
+        .await;
+    assert_eq!(st, SendStatus::Accepted);
+    let got = f.mailbox.fetch_after(&dev(2), 0, 10).await.unwrap();
+    let (stamp, _) = Stamp::split(&got[0].envelope).unwrap();
+    assert!(
+        f.policy
+            .franking
+            .as_ref()
+            .unwrap()
+            .verify(&stamp, &[0; 16], &[0xB; 16])
+    );
+}
+
+#[tokio::test]
+async fn franking_without_a_key_is_refused_and_forged_stamps_are_reserved() {
+    let mut f = two_device_fixture();
+    f.policy.franking = None;
+    let st = f
+        .path()
+        .send(
+            &dev(1),
+            franked(&[dev(2), dev(3)], [7; 32]),
+            Instant::now(),
+            &mut Vec::new(),
+        )
+        .await;
+    assert!(matches!(
+        st,
+        SendStatus::Rejected {
+            reason: RejectReason::Unavailable,
+            ..
+        }
+    ));
+    // A user envelope that looks like a stamp (or anything else the server writes) is refused.
+    let mut forged = songbird_proto::envelope::FRANKED_MAGIC.to_vec();
+    forged.extend_from_slice(&[0; 100]);
+    for env in [forged, b"\xF5SBanything".to_vec()] {
+        let st = f
+            .path()
+            .send(
+                &dev(1),
+                to(&[dev(2), dev(3)], Bytes::from(env)),
+                Instant::now(),
+                &mut Vec::new(),
+            )
+            .await;
+        assert_eq!(
+            st,
+            SendStatus::Rejected {
+                reason: RejectReason::ReservedEnvelope,
+                retry_after_ms: 0
+            }
+        );
+    }
+    assert_eq!(f.mailbox.count_pending(&dev(2)).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn the_disappearing_hint_reaches_the_mailbox() {
+    let f = two_device_fixture();
+    let mut s = to(&[dev(2), dev(3)], "soon gone");
+    s.hints.expire_after_s = Some(1);
+    assert_eq!(
+        f.path()
+            .send(&dev(1), s, Instant::now(), &mut Vec::new())
+            .await,
+        SendStatus::Accepted
+    );
+    assert_eq!(
+        f.mailbox.fetch_after(&dev(2), 0, 10).await.unwrap().len(),
+        1
+    );
+    tokio::time::sleep(Duration::from_millis(1_050)).await;
+    assert_eq!(
+        f.mailbox.fetch_after(&dev(2), 0, 10).await.unwrap().len(),
+        0
     );
 }

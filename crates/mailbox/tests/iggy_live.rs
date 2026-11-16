@@ -79,6 +79,7 @@ fn devices(n: usize) -> Vec<DeviceId> {
 
 fn per(items: &[(DeviceId, &'static str)]) -> StoreRequest {
     StoreRequest {
+        expires_after: None,
         idempotency_key: None,
         mls: None,
         payload: Payload::PerDevice(
@@ -171,6 +172,7 @@ async fn shared_body_is_stored_once_per_partition() {
     let ds = devices(1000);
     let body = Bytes::from(vec![0x5a; 4096]);
     let req = StoreRequest {
+        expires_after: None,
         idempotency_key: Some([3; 16]),
         mls: None,
         payload: Payload::Shared {
@@ -369,6 +371,72 @@ async fn expiry_drops_old_entries() {
     assert_eq!(m.store(per(&[(ds[0], "z")])).await.unwrap().seqs, vec![2]);
 }
 
+/// The disappearing hint (D-0061): an envelope past its deadline is never fetched, is dropped by
+/// the next compaction although no device fetched it (its leaf punctured, its `seq` skipped),
+/// and stays gone after a restart; relocated entries keep their deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_disappearing_hint_skips_drops_and_survives_a_restart() {
+    let Some(mut cfg) = config("disappearing") else {
+        return;
+    };
+    cfg.relocate_after = Duration::ZERO;
+    let m = IggyMailbox::connect(cfg.clone()).await.unwrap();
+    let ds = devices(4);
+    let all: Vec<(DeviceId, &'static str)> = ds.iter().map(|d| (*d, "keep")).collect();
+    m.store(per(&all)).await.unwrap();
+    let mut short = per(&ds.iter().map(|d| (*d, "gone")).collect::<Vec<_>>());
+    short.expires_after = Some(Duration::from_secs(1));
+    m.store(short).await.unwrap();
+    let mut long = per(&ds.iter().map(|d| (*d, "later")).collect::<Vec<_>>());
+    long.expires_after = Some(Duration::from_hours(1));
+    m.store(long).await.unwrap();
+    // A shared body that disappears too.
+    m.store(StoreRequest {
+        expires_after: Some(Duration::from_secs(1)),
+        idempotency_key: None,
+        mls: None,
+        payload: Payload::Shared {
+            devices: ds.clone(),
+            body: Bytes::from_static(b"group"),
+        },
+    })
+    .await
+    .unwrap();
+    assert_eq!(m.fetch_after(&ds[0], 0, 10).await.unwrap().len(), 4);
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let seqs = |got: Vec<songbird_mailbox::Stored>| got.iter().map(|s| s.seq).collect::<Vec<_>>();
+    for d in &ds {
+        assert_eq!(seqs(m.fetch_after(d, 0, 10).await.unwrap()), vec![1, 3]);
+    }
+    // Compaction drops them (2 per device) and relocates the rest with their deadlines.
+    assert_eq!(
+        m.expire_older_than(Duration::from_hours(30 * 24))
+            .await
+            .unwrap(),
+        8
+    );
+    for d in &ds {
+        assert_eq!(m.count_pending(d).await.unwrap(), 2);
+    }
+    let stats = m.stats();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while stats.compactions.load(std::sync::atomic::Ordering::Relaxed) < u64::from(cfg.partitions) {
+        assert!(Instant::now() < deadline, "compaction did not finish");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // After a restart: still gone, the counters continue, the hour-long one still pending.
+    let again = IggyMailbox::connect(cfg).await.unwrap();
+    for d in &ds {
+        let got = again.fetch_after(d, 0, 10).await.unwrap();
+        assert_eq!(seqs(got.clone()), vec![1, 3]);
+        assert_eq!(&got[1].envelope[..], b"later");
+    }
+    assert_eq!(
+        again.store(per(&[(ds[0], "next")])).await.unwrap().seqs,
+        vec![5]
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn many_devices_ack_in_bulk() {
     let Some(cfg) = config("bulk") else { return };
@@ -545,6 +613,7 @@ async fn acknowledged_messages_cannot_be_decrypted_even_with_every_key() {
     m.store(per(&[(b, "MARK-beta-00002")])).await.unwrap();
     let group = devices(3);
     m.store(StoreRequest {
+        expires_after: None,
         idempotency_key: Some([5; 16]),
         mls: None,
         payload: Payload::Shared {
@@ -581,6 +650,7 @@ async fn acknowledged_messages_cannot_be_decrypted_even_with_every_key() {
     assert_eq!(&got[0].envelope[..], b"MARK-beta-00002");
     // A retried send after delivery is a replay with seq 0 for the recipients that acknowledged.
     let mut retry = StoreRequest {
+        expires_after: None,
         idempotency_key: Some([5; 16]),
         mls: None,
         payload: Payload::Shared {
@@ -659,6 +729,7 @@ async fn forgotten_devices_leave_nothing_readable_and_no_counters() {
         .await
         .unwrap();
     m.store(StoreRequest {
+        expires_after: None,
         idempotency_key: None,
         mls: None,
         payload: Payload::Shared {

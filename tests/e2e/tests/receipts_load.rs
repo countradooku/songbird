@@ -136,12 +136,14 @@ async fn run(s: &Scenario) -> Counts {
     let router = LocalRouter::new();
     let push = Pusher::disabled();
     let metrics = SendMetrics::default();
+    let policy = songbird_send::Policy::default();
     let path = SendPath {
         directory: &directory,
         mailbox: &mailbox,
         router: &router,
         push: &push,
         metrics: &metrics,
+        policy: &policy,
     };
     let mut scratch = Vec::new();
     let mut counts = Counts::default();
@@ -150,13 +152,14 @@ async fn run(s: &Scenario) -> Counts {
         idem += 1;
         let mut key = [0u8; 16];
         key[..8].copy_from_slice(&idem.to_be_bytes());
-        let frame = SendFrame {
+        let mut frame = SendFrame {
+            hints: songbird_proto::frame::SendHints::default(),
             req_id: 1,
             idempotency_key: key,
             mls: None,
             payload,
         };
-        path.store(&sender, &frame, Instant::now(), &mut scratch)
+        path.store(&sender, &mut frame, Instant::now(), &mut scratch)
             .await
             .expect("stored");
     };

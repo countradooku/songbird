@@ -681,6 +681,7 @@ impl Task {
         let req_id = self.next_req;
         self.next_req = self.next_req.wrapping_add(1);
         let f = ClientFrame::Send(SendFrame {
+            hints: songbird_proto::frame::SendHints::default(),
             req_id,
             idempotency_key,
             mls,

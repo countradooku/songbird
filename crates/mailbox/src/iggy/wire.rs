@@ -16,6 +16,8 @@ pub(crate) struct JobData {
     pub(crate) mls: Option<MlsCommit>,
     pub(crate) local: LocalReq,
     pub(crate) remote: Vec<Remote>,
+    /// The send's deadline (ms since the Unix epoch), from the disappearing hint.
+    pub(crate) expires_ms: Option<u64>,
 }
 
 /// One request to a partition's owner.
@@ -141,7 +143,9 @@ impl std::fmt::Debug for Response {
     }
 }
 
-const VERSION: u8 = 1;
+/// Version 2 added a store's deadline (the disappearing hint, D-0061). Every node of a cluster
+/// runs one build, so nodes never speak two versions to each other.
+const VERSION: u8 = 2;
 
 fn put_err(b: &mut BytesMut, e: &MailboxError) {
     b.put_u8(match e {
@@ -203,6 +207,13 @@ impl Request {
                         b.put_u8(1);
                         b.put_slice(&m.group);
                         b.put_u64(m.epoch);
+                    }
+                    None => b.put_u8(0),
+                }
+                match job.expires_ms {
+                    Some(t) => {
+                        b.put_u8(1);
+                        b.put_u64(t);
                     }
                     None => b.put_u8(0),
                 }
@@ -340,6 +351,11 @@ impl Request {
                     }),
                     _ => return None,
                 };
+                let expires_ms = match r.u8()? {
+                    0 => None,
+                    1 => Some(r.u64()?),
+                    _ => return None,
+                };
                 let local = r.local()?;
                 let n = r.count(4 + 4 + 1)?;
                 let mut remote = Vec::with_capacity(n);
@@ -368,6 +384,7 @@ impl Request {
                         mls,
                         local,
                         remote,
+                        expires_ms,
                     },
                 }
             }
@@ -632,6 +649,7 @@ mod tests {
                         epoch: 4,
                     }),
                     local: LocalReq::PerDevice(vec![(d(1), Bytes::from_static(b"a"))]),
+                    expires_ms: Some(1_800_000_000_000),
                     remote: vec![
                         Remote {
                             partition: 1,
@@ -656,6 +674,7 @@ mod tests {
                         body: Bytes::from_static(b"group"),
                     },
                     remote: vec![],
+                    expires_ms: None,
                 },
             },
             Request::Ack {

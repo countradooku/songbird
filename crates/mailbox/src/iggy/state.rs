@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use songbird_types::DeviceId;
 
 use super::keys::KeyRing;
+use super::record::NEVER;
 
 /// A pending (un-acknowledged) entry: where its sealed slot is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +20,9 @@ pub(crate) struct Entry {
     pub(crate) leaf: u32,
     /// When the send was accepted (ms).
     pub(crate) at_ms: u64,
+    /// The send's deadline (ms; [`NEVER`] for none): never fetched after it, dropped by the
+    /// next compaction.
+    pub(crate) expires_ms: u64,
 }
 
 /// One device's counters and pending entries (ascending `seq`).
@@ -44,6 +48,8 @@ struct RecInfo {
 pub(crate) enum Fact {
     Store {
         at_ms: u64,
+        /// The send's deadline, from the disappearing hint.
+        expires_ms: Option<u64>,
         /// Idempotency tag and keyed recipient-set fingerprint.
         tag: Option<([u8; 32], [u8; 16])>,
         mls: Option<([u8; 16], u64)>,
@@ -52,8 +58,8 @@ pub(crate) enum Fact {
         body_leaf: Option<u32>,
     },
     Relocate {
-        /// (device, seq, `at_ms`, leaf).
-        entries: Vec<(DeviceId, u64, u64, u32)>,
+        /// (device, seq, `at_ms`, `expires_ms` or [`NEVER`], leaf).
+        entries: Vec<(DeviceId, u64, u64, u64, u32)>,
     },
     Ack(Vec<(DeviceId, u64)>),
     Owner(u16),
@@ -251,6 +257,32 @@ impl State {
             .collect()
     }
 
+    /// Drops every pending entry whose deadline is at or before `now_ms` (the disappearing
+    /// hint): it leaves the index and its leaf is punctured, so it can never be read again, nor
+    /// come back on replay (punctured slots are absent). Not an acknowledgement: the device's
+    /// cursor does not move and its `seq` is simply skipped. Returns how many.
+    pub(crate) fn drop_expired(&mut self, now_ms: u64) -> u64 {
+        let mut gone = Vec::new();
+        for st in self.devices.values_mut() {
+            if st.pending.iter().all(|e| e.expires_ms > now_ms) {
+                continue;
+            }
+            st.pending.retain(|e| {
+                let keep = e.expires_ms > now_ms;
+                if !keep {
+                    gone.push(*e);
+                }
+                keep
+            });
+        }
+        let n = u64::try_from(gone.len()).unwrap_or(u64::MAX);
+        for e in gone {
+            self.puncture(e.window, e.leaf);
+            self.record_remove(e.offset);
+        }
+        n
+    }
+
     /// Pending entries stored in records before `offset`: (device, entry).
     pub(crate) fn entries_before(&self, offset: u64) -> Vec<(DeviceId, Entry)> {
         let mut out = Vec::new();
@@ -296,6 +328,7 @@ impl State {
         match fact {
             Fact::Store {
                 at_ms,
+                expires_ms,
                 tag,
                 mls,
                 entries,
@@ -326,6 +359,7 @@ impl State {
                             window,
                             leaf: *leaf,
                             at_ms: *at_ms,
+                            expires_ms: expires_ms.unwrap_or(NEVER),
                         },
                     );
                 }
@@ -338,7 +372,7 @@ impl State {
                 }
             }
             Fact::Relocate { entries } => {
-                for (d, seq, at_ms, leaf) in entries {
+                for (d, seq, at_ms, expires_ms, leaf) in entries {
                     self.insert(
                         *d,
                         Entry {
@@ -347,6 +381,7 @@ impl State {
                             window,
                             leaf: *leaf,
                             at_ms: *at_ms,
+                            expires_ms: *expires_ms,
                         },
                     );
                 }
@@ -400,6 +435,7 @@ mod tests {
     fn store(entries: &[(u8, u64, u32)], at: u64, tag: Option<[u8; 32]>) -> Fact {
         Fact::Store {
             at_ms: at,
+            expires_ms: None,
             tag: tag.map(|t| (t, [0; 16])),
             mls: None,
             entries: entries.iter().map(|(b, s, l)| (d(*b), *s, *l)).collect(),
@@ -469,6 +505,7 @@ mod tests {
             w,
             &Fact::Store {
                 at_ms: 1,
+                expires_ms: None,
                 tag: None,
                 mls: None,
                 entries: vec![(d(1), 1, 0), (d(2), 1, 1)],
@@ -494,7 +531,7 @@ mod tests {
             9,
             w,
             &Fact::Relocate {
-                entries: vec![(d(1), 1, 5, 7)],
+                entries: vec![(d(1), 1, 5, NEVER, 7)],
             },
             1000,
             10,
@@ -551,6 +588,44 @@ mod tests {
         );
         assert_eq!(st.destroy_windows_below(3, None), 1);
         assert!(st.ring.meta(w).is_none());
+    }
+
+    #[test]
+    fn entries_past_their_deadline_are_dropped_wherever_they_are() {
+        let (mut st, w) = state();
+        st.apply(1, w, &store(&[(1, 1, 0)], 5, None), 1000, 10);
+        // A disappearing send in the middle of the device's queue, to two devices (shared body).
+        st.apply(
+            2,
+            w,
+            &Fact::Store {
+                at_ms: 6,
+                expires_ms: Some(100),
+                tag: None,
+                mls: None,
+                entries: vec![(d(1), 2, 1), (d(2), 1, 2)],
+                body_leaf: Some(3),
+            },
+            1000,
+            10,
+        );
+        st.apply(3, w, &store(&[(1, 3, 4)], 7, None), 1000, 10);
+        assert_eq!(st.drop_expired(99), 0);
+        assert_eq!(st.drop_expired(100), 2);
+        let seqs: Vec<u64> = st.devices[&d(1)].pending.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, vec![1, 3], "seq 2 skipped, the others kept");
+        assert_eq!(st.devices[&d(1)].acked, 0, "not an acknowledgement");
+        assert!(st.devices[&d(2)].pending.is_empty());
+        for leaf in [1, 2, 3] {
+            assert!(
+                st.ring.leaf(w, leaf).unwrap().is_none(),
+                "leaf {leaf} punctured"
+            );
+        }
+        assert!(st.ring.leaf(w, 0).unwrap().is_some());
+        // Its record holds nothing any more.
+        st.ack(&d(1), 3);
+        assert_eq!(st.min_live(), None);
     }
 
     #[test]

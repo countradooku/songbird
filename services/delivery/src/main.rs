@@ -349,6 +349,7 @@ impl Service for Delivery {
         );
         let (stop_tx, stop_rx) = watch::channel(false);
         let (directory, follow) = load_directory(self.registry, self.directory).await?;
+        let franking = franker(self.settings.franking_key.as_ref())?;
         let mut shared = Shared::new(
             self.settings,
             directory,
@@ -356,6 +357,7 @@ impl Service for Delivery {
             router,
             self.metrics.clone(),
         );
+        shared = shared.with_policy(songbird_delivery::Policy { franking });
         let mut pusher_task = None;
         if let Some(jobs) = self.jobs {
             let (pusher, task) = start_pusher(jobs, &self.metrics, stop_rx.clone()).await?;
@@ -569,4 +571,16 @@ impl Drop for StorageRuntime {
 fn main() -> std::process::ExitCode {
     sockudo_ws::init_clock();
     songbird_service::main::<Delivery>()
+}
+
+/// The franking key from the secrets store (Prompt 4, D-0061), if configured.
+fn franker(
+    key: Option<&songbird_types::SecretRef>,
+) -> Result<Option<songbird_send::Franker>, BoxError> {
+    key.map(|k| {
+        let secret = k.resolve_key32()?;
+        songbird_send::Franker::from_secret(&secret)
+            .map_err(|_| BoxError::from("franking key derivation failed"))
+    })
+    .transpose()
 }

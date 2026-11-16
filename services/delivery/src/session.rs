@@ -582,7 +582,7 @@ impl<M: Mailbox, R: Router> Session<M, R> {
     async fn on_send<S>(
         &mut self,
         ws: &mut WebSocketStream<S>,
-        s: SendFrame,
+        mut s: SendFrame,
         now: std::time::Instant,
     ) -> Res
     where
@@ -602,7 +602,10 @@ impl<M: Mailbox, R: Router> Session<M, R> {
         // send would be a contended cache line).
         let path = self.shared.send_path();
         // Invariant 1: store first; only then acknowledge and route.
-        let outcome = match path.store(&self.device, &s, now, &mut self.scratch).await {
+        let outcome = match path
+            .store(&self.device, &mut s, now, &mut self.scratch)
+            .await
+        {
             Ok(o) => o,
             Err(status) => return self.reply(ws, s.req_id, status).await,
         };

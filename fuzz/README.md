@@ -19,6 +19,7 @@ every decoder). The crate is outside the main workspace because it needs nightly
 | `profile` | profile upload and sender-certificate decoders (Prompt 3) | `songbird-proto` |
 | `kt` | akd lookup, history and audit proof decoders and verification; signed heads (Prompt 3) | `songbird-akd` |
 | `content` | padded plaintext and encrypted content decoders and validation (Prompt 4) | `songbird-content` |
+| `franking` | franking stamps in front of envelopes; report bodies from M5 (Prompt 4) | `songbird-proto` |
 
 ```bash
 cargo xtask fuzz --secs 60            # every target, 60 s each (CI fast checks do not fuzz)

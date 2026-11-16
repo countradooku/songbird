@@ -67,6 +67,8 @@ pub struct SendStack<M, R> {
     pub push: Pusher,
     /// Counters (shared with [`Messages::metrics`]).
     pub metrics: SendMetrics,
+    /// Franking and the contact gate (Prompt 4).
+    pub policy: songbird_send::Policy,
 }
 
 impl<M, R> std::fmt::Debug for SendStack<M, R> {
@@ -89,6 +91,7 @@ impl<M: StoreSend, R: Router> Submit for SendStack<M, R> {
                 router: &self.router,
                 push: &self.push,
                 metrics: &self.metrics,
+                policy: &self.policy,
             };
             path.send(sender, frame, received, &mut Vec::new()).await
         })
@@ -110,6 +113,7 @@ impl<M: StoreSend, R: Router> Submit for SendStack<M, R> {
                 router: &self.router,
                 push: &self.push,
                 metrics: &self.metrics,
+                policy: &self.policy,
             };
             path.send_system(signer, devices, kind, body, notice_id)
                 .await

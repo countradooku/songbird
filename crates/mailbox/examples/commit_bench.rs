@@ -97,7 +97,7 @@ fn main() {
                     key[..8].copy_from_slice(&t.to_be_bytes());
                     key[8..].copy_from_slice(&n.to_be_bytes());
                     let t0 = Instant::now();
-                    m.store(StoreRequest { idempotency_key: Some(key), mls: None, payload }).await.unwrap();
+                    m.store(StoreRequest { idempotency_key: Some(key), mls: None, payload, expires_after: None }).await.unwrap();
                     lat.push(t0.elapsed().as_micros() as u32);
                     n += 1;
                 }

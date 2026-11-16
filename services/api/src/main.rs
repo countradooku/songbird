@@ -139,6 +139,17 @@ async fn build_messages(
             router,
             push,
             metrics: metrics.send.clone(),
+            policy: songbird_send::Policy {
+                franking: s
+                    .franking_key
+                    .as_ref()
+                    .map(|k| {
+                        let secret = k.resolve_key32().map_err(BoxError::from)?;
+                        songbird_send::Franker::from_secret(&secret)
+                            .map_err(|_| BoxError::from("franking key derivation failed"))
+                    })
+                    .transpose()?,
+            },
         }),
         limits: s.limits.limits(),
         sends_per_sec: s.sends_per_sec,

@@ -57,6 +57,11 @@ impl Validate for DeliveryConfig {
                 "is required in staging and production (account deletion)",
             );
             v.check(
+                d.franking_key.is_some(),
+                "delivery.franking_key",
+                "is required in staging and production (franked sends)",
+            );
+            v.check(
                 d.mailbox.backend == MailboxBackend::Iggy,
                 "delivery.mailbox.backend",
                 "must be iggy in staging and production",
@@ -129,6 +134,10 @@ pub struct DeliverySettings {
     /// this node.
     #[serde(default)]
     pub internal: Option<InternalSettings>,
+    /// The franking key (64 hex characters, the same on every node that sends; Prompt 4,
+    /// D-0061): franked sends are stamped with it. Absent: franked sends are refused.
+    #[serde(default)]
+    pub franking_key: Option<SecretRef>,
 }
 
 /// `[delivery.registry]`.

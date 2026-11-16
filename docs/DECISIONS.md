@@ -102,6 +102,60 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0061 — Prompt 4, milestone 3: franking stamps and disappearing envelopes; the `Send` frame's hints
+
+- Date: 2026-11-16
+- Status: accepted; built (report `P04-M3.md`); awaiting the owner's approval of the gate and the
+  two threat-model §1 rows
+- Decided by: agent, under the owner's plan (D-0058) and standing instruction (Proton-level bar)
+- Context: Prompt 4 asks for reporting with message franking (the server verifies the commitment
+  it stamped at send time) and for an envelope flag that expires undelivered envelopes early.
+  Both need something the server can see; the content stays opaque.
+- Options considered:
+  - **Hints inside the ciphertext** were rejected: the server would have to parse client content.
+  - **A new protocol version** was rejected while no app exists. Instead, v1's `Send` frame gains
+    four optional blocks behind new flag bits. Unknown bits stay refused, and each block appears
+    only with its flag, in a fixed order, so there is still one encoding per frame.
+  - **A stamp that names the sender** was rejected: it would store the sender with the envelope in
+    the clear (threat model §1, "never stored with the envelope"). It is a MAC over the accounts
+    instead.
+  - **A deadline in a server-written envelope header** was rejected: Iggy rebuilds its index from
+    record metadata, without opening envelopes. The deadline goes into the records instead (sealed
+    format 5).
+  - **A new Iggy record kind for dropped entries** was rejected as unnecessary: an expired
+    entry's key is punctured, so replay leaves it out (punctured slots are absent), and the
+    deadline in the metadata re-drops anything a crash left unpunctured.
+- Decision:
+  - **Frame:** `ACCESS 0x04` (16-byte key), `REQUEST 0x08`, `FRANKED 0x10` (32-byte commitment),
+    `EXPIRES 0x20` (`u32` seconds, 1 to 30 days). Access or request, never both, and neither on a
+    shared body; a request is never an MLS commit. Reasons 10 (access required) and 11 (invalid
+    request) are defined here and enforced in M4.
+  - **Stamps:** envelopes for another account are stored as `stamp ‖ envelope`, with a MAC by the
+    franking key over the key ID, commitment, time, sender and recipient accounts (zeros where
+    unknown or shared). The sender's own devices are not stamped. One allocation per stamped
+    envelope; unfranked sends are unchanged.
+  - **Reserved prefix:** `F5 53 42` covers system frames, stamps and any later server format.
+  - **Deadlines:** `StoreRequest::expires_after`, kept by every mailbox:
+    - memory: per entry;
+    - SurrealDB: `exp` with an index;
+    - Iggy: in the store metadata and the relocated slots (format 5; 3 and 4 still read), carried
+      over node links (wire 2) and by the re-driver.
+    Fetch skips expired entries, and the sweep deletes them (Iggy punctures their keys).
+  - **Keys:** `[delivery] franking_key` and `[api.send] franking_key` (+ `previous_franking_keys`
+    for reports), required in staging and production. Without a key a franked send is refused as
+    unavailable.
+- Evidence (Apple M5 Pro, macOS 27.2.1):
+  - the stamp's known answer, recomputed with Python's `hmac` and `hashlib`;
+  - stamps bound to key, sender, recipient, time and commitment; own devices unstamped; shared
+    bodies once; sealed without a sender; forged prefixes refused;
+  - frame vectors and flag rules, with proptest round trips including hints;
+  - deadlines in the memory mailbox, SurrealDB (live) and the Iggy state (unit; the Iggy live
+    test runs in CI);
+  - fuzz: `franking` 14,180,569 runs, `proto_client_frame` 7,624,430 and `iggy_record` 147,775 in
+    30 s each, nothing found.
+- Consequences: no new dependency. Iggy's sealed format is 5 and the node-link wire format is 2;
+  every node of a cluster runs one build. Two threat-model §1 rows for the owner.
+
 ## D-0060 — Prompt 4, milestone 2: order-independent chat state and message status; receipt batching sized by measurement
 
 - Date: 2026-11-16

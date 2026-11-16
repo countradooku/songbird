@@ -2,7 +2,8 @@
 //!
 //! **Schema** (`SCHEMA`, applied idempotently at connect):
 //! - `mailbox:[device, seq]`: one entry per stored envelope, either `env` (per-device ciphertext)
-//!   or `body` (a link to a shared body), plus `at`. Keyed by `(device, seq)` so `fetch_after` is
+//!   or `body` (a link to a shared body), plus `at` and, for a send with the disappearing hint,
+//!   its deadline `exp` (never fetched after it; deleted by the sweep). Keyed by `(device, seq)` so `fetch_after` is
 //!   one range scan and `ack_up_to` one range delete.
 //! - `seqctr:[device]`: `last`, the last `seq` allocated (never decreases). Written only by stores.
 //! - `ackctr:[device]`: `n`, the highest `seq` acknowledged. Written only by ACK batches, so ACKs
@@ -90,6 +91,8 @@ DEFINE FIELD IF NOT EXISTS env ON mailbox TYPE option<bytes>;
 DEFINE FIELD IF NOT EXISTS body ON mailbox TYPE option<record<body>>;
 DEFINE FIELD IF NOT EXISTS at ON mailbox TYPE datetime;
 DEFINE INDEX IF NOT EXISTS mailbox_at ON mailbox FIELDS at;
+DEFINE FIELD IF NOT EXISTS exp ON mailbox TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS mailbox_exp ON mailbox FIELDS exp;
 DEFINE TABLE IF NOT EXISTS body SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS env ON body TYPE bytes;
 DEFINE FIELD IF NOT EXISTS refs ON body TYPE int;
@@ -128,7 +131,8 @@ const LOAD: &str =
 /// Most entries deleted by explicit IDs per device and flush; beyond it a range delete is used.
 const EXPLICIT_MAX: u64 = 4096;
 
-const FETCH: &str = "SELECT meta::id(id)[1] AS seq, env, body.env AS benv FROM mailbox:[$d, $after]>..[$d, ..] LIMIT $n;";
+/// Entries past their own deadline (the disappearing hint) are never fetched.
+const FETCH: &str = "SELECT meta::id(id)[1] AS seq, env, body.env AS benv FROM mailbox:[$d, $after]>..[$d, ..] WHERE exp = NONE OR exp > time::now() LIMIT $n;";
 
 /// Forgets deleted devices: their entries (shared bodies by reference count) and counters.
 const FORGET: &str = "
@@ -148,7 +152,7 @@ COMMIT TRANSACTION;
 const EXPIRE: &str = "
 BEGIN TRANSACTION;
 LET $cut = time::now() - duration::from_secs($age);
-LET $gone = DELETE mailbox WHERE at < $cut RETURN BEFORE;
+LET $gone = DELETE mailbox WHERE at < $cut OR (exp != NONE AND exp <= time::now()) RETURN BEFORE;
 FOR $b IN array::filter($gone.body, |$v| $v != NONE) {
   LET $r = UPDATE ONLY $b SET refs -= 1 RETURN VALUE refs;
   IF $r <= 0 { DELETE $b RETURN NONE };
@@ -180,9 +184,15 @@ fn record_key(table: &str, key: Vec<Value>) -> Value {
 
 /// A SurrealDB datetime (tag 12, `[seconds, nanoseconds]`) for now.
 fn now_value() -> Value {
+    datetime_value(Duration::ZERO)
+}
+
+/// A SurrealDB datetime `after` from now.
+fn datetime_value(after: Duration) -> Value {
     let d = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .saturating_add(after);
     Value::Tag(
         songbird_surreal::cbor::TAG_DATETIME,
         Box::new(Value::Array(vec![
@@ -870,6 +880,7 @@ impl Writer {
                 }
                 Payload::PerDevice(_) => None,
             };
+            let exp = j.req.expires_after.map(datetime_value);
             let mut stored = Vec::with_capacity(seqs.len());
             for (i, (d, seq)) in j.req.payload.devices().zip(seqs).enumerate() {
                 let id = record_key("mailbox", vec![bytes_value(d.as_bytes()), int(*seq)]);
@@ -884,7 +895,12 @@ impl Writer {
                             .map_or(Value::Null, Value::Bytes),
                     ),
                 };
-                rows.push(Value::map([("id", id), content, ("at", now.clone())]));
+                rows.push(match &exp {
+                    Some(e) => {
+                        Value::map([("id", id), content, ("at", now.clone()), ("exp", e.clone())])
+                    }
+                    None => Value::map([("id", id), content, ("at", now.clone())]),
+                });
                 stored.push(Value::Array(vec![bytes_value(d.as_bytes()), int(*seq)]));
             }
             if let Some(tag) = j.tag {

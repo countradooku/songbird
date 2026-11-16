@@ -94,14 +94,55 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   M4b (D-0053), M5 (D-0054), M6 (D-0055) and M7 (D-0056, the final gate `P03-gate.md`) on one
   branch and one PR (#54). **Approved by the owner on 2026-11-16** ("i approve everything"): the
   Prompt 3 gate, M4b–M7 and the six threat-model §1 rows. The owner also decided to **adopt
-  `akd` for key transparency now** (D-0055, superseded by D-0057 when built). Prompt 3 is done
-  but for that.
+  `akd` for key transparency now** (D-0057, built on branch `feat/p03-akd`, awaiting approval).
 - D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
   tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
   `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0057 — Key transparency on Meta's akd (supersedes D-0055's own log)
+
+- Date: 2026-11-16
+- Status: accepted; built (report `P03-akd.md`); **awaiting the owner's approval of the build**
+- Decided by:
+  - owner: adopt `akd` now ("we can use akd now", 2026-11-16);
+  - agent: the integration below.
+- Correction to D-0055: `akd` 0.13 with the features it needs adds **27 crates to the audit
+  backlog** (cargo-vet exemptions), not the 12 measured with its defaults. Two things were
+  missed:
+  - its `public_auditing` feature is required to compile (it imports `akd_core::proto`
+    unconditionally) and brings protobuf code generation at build time (`protobuf-codegen`,
+    `regex`, `which`, `tempfile`);
+  - it brings a second curve25519/Ed25519 stack (`curve25519-dalek` 4.1.3, `ed25519-dalek`).
+  Imported audits cover seven of the new crates. The licences are permissive. The `public_tests`
+  helpers (MPL-2.0 `colored`) are not used, so the licence policy is unchanged.
+- Decision:
+  - **Storage**: akd's `Database` on SurrealDB (`crates/akd`). Records are in `akdrec` by binary
+    ID; value states are in `akdval` by (label, epoch) with the label indexed. Each `batch_set`
+    is one transaction with the Azks record last. The retrieval rules match akd's in-memory store.
+  - **Configuration**: WhatsApp v1. The VRF key comes from the secrets store (worker
+    `kt_vrf_key`, api `[api.kt] vrf_key`).
+  - **Labels**: `kind || HMAC(salt, account)`, deleted with the salt, because `akd` 0.13 cannot
+    tombstone. Values are SHA-256 of the identity key or list, or the username hash.
+  - **Writer**: the worker publishes one epoch per sweep from the generation-driven pending list
+    (D-0055's mechanism kept).
+  - **Readers**: `api` uses akd's read-only directory, opened lazily. It serves keys, signed
+    heads (log key) and lookup, history (newest 64) and audit (at most 1,000 epochs) proofs in
+    akd's protobuf.
+  - **Removed**: the own RFC 9162 log (`crates/kt`) and its tables. The fuzz target `kt` now
+    covers akd's proof decoding.
+- Evidence:
+  - `akd_live`: epochs published and read by a separate reader; lookup, history and audit
+    verified with akd's client checks; refused under another label, root or VRF key and for a
+    rewritten history; the store's semantics;
+  - `kt_live` (pending and published);
+  - `clients_verify_the_transparency_log` over HTTP;
+  - `gate_p03`;
+  - fuzz `kt`.
+- Consequences: 27 new exemptions; protobuf generated at build time; a VRF key and a log key for
+  the secrets store. No external auditor yet.
 
 ## D-0056 — Prompt 3, milestone 7: GDPR export, deletion across every Prompt 3 store, inactivity deletion; the Prompt 3 gate
 

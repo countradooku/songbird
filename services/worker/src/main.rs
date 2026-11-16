@@ -82,6 +82,10 @@ struct WorkerSettings {
     /// Seconds between sweeps.
     #[serde(default = "default_sweep_secs")]
     sweep_secs: u64,
+    /// Key transparency on akd (Prompt 3, D-0057): the VRF key's 32-byte seed (64 hex
+    /// characters). Absent: nothing is published (development).
+    #[serde(default)]
+    kt_vrf_key: Option<SecretRef>,
 }
 
 const fn default_propagation_ms() -> u64 {
@@ -302,6 +306,25 @@ impl Service for WorkerService {
             .iter()
             .map(|n| songbird_link::LinkClient::new(n.addr, &n.name, tls.clone()))
             .collect();
+        // The akd writer (the only one), on its own connection.
+        let kt = match &s.kt_vrf_key {
+            Some(k) => {
+                let store = songbird_akd::SurrealStore::connect(Arc::new(
+                    songbird_accounts::Db::connect(s.surrealdb.config()?).await?,
+                ))
+                .await
+                .map_err(|e| e.to_string())?;
+                Some(Arc::new(
+                    songbird_akd::Publisher::open(
+                        store,
+                        songbird_akd::SecretVrf::new(&*k.resolve_key32()?),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?,
+                ))
+            }
+            None => None,
+        };
         let worker = Arc::new(Worker {
             registry,
             s3: songbird_s3::Client::new(s3_config(&s.s3)?)?,
@@ -310,6 +333,7 @@ impl Service for WorkerService {
             push_index_secret: *s.push_index_secret.resolve_key32()?,
             journal: s.deletion_journal.as_ref().map(journal).transpose()?,
             propagation: Duration::from_millis(s.propagation_ms),
+            kt,
             metrics: self.metrics,
         });
         let (stop_tx, stop_rx) = watch::channel(false);

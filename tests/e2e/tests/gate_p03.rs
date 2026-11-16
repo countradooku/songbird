@@ -182,6 +182,7 @@ async fn stack() -> Option<Stack> {
         push_index_secret: PUSH_INDEX,
         journal: None,
         propagation: Duration::from_millis(200),
+        kt: None,
         metrics: WorkerMetrics::default(),
     };
     Some(Stack {
@@ -307,13 +308,11 @@ async fn an_account_is_exported_then_deleted_from_every_prompt_3_store() {
         .0,
         204
     );
-    r.kt_reconcile(100, 1).await.unwrap();
-    assert!(
-        r.kt_account(&a, r.kt_size().await.unwrap(), 10)
-            .await
-            .unwrap()
-            .is_some()
-    );
+    // The worker's publish pass (the akd epoch itself is `songbird-akd`'s test).
+    for p in r.kt_pending(100).await.unwrap() {
+        r.kt_logged(&p).await.unwrap();
+    }
+    assert!(r.kt_salt(&a).await.unwrap().is_some());
 
     // The export: everything above, from the primary only.
     let (st, b) = c.send("GET", "/v1/account/export", None).await.unwrap();
@@ -378,12 +377,7 @@ async fn an_account_is_exported_then_deleted_from_every_prompt_3_store() {
             .unwrap()
             .is_none()
     );
-    assert!(
-        r.kt_account(&a, r.kt_size().await.unwrap(), 10)
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(r.kt_salt(&a).await.unwrap().is_none());
     let left: Value = r
         .db()
         .query1(

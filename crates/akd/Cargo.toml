@@ -1,0 +1,28 @@
+[package]
+name = "songbird-akd"
+description = "Songbird key transparency on Meta's akd (Prompt 3, D-0057): akd's storage on SurrealDB, the VRF key from the secrets store, and the WhatsApp v1 configuration."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+akd.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+aws-lc-rs.workspace = true
+protobuf.workspace = true
+serde_json.workspace = true
+songbird-surreal.workspace = true
+songbird-accounts.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+
+[dev-dependencies]
+songbird-types.workspace = true
+tokio = { workspace = true, features = ["sync", "macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true

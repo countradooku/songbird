@@ -1,26 +1,31 @@
-//! Key transparency (Prompt 3, M6, D-0055; `docs/PROTOCOL.md` §4.9): signed tree heads,
-//! an account's entries with inclusion proofs, and consistency proofs.
+//! Key transparency on `akd` (Prompt 3, D-0057; `docs/PROTOCOL.md` §4.9): signed epoch heads,
+//! lookup, history and audit proofs in akd's own protobuf encoding, served from akd's read-only
+//! directory (the worker is the only writer).
 //!
 //! | Method and path | What |
 //! | --- | --- |
-//! | `GET /v1/kt/head` | The current signed tree head |
-//! | `POST /v1/kt/account` | `{"account"}` → the account's salt, the head, its entries with proofs |
-//! | `POST /v1/kt/consistency` | `{"from", "to"}` → the consistency proof between two sizes |
+//! | `GET /v1/kt/keys` | The VRF and log public keys (apps pin both) |
+//! | `GET /v1/kt/head` | The current epoch's signed head |
+//! | `POST /v1/kt/lookup` | `{"account", "kind"}` → the salt, the signed head, a lookup proof |
+//! | `POST /v1/kt/history` | `{"account", "kind"}` → the salt, the signed head, a history proof (newest 64) |
+//! | `POST /v1/kt/audit` | `{"from", "to"}` → an append-only proof between two epochs (at most 1,000 apart) |
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair as _};
 use aws_lc_rs::{hkdf, hmac};
 use songbird_accounts::Registry;
-use songbird_kt::TreeHead;
+use songbird_akd::{Kind, Reader, SecretVrf, SignedHead, SurrealStore, label, proofs};
 use songbird_types::AccountId;
 use songbird_valkey::ValkeyConn;
 
 use crate::config::KtSettings;
 use crate::registration::Registration;
 
-/// Most entries an account answer carries (the newest).
-pub const MAX_ENTRIES: usize = 256;
+/// History entries a proof carries (the newest).
+pub const HISTORY: usize = 64;
+/// Most epochs one audit proof spans.
+pub const MAX_AUDIT_SPAN: u64 = 1_000;
 
 /// What a transparency endpoint answers.
 #[derive(Debug, Clone, PartialEq)]
@@ -41,13 +46,14 @@ pub enum Outcome {
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AccountBody {
+struct LabelBody {
     account: String,
+    kind: String,
 }
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ConsistencyBody {
+struct AuditBody {
     from: u64,
     to: u64,
 }
@@ -57,6 +63,9 @@ pub struct Transparency {
     /// Settings.
     pub settings: KtSettings,
     key: Ed25519KeyPair,
+    vrf: SecretVrf,
+    store: SurrealStore,
+    reader: tokio::sync::OnceCell<Reader>,
     record_key: hmac::Key,
 }
 
@@ -72,22 +81,17 @@ fn now_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
-/// Signs a tree head.
-#[must_use]
-pub fn sign_head(key: &Ed25519KeyPair, size: u64, root: [u8; 32], time_ms: u64) -> TreeHead {
-    let mut h = TreeHead {
-        size,
-        root,
-        time_ms,
-        signature: [0; 64],
-    };
-    let sig = key.sign(&h.signed_bytes());
-    h.signature.copy_from_slice(sig.as_ref());
-    h
+fn kind(s: &str) -> Option<Kind> {
+    match s {
+        "identity" => Some(Kind::Identity),
+        "device_list" => Some(Kind::DeviceList),
+        "username" => Some(Kind::Username),
+        _ => None,
+    }
 }
 
 impl Transparency {
-    /// Loads the log key; derives the throttle key.
+    /// Loads the log and VRF keys; derives the throttle key.
     ///
     /// # Errors
     /// A malformed key, HKDF (never).
@@ -95,6 +99,8 @@ impl Transparency {
         settings: KtSettings,
         secret: &[u8; 32],
         log_seed: &[u8; 32],
+        vrf_seed: &[u8; 32],
+        store: SurrealStore,
     ) -> Result<Self, &'static str> {
         let key = Ed25519KeyPair::from_seed_unchecked(log_seed).map_err(|_| "log key")?;
         let mut k = [0u8; 32];
@@ -106,14 +112,25 @@ impl Transparency {
         Ok(Self {
             settings,
             key,
+            vrf: SecretVrf::new(vrf_seed),
+            store,
+            reader: tokio::sync::OnceCell::new(),
             record_key: hmac::Key::new(hmac::HMAC_SHA256, &k),
         })
     }
 
-    /// The log's public key (clients pin it).
+    /// The log's public key.
     #[must_use]
-    pub fn public_key(&self) -> [u8; 32] {
+    pub fn log_public_key(&self) -> [u8; 32] {
         self.key.public_key().as_ref().try_into().unwrap_or([0; 32])
+    }
+
+    /// The directory reader, opened once the worker has created the directory.
+    async fn reader(&self) -> Result<&Reader, Outcome> {
+        self.reader
+            .get_or_try_init(|| songbird_akd::reader(self.store.clone(), self.vrf.clone()))
+            .await
+            .map_err(|_| Outcome::Unavailable)
     }
 
     async fn throttle(&self, hot: &ValkeyConn, requester: &AccountId) -> Result<(), Outcome> {
@@ -139,70 +156,56 @@ impl Transparency {
         }
     }
 
-    async fn head_at(&self, registry: &Registry, size: u64) -> Result<TreeHead, Outcome> {
-        let root = registry
-            .kt_root(size)
-            .await
-            .map_err(|_| Outcome::Unavailable)?;
-        Ok(sign_head(&self.key, size, root, now_ms()))
+    fn sign(&self, h: &akd::helper_structs::EpochHash) -> SignedHead {
+        SignedHead::sign(&self.key, h.epoch(), h.hash(), now_ms())
     }
 
-    /// `GET /v1/kt/head`.
-    pub async fn head(&self, registry: &Registry) -> Outcome {
-        let Ok(size) = registry.kt_size().await else {
+    /// `GET /v1/kt/keys`.
+    pub async fn keys(&self) -> Outcome {
+        let Ok(r) = self.reader().await else {
             return Outcome::Unavailable;
         };
-        match self.head_at(registry, size).await {
-            Ok(h) => Outcome::Blob(bytes::Bytes::from(h.encode())),
-            Err(o) => o,
-        }
-    }
-
-    /// `POST /v1/kt/account`.
-    pub async fn account(
-        &self,
-        registry: &Registry,
-        hot: &ValkeyConn,
-        requester: &AccountId,
-        body: &[u8],
-    ) -> Outcome {
-        if let Err(o) = self.throttle(hot, requester).await {
-            return o;
-        }
-        let Some(account) = serde_json::from_slice::<AccountBody>(body)
-            .ok()
-            .and_then(|b| {
-                let mut a = [0u8; 16];
-                hex::decode_to_slice(b.account, &mut a).ok().map(|()| a)
-            })
-            .map(AccountId::from_bytes)
-        else {
-            return Outcome::Malformed("request");
-        };
-        let Ok(size) = registry.kt_size().await else {
-            return Outcome::Unavailable;
-        };
-        let head = match self.head_at(registry, size).await {
-            Ok(h) => h,
-            Err(o) => return o,
-        };
-        match registry.kt_account(&account, size, MAX_ENTRIES).await {
-            Ok(Some((salt, entries))) => Outcome::Json(serde_json::json!({
-                "salt": hex::encode(salt),
-                "head": hex::encode(head.encode()),
-                "entries": entries.iter().map(|e| serde_json::json!({
-                    "index": e.index,
-                    "leaf": hex::encode(e.leaf.encode()),
-                    "proof": e.proof.iter().map(hex::encode).collect::<Vec<_>>(),
-                })).collect::<Vec<_>>(),
+        match r.get_public_key().await {
+            Ok(vrf) => Outcome::Json(serde_json::json!({
+                "vrf": hex::encode(vrf.as_bytes()),
+                "log": hex::encode(self.log_public_key()),
             })),
-            Ok(None) => Outcome::NotFound,
             Err(_) => Outcome::Unavailable,
         }
     }
 
-    /// `POST /v1/kt/consistency`.
-    pub async fn consistency(
+    /// `GET /v1/kt/head`.
+    pub async fn head(&self) -> Outcome {
+        let r = match self.reader().await {
+            Ok(r) => r,
+            Err(o) => return o,
+        };
+        match r.get_epoch_hash().await {
+            Ok(h) => Outcome::Blob(bytes::Bytes::from(self.sign(&h).encode())),
+            Err(_) => Outcome::Unavailable,
+        }
+    }
+
+    async fn subject_label(
+        &self,
+        registry: &Registry,
+        body: &[u8],
+    ) -> Result<([u8; 32], akd::AkdLabel), Outcome> {
+        let b =
+            serde_json::from_slice::<LabelBody>(body).map_err(|_| Outcome::Malformed("request"))?;
+        let mut a = [0u8; 16];
+        hex::decode_to_slice(&b.account, &mut a).map_err(|_| Outcome::Malformed("account"))?;
+        let k = kind(&b.kind).ok_or(Outcome::Malformed("kind"))?;
+        let salt = registry
+            .kt_salt(&AccountId::from_bytes(a))
+            .await
+            .map_err(|_| Outcome::Unavailable)?
+            .ok_or(Outcome::NotFound)?;
+        Ok((salt, label(k, &songbird_akd::subject(&salt, &a))))
+    }
+
+    /// `POST /v1/kt/lookup`.
+    pub async fn lookup(
         &self,
         registry: &Registry,
         hot: &ValkeyConn,
@@ -212,19 +215,88 @@ impl Transparency {
         if let Err(o) = self.throttle(hot, requester).await {
             return o;
         }
-        let Ok(b) = serde_json::from_slice::<ConsistencyBody>(body) else {
+        let (salt, l) = match self.subject_label(registry, body).await {
+            Ok(x) => x,
+            Err(o) => return o,
+        };
+        let r = match self.reader().await {
+            Ok(r) => r,
+            Err(o) => return o,
+        };
+        match r.lookup(l).await {
+            Ok((proof, h)) => match proofs::encode_lookup(&proof) {
+                Ok(p) => Outcome::Json(serde_json::json!({
+                    "salt": hex::encode(salt),
+                    "head": hex::encode(self.sign(&h).encode()),
+                    "proof": hex::encode(p),
+                })),
+                Err(_) => Outcome::Unavailable,
+            },
+            // Never published under this label.
+            Err(_) => Outcome::NotFound,
+        }
+    }
+
+    /// `POST /v1/kt/history`.
+    pub async fn history(
+        &self,
+        registry: &Registry,
+        hot: &ValkeyConn,
+        requester: &AccountId,
+        body: &[u8],
+    ) -> Outcome {
+        if let Err(o) = self.throttle(hot, requester).await {
+            return o;
+        }
+        let (salt, l) = match self.subject_label(registry, body).await {
+            Ok(x) => x,
+            Err(o) => return o,
+        };
+        let r = match self.reader().await {
+            Ok(r) => r,
+            Err(o) => return o,
+        };
+        match r
+            .key_history(&l, akd::HistoryParams::MostRecent(HISTORY))
+            .await
+        {
+            Ok((proof, h)) => match proofs::encode_history(&proof) {
+                Ok(p) => Outcome::Json(serde_json::json!({
+                    "salt": hex::encode(salt),
+                    "head": hex::encode(self.sign(&h).encode()),
+                    "most_recent": HISTORY,
+                    "proof": hex::encode(p),
+                })),
+                Err(_) => Outcome::Unavailable,
+            },
+            Err(_) => Outcome::NotFound,
+        }
+    }
+
+    /// `POST /v1/kt/audit`.
+    pub async fn audit(&self, hot: &ValkeyConn, requester: &AccountId, body: &[u8]) -> Outcome {
+        if let Err(o) = self.throttle(hot, requester).await {
+            return o;
+        }
+        let Ok(b) = serde_json::from_slice::<AuditBody>(body) else {
             return Outcome::Malformed("request");
         };
-        let Ok(size) = registry.kt_size().await else {
+        let r = match self.reader().await {
+            Ok(r) => r,
+            Err(o) => return o,
+        };
+        let Ok(current) = r.get_epoch_hash().await else {
             return Outcome::Unavailable;
         };
-        if b.from == 0 || b.from > b.to || b.to > size {
-            return Outcome::Malformed("sizes");
+        if b.from == 0 || b.from >= b.to || b.to > current.epoch() || b.to - b.from > MAX_AUDIT_SPAN
+        {
+            return Outcome::Malformed("epochs");
         }
-        match registry.kt_consistency(b.from, b.to).await {
-            Ok(p) => Outcome::Json(serde_json::json!({
-                "proof": p.iter().map(hex::encode).collect::<Vec<_>>(),
-            })),
+        match r.audit(b.from, b.to).await {
+            Ok(p) => match proofs::encode_audit(&p) {
+                Ok(bytes) => Outcome::Json(serde_json::json!({ "proof": hex::encode(bytes) })),
+                Err(_) => Outcome::Unavailable,
+            },
             Err(_) => Outcome::Unavailable,
         }
     }

@@ -129,8 +129,11 @@ pub struct ApiSettings {
 pub struct KtSettings {
     /// 32 bytes (64 hex characters), the same on every `api` node: keys the throttle records.
     pub secret: SecretRef,
-    /// The log key's Ed25519 seed (64 hex characters); clients pin its public key.
+    /// The log key's Ed25519 seed (64 hex characters): signs epoch heads; apps pin it.
     pub log_key: SecretRef,
+    /// The akd VRF key's seed (64 hex characters), the worker's `kt_vrf_key`: readers need it
+    /// to open the directory; apps pin its public key.
+    pub vrf_key: SecretRef,
     /// Account and consistency answers per hour per requesting account.
     #[serde(default = "default_profile_fetches")]
     pub fetches_per_hour: u32,

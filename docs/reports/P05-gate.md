@@ -2,7 +2,9 @@
 
 - Date: 2026-11-16
 - Prompt: [05-groups.md](../prompts/05-groups.md).
-- Status: **built; awaiting the owner's approval** (the items under "The owner's decisions").
+- Status: **approved by the owner on 2026-11-17** ("approve all"): the gate with M2–M5, the
+  benchmarks and the caps they set (X-Wing by default), the seven threat-model §1 rows, and the
+  three follow-ups as future work. PR #59.
   M1 was approved on 2026-11-16 ("Approve all three").
 - Reports: `P05-plan.md` (agreed, D-0065), `P05-M1.md` to `P05-M4.md`, and this report.
 - Decisions: D-0065 to D-0074 (D-0074: the security review's fixes).

@@ -20,6 +20,13 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 5 gate (`P05-gate.md`, D-0070 to D-0074; PR #59): **approved by the owner on 2026-11-17**
+  ("approve all"): M2–M5, the benchmarks and the caps they set (1,024 devices per group, 2,048
+  per private channel, X-Wing by default), the seven threat-model §1 rows (roles, metadata,
+  change log, invite links, join requests, communities, claimed KeyPackage references), and the
+  three follow-ups as future work: server-proposed removal of deleted devices
+  (`external_senders`, D-0073), a link proof members can check (D-0071), a cluster-wide channel
+  budget (D-0072). Prompt 5 is done once PR #59 merges.
 - Prompt 5, M1 (`P05-M1.md`, D-0066 to D-0068): **approved by the owner on 2026-11-16**
   ("Approve all three"): the milestone, the two threat-model §1 rows (group state; pending
   fan-outs) and the three MPL-2.0 licence exceptions for the test harness. M2 (roles,
@@ -225,7 +232,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0072 — Prompt 5, milestone 4: communities as opaque links run by the announcement group's admins; private channels capped at 2,048 devices with a rate class; receipt tiers
 
 - Date: 2026-11-16
-- Status: accepted by the agent; the benchmarks and caps await the owner (report `P05-M4.md`);
+- Status: accepted; the benchmarks and caps **accepted by the owner on 2026-11-17** (report `P05-M4.md`);
   part of the Prompt 5 PR
 - Decided by: agent, under D-0065 (owner: tiers §5, public channels §4, X-Wing §3) and the
   standing instruction (Proton-level bar)

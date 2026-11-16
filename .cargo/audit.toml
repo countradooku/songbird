@@ -1,0 +1,22 @@
+# cargo-audit (`cargo xtask ci`, `--deny warnings`). cargo-audit reads every entry of Cargo.lock,
+# which records the optional dependencies of every dependency whether or not a feature enables
+# them; cargo-deny (deny.toml) follows the real feature graph instead. Every ignore below is for
+# a crate that no Songbird service builds, with its reason (D-0068). Review by 2027-02-16, or at
+# the next OpenMLS upgrade, whichever comes first.
+[advisories]
+ignore = [
+    # crypto-bigint 0.5.5, timing in constant-time arithmetic: built only in the test harness
+    # (tests/groups, OpenMLS's RustCrypto provider, its P-256/P-384 code). Also in deny.toml.
+    "RUSTSEC-2026-0387",
+    # libcrux-hmac-drbg 0.0.1 and libcrux-kem 0.0.9 (panics on some lengths and short keys):
+    # OpenMLS's optional libcrux provider, never built (`cargo tree -i` finds no path).
+    "RUSTSEC-2026-0329",
+    "RUSTSEC-2026-0330",
+    "RUSTSEC-2026-0331",
+    # libsqlite3-sys 0.35.0 (SQLite CVE-2026-119375): OpenMLS's optional SQLite storage, never
+    # built (Songbird stores group state itself, D-0066).
+    "RUSTSEC-2026-0459",
+    # proc-macro-error2 2.0.1, unmaintained: a build-time macro under those optional crates,
+    # never built.
+    "RUSTSEC-2026-0173",
+]

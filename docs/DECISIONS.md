@@ -137,6 +137,14 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
       `crossbeam-deque`, `crossbeam-epoch`, `postcard`, `cobs`. Noted "audit backlog".
     - **105 are never built for a server.** Noted as such.
     - Totals now: 167 fully audited, 26 partially, 374 exempted.
+  - **cargo-audit** (0.22.2) reads every lockfile entry, so it also reports OpenMLS's optional
+    backends, which cargo-deny's feature graph leaves out. Six findings, none on `main`
+    (479 crates, clean), all ignored in a new `.cargo/audit.toml` with their reasons:
+    - RUSTSEC-2026-0387 (`crypto-bigint`, above): built in the test harness only;
+    - RUSTSEC-2026-0329, -0330 and -0331 (`libcrux-hmac-drbg`, `libcrux-kem`: panics on some
+      lengths and short keys), RUSTSEC-2026-0459 (`libsqlite3-sys`: an SQLite CVE) and
+      RUSTSEC-2026-0173 (`proc-macro-error2` unmaintained): never built at all (`cargo tree
+      -i` finds no path, tests included).
 - Consequences: the audit backlog grows by 11 crates that `api` runs, and by 105 that ship
   nowhere. On Windows, `cargo vet` calls the store "not correctly formatted" until `cargo vet fmt`
   rewrites its line endings; the content does not change (a cargo-vet quirk; CI runs on Linux).

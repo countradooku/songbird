@@ -923,7 +923,7 @@ async fn send_path_device_lists_and_shared_bodies() {
     // Account A: devices 0, 1. Account B: devices 2, 3, 4.
     let s = songbird_e2e::start_accounts(songbird_e2e::test_mailbox().await, &[2, 3], |_| {}).await;
     let (a0, _a0e) = s.connect(0).await;
-    let (a1, mut a1e) = s.connect(1).await;
+    let (_a1, mut a1e) = s.connect(1).await;
     let (_b2, mut b2e) = s.connect(2).await;
     let (_b3, mut b3e) = s.connect(3).await;
     let (_b4, mut b4e) = s.connect(4).await;

@@ -21,7 +21,7 @@ fn write_fixtures() {
         .map(|n| Device::new(n, AccountId::from_bytes(id_from(n, 0xA0)), &mut dir))
         .collect();
     let mut g = server_create(&mut d[0], &dir);
-    let mut apply = |g: songbird_groups::Group, who: usize, b: &[u8], d: &mut Vec<Device>| {
+    let apply = |g: songbird_groups::Group, who: usize, b: &[u8], d: &mut Vec<Device>| {
         let (g, _) = g
             .apply_commit(&d[who].id, b, &dir, &Limits::default())
             .unwrap();

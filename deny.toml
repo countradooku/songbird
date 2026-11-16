@@ -4,7 +4,14 @@ all-features = false
 
 [advisories]
 # Every advisory fails the build unless listed here with a reason and an expiry review date.
-ignore = []
+ignore = [
+    # D-0068: crypto-bigint 0.5.5's constant-time arithmetic can branch on secrets. It reaches
+    # the tree only through the test harness (tests/groups: OpenMLS's RustCrypto provider, its
+    # P-256/P-384 code); no service links it (crates/groups manifest guard), and Songbird groups
+    # use X-Wing and Ed25519 only. The fix (0.7.6) needs elliptic-curve 0.14 upstream.
+    # Review by 2027-02-16, or at the next OpenMLS provider upgrade, whichever comes first.
+    { id = "RUSTSEC-2026-0387", reason = "test harness only (D-0068); review by 2027-02-16" },
+]
 unmaintained = "workspace"
 yanked = "deny"
 
@@ -26,6 +33,11 @@ exceptions = [
     { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
     { allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs" },
     { allow = ["BSL-1.0"], crate = "xxhash-rust" },
+    # D-0068: HPKE for OpenMLS's RustCrypto provider, in the test harness (tests/groups) only;
+    # no service links them (crates/groups manifest guard).
+    { allow = ["MPL-2.0"], crate = "hpke-rs" },
+    { allow = ["MPL-2.0"], crate = "hpke-rs-crypto" },
+    { allow = ["MPL-2.0"], crate = "hpke-rs-rust-crypto" },
 ]
 
 [licenses.private]

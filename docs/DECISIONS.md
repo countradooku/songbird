@@ -106,6 +106,41 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0068 — Prompt 5, milestone 1: the supply chain of OpenMLS and the client harness
+
+- Date: 2026-11-16
+- Status: accepted; cargo-deny and cargo-vet pass (CI's versions: cargo-deny 0.20.2, cargo-vet
+  0.10.2); **the licence exceptions are for the owner to confirm** (the repository's licence is
+  still open)
+- Decided by: agent, under D-0065 (owner)
+- Context: D-0065 §1 brought OpenMLS into the workspace, and D-0066 the test harness on OpenMLS's
+  RustCrypto provider. cargo-deny refused three crates' licence and one advisory; cargo-vet
+  wanted 116 crates vetted.
+- Evidence and decision:
+  - **Licences:** `hpke-rs`, `hpke-rs-crypto` and `hpke-rs-rust-crypto` are MPL-2.0. They come
+    only through `openmls_rust_crypto` in `tests/groups`, which no service links (the
+    `crates/groups` manifest guard). MPL-2.0 is file-level copyleft; it binds code that is
+    distributed, which test crates are not. Per-crate exceptions, these three only.
+  - **Advisory RUSTSEC-2026-0387** (`crypto-bigint` 0.5.5: secret-dependent branches in
+    constant-time arithmetic). Ignored with a review date of 2027-02-16:
+    - it reaches the tree only through the harness's RustCrypto provider (its P-256/P-384 code);
+    - Songbird groups use X-Wing and Ed25519, never those curves, and a test run has no
+      observer for a timing side channel;
+    - the fix (0.7.6) needs `elliptic-curve` 0.14, which OpenMLS's providers have not adopted.
+  - **cargo-vet: 116 exemptions,** each with a note. cargo-vet resolves every optional feature,
+    so OpenMLS's optional backends (libcrux, RustCrypto, SQLite storage) count as dependencies
+    of `crates/groups` even though `default-features = false` never builds them. A
+    `safe-to-run` policy for the harness changed nothing for that reason, and was not kept.
+    - **11 are in the server build** (`api` only; delivery, worker and push do not link OpenMLS,
+      shown by `cargo tree -i openmls`): `openmls`, `openmls_traits`,
+      `openmls_serialization_helpers`, `tls_codec`, `tls_codec_derive`, `rayon`, `rayon-core`,
+      `crossbeam-deque`, `crossbeam-epoch`, `postcard`, `cobs`. Noted "audit backlog".
+    - **105 are never built for a server.** Noted as such.
+    - Totals now: 167 fully audited, 26 partially, 374 exempted.
+- Consequences: the audit backlog grows by 11 crates that `api` runs, and by 105 that ship
+  nowhere. On Windows, `cargo vet` calls the store "not correctly formatted" until `cargo vet fmt`
+  rewrites its line endings; the content does not change (a cargo-vet quirk; CI runs on Linux).
+
 ## D-0067 — Prompt 5, milestone 1 (integration): groups in the registry, commits over `api`, group messages fanned out from the roster
 
 - Date: 2026-11-16

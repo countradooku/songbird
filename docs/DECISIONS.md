@@ -102,6 +102,60 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0060 — Prompt 4, milestone 2: order-independent chat state and message status; receipt batching sized by measurement
+
+- Date: 2026-11-16
+- Status: accepted; built (report `P04-M2.md`); awaiting the owner's approval of the gate
+- Decided by:
+  - owner: group read receipts follow the setting; 24-hour edit and delete windows (D-0058);
+  - agent: the semantics below.
+- Context: Prompt 4 asks that polls tally the same on every device whatever the arrival order
+  ("last vote per voter wins, by a per-voter counter"), proven by property tests; statuses that
+  only move forward; batched and coalesced receipts; group aggregation as members come and go;
+  and a measured share of receipt traffic in a 1,024-member group.
+- Decision:
+  - **Convergence by construction:**
+    - per-author slots keep the greatest `(counter, value)`: reactions, votes, RSVPs, edits;
+    - shared chat state takes the greatest `(time, author, message ID)`: pins, timer, policy;
+    - every state is a function of the set of operations.
+  - **Closing a poll fixes its result:**
+    - the author's close lists each voter's counter as the author saw it;
+    - only those votes count afterwards, so a late vote cannot make devices disagree;
+    - closes by others, or naming another poll, are dropped.
+  - **Edit and delete windows** are judged from the messages' own times, never from arrival.
+  - **Status:** each recipient's greatest receipt. A group's audience is fixed at send time;
+    members who leave are dropped, and joiners are never counted.
+  - **Batching window:** 1 s, and **10 s in groups above 32 members**, chosen from the load test
+    below. Every device that saves a message sends a delivered receipt, which keeps "at least
+    one device" exact.
+- Evidence (Apple M5 Pro, macOS 27.2.1, release build):
+  - property tests, 512 cases each, two random orders with random repeats: polls (with closes,
+    forged closes and invalid votes), reactions and RSVPs, edits and deletes, pins, timers and
+    policies, and statuses (forward only);
+  - a broken merge ("the last arrival wins") fails at once;
+  - known cases: a closed poll, group ticks as members leave and join, a receipt lifting a failed
+    message, 200 unread messages giving one read receipt, splitting above 512, the setting off.
+  - **Load test** (`tests/e2e/tests/receipts_load.rs`): the real coalescer drives the real send
+    path. Setup: 1,024 members with 2 devices each; 60 messages in an hour; 20 % of devices offline
+    and catching up; 3 chat openings per member. Receipt share of all envelopes:
+
+    | Traffic | Window | Delivered from | Receipts |
+    | --- | --- | --- | --- |
+    | Steady, random authors | 1 s or 10 s | every device | 72.6 % |
+    | Steady, random authors | 1 s or 10 s | primaries only | 62.6 % |
+    | Bursts of two people chatting | 1 s | every device | 65.9 % |
+    | Bursts of two people chatting | 1 s | primaries only | 51.0 % |
+    | Bursts of two people chatting | **10 s** | **every device** | **47.2 %** (chosen) |
+    | Bursts of two people chatting | 10 s | primaries only | 34.3 % |
+
+    Receipts go to each author only (the prompt's rule), so they batch only across one author's
+    messages, and "read up to here" saves little in a big group whose messages have many
+    authors (9,624 read receipts for 47,360 messages read in the chosen case).
+- Consequences: no new dependency. Large groups see receipt envelopes close to half of all
+  traffic. Delivered receipts from primaries only would save another 13 points, at the cost of
+  "delivered" waiting for the primary; this is left to the owner (P04 gate) and to Prompt 5's
+  group tiers.
+
 ## D-0059 — Prompt 4, milestone 1: the encrypted content schema (`crates/content`), never linked by a service
 
 - Date: 2026-11-16

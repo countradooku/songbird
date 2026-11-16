@@ -348,6 +348,22 @@ and the specification's. Nothing new reaches the server (no §1 row).
 | Apps logging message content or keys | I | App bugs, log collection | `Debug` of every content type prints its name only | `debug_prints_no_content` |
 | Two implementations disagreeing on the encoding | T | Interoperability bugs | The `.proto` is the specification; 32 vectors encoded by the Rust types and by an independent compiler from hand-written JSON | `every_vector_matches_the_rust_types_byte_for_byte`; `tools/content-vectors` |
 
+### 3.18 Chat state and receipts (Prompt 4, milestone 2; D-0060)
+
+These run in apps, over end-to-end encrypted content. The server sees receipts only as envelopes
+(their count and timing, §1).
+
+| Threat | STRIDE | Attacker | Mitigation | Test or proof |
+| --- | --- | --- | --- | --- |
+| Devices disagreeing on a poll, reaction, pin or timer (or an attacker making them disagree by reordering or replaying) | T | Malicious server (reorders, delays, replays), network faults | Every state is a function of the set of operations: per-author counters, or a total order on (time, author, message ID) | `crates/content/tests/convergence.rs` |
+| Changing someone else's vote or reaction | T, S | Malicious member | Slots are per author; the author comes from the session layer, not the content | `Lww`, `Poll` (votes keyed by the authenticated voter) |
+| Closing someone else's poll, or rewriting a closed result with late votes | T | Malicious member | Only the poll's author's close counts; a close fixes each listed voter's counted vote | `a_closed_poll_counts_exactly_the_votes_its_author_saw` |
+| Editing or deleting another person's message, or after the window | T | Malicious member | Only the author (group admins from Prompt 5), within 24 hours of the messages' own times | `edits_and_deletes_converge…` (only the author's in-window edits shown) |
+| Faking ticks | S | Server, insider | Receipts are end-to-end encrypted content from the audience only; the server's `Accepted` gives one tick only | `group_ticks_wait…`; PROTOCOL §5.6 |
+| Flooding a device with operations it must store | D | Malicious member | Validation bounds every message; per-voter (64) and per-message (64 revisions, 16 deletes) caps | `crates/content/src/state` |
+| Read receipts revealing reading habits against the user's wish | I | Contacts, group members | Reciprocal setting, applied to groups (D-0058); receipts go to the author only, never the group | `with_read_receipts_off_only_the_own_devices_learn_what_was_read` |
+| Receipt traffic overloading the server in large groups | D | Large groups (load) | Batching per author, 10 s above 32 members; measured | `receipt_share_in_a_1024_member_group` (47 %) |
+
 ## 4. Server-enforced settings
 
 ## 5. Compliance notes (GDPR, age of digital consent per EU country)

@@ -890,17 +890,82 @@ one chat at a time; otherwise to at most 5 chats at once. Apps enforce this; the
 nothing of it.
 
 **Edit and delete windows** use the server's stamp time (§5.13) of both messages when both carry
-one, otherwise the sender's `sent_at_ms`; a reader also ignores an edit or delete that claims a
-time more than 5 minutes ahead of its own clock. A modified app can still ignore the window on
-its own device, as in Signal and WhatsApp.
+one, otherwise the sender's `sent_at_ms`. The rule looks only at the two messages, never at when
+they arrived, so every device agrees. A modified app can still ignore the window on its own
+device, as in Signal and WhatsApp.
 
 ### 5.5 Order-independent state
 
-Filled in by M2 (D-0060).
+Decision D-0060 (M2). Reference implementation: `songbird_content::state`; every app computes
+the same. Every state is a function of the **set** of operations received, never of their
+order or repeats (property tests: `crates/content/tests/convergence.rs`).
+
+- **Last write per author, by the author's counter.** Reactions, poll votes and RSVPs keep, per
+  (target, author), the write with the greatest `(counter, value)`. Each author numbers its own
+  writes (any strictly increasing counter), so no clock is trusted, and a reused counter still
+  breaks ties on the value's bytes.
+- **A total order for state many people write.** Pins, the disappearing timer and the
+  restricted-chat policy are decided by the greatest `(time, author, message ID)`. The time is the
+  server's stamp (§5.13) when the message has one, else `sent_at_ms`.
+- **Reactions:** one per reactor and message; a new emoji replaces, `remove` clears.
+- **Polls:**
+  - while open, each voter's vote with the highest counter counts. A vote for an option the poll
+    lacks, or for several options in a single-choice poll, counts as none; no options retracts;
+  - only the poll's author can close it, and a close names the poll (author and message ID).
+    `heads` lists each voter's counter as the author saw it. From then on exactly those votes
+    count, and nobody else's, so late votes cannot change a closed result on any device. Of two
+    closes, the greater `(time, author, message ID)` wins;
+  - votes may arrive before the poll and are judged once it is known;
+  - a device keeps at most 64 votes per voter (the highest counters), which bounds what one
+    voter can make it store.
+- **Events:** RSVPs as votes (going, maybe, declined), the responder's highest counter winning.
+- **Edits:**
+  - the shown text is the author's valid edit with the highest revision; every valid revision is
+    the history;
+  - an edit is valid when its editor is the original's author and it falls within 24 hours of
+    the original (§5.4);
+  - at most 64 revisions are kept.
+- **Delete for everyone:** by the author (or a group admin, Prompt 5) within 24 hours.
+- **Pins:** per message, the greatest pin operation wins. A pin lasts its duration from its time,
+  and at most 3 are shown, the newest pins first.
 
 ### 5.6 Receipts and message status
 
-Filled in by M2 (D-0060).
+Decision D-0060 (M2).
+
+| Status | Meaning | Produced by |
+| --- | --- | --- |
+| Sending | Not yet stored on the server | The sender's app |
+| Sent (one tick) | Stored durably | The server's `Accepted` (§3.1) |
+| Delivered (two ticks) | At least one device of the recipient (of every member) decrypted and saved it | Encrypted delivered receipts |
+| Read (blue) | The recipient (every member) opened the chat | Encrypted read receipts, if enabled |
+| Played | A voice or video note was played | Encrypted played receipts |
+| Failed | Could not be sent after retries | The sender's app |
+
+- **Receipts are content** (`ReceiptMessage`), end-to-end encrypted, so the server can neither
+  fake nor hide them. They travel through the mailbox (never the ephemeral lane), so an offline
+  sender gets its ticks later. Every device that saves a message sends a delivered receipt.
+- **Only to the author.** A receipt goes to every device of the message's author, never to the
+  rest of a group.
+- **Forward only.** The status is computed from each recipient's greatest receipt (delivered <
+  read < played), so it never moves back, whatever order receipts arrive in. A receipt also lifts
+  a message the app had marked failed, since it proves the server stored it.
+- **Groups ("Message info").** The audience is the members when the message was sent:
+  - members who left since are no longer waited for, and members who joined later are not
+    counted;
+  - two ticks when every remaining audience member has a device that received it, and read when
+    every one of them read it.
+- **Batching.** The recipient's app gathers receipts per (chat, author, kind) for 1 second, or 10
+  seconds in groups above 32 members, then sends one receipt:
+  - delivered and played receipts list message IDs, at most 512 per receipt;
+  - a read receipt says "up to here" (`up_to`), so opening a chat with 200 unread messages from
+    one author sends one receipt;
+  - the reader's own other devices get one `ReadSync` of what was read.
+- **The read-receipt setting** is reciprocal and **applies to groups too** (D-0058): off means
+  no read or played receipts sent, and none shown (at most two ticks). Delivered receipts are
+  always sent.
+- **Load** (the M2 report): in a 1,024-member group where members chat in bursts, receipts are
+  47 % of all envelopes with the 10-second window (66 % with 1 second).
 
 ### 5.7 Typing
 

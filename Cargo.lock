@@ -3608,6 +3608,7 @@ dependencies = [
  "songbird-alloc-count",
  "songbird-api",
  "songbird-client",
+ "songbird-content",
  "songbird-delivery",
  "songbird-jobs",
  "songbird-keys",

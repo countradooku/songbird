@@ -14,9 +14,13 @@
 //!                                 └─▶ commitment = HMAC(franking_key, ctx ‖ bytes) ─▶ Send frame
 //! open:  session layer ─▶ unpad ─▶ Plaintext ─▶ Content (bounded, validated)
 //! ```
+//!
+//! [`state`] holds the reference semantics every app must reproduce: tallies, reactions, edits,
+//! pins, timers and message status, all independent of arrival order.
 #![forbid(unsafe_code)]
 
 pub mod schema;
+pub mod state;
 pub mod validate;
 
 use aws_lc_rs::constant_time::verify_slices_are_equal;

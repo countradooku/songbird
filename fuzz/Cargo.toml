@@ -18,6 +18,8 @@ songbird-pow = { path = "../crates/pow" }
 songbird-keys = { path = "../crates/keys" }
 songbird-akd = { path = "../crates/akd" }
 songbird-content = { path = "../crates/content" }
+songbird-groups = { path = "../crates/groups" }
+songbird-groups-harness = { path = "../tests/groups" }
 akd = { version = "=0.13.0", default-features = false, features = ["whatsapp_v1", "serde_serialization", "public_auditing"] }
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
@@ -154,6 +156,20 @@ bench = false
 [[bin]]
 name = "franking"
 path = "fuzz_targets/franking.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mls_wire"
+path = "fuzz_targets/mls_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mls_commit"
+path = "fuzz_targets/mls_commit.rs"
 test = false
 doc = false
 bench = false

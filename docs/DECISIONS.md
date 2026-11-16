@@ -106,6 +106,79 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0066 — Prompt 5, milestone 1 (core): OpenMLS `PublicGroup` behind a verify-only aws-lc-rs provider; X-Wing `0x004F`; group state as postcard; commits over HTTP
+
+- Date: 2026-11-16
+- Status: accepted for the core (`crates/groups`, `tests/groups`); the registry, `api` and
+  send-path integration of M1 follow; the threat-model row is for the owner with the M1 gate
+- Decided by: agent, under D-0065 (owner) and the standing instruction (Proton-level bar)
+- Context: D-0065 §1 and §3 needed a concrete provider, ciphersuite, state format and transport.
+- Options considered and evidence (Windows 11, `rustc 1.99.1`, release build):
+  - **The server's provider: verify only.** Hashing, Ed25519 verification (with D-0048's
+    honest-key check), HMAC and HKDF on aws-lc-rs; AEAD, HPKE, signing and key generation return
+    errors. The delivery service never holds a group secret, so it cannot be made to use one.
+    - Known answers: RFC 5869 case 1, RFC 8032 test 1.
+    - OpenMLS's RustCrypto provider plays the clients and interoperates byte for byte (every
+      harness test).
+  - **The ciphersuite: X-Wing `0x004F`**
+    (`MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519`, draft-ietf-mls-pq-ciphersuites,
+    provisional code point).
+    - Chosen over `0x004D` (an older X-Wing draft suite that only libcrux implements); RustCrypto
+      implements `0x004F`.
+    - Groups accept only `GROUP_CIPHERSUITES` (one constant). The KeyPackage upload check (D-0051)
+      still allows `0x0001`/`0x0003` until M1's integration extends it.
+    - A provisional code point that changes later means new groups under the new value, since
+      every client is ours.
+  - **Stored state: OpenMLS's public storage format, as postcard, tagged with its storage
+    version.** This replaces the plan's "RFC 9420 wire bytes", because OpenMLS rebuilds a
+    `PublicGroup` from them only through `from_external`. That call checks the lifetimes of
+    never-updated leaves, so a member idle beyond 100 days (D-0051) would make the group
+    unloadable.
+    - postcard 1.1.3 (`cobs`, `serde`; a specified, stable format) instead of JSON: the stored
+      tree is 1.67 KB per member against 6.26 KB (21 X-Wing members: 35,121 bytes against
+      131,461).
+    - Records failing to decode are refused (fuzz target `mls_commit`).
+  - **Commits travel over HTTP to `api`, not in the WebSocket `Send` frame.** X-Wing commits grow
+    about 1.2 KB per unmerged leaf (adding 20 members one at a time: 5,479 to 32,611 bytes), past
+    the 64 KiB envelope and 1 MiB frame limits long before 1,024 members.
+    - Group application messages stay on the WebSocket. There the send path reads only the
+      `PrivateMessage` prefix (group, epoch, content type), allocation-free, and checks the
+      roster.
+    - M4 measures commits and Welcomes at 1,024 and 5,000 members; D-0065 §3 comes back to the
+      owner if they are too large.
+- Decision (Songbird's checks, on top of OpenMLS's RFC 9420 validation, before anything is
+  merged):
+  - a member commit is signed by the leaf whose credential is the authenticated device;
+  - credentials are basic, naming a 16-byte device the directory knows, and are never changed by
+    an update;
+  - only add, remove, update, self-remove, and external init (external commits only) proposals;
+  - an external commit only for an account already in the group, removing at most the joining
+    device's own old leaf (RFC 9420 §12.4.3.2). A reinstalled device is a new device: it joins,
+    then a member commit removes the dead leaf;
+  - at most 1,024 leaves and a 4 MiB bundle;
+  - the Welcome has exactly one secret per added KeyPackage;
+  - the uploaded `GroupInfo` is the new epoch's, signed by the committer;
+  - the group is consumed by `apply_commit` and returned only on success, so half-checked state
+    cannot be used.
+- Evidence:
+  - `tests/groups`:
+    - `lifecycle`, 11 tests: every refusal above, adds and removes and updates, reloads from
+      stored bytes, an application message readable by the others;
+    - `convergence`: six concurrent commits, one winner per epoch, no fork; and a property test,
+      24 random sequences of adds, removals and races, in which every honest client always has
+      the server's epoch and roster and can read every other member.
+  - `crates/groups`: 9 unit tests, among them the wire parsers' malformation and minimality
+    tests and the manifest guard (no service links OpenMLS's client providers or the harness).
+  - Fuzz targets `mls_wire` and `mls_commit`, written and type-checked. **Not yet run:** this
+    machine has no nightly toolchain; they run before the M1 gate.
+- Consequences:
+  - New crates in the server build: `openmls`, `openmls_traits`,
+    `openmls_serialization_helpers`, `tls_codec`, `tls_codec_derive`, `rayon`, `rayon-core`,
+    `crossbeam-deque`, `crossbeam-epoch`, `postcard` and `cobs`. Each needs a cargo-vet entry.
+  - `Cargo.lock` grows from 479 to 600 entries. Most are OpenMLS's optional backends, which
+    Cargo resolves but never builds, plus the harness's test-only RustCrypto.
+  - OpenMLS upgrades must keep stored records loadable (a fixture test with the integration).
+
 ## D-0065 — Prompt 5: the plan, and the owner's decisions it needed
 
 - Date: 2026-11-16

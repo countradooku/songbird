@@ -25,7 +25,27 @@ pub const PUBLIC_LEN: usize = 32;
 /// Envelope overhead: version, ephemeral key, GCM tag.
 pub const OVERHEAD: usize = 1 + PUBLIC_LEN + 16;
 
-const SALT: &[u8] = b"songbird.v1/provisioning";
+/// What an envelope is sealed for. Each purpose derives its key under its own HKDF salt, so an
+/// envelope sealed for one never opens for another. A closed set: a new purpose is a new variant
+/// with its own label, never a caller's string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Domain {
+    /// Device linking (`songbird.v1/provisioning`): [`seal`] and [`open`].
+    Provisioning,
+    /// Reports sealed to the offline moderation key (`songbird.v1/report`, Prompt 4).
+    Report,
+}
+
+impl Domain {
+    /// The HKDF-Extract salt: a public domain-separation label (RFC 5869 §3.1), not a secret.
+    /// Each label is written at the call to `Salt::new` itself.
+    fn salt(self) -> hkdf::Salt {
+        match self {
+            Self::Provisioning => hkdf::Salt::new(hkdf::HKDF_SHA256, b"songbird.v1/provisioning"),
+            Self::Report => hkdf::Salt::new(hkdf::HKDF_SHA256, b"songbird.v1/report"),
+        }
+    }
+}
 const CONFIRM_CONTEXT: &[u8] = b"songbird.v1/link-confirm\0";
 
 /// Provisioning failed (one answer for every cause).
@@ -86,7 +106,7 @@ impl ProvisioningKey {
 }
 
 fn aead_key(
-    salt: &[u8],
+    domain: Domain,
     shared: &[u8],
     ephemeral: &[u8; PUBLIC_LEN],
     recipient: &[u8; PUBLIC_LEN],
@@ -99,7 +119,8 @@ fn aead_key(
     info[..PUBLIC_LEN].copy_from_slice(ephemeral);
     info[PUBLIC_LEN..].copy_from_slice(recipient);
     let mut k = [0u8; 32];
-    hkdf::Salt::new(hkdf::HKDF_SHA256, salt)
+    domain
+        .salt()
         .extract(shared)
         .expand(&[&info], &AES_256_GCM)
         .and_then(|o| o.fill(&mut k))
@@ -123,16 +144,16 @@ fn aad(ephemeral: &[u8; PUBLIC_LEN], recipient: &[u8; PUBLIC_LEN]) -> [u8; 1 + 2
 /// # Errors
 /// A dishonest recipient key or a random-source failure.
 pub fn seal(recipient: &[u8; PUBLIC_LEN], plaintext: &[u8]) -> Result<Vec<u8>, ProvisioningError> {
-    seal_with(SALT, recipient, plaintext)
+    seal_with(Domain::Provisioning, recipient, plaintext)
 }
 
-/// [`seal`] under another domain (the HKDF salt): the same construction for another purpose
-/// (sealed reports, Prompt 4), so an envelope sealed for one purpose never opens for another.
+/// [`seal`] for another [`Domain`]: the same construction for another purpose (sealed reports,
+/// Prompt 4), so an envelope sealed for one purpose never opens for another.
 ///
 /// # Errors
 /// As [`seal`].
 pub fn seal_with(
-    domain: &[u8],
+    domain: Domain,
     recipient: &[u8; PUBLIC_LEN],
     plaintext: &[u8],
 ) -> Result<Vec<u8>, ProvisioningError> {
@@ -166,7 +187,7 @@ pub fn seal_with(
 /// [`ProvisioningError`] for another key, any changed byte, a truncation, a dishonest
 /// ephemeral key.
 pub fn open(key: &ProvisioningKey, envelope: &[u8]) -> Result<Vec<u8>, ProvisioningError> {
-    open_with(SALT, key, envelope)
+    open_with(Domain::Provisioning, key, envelope)
 }
 
 /// [`open`] under another domain ([`seal_with`]).
@@ -174,7 +195,7 @@ pub fn open(key: &ProvisioningKey, envelope: &[u8]) -> Result<Vec<u8>, Provision
 /// # Errors
 /// As [`open`], and for an envelope sealed under another domain.
 pub fn open_with(
-    domain: &[u8],
+    domain: Domain,
     key: &ProvisioningKey,
     envelope: &[u8],
 ) -> Result<Vec<u8>, ProvisioningError> {
@@ -258,10 +279,10 @@ mod tests {
     #[test]
     fn a_domain_seals_for_its_purpose_only() {
         let k = ProvisioningKey::generate().unwrap();
-        let e = seal_with(b"songbird.v1/report", &k.public(), b"report").unwrap();
-        assert_eq!(open_with(b"songbird.v1/report", &k, &e).unwrap(), b"report");
+        let e = seal_with(Domain::Report, &k.public(), b"report").unwrap();
+        assert_eq!(open_with(Domain::Report, &k, &e).unwrap(), b"report");
         assert!(open(&k, &e).is_err(), "not a provisioning message");
-        assert!(open_with(b"songbird.v1/report", &k, &seal(&k.public(), b"p").unwrap()).is_err());
+        assert!(open_with(Domain::Report, &k, &seal(&k.public(), b"p").unwrap()).is_err());
     }
 
     #[test]

@@ -7,14 +7,15 @@
 //!
 //! `"@name"` in a bytes field stands for another vector's bytes. A `PaddedPlaintext` is unpadded
 //! (`0x80 0x00*`) and checked as a `Plaintext`.
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use base64::Engine as _;
 use prost::Message as _;
 use prost_reflect::{DynamicMessage, MessageDescriptor, ReflectMessage as _, Value};
 
 fn main() {
-    let root = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "../..".into()));
+    // The repository this tool lives in (`tools/content-vectors`), fixed at build time.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let content = root.join("crates/content");
     let pool = protox::compile([content.join("proto/content.proto")], [content.join("proto")])
         .expect("content.proto compiles");

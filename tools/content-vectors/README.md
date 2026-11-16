@@ -9,5 +9,5 @@ for byte, and decoding must leave no unknown field.
 Not part of the workspace or of any build (it pulls a protobuf compiler that nothing ships with).
 
 ```bash
-cd tools/content-vectors && cargo run --release -- ../..
+cd tools/content-vectors && cargo run --release
 ```

@@ -24,6 +24,7 @@
 use aws_lc_rs::constant_time::verify_slices_are_equal;
 use aws_lc_rs::hmac;
 use songbird_accounts::{DeviceRow, Registry, RegistryError};
+use songbird_keys::provisioning::Domain;
 use songbird_proto::report::Report;
 use songbird_send::{Frankers, GateKeys};
 use songbird_service::telemetry::sharded::ShardedCounter as Counter;
@@ -36,7 +37,7 @@ use crate::devices::Outcome;
 /// does not link that crate, and `tests/e2e` checks the two agree).
 pub const FRANKING_CONTEXT: &[u8] = b"songbird.v1/franking\0";
 /// The domain reports are sealed under (`songbird_keys::provisioning::seal_with`).
-pub const SEAL_DOMAIN: &[u8] = b"songbird.v1/report";
+pub const SEAL_DOMAIN: Domain = Domain::Report;
 /// How far ahead of the server's clock a stamp may be (clock steps between nodes).
 pub const MAX_AHEAD_MS: u64 = 5 * 60 * 1000;
 

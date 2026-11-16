@@ -353,7 +353,7 @@ and the specification's. Nothing new reaches the server (no §1 row).
 | Replayed or resent messages shown twice | T | Faults, restores, malicious server | Recipients drop a repeat of (author, message ID) | PROTOCOL §5.1; M2's state tests |
 | An old app misreading a newer message | T | Version skew | Unknown fields, kinds and enums ignored; `required_version` shows "update to see this" | `a_newer_writers_*`, `this_reader_decodes_every_versions_vectors` |
 | Apps logging message content or keys | I | App bugs, log collection | `Debug` of every content type prints its name only | `debug_prints_no_content` |
-| Two implementations disagreeing on the encoding | T | Interoperability bugs | The `.proto` is the specification; 32 vectors encoded by the Rust types and by an independent compiler from hand-written JSON | `every_vector_matches_the_rust_types_byte_for_byte`; `tools/content-vectors` |
+| Two implementations disagreeing on the encoding | T | Interoperability bugs | The `.proto` is the specification; 33 vectors encoded by the Rust types and by an independent compiler from hand-written JSON | `every_vector_matches_the_rust_types_byte_for_byte`; `tools/content-vectors` |
 
 ### 3.18 Chat state and receipts (Prompt 4, milestone 2; D-0060)
 

@@ -1218,7 +1218,8 @@ Then the server seals a **minimal report** to the moderation key and queues it (
 ```
 
 - **Sealing:** X25519 with a fresh ephemeral key, HKDF-SHA256 under the domain
-  `songbird.v1/report`, AES-256-GCM (`songbird_keys::provisioning::seal_with`), to
+  `songbird.v1/report`, AES-256-GCM
+  (`songbird_keys::provisioning::seal_with(Domain::Report, …)`), to
   `[api.reports] moderation_key`. The private half stays offline with the moderators
   (`songbird-admin reports keygen`).
 - **What the report leaves out:** the reporter, any other message, the conversation's members.

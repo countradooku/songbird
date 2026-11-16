@@ -16,12 +16,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow};
 use clap::Subcommand;
-use songbird_keys::provisioning::{ProvisioningKey, open_with};
+use songbird_keys::provisioning::{Domain, ProvisioningKey, open_with};
 
 use crate::{audit, store};
 
 /// The domain reports are sealed under (`songbird_api::reports::SEAL_DOMAIN`).
-const SEAL_DOMAIN: &[u8] = b"songbird.v1/report";
+const SEAL_DOMAIN: Domain = Domain::Report;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum ReportsCmd {

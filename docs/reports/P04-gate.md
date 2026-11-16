@@ -58,6 +58,18 @@ Run on the owner's Mac (Apple M5 Pro, macOS 27.2.1; compose stack under podman w
   passed in. The bug predates Prompt 4; the deadline repeated it.
 - The Iggy live tests (including `the_disappearing_hint_skips_drops_and_survives_a_restart`) run
   in CI's compose job: Iggy does not run on the owner's Mac (memory).
+- **CI's first run on the PR** passed five checks and failed two on false positives. Both were
+  fixed in code, with no waiver:
+  - semgrep flagged `std::env::args` in `tools/content-vectors`, which now finds the repository
+    from `CARGO_MANIFEST_DIR`;
+  - CodeQL (`rust/hard-coded-cryptographic-value`) flagged the report domain, a public HKDF salt,
+    reaching `Salt::new` through a parameter. `seal_with` and `open_with` now take a closed
+    `provisioning::Domain` enum (`Provisioning`, `Report`) whose labels are written at
+    `Salt::new`, as everywhere else in the workspace. The salts' bytes did not change, and
+    callers can no longer pass an arbitrary domain.
+
+  After the fixes, `ci fast` passed again (570), as did `gate_p04` (5/5) and the vector checker
+  (33 of 33).
 
 
 ## Security review

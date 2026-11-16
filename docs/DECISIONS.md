@@ -193,9 +193,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   - **Checks, in order:** the reporter's budget (spent first), the franking key, the 30-day
     window, the stamp (sender attested or sealed; this recipient or a group), then the commitment
     (constant time).
-  - **The minimal report:** eight fields, sealed with `seal_with("songbird.v1/report", …)`. The
-    row is named by a keyed hash of the stamp's tag (one per message), kept 30 days (at most 90),
-    and swept by the worker.
+  - **The minimal report:** eight fields, sealed with `seal_with(Domain::Report, …)` (salt
+    `songbird.v1/report`). The row is named by a keyed hash of the stamp's tag (one per
+    message), kept 30 days (at most 90), and swept by the worker.
   - **`songbird-admin reports`:** `keygen`, `list`, `open` (decrypt and decode) and `delete`
     (audit-logged).
   - `[api.reports]` is required in staging and production, and needs `[api.requests]` and

@@ -501,10 +501,12 @@ server checks each package before publishing it, with its own focused parser (th
 over running OpenMLS on the server), and **binds it to the uploading device**:
 
 - RFC 9420's encoding, strictly (minimal variable-length integers, no trailing bytes, at most
-  2,048 bytes, no duplicate extension types); version mls10; ciphersuite `0x0001` or `0x0003`
-  (X25519 HPKE, Ed25519 signatures);
-- `init_key` and the leaf's `encryption_key` honest X25519 keys, different from each other; the
-  `signature_key` an honest Ed25519 key;
+  4,096 bytes, no duplicate extension types); version mls10; ciphersuite `0x0001` or `0x0003`
+  (X25519 HPKE), or `0x004F`, X-Wing (ML-KEM-768 and X25519 HPKE, the suite of every group,
+  D-0066); Ed25519 signatures throughout;
+- `init_key` and the leaf's `encryption_key` honest keys of the suite's KEM, different from each
+  other: X25519, or X-Wing (an ML-KEM-768 encapsulation key passing the FIPS 203 modulus check,
+  then an honest X25519 key); the `signature_key` an honest Ed25519 key;
 - a **basic credential whose identity is the uploading device's 16-byte ID**;
 - capabilities listing mls10, the package's ciphersuite and basic credentials; leaf source
   `key_package`; a lifetime that has begun (an hour of skew allowed), has not ended and is at most

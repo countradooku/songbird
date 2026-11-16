@@ -7,9 +7,10 @@
 //!
 //! - the TLS presentation language encoding, strictly (minimal variable-length integers, no
 //!   trailing bytes, at most [`MAX_LEN`] bytes, duplicate extension types refused);
-//! - `version` mls10; `cipher_suite` one of [`ALLOWED_SUITES`] (X25519 for HPKE, Ed25519 for
-//!   signatures);
-//! - `init_key` and the leaf's `encryption_key`: honest X25519 keys, different from each other;
+//! - `version` mls10; `cipher_suite` one of [`ALLOWED_SUITES`] (X25519 or X-Wing for HPKE,
+//!   Ed25519 for signatures);
+//! - `init_key` and the leaf's `encryption_key`: honest keys of the suite's KEM (X25519, or
+//!   X-Wing: ML-KEM-768 then X25519, D-0066), different from each other;
 //!   `signature_key`: an honest Ed25519 key;
 //! - the credential: basic, its identity exactly the uploading device's ID;
 //! - capabilities list mls10, the package's ciphersuite and the basic credential;
@@ -28,11 +29,14 @@ use aws_lc_rs::digest;
 use aws_lc_rs::signature::{ED25519, UnparsedPublicKey};
 
 /// Longest KeyPackage accepted (an X25519/Ed25519 package with a basic credential is about
-/// 300 bytes).
-pub const MAX_LEN: usize = 2048;
+/// 300 bytes; an X-Wing one, with two 1,216-byte keys, about 2,700).
+pub const MAX_LEN: usize = 4096;
 /// `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519` and
-/// `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519`.
-pub const ALLOWED_SUITES: [u16; 2] = [0x0001, 0x0003];
+/// `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519`, and X-Wing
+/// `MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519` (the suite of every group, D-0066).
+pub const ALLOWED_SUITES: [u16; 3] = [0x0001, 0x0003, XWING_SUITE];
+/// X-Wing (`0x004F`, the provisional code point of draft-ietf-mls-pq-ciphersuites).
+pub const XWING_SUITE: u16 = 0x004F;
 /// mls10.
 const MLS10: u16 = 1;
 /// Basic credential.
@@ -280,7 +284,14 @@ pub fn check(package: &[u8], device: &[u8; 16], now: u64) -> Result<Checked, Mls
     {
         return Err(MlsError::Unsupported);
     }
-    if x25519(init_key)? == x25519(encryption_key)? {
+    if suite == XWING_SUITE {
+        if !crate::kem::xwing_public_key_ok(init_key)
+            || !crate::kem::xwing_public_key_ok(encryption_key)
+            || init_key == encryption_key
+        {
+            return Err(MlsError::Keys);
+        }
+    } else if x25519(init_key)? == x25519(encryption_key)? {
         return Err(MlsError::Keys);
     }
     let sig_key: [u8; 32] = signature_key.try_into().map_err(|_| MlsError::Keys)?;

@@ -4923,6 +4923,7 @@ dependencies = [
  "openmls_rust_crypto",
  "proptest",
  "songbird-groups",
+ "songbird-keys",
  "songbird-types",
 ]
 

@@ -17,6 +17,7 @@ openmls_rust_crypto = { version = "=0.6.0", features = ["draft-ietf-mls-pq-ciphe
 openmls_basic_credential = "=0.6.0"
 
 [dev-dependencies]
+songbird-keys.workspace = true
 proptest.workspace = true
 
 [lints]

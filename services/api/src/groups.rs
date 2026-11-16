@@ -56,6 +56,11 @@ pub struct Groups {
     pub links_per_sec: u32,
     /// Their burst.
     pub link_burst: u32,
+    /// Reads (state, change log, community state) per second per device (D-0074): a state read
+    /// rebuilds the whole tree.
+    pub reads_per_sec: u32,
+    /// Their burst.
+    pub read_burst: u32,
 }
 
 impl std::fmt::Debug for Groups {
@@ -85,6 +90,8 @@ impl Groups {
             commit_burst: 10,
             links_per_sec: 1,
             link_burst: 5,
+            reads_per_sec: 5,
+            read_burst: 20,
         })
     }
 
@@ -268,6 +275,11 @@ impl Groups {
             Ok(None) => return Outcome::NotFound,
             Err(_) => return Outcome::Unavailable,
         };
+        // Outsiders get the answer for no group, before any work (D-0074); a join by link is
+        // the one way in for them.
+        if link.is_none() && !Self::may_read(m, &row.roster, &device) {
+            return Outcome::NotFound;
+        }
         // A spent link is refused before any work, unless this is its last join again.
         if matches!(link, Some((_, false))) && row.last.as_ref() != hash {
             return Outcome::NotFound;
@@ -307,33 +319,19 @@ impl Groups {
             Err(_) => return Outcome::Unavailable,
         };
 
-        // Who hears what: the commit goes to every device in the group before or after it
-        // (removed devices learn they were removed) except the committer and the added devices,
-        // which get the Welcome instead.
-        let old = devices_of(&row.roster);
-        let mut members: Vec<DeviceId> = old.iter().chain(roster.iter()).copied().collect();
-        members.sort_unstable();
-        members.dedup();
-        members.retain(|d| *d != device && !applied.added.contains(d));
-        let plan = Plan {
-            commit: parts.commit.to_vec(),
-            members: members.iter().map(|d| *d.as_bytes()).collect(),
-            welcome: parts.welcome.map(<[u8]>::to_vec),
-            added: applied.added.iter().map(|d| *d.as_bytes()).collect(),
-        };
-        let Ok(plan_bytes) = postcard::to_stdvec(&plan) else {
+        // Every added leaf is a KeyPackage its device published (D-0074): a member cannot add
+        // a leaf it made up under another device's ID and speak as that device.
+        match registry.key_packages_published(&applied.key_packages).await {
+            Ok(true) => {}
+            Ok(false) => return Outcome::Forbidden("key_package"),
+            Err(_) => return Outcome::Unavailable,
+        }
+        let Ok(plan_bytes) =
+            postcard::to_stdvec(&plan_of(&row.roster, &roster, device, &parts, &applied))
+        else {
             return Outcome::Unavailable;
         };
-        // Accounts this commit brings in: their pending join requests are answered (D-0071).
-        let directory = m.path.directory();
-        let mut joined: Vec<[u8; 16]> = applied
-            .added
-            .iter()
-            .filter_map(|d| directory.listed_account(d))
-            .map(|a| *a.as_bytes())
-            .collect();
-        joined.sort_unstable();
-        joined.dedup();
+        let joined = joined_accounts(m, &applied.added);
         let from = applied.from_epoch;
         match registry
             .commit_group(
@@ -409,7 +407,7 @@ impl Groups {
                 self.idempotency(b"commit", group, from),
             )
             .await
-            .map_err(|_| ())?;
+            .or_else(|e| stored_before(&e))?;
         if let Some(w) = plan.welcome {
             let added: Vec<DeviceId> = plan
                 .added
@@ -423,7 +421,7 @@ impl Groups {
                     self.idempotency(b"welcome", group, from),
                 )
                 .await
-                .map_err(|_| ())?;
+                .or_else(|e| stored_before(&e))?;
         }
         registry
             .group_fanout_done(group, from)
@@ -486,6 +484,10 @@ impl Groups {
             Ok(None) => return Outcome::NotFound,
             Err(_) => return Outcome::Unavailable,
         };
+        // Outsiders get the answer for no group, before any work (D-0074).
+        if !Self::may_read(m, &row.roster, &device) {
+            return Outcome::NotFound;
+        }
         let Ok(record) = Record::decode(&row.state) else {
             return Outcome::Unavailable;
         };
@@ -728,6 +730,18 @@ struct Opened {
 /// metadata, never reaches the server). Every wrong, unknown, spent, revoked or expired link
 /// gets one answer: 404.
 impl Groups {
+    /// The `valkey-hot` record of a device's read budget (state, change log, community state).
+    pub(crate) fn read_record(&self, device: &DeviceId) -> String {
+        let mut ctx = hmac::Context::with_key(&self.key);
+        ctx.update(b"read");
+        ctx.update(device.as_bytes());
+        let tag = ctx.sign();
+        format!(
+            "gr:{}",
+            hex::encode(tag.as_ref().get(..16).unwrap_or_default())
+        )
+    }
+
     /// The `valkey-hot` record of an account's link budget (opening, joining, asking).
     pub(crate) fn link_record(&self, account: &AccountId) -> String {
         let mut ctx = hmac::Context::with_key(&self.key);
@@ -747,12 +761,13 @@ impl Groups {
         device: &DeviceId,
         idx: usize,
     ) -> Result<songbird_send::Roster, Outcome> {
-        let row = match registry.group(group).await {
+        // The roster only: never the (multi-MiB) state for a role check (D-0074).
+        let (_, roster) = match registry.group_roster(group).await {
             Ok(Some(r)) => r,
             Ok(None) => return Err(Outcome::NotFound),
             Err(_) => return Err(Outcome::Unavailable),
         };
-        let roster = roster_of(&row.roster).ok_or(Outcome::Unavailable)?;
+        let roster = roster_of(&roster).ok_or(Outcome::Unavailable)?;
         let role = roster.role(device).ok_or(Outcome::NotFound)?;
         if roster.policy.get(idx).is_none_or(|need| role < *need) {
             return Err(Outcome::Forbidden("role"));
@@ -1028,4 +1043,53 @@ impl Groups {
             Err(_) => Outcome::Unavailable,
         }
     }
+}
+
+/// A fan-out store that conflicts with an earlier store under the same key: that store
+/// completed (stores are atomic), and only the recipients differ because a device left the
+/// directory since. It counts as delivered, so the fan-out can finish (D-0074).
+fn stored_before(e: &songbird_proto::frame::SendStatus) -> Result<(), ()> {
+    match e {
+        songbird_proto::frame::SendStatus::Rejected {
+            reason: songbird_proto::frame::RejectReason::IdempotencyConflict,
+            ..
+        } => Ok(()),
+        _ => Err(()),
+    }
+}
+
+/// Who hears what: the commit goes to every device in the group before or after it (removed
+/// devices learn they were removed) except the committer and the added devices, which get the
+/// Welcome instead.
+fn plan_of(
+    old_roster: &[u8],
+    roster: &[DeviceId],
+    committer: DeviceId,
+    parts: &Bundle<'_>,
+    applied: &songbird_groups::Applied,
+) -> Plan {
+    let old = devices_of(old_roster);
+    let mut members: Vec<DeviceId> = old.iter().chain(roster.iter()).copied().collect();
+    members.sort_unstable();
+    members.dedup();
+    members.retain(|d| *d != committer && !applied.added.contains(d));
+    Plan {
+        commit: parts.commit.to_vec(),
+        members: members.iter().map(|d| *d.as_bytes()).collect(),
+        welcome: parts.welcome.map(<[u8]>::to_vec),
+        added: applied.added.iter().map(|d| *d.as_bytes()).collect(),
+    }
+}
+
+/// Accounts a commit brings in: their pending join requests are answered (D-0071).
+fn joined_accounts(m: &Messages, added: &[DeviceId]) -> Vec<[u8; 16]> {
+    let directory = m.path.directory();
+    let mut joined: Vec<[u8; 16]> = added
+        .iter()
+        .filter_map(|d| directory.listed_account(d))
+        .map(|a| *a.as_bytes())
+        .collect();
+    joined.sort_unstable();
+    joined.dedup();
+    joined
 }

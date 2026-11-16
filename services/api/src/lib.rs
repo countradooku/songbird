@@ -674,7 +674,10 @@ impl App {
             return Ok(device_outcome(devices::Outcome::Forbidden("pending")));
         }
         let budget = match path.as_str() {
-            "/v1/groups/state" | "/v1/groups/log" | "/v1/communities/state" => None,
+            // Reads rebuild the tree: their own budget (D-0074).
+            "/v1/groups/state" | "/v1/groups/log" | "/v1/communities/state" => {
+                Some((g.read_record(&device), g.reads_per_sec, g.read_burst))
+            }
             // Anything a link opens has its own, smaller budget per account (D-0071), shared by
             // its devices: links are not guessable, but a leaked one should not be tried at speed.
             "/v1/groups/links/open" | "/v1/groups/join" | "/v1/groups/requests" => {

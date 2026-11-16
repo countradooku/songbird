@@ -80,7 +80,7 @@ pub struct Policy {
     pub add: Role,
     /// Edit the group's info (the encrypted metadata) ("only admins can edit group info").
     pub edit_info: Role,
-    /// Manage invite links and approve join requests.
+    /// Manage invite links (join requests are the `add` role's: approving one is adding).
     pub links: Role,
     /// Start a group call (Prompt 7).
     pub call: Role,
@@ -328,9 +328,22 @@ pub fn authorize(
     if new.policy != old.policy && r < Role::Admin {
         return Err(Denied::Role);
     }
-    // Succession: when every owner leaves, the committer names the next owner(s).
-    let succession = old.owners(&change.before) > 0 && old.owners(&change.after) == 0;
-    let accounts: BTreeSet<&AccountId> = old.explicit.keys().chain(new.explicit.keys()).collect();
+    // Succession: when no owner is left in the group (every owner left, or their devices are
+    // gone), the committer names the next owner(s), from the highest role that remains.
+    let succession = old.owners(&change.after) == 0;
+    let heir_rank = change
+        .after
+        .iter()
+        .map(|a| old.role(a))
+        .max()
+        .unwrap_or(Role::ReadOnly);
+    // Whose role may change: the accounts named either side, and, when the default role
+    // changes, everyone else too (each unnamed member's role moves with it).
+    let mut accounts: BTreeSet<&AccountId> =
+        old.explicit.keys().chain(new.explicit.keys()).collect();
+    if old.policy.default_role != new.policy.default_role {
+        accounts.extend(change.before.iter().chain(change.after.iter()));
+    }
     for a in accounts {
         let (from, to) = (old.role(a), new.role(a));
         if from == to {
@@ -344,7 +357,10 @@ pub fn authorize(
         let allowed = lowering_self
             || r == Role::Owner && from < Role::Owner
             || r >= Role::Admin && from < r && to < r
-            || succession && to == Role::Owner && change.after.contains(a);
+            || succession
+                && to == Role::Owner
+                && change.after.contains(a)
+                && old.role(a) == heir_rank;
         if !allowed {
             return Err(Denied::Role);
         }
@@ -372,7 +388,7 @@ impl Roles {
         self.role(account) >= self.policy.edit_info
     }
 
-    /// Manage invite links and approve join requests (`api`, M3).
+    /// Manage invite links (`api`, M3).
     #[must_use]
     pub fn may_manage_links(&self, account: &AccountId) -> bool {
         self.role(account) >= self.policy.links
@@ -617,12 +633,70 @@ mod tests {
         let mut n = r.clone();
         n.explicit.remove(&acc(1));
         assert_eq!(authorize(&acc(4), &r, &n, &c), Err(Denied::NoOwner));
-        n.explicit.insert(acc(5), Role::Owner);
+        // The heir comes from the highest role left (the admin), not whoever commits.
+        let mut member_heir = n.clone();
+        member_heir.explicit.insert(acc(5), Role::Owner);
+        assert_eq!(authorize(&acc(4), &r, &member_heir, &c), Err(Denied::Role));
+        n.explicit.insert(acc(2), Role::Owner);
         assert_eq!(authorize(&acc(4), &r, &n, &c), Ok(()));
         // No succession while an owner stays: a member still cannot make owners.
         let mut grab = r.clone();
         grab.explicit.insert(acc(5), Role::Owner);
         assert_eq!(authorize(&acc(4), &r, &grab, &change()), Err(Denied::Role));
+    }
+
+    #[test]
+    fn a_vanished_owner_has_successors_too() {
+        // The only owner's devices are gone (account deleted): neither side counts them, so the
+        // group would otherwise be stuck. The entry is dropped and the admin succeeds.
+        let r = roles();
+        let mut c = change();
+        c.before.remove(&acc(1));
+        c.after.remove(&acc(1));
+        let mut n = r.clone();
+        n.explicit.remove(&acc(1));
+        n.explicit.insert(acc(2), Role::Owner);
+        assert_eq!(authorize(&acc(4), &r, &n, &c), Ok(()));
+        let mut stuck = r.clone();
+        stuck.explicit.remove(&acc(1));
+        assert_eq!(authorize(&acc(4), &r, &stuck, &c), Err(Denied::NoOwner));
+    }
+
+    #[test]
+    fn the_default_role_moves_everyone_it_names() {
+        // Review finding (D-0074): changing the default role changes every unnamed member's
+        // role, so each of them is checked as a role change.
+        let r = roles();
+        let mut up = r.clone();
+        up.policy.default_role = Role::Owner;
+        up.explicit.remove(&acc(1));
+        assert_eq!(
+            authorize(&acc(2), &r, &up, &change()),
+            Err(Denied::Role),
+            "an admin makes every member an owner"
+        );
+        // Lowering the default moves an unnamed owner too.
+        let mut owners = r.clone();
+        owners.policy.default_role = Role::Owner;
+        owners.explicit.clear();
+        owners.explicit.insert(acc(2), Role::Admin);
+        let mut down = owners.clone();
+        down.policy.default_role = Role::Member;
+        down.explicit.insert(acc(3), Role::Owner);
+        assert_eq!(
+            authorize(&acc(2), &owners, &down, &change()),
+            Err(Denied::Role),
+            "an admin demotes the owners"
+        );
+        // An admin may make the default read-only (below its own role); an owner may do more.
+        let mut quiet = r.clone();
+        quiet.policy.default_role = Role::ReadOnly;
+        assert_eq!(authorize(&acc(2), &r, &quiet, &change()), Ok(()));
+        let mut mods = r.clone();
+        mods.policy.default_role = Role::Moderator;
+        mods.explicit.remove(&acc(3));
+        assert_eq!(authorize(&acc(1), &r, &mods, &change()), Ok(()));
+        assert_eq!(authorize(&acc(2), &r, &mods, &change()), Ok(()));
     }
 
     #[test]

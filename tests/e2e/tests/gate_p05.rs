@@ -175,6 +175,8 @@ async fn stack(people: usize) -> Option<Stack> {
             // Room for the link tests; the throttling test spends the burst on purpose.
             g.links_per_sec = 1;
             g.link_burst = 20;
+            g.reads_per_sec = 1_000;
+            g.read_burst = 1_000;
             g
         }),
     };
@@ -322,9 +324,40 @@ fn group_frame(key: u8, msg: Vec<u8>) -> SendFrame {
     }
 }
 
+/// A KeyPackage of person `who`, uploaded to the key directory and claimed by person `by`, as
+/// an app adding someone does: a commit may add only published packages (D-0074).
+async fn published(s: &Stack, who: usize, by: usize) -> songbird_groups_harness::KeyPackage {
+    let (kp, bytes) = s.people[who].mls.key_package_with_bytes();
+    let device = s.people[who].mls.id;
+    let stored = songbird_accounts::StoredKeyPackage {
+        reference: songbird_keys::mls::reference(&bytes),
+        package: bytes,
+        not_after: 4_000_000_000,
+    };
+    s.registry
+        .put_key_packages(&device, &[stored], None, 100)
+        .await
+        .unwrap();
+    let claimed = s
+        .registry
+        .claim_key_packages(
+            &s.people[who].mls.account,
+            Some(&device),
+            &s.people[by].mls.id,
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+    kp
+}
+
 /// Adds people `who` (by Alice, person 0) and has them join from their Welcome and the tree.
 async fn add(s: &mut Stack, who: &[usize]) {
-    let kps: Vec<_> = who.iter().map(|i| s.people[*i].mls.key_package()).collect();
+    let mut kps = Vec::new();
+    for &i in who {
+        kps.push(published(s, i, 0).await);
+    }
     let b = s.people[0].mls.add(&kps);
     let (st, reply) = commit(s, 0, &b).await;
     assert_eq!(st, 200, "{reply}");
@@ -1055,7 +1088,8 @@ async fn communities_are_run_by_the_announcement_groups_admins() {
     // ordinary group.
     let mut a = Device::restored(&s.people[alice].mls);
     create_group(&s, alice, &mut a, ann, announcement).await;
-    let b = a.add(&[s.people[carol].mls.key_package()]);
+    let kp = published(&s, carol, alice).await;
+    let b = a.add(&[kp]);
     let mut req = ann.to_vec();
     req.extend_from_slice(&b);
     let (st, _) = post(&s, alice, "/v1/groups/commit", &req).await;
@@ -1173,4 +1207,46 @@ async fn groups_are_in_the_export_and_requests_go_with_the_account() {
     assert!(left.is_empty(), "{left:?}");
     let (_, l) = list(&s, alice).await;
     assert_eq!(&l[..], &[0u8, 0][..], "the request is gone");
+}
+
+#[tokio::test]
+async fn a_member_cannot_add_a_leaf_it_made_up_for_another_device() {
+    // Review finding (D-0074): a KeyPackage under Bob's device ID that Bob never published (as
+    // Alice could make with keys of her own) is refused, and nothing is stored.
+    let Some(mut s) = stack(2).await else { return };
+    create(&mut s, 0).await;
+    let forged = s.people[1].mls.key_package();
+    let b = s.people[0].mls.add(&[forged]);
+    let (st, reply) = commit(&s, 0, &b).await;
+    assert_eq!((st, reply["error"].as_str()), (403, Some("key_package")));
+    assert_eq!(s.registry.group(&GID).await.unwrap().unwrap().epoch, 0);
+    assert!(s.pending(1).await.is_empty(), "no Welcome");
+    s.people[0].mls.discard();
+    // The same device's published package is accepted.
+    add(&mut s, &[1]).await;
+    assert_eq!(s.registry.group(&GID).await.unwrap().unwrap().epoch, 1);
+}
+
+#[tokio::test]
+async fn outsiders_get_the_answer_for_no_group() {
+    // Review finding (D-0074): a stranger's commit or proposal is refused before any work,
+    // with 404, as for a group that does not exist.
+    let Some(mut s) = stack(3).await else { return };
+    create(&mut s, 0).await;
+    add(&mut s, &[1]).await;
+    let info = s.people[0].mls.group_info();
+    let tree = s.people[0].mls.tree();
+    let b = s.people[2].mls.rejoin(&info, &tree);
+    let (st, _) = commit(&s, 2, &b).await;
+    assert_eq!(st, 404);
+    let (st, _) = s.people[2]
+        .api
+        .send(
+            "POST",
+            "/v1/groups/propose",
+            Some(&body(b"not even a proposal")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(st, 404);
 }

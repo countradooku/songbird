@@ -154,11 +154,19 @@ fn verify_log(
 
 /// Only the roles extension (and `required_capabilities`) may be in a group's context.
 fn extensions_allowed(ctx: &GroupContext) -> bool {
+    let mut required = false;
     ctx.extensions().iter().all(|e| match e {
         Extension::Unknown(t, _) => *t == ROLES_EXTENSION,
-        Extension::RequiredCapabilities(_) => true,
+        // Exactly Songbird's: every member supports the roles extension, `SelfRemove` and basic
+        // credentials. A member cannot drop it to let in clients that ignore roles (D-0074).
+        Extension::RequiredCapabilities(r) => {
+            required = r.extension_types() == [ExtensionType::Unknown(ROLES_EXTENSION)]
+                && r.proposal_types() == [ProposalType::SelfRemove]
+                && r.credential_types() == [CredentialType::Basic];
+            required
+        }
         _ => false,
-    })
+    }) && required
 }
 
 /// One leaf of the roster.
@@ -235,6 +243,9 @@ pub struct Applied {
     pub commit_hash: [u8; 32],
     /// The committer's change-log entry (`wire::LogEntry` bytes), its signature verified.
     pub log: Option<Vec<u8>>,
+    /// Each added KeyPackage's reference, with its device: the caller checks that the device
+    /// published it (D-0074), before storing the commit.
+    pub key_packages: Vec<(DeviceId, [u8; 32])>,
 }
 
 /// The stored form of a group: what the registry keeps under the group ID, compared and set
@@ -588,14 +599,15 @@ impl Group {
     }
 
     /// Added devices: known, not already present (unless their old leaf goes), and the Welcome
-    /// holds exactly one secret per added KeyPackage. Returns the added devices.
+    /// holds exactly one secret per added KeyPackage. Returns the added devices with their
+    /// KeyPackages' references.
     fn check_adds(
         &self,
         staged: &StagedCommit,
         welcome: Option<&[u8]>,
         removed: &BTreeSet<u32>,
         dir: &impl Directory,
-    ) -> Result<Vec<DeviceId>, GroupError> {
+    ) -> Result<Vec<(DeviceId, [u8; 32])>, GroupError> {
         let mut added = Vec::new();
         let mut added_refs = BTreeSet::new();
         for a in staged.add_proposals() {
@@ -608,13 +620,14 @@ impl Group {
                 .roster
                 .leaf(&device)
                 .is_some_and(|i| !removed.contains(&i))
-                || added.contains(&device)
+                || added.iter().any(|(d, _)| *d == device)
             {
                 return Err(GroupError::Duplicate);
             }
             let r = kp.hash_ref(&CRYPTO).map_err(|_| GroupError::Invalid)?;
-            added_refs.insert(r.as_slice().to_vec());
-            added.push(device);
+            let r: [u8; 32] = r.as_slice().try_into().map_err(|_| GroupError::Invalid)?;
+            added_refs.insert(r.to_vec());
+            added.push((device, r));
         }
         match (welcome, added.is_empty()) {
             (None, true) => {}
@@ -771,7 +784,8 @@ impl Group {
 
         let removed_leaves =
             self.check_leaves(&staged, sender, sender_account, external, by_link, dir)?;
-        let added = self.check_adds(&staged, b.welcome, &removed_leaves, dir)?;
+        let key_packages = self.check_adds(&staged, b.welcome, &removed_leaves, dir)?;
+        let added: Vec<DeviceId> = key_packages.iter().map(|(d, _)| *d).collect();
 
         // Roles (D-0070): the commit's new roles extension must be valid and the change allowed
         // for the committer's role. External commits cannot change extensions, and only rejoin.
@@ -835,6 +849,7 @@ impl Group {
             removed,
             commit_hash: sha256(b.commit),
             log: b.log.map(<[u8]>::to_vec),
+            key_packages,
         };
         Ok((self, applied))
     }

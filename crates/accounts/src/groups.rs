@@ -643,3 +643,38 @@ fn roster_devices(roster: &[u8]) -> Value {
         .unwrap_or_default();
     Value::Array(devices)
 }
+
+impl Registry {
+    /// Whether every `(device, KeyPackageRef)` names a package that device published: a
+    /// single-use one claimed from the key directory (until it expires), or its last-resort
+    /// one (D-0074). A commit may add only such packages, so a member cannot add a leaf it made
+    /// up for someone else's device.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn key_packages_published(
+        &self,
+        packages: &[(songbird_types::DeviceId, [u8; 32])],
+    ) -> Result<bool, RegistryError> {
+        if packages.is_empty() {
+            return Ok(true);
+        }
+        for (device, reference) in packages {
+            let v = self
+                .db
+                .query1(
+                    "RETURN record::exists(mlskp_used:[$d, $r])
+                       OR ((SELECT VALUE mlslr_ref FROM ONLY device:[$d]) ?? NONE) = $r;",
+                    vec![
+                        var("d", bytes(device.as_bytes())),
+                        var("r", bytes(reference)),
+                    ],
+                )
+                .await?;
+            if !matches!(v, Value::Bool(true)) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}

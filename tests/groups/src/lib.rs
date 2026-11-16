@@ -14,6 +14,8 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
+/// The package type, for callers without their own `openmls`.
+pub use openmls::prelude::KeyPackage;
 use openmls::prelude::tls_codec::{Deserialize as _, Serialize as _};
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
@@ -131,6 +133,14 @@ impl Device {
             group: None,
             raw_key,
         }
+    }
+
+    /// A new KeyPackage and its wire bytes (what an app uploads to the key directory).
+    #[must_use]
+    pub fn key_package_with_bytes(&self) -> (KeyPackage, Vec<u8>) {
+        let kp = self.key_package();
+        let bytes = kp.tls_serialize_detached().unwrap();
+        (kp, bytes)
     }
 
     #[must_use]

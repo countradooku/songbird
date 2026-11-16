@@ -43,12 +43,12 @@ async fn role_in(
     group: &[u8; 16],
     device: &DeviceId,
 ) -> Result<(u8, [u8; 7]), Outcome> {
-    let row = match registry.group(group).await {
+    let (_, roster) = match registry.group_roster(group).await {
         Ok(Some(r)) => r,
         Ok(None) => return Err(Outcome::NotFound),
         Err(_) => return Err(Outcome::Unavailable),
     };
-    let roster = roster_of(&row.roster).ok_or(Outcome::Unavailable)?;
+    let roster = roster_of(&roster).ok_or(Outcome::Unavailable)?;
     let role = roster.role(device).ok_or(Outcome::NotFound)?;
     Ok((role, roster.policy))
 }
@@ -226,12 +226,12 @@ impl Groups {
             Ok(c) => c,
             Err(o) => return o,
         };
-        let ann = match registry.group(&c.announcement).await {
-            Ok(Some(r)) => r,
+        let roster = match registry.group_roster(&c.announcement).await {
+            Ok(Some((_, r))) => r,
             Ok(None) => return Outcome::NotFound,
             Err(_) => return Outcome::Unavailable,
         };
-        if !Self::may_read(m, &ann.roster, &device) {
+        if !Self::may_read(m, &roster, &device) {
             return Outcome::NotFound;
         }
         let mut out = Vec::with_capacity(16 + 12 + c.meta.len() + 2 + c.groups.len() * 16);

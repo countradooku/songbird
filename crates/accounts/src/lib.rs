@@ -86,6 +86,12 @@ DEFINE FIELD IF NOT EXISTS blob ON mlskp TYPE bytes;
 DEFINE FIELD IF NOT EXISTS expires ON mlskp TYPE datetime;
 DEFINE INDEX IF NOT EXISTS mlskp_device ON mlskp FIELDS device;
 DEFINE INDEX IF NOT EXISTS mlskp_expires ON mlskp FIELDS expires;
+DEFINE FIELD IF NOT EXISTS mlslr_ref ON device TYPE option<bytes>;
+DEFINE TABLE IF NOT EXISTS mlskp_used SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS device ON mlskp_used TYPE bytes;
+DEFINE FIELD IF NOT EXISTS expires ON mlskp_used TYPE datetime;
+DEFINE INDEX IF NOT EXISTS mlskp_used_device ON mlskp_used FIELDS device;
+DEFINE INDEX IF NOT EXISTS mlskp_used_expires ON mlskp_used FIELDS expires;
 DEFINE TABLE IF NOT EXISTS ulink SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS account ON ulink TYPE bytes;
 DEFINE FIELD IF NOT EXISTS blob ON ulink TYPE bytes;
@@ -1235,12 +1241,28 @@ impl Registry {
                 .db
                 .query1(
                     take,
-                    vec![var("d", bytes(device.as_bytes())), var("id", id)],
+                    vec![var("d", bytes(device.as_bytes())), var("id", id.clone())],
                 )
                 .await
             {
                 Ok(v) => {
                     if let Some(blob) = v.get("blob").and_then(|b| b.as_bytes().cloned()) {
+                        // A claimed package's reference is kept until it expires: a commit
+                        // may add only a package its device published (D-0074). If this
+                        // fails, adding the package is refused later (fail closed).
+                        if matches!(pool, Pool::KeyPackage) {
+                            self.db
+                                .exec(
+                                    "UPSERT mlskp_used:[$d, $id] SET device = $d,
+                                       expires = $e RETURN NONE;",
+                                    vec![
+                                        var("d", bytes(device.as_bytes())),
+                                        var("id", id),
+                                        var("e", v.get("expires").cloned().unwrap_or(Value::Null)),
+                                    ],
+                                )
+                                .await?;
+                        }
                         return Ok(Some(blob));
                     }
                     // Someone else claimed it first: try another.
@@ -1346,8 +1368,9 @@ impl Registry {
         if let Some(lr) = last_resort {
             vars.push(var("lr", bytes(&lr.package)));
             vars.push(var("lrexp", int(lr.not_after)));
+            vars.push(var("lrref", bytes(&lr.reference)));
             sql.push_str(
-                "UPDATE device:[$d] SET mlslr = $lr,
+                "UPDATE device:[$d] SET mlslr = $lr, mlslr_ref = $lrref,
                    mlslr_exp = time::from_secs($lrexp) RETURN NONE;\n",
             );
         }
@@ -1462,7 +1485,9 @@ impl Registry {
             .db
             .query1(
                 "DELETE (SELECT VALUE id FROM mlskp WHERE expires <= time::now() LIMIT $n)
-                   RETURN BEFORE;",
+                   RETURN BEFORE;
+                 DELETE (SELECT VALUE id FROM mlskp_used WHERE expires <= time::now() LIMIT $n)
+                   RETURN NONE;",
                 vec![var("n", int(u64::try_from(limit).unwrap_or(u64::MAX)))],
             )
             .await?;
@@ -1762,6 +1787,7 @@ impl Registry {
                  DELETE otpk WHERE device IN $devs RETURN NONE;
                  DELETE otkem WHERE device IN $devs RETURN NONE;
                  DELETE mlskp WHERE device IN $devs RETURN NONE;
+                 DELETE mlskp_used WHERE device IN $devs RETURN NONE;
                  DELETE device WHERE account = $a RETURN NONE;
                  UPDATE username SET account = NONE, held_until = time::now() + duration::from_secs($hold)
                    WHERE account = $a RETURN NONE;
@@ -1808,7 +1834,8 @@ impl Registry {
                    + count(SELECT id FROM avatar WHERE account = $a);
                  RETURN count(SELECT id FROM otpk WHERE device IN $ds)
                    + count(SELECT id FROM otkem WHERE device IN $ds)
-                   + count(SELECT id FROM mlskp WHERE device IN $ds);
+                   + count(SELECT id FROM mlskp WHERE device IN $ds)
+                   + count(SELECT id FROM mlskp_used WHERE device IN $ds);
                  RETURN count(SELECT id FROM grp_req WHERE acct = $a);",
                 vec![
                     var("a", bytes(account.as_bytes())),

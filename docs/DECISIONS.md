@@ -111,6 +111,62 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0074 — Prompt 5: the security review's fixes
+
+- Date: 2026-11-17
+- Status: accepted; part of the Prompt 5 PR (report `P05-gate.md`, "Security review")
+- Decided by: agent, on an independent read-only review of the whole Prompt 5 diff
+- Context: the review found:
+  - two high findings: a default-role change bypassed the role checks; an added KeyPackage
+    was not bound to its device;
+  - four medium: a group with no listed owner froze; reads had no budget; a fan-out could stall
+    when the directory changed; outsiders' commits were processed before the membership check;
+  - five low.
+- Decision:
+  - **Default role** (`roles::authorize`): a change to `policy.default_role` is a role change
+    for every member it applies to, checked like any other. An admin can no longer make
+    everyone an owner, or demote unnamed owners.
+  - **Published KeyPackages only** (`ds::Applied::key_packages`,
+    `Registry::key_packages_published`):
+    - a commit may add a KeyPackage only if its device published it, as a single-use package
+      claimed from the key directory (its reference kept in `mlskp_used` until it expires) or as
+      its last-resort package (`device.mlslr_ref`);
+    - otherwise 403 `key_package`, and nothing is stored;
+    - without this, a member could add a leaf under another device's ID with keys of its own
+      and speak as that device.
+  - **Succession** (`roles::authorize`): when no owner is left in the group, whether every
+    owner left or their devices are gone, the committer names new owners, from the highest
+    role left. A vanished owner no longer freezes the group, and a read-only subscriber cannot
+    take a channel while admins remain.
+  - **`required_capabilities`** must be exactly Songbird's (roles extension, `SelfRemove`,
+    basic credentials), at creation and after every commit.
+  - **Outsiders first** (`api`): a commit or proposal from a device that may not read the group
+    gets 404 before the state is decoded. A join by link is the one way in.
+  - **Reads have a budget**: state, change log and community state, 5 a second per device,
+    bursting to 20. Role checks read the roster only, never the state.
+  - **Fan-outs finish** when a recipient left the directory between attempts: an idempotency
+    conflict means a store under that key already completed.
+  - **Docs:** join requests are the `add` role's (PROTOCOL §6.6).
+- Not changed, recorded as risks (threat model §6):
+  - role checks for metadata, links, requests and communities read the roster before the
+    write, so one in-flight action by a just-demoted admin can land;
+  - no per-account cap on creating groups, and groups are not deleted yet;
+  - a client whose directory view differs from the server's may judge a commit differently;
+  - one member can fill the 64-proposal queue until the next commit (which removes them).
+- Evidence:
+  - `roles` unit tests `the_default_role_moves_everyone_it_names`,
+    `a_vanished_owner_has_successors_too`, and the heir in
+    `leaving_is_the_leavers_and_owners_have_successors`;
+  - `gate_p05` live, 10 of 10, with `a_member_cannot_add_a_leaf_it_made_up_for_another_device`
+    and `outsiders_get_the_answer_for_no_group`. Every live add now goes through the key
+    directory, as apps do;
+  - groups, harness and send: 76 tests.
+- Consequences:
+  - Apps add people only with KeyPackages fetched from the key directory, which they did
+    anyway.
+  - One more registry table (`mlskp_used`), swept with expired packages, deleted with the
+    device, counted in remnants.
+
 ## D-0073 — Prompt 5, milestone 5: groups in the GDPR export and deletion
 
 - Date: 2026-11-16

@@ -1307,9 +1307,11 @@ The answer comes only once every recipient's mailbox holds it (invariant 1):
 - 200 `{"epoch": n}`, the new epoch;
 - 409 `{"error": "stale", "epoch": n}`: another commit won. Process it (it is in your mailbox),
   then commit again from epoch `n`;
-- 404: no such group;
+- 404: no such group, or the device may not read it (neither in it nor a device of an account in
+  it: the same answer, before any work; D-0074);
 - 400 with a reason (as §6.2, plus `proposal`, `external`, `duplicate`, `size`, `welcome`);
-- 403 `pending`;
+- 403 `pending`; 403 `key_package` if an added KeyPackage is not one its device published to the
+  key directory (a claimed single-use package or its last-resort one; D-0074);
 - 429 or 503: retry the same bundle.
 
 A commit that already won is answered 200 again, with its fan-out finished. Fan-outs a crash
@@ -1317,6 +1319,9 @@ interrupted are finished by every `api` node within seconds. They are stored und
 keys only the servers can derive, so a member cannot pre-empt them.
 
 ### 6.4 Joining: `POST /v1/groups/state`
+
+Reads (`/state`, `/log`, `/v1/communities/state`) take 5 a second per device, bursting to 20
+(D-0074).
 
 `version u8 (1) | group [16]`. Answers 200 `epoch u64 | info_len u32 | GroupInfo | tree_len u32 |
 ratchet tree` to:
@@ -1387,10 +1392,11 @@ apply the same rule to a commit (`songbird_groups::roles::authorize`):
 | Change the policy (send, add, edit info, links, call, default role, flags) | Admin and above |
 | Change someone's role | An admin who outranks both the old and the new role, or an owner (who may make owners) |
 | Lower one's own role | Anyone |
-| Afterwards | At least one owner; entries only for accounts still in the group. When every owner leaves, the committer may name a new owner |
+| Afterwards | At least one owner; entries only for accounts still in the group. When no owner is left (they left, or their devices are gone), the committer may name new owners from the highest role left. Changing the default role is a role change for every member it applies to |
 | Send a message | Role ≥ `send`: the send path refuses others with reason 14 |
 | Edit the group's info | Role ≥ `edit_info`: `POST /v1/groups/meta` |
-| Manage invite links, approve requests | Role ≥ `links` (§6.8) |
+| Manage invite links | Role ≥ `links` (§6.8) |
+| See, approve (add) and decline join requests | Role ≥ `add` (§6.8) |
 | Start a group call | Role ≥ `call` (Prompt 7) |
 | Pin a message, delete others' messages | Moderator and above, **enforced by clients only** (inside the ciphertext) |
 

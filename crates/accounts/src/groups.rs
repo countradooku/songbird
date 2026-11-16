@@ -29,7 +29,30 @@ pub struct GroupCommit<'a> {
     pub fanout: &'a [u8],
     /// Its change-log entry, if any.
     pub log: Option<&'a [u8]>,
+    /// The invite link a join by link spends (M3): checked and counted in the same transaction.
+    pub link: Option<&'a [u8; 16]>,
+    /// Accounts the commit added: their pending join requests are settled.
+    pub joined: &'a [[u8; 16]],
 }
+
+/// An invite link (M3, D-0071).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupLink {
+    pub group: [u8; 16],
+    /// SHA-256 of the link's secret (the secret itself never reaches the server's store).
+    pub secret_hash: [u8; 32],
+    /// Joining by this link needs an admin's approval.
+    pub approval: bool,
+    /// Still usable: not expired and not used up.
+    pub usable: bool,
+}
+
+/// Most invite links per group.
+pub const MAX_LINKS: u64 = 16;
+/// Most pending join requests per group.
+pub const MAX_REQUESTS: u64 = 256;
+/// Pending join requests are dropped after this many days.
+pub const REQUEST_DAYS: u64 = 7;
 
 /// A group as stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,9 +199,18 @@ impl Registry {
                RETURN NONE;
              UPSERT grp_fanout:[$g, $e] SET body = $f, at = time::now() RETURN NONE;
              IF $has_log {
-               UPSERT grp_log:[$g, $e] SET entry = $log, at = time::now() RETURN NONE;
+               UPSERT grp_log:[$g, $e] SET grp = $g, entry = $log, at = time::now() RETURN NONE;
                IF $e >= $keep { DELETE grp_log:[$g, $e - $keep] };
              };
+             IF $has_link {
+               LET $k = (SELECT grp, max, uses, expires FROM ONLY grp_link:[$h]);
+               IF $k = NONE OR $k.grp != $g OR ($k.max > 0 AND $k.uses >= $k.max)
+                 OR ($k.expires != NONE AND $k.expires < time::now()) {
+                 THROW 'songbird:link'
+               };
+               UPDATE grp_link:[$h] SET uses += 1 RETURN NONE;
+             };
+             FOR $a IN $joined { DELETE grp_req:[$g, $a] };
              COMMIT TRANSACTION;";
         self.retry(
             sql,
@@ -193,9 +225,19 @@ impl Registry {
                     var("has_log", Value::Bool(commit.log.is_some())),
                     var("log", bytes(commit.log.unwrap_or_default())),
                     var("keep", int(MAX_LOG_ENTRIES)),
+                    var("has_link", Value::Bool(commit.link.is_some())),
+                    var("h", bytes(commit.link.map_or(&[][..], |h| &h[..]))),
+                    var(
+                        "joined",
+                        Value::Array(commit.joined.iter().map(|a| bytes(a)).collect()),
+                    ),
                 ]
             },
-            |k| (k == "Thrown:stale").then_some(RegistryError::StaleEpoch),
+            |k| match k {
+                "Thrown:stale" => Some(RegistryError::StaleEpoch),
+                "Thrown:link" => Some(RegistryError::GroupLink),
+                _ => None,
+            },
             |_| Ok(()),
         )
         .await
@@ -280,7 +322,7 @@ impl Registry {
             .db
             .query1(
                 "SELECT meta::id(id)[1] AS e, entry FROM grp_log
-                   WHERE meta::id(id)[0] = $g AND meta::id(id)[1] > $a
+                   WHERE grp = $g AND meta::id(id)[1] > $a
                    ORDER BY e LIMIT $n;",
                 vec![
                     var("g", bytes(group)),
@@ -369,5 +411,213 @@ impl Registry {
             out.push((group, epoch, body));
         }
         Ok(out)
+    }
+}
+
+/// Invite links and join requests (Prompt 5, M3; D-0071).
+impl Registry {
+    /// Records an invite link under its random `handle`, first forgetting the group's spent and
+    /// expired links. The caller checked the role.
+    ///
+    /// # Errors
+    /// [`RegistryError::Exists`] if the handle is taken; [`RegistryError::Full`] at
+    /// [`MAX_LINKS`] for the group; [`RegistryError`] otherwise.
+    pub async fn create_group_link(
+        &self,
+        handle: &[u8; 16],
+        group: &[u8; 16],
+        secret_hash: &[u8; 32],
+        expires_secs: Option<u64>,
+        max_uses: u32,
+        approval: bool,
+    ) -> Result<(), RegistryError> {
+        let sql = "BEGIN TRANSACTION;
+             DELETE grp_link WHERE grp = $g AND ((max > 0 AND uses >= max)
+               OR (expires != NONE AND expires < time::now()));
+             IF count((SELECT VALUE id FROM grp_link WHERE grp = $g)) >= $most {
+               THROW 'songbird:full'
+             };
+             CREATE grp_link:[$h] SET grp = $g, sha = $sha, max = $max, uses = 0,
+               approval = $appr,
+               expires = IF $ttl > 0 { time::now() + duration::from_secs($ttl) } ELSE { NONE }
+               RETURN NONE;
+             COMMIT TRANSACTION;";
+        self.retry(
+            sql,
+            || {
+                vec![
+                    var("h", bytes(handle)),
+                    var("g", bytes(group)),
+                    var("sha", bytes(secret_hash)),
+                    var("max", int(u64::from(max_uses))),
+                    var("appr", Value::Bool(approval)),
+                    var("ttl", int(expires_secs.unwrap_or(0))),
+                    var("most", int(MAX_LINKS)),
+                ]
+            },
+            |k| match k {
+                "Thrown:full" => Some(RegistryError::Full),
+                k if k.contains("AlreadyExists") => Some(RegistryError::Exists),
+                _ => None,
+            },
+            |_| Ok(()),
+        )
+        .await
+    }
+
+    /// Revokes a link of `group` (nothing if it is another group's or gone).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn revoke_group_link(
+        &self,
+        group: &[u8; 16],
+        handle: &[u8; 16],
+    ) -> Result<(), RegistryError> {
+        self.db
+            .exec(
+                "DELETE grp_link:[$h] WHERE grp = $g;",
+                vec![var("h", bytes(handle)), var("g", bytes(group))],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// A link by its handle.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn group_link(&self, handle: &[u8; 16]) -> Result<Option<GroupLink>, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "SELECT grp, sha, approval,
+                   (max = 0 OR uses < max) AND (expires = NONE OR expires > time::now()) AS usable
+                 FROM ONLY grp_link:[$h];",
+                vec![var("h", bytes(handle))],
+            )
+            .await?;
+        if matches!(v, Value::Null) {
+            return Ok(None);
+        }
+        let group = bytes_of(&v, "grp").and_then(|b| <[u8; 16]>::try_from(b.as_ref()).ok());
+        let sha = bytes_of(&v, "sha").and_then(|b| <[u8; 32]>::try_from(b.as_ref()).ok());
+        let (Some(group), Some(secret_hash)) = (group, sha) else {
+            return Ok(None);
+        };
+        let flag = |k: &str| matches!(v.get(k), Some(Value::Bool(true)));
+        Ok(Some(GroupLink {
+            group,
+            secret_hash,
+            approval: flag("approval"),
+            usable: flag("usable"),
+        }))
+    }
+
+    /// Records `account`'s request to join `group` (idempotent: asking again keeps the first
+    /// request's time, so it keeps its place and does not outlive [`REQUEST_DAYS`]).
+    ///
+    /// # Errors
+    /// [`RegistryError::Full`] at [`MAX_REQUESTS`] pending; [`RegistryError`] otherwise.
+    pub async fn add_group_request(
+        &self,
+        group: &[u8; 16],
+        account: &[u8; 16],
+    ) -> Result<(), RegistryError> {
+        let sql = "BEGIN TRANSACTION;
+             DELETE grp_req WHERE grp = $g
+               AND at < time::now() - duration::from_days($days);
+             IF !record::exists(grp_req:[$g, $a])
+               AND count((SELECT VALUE id FROM grp_req WHERE grp = $g)) >= $most {
+               THROW 'songbird:full'
+             };
+             IF !record::exists(grp_req:[$g, $a]) {
+               CREATE grp_req:[$g, $a] SET grp = $g, at = time::now() RETURN NONE
+             };
+             COMMIT TRANSACTION;";
+        self.retry(
+            sql,
+            || {
+                vec![
+                    var("g", bytes(group)),
+                    var("a", bytes(account)),
+                    var("days", int(REQUEST_DAYS)),
+                    var("most", int(MAX_REQUESTS)),
+                ]
+            },
+            |k| (k == "Thrown:full").then_some(RegistryError::Full),
+            |_| Ok(()),
+        )
+        .await
+    }
+
+    /// Pending join requests: `(account, seconds since the request)`, oldest first.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn group_requests(
+        &self,
+        group: &[u8; 16],
+    ) -> Result<Vec<([u8; 16], u64)>, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "SELECT meta::id(id)[1] AS a, at, duration::secs(time::now() - at) AS age FROM grp_req
+                   WHERE grp = $g AND at > time::now() - duration::from_days($days)
+                   ORDER BY at LIMIT $most;",
+                vec![
+                    var("g", bytes(group)),
+                    var("days", int(REQUEST_DAYS)),
+                    var("most", int(MAX_REQUESTS)),
+                ],
+            )
+            .await?;
+        rows(v)
+            .into_iter()
+            .map(|r| {
+                let a = r
+                    .get("a")
+                    .and_then(Value::as_bytes)
+                    .and_then(|b| <[u8; 16]>::try_from(b.as_ref()).ok())
+                    .ok_or(RegistryError::Shape)?;
+                Ok((a, r.get("age").and_then(u64_of).unwrap_or(0)))
+            })
+            .collect()
+    }
+
+    /// Declines (forgets) a join request.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn delete_group_request(
+        &self,
+        group: &[u8; 16],
+        account: &[u8; 16],
+    ) -> Result<(), RegistryError> {
+        self.db
+            .exec(
+                "DELETE grp_req:[$g, $a];",
+                vec![var("g", bytes(group)), var("a", bytes(account))],
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+impl Registry {
+    /// Forgets join requests older than [`REQUEST_DAYS`] and expired invite links, everywhere
+    /// (a periodic sweep; both are also ignored when read).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn purge_group_invites(&self) -> Result<(), RegistryError> {
+        self.db
+            .exec(
+                "DELETE grp_req WHERE at < time::now() - duration::from_days($days);
+                 DELETE grp_link WHERE expires != NONE AND expires < time::now();",
+                vec![var("days", int(REQUEST_DAYS))],
+            )
+            .await?;
+        Ok(())
     }
 }

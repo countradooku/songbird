@@ -1419,6 +1419,51 @@ A commit the rule refuses gets 403 `role`, and clients drop it.
     (`u64::MAX` for all) answers `n u16 | n × (epoch u64 | len u16 | entry)`, at most 200, for
     the same devices as the state.
 
+### 6.8 Invite links and join requests (M3, D-0071)
+
+- **A link** is `handle [16]` (random, chosen by the app) and a 32-byte secret. Both travel
+  only in the link itself (`https://…/g#<handle><secret>`, in the fragment). The app derives
+  two keys from the secret with HKDF-SHA-256 (salt `"songbird.v1/group-link"`):
+  - `auth` (info `"auth"`), shown to the server to open or use the link;
+  - a key for the group's info (info `"info"`), which the server never sees.
+
+  The server keeps `SHA-256(auth)`, the group, whether a join must be approved, a use count,
+  an optional limit and an optional expiry (at most a year).
+- **Managing:** for roles at least the policy's `links` role (admins, by default):
+  - `POST /v1/groups/links` with `version | group | handle | SHA-256(auth) [32] | ttl u64
+    (seconds, 0: none) | max_uses u32 (0: any) | approval u8`. 204; 409 `exists` (draw another
+    handle) or `full` (16 links per group).
+  - `POST /v1/groups/links/revoke` with `version | group | handle`. 204.
+- **Opening:** `POST /v1/groups/links/open` with `version | handle | auth`. Every link that
+  cannot be used (unknown handle, wrong `auth`, used up, expired, revoked) gets one answer: 404.
+  The secret is compared in constant time. Otherwise 200:
+  - `0 | group [16] | state` (as `/v1/groups/state`) if the device may join now;
+  - `1 | meta_v u64 | meta_len u32 | meta` if a join needs approval: the encrypted name and
+    picture only, no members.
+- **Joining:** `POST /v1/groups/join` with `version | handle | auth | bundle`. The bundle is an
+  external commit adding the device (`Sender::NewMemberCommit`), with the group's default role
+  (it cannot change roles: RFC 9420 forbids external commits from changing extensions).
+  - Answers as `/v1/groups/commit`, including a retried join that already won.
+  - 404 for a link that cannot be used; 403 `approval` if joins need approval.
+  - The link's use is counted in the same transaction as the commit, so two joins can never
+    both take the last use.
+- **Asking:** a link needs approval if the link says so or the group's policy has the approval
+  flag (`0x02`).
+  - `POST /v1/groups/requests` with `version | handle | auth`: the device's account asks to
+    join. 204, also when it asked before (the first request's time is kept). 409 `open` (join
+    instead), `member`, or `full` (256 pending per group). Requests lapse after 7 days.
+  - `POST /v1/groups/requests/list` with `version | group`, for roles at least the policy's
+    `add` role: `n u16 | n × (account [16] | age_secs u64)`, oldest first.
+  - **Approving** is adding the account's devices in an ordinary commit. That commit removes
+    the request.
+  - `POST /v1/groups/requests/decline` with `version | group | account [16]`, the same role.
+    204.
+- **Budgets:** opening, joining and asking share a per-account budget of 1 a second, bursting
+  to 5. Managing links and requests uses the commit budget.
+- **What members see:** every join by link is an external commit from a new account, with the
+  default role (OpenMLS refuses an external commit that changes extensions). Apps show it in
+  the chat. Whether the joiner held a valid link is the server's word; see the threat model.
+
 ## 7. Attachments and packs (Prompt 6)
 
 ## 8. Calls and the call key schedule (Prompt 7)

@@ -429,8 +429,19 @@ impl App {
             (&Method::POST, "/v1/reports", None) => self.report(req).await,
             (
                 &Method::POST,
-                "/v1/groups" | "/v1/groups/commit" | "/v1/groups/state" | "/v1/groups/propose"
-                | "/v1/groups/meta" | "/v1/groups/log",
+                "/v1/groups"
+                | "/v1/groups/commit"
+                | "/v1/groups/state"
+                | "/v1/groups/propose"
+                | "/v1/groups/meta"
+                | "/v1/groups/log"
+                | "/v1/groups/links"
+                | "/v1/groups/links/revoke"
+                | "/v1/groups/links/open"
+                | "/v1/groups/join"
+                | "/v1/groups/requests"
+                | "/v1/groups/requests/list"
+                | "/v1/groups/requests/decline",
                 None,
             ) => self.groups(req).await,
             (_, p, None) if p.starts_with("/v1/account/") => self.factors(req).await,
@@ -655,23 +666,40 @@ impl App {
         if row.pending {
             return Ok(device_outcome(devices::Outcome::Forbidden("pending")));
         }
-        if !matches!(path.as_str(), "/v1/groups/state" | "/v1/groups/log") {
+        let budget = match path.as_str() {
+            "/v1/groups/state" | "/v1/groups/log" => None,
+            // Anything a link opens has its own, smaller budget per account (D-0071), shared by
+            // its devices: links are not guessable, but a leaked one should not be tried at speed.
+            "/v1/groups/links/open" | "/v1/groups/join" | "/v1/groups/requests" => {
+                Some((g.link_record(&row.account), g.links_per_sec, g.link_burst))
+            }
             // Validating a commit costs CPU: a per-device budget, shared by creations,
-            // proposals and metadata writes.
+            // proposals, metadata writes and link and request management.
+            _ => Some((g.rate_record(&device), g.commits_per_sec, g.commit_burst)),
+        };
+        if let Some((record, per_sec, burst)) = budget {
             let wait = self
-                .gcra(&g.rate_record(&device), g.commits_per_sec, g.commit_burst)
+                .gcra(&record, per_sec, burst)
                 .await
                 .map_err(|()| unavailable())?;
             if wait > 0 {
                 return Ok(device_outcome(devices::Outcome::Throttled(wait)));
             }
         }
+        let r = &self.registry;
         let outcome = match path.as_str() {
-            "/v1/groups" => g.create(&self.registry, m, device, body).await,
-            "/v1/groups/commit" => g.commit(&self.registry, m, device, body).await,
-            "/v1/groups/propose" => g.propose(&self.registry, m, device, body).await,
-            "/v1/groups/meta" => g.meta(&self.registry, device, body).await,
-            "/v1/groups/log" => g.log(&self.registry, m, device, body).await,
+            "/v1/groups" => g.create(r, m, device, body).await,
+            "/v1/groups/commit" => g.commit(r, m, device, body).await,
+            "/v1/groups/propose" => g.propose(r, m, device, body).await,
+            "/v1/groups/meta" => g.meta(r, device, body).await,
+            "/v1/groups/log" => g.log(r, m, device, body).await,
+            "/v1/groups/links" => g.create_link(r, device, body).await,
+            "/v1/groups/links/revoke" => g.revoke_link(r, device, body).await,
+            "/v1/groups/links/open" => g.open(r, body).await,
+            "/v1/groups/join" => g.join(r, m, device, body).await,
+            "/v1/groups/requests" => g.request(r, m, device, body).await,
+            "/v1/groups/requests/list" => g.requests(r, device, body).await,
+            "/v1/groups/requests/decline" => g.decline(r, device, body).await,
             _ => g.state(&self.registry, m, device, body).await,
         };
         Ok(device_outcome(outcome))

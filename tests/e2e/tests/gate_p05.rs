@@ -172,6 +172,9 @@ async fn stack(people: usize) -> Option<Stack> {
             // Races send many commits at once; the budget itself is tested below.
             g.commits_per_sec = 1_000;
             g.commit_burst = 1_000;
+            // Room for the link tests; the throttling test spends the burst on purpose.
+            g.links_per_sec = 1;
+            g.link_burst = 20;
             g
         }),
     };
@@ -529,6 +532,8 @@ async fn a_lost_answer_is_recognised_and_an_interrupted_fan_out_is_redriven() {
                 last: &applied.commit_hash,
                 fanout: &plan,
                 log: None,
+                link: None,
+                joined: &[],
             },
         )
         .await
@@ -671,4 +676,327 @@ async fn roles_metadata_change_log_and_leaving() {
     let roster = songbird_send::Roster::from_bytes(row.epoch, &row.roster).unwrap();
     assert!(!roster.contains(&s.people[2].mls.id), "Carol left");
     assert_eq!(roster.members.len(), 2);
+}
+
+/// The `GroupInfo` from a state answer (as [`tree_of`]).
+fn info_of(b: &[u8]) -> Vec<u8> {
+    let info_len = usize::try_from(u32::from_be_bytes(b[8..12].try_into().unwrap())).unwrap();
+    b[12..12 + info_len].to_vec()
+}
+
+/// `POST` `path` as person `who` with `version | rest` (no group ID).
+async fn post(s: &Stack, who: usize, path: &str, rest: &[u8]) -> (u16, Bytes) {
+    let mut b = vec![1];
+    b.extend_from_slice(rest);
+    s.people[who]
+        .api
+        .send("POST", path, Some(&b))
+        .await
+        .unwrap()
+}
+
+/// An invite link: a handle and the `auth` the client derives from its secret.
+struct Link {
+    handle: [u8; 16],
+    auth: [u8; 32],
+}
+
+impl Link {
+    fn new() -> Self {
+        let mut handle = [0u8; 16];
+        aws_lc_rs::rand::fill(&mut handle).unwrap();
+        Self {
+            handle,
+            auth: random32(),
+        }
+    }
+
+    /// `handle | auth`.
+    fn open(&self) -> Vec<u8> {
+        [&self.handle[..], &self.auth[..]].concat()
+    }
+
+    /// `POST /v1/groups/links` as person `who`.
+    async fn create(&self, s: &Stack, who: usize, ttl: u64, max: u32, approval: bool) -> u16 {
+        let hash = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &self.auth);
+        let mut rest = self.handle.to_vec();
+        rest.extend_from_slice(hash.as_ref());
+        rest.extend_from_slice(&ttl.to_be_bytes());
+        rest.extend_from_slice(&max.to_be_bytes());
+        rest.push(u8::from(approval));
+        s.people[who]
+            .api
+            .send("POST", "/v1/groups/links", Some(&body(&rest)))
+            .await
+            .unwrap()
+            .0
+    }
+}
+
+#[tokio::test]
+async fn invite_links_and_join_requests() {
+    let Some(mut s) = stack(6).await else { return };
+    let (alice, bob, carol, dave, erin, frank) = (0, 1, 2, 3, 4, 5);
+    create(&mut s, alice).await;
+    add(&mut s, &[bob]).await;
+
+    // Links are the admins' (the group policy): Bob, a member, may not make one.
+    let once = Link::new();
+    assert_eq!(once.create(&s, bob, 0, 1, false).await, 403);
+    assert_eq!(once.create(&s, alice, 0, 1, false).await, 204);
+    assert_eq!(
+        once.create(&s, alice, 0, 1, false).await,
+        409,
+        "the handle is taken"
+    );
+
+    // Wrong secret and unknown handle: one answer.
+    let wrong = Link {
+        handle: once.handle,
+        auth: random32(),
+    };
+    assert_eq!(
+        post(&s, carol, "/v1/groups/links/open", &wrong.open())
+            .await
+            .0,
+        404
+    );
+    assert_eq!(
+        post(&s, carol, "/v1/groups/links/open", &Link::new().open())
+            .await
+            .0,
+        404
+    );
+
+    // Carol opens the link (the group, its state) and joins by external commit.
+    let (st, opened) = post(&s, carol, "/v1/groups/links/open", &once.open()).await;
+    assert_eq!((st, opened[0]), (200, 0));
+    assert_eq!(opened[1..17], GID);
+    let opened_state = &opened[17..];
+    let join = s.people[carol]
+        .mls
+        .rejoin(&info_of(opened_state), &tree_of(opened_state));
+    // A wrong secret cannot carry a join either.
+    let mut wrong_join = wrong.open();
+    wrong_join.extend_from_slice(&join);
+    assert_eq!(post(&s, carol, "/v1/groups/join", &wrong_join).await.0, 404);
+    let mut req = once.open();
+    req.extend_from_slice(&join);
+    let (st, reply) = post(&s, carol, "/v1/groups/join", &req).await;
+    assert_eq!((st, json(&reply)["epoch"].as_u64()), (200, Some(2)));
+    // The same join again (a lost answer) is recognised, though the link is now spent.
+    let (st, reply) = post(&s, carol, "/v1/groups/join", &req).await;
+    assert_eq!((st, json(&reply)["epoch"].as_u64()), (200, Some(2)));
+    // The members receive it; Carol reads the group from then on.
+    let c = s.pending(alice).await.pop().unwrap();
+    s.people[alice].mls.receive(
+        &songbird_groups::wire::Bundle {
+            commit: &c,
+            welcome: None,
+            group_info: b"-",
+            log: None,
+        }
+        .encode(),
+    );
+    assert_eq!(
+        s.pending(bob).await.len(),
+        2,
+        "the Welcome, then Carol's join"
+    );
+    let msg = s.people[alice].mls.message(b"hi carol");
+    assert_eq!(s.people[carol].mls.read(&msg), b"hi carol");
+    assert_eq!(state(&s, carol).await.0, 200);
+
+    // Used up: Dave gets the answer for no link.
+    assert_eq!(
+        post(&s, dave, "/v1/groups/links/open", &once.open())
+            .await
+            .0,
+        404
+    );
+
+    // Expiry.
+    let brief = Link::new();
+    assert_eq!(brief.create(&s, alice, 1, 0, false).await, 204);
+    assert_eq!(
+        post(&s, dave, "/v1/groups/links/open", &brief.open())
+            .await
+            .0,
+        200
+    );
+    tokio::time::sleep(Duration::from_millis(2_100)).await;
+    assert_eq!(
+        post(&s, dave, "/v1/groups/links/open", &brief.open())
+            .await
+            .0,
+        404
+    );
+    s.registry.purge_group_invites().await.unwrap();
+    assert!(
+        s.registry
+            .group_link(&brief.handle)
+            .await
+            .unwrap()
+            .is_none(),
+        "swept"
+    );
+
+    // Revocation: Bob may not; Alice does.
+    let revoked = Link::new();
+    assert_eq!(revoked.create(&s, alice, 0, 0, false).await, 204);
+    let revoke = |who: usize| {
+        let handle = revoked.handle;
+        let s = &s;
+        async move {
+            s.people[who]
+                .api
+                .send("POST", "/v1/groups/links/revoke", Some(&body(&handle)))
+                .await
+                .unwrap()
+                .0
+        }
+    };
+    assert_eq!(revoke(bob).await, 403);
+    assert_eq!(revoke(alice).await, 204);
+    assert_eq!(
+        post(&s, dave, "/v1/groups/links/open", &revoked.open())
+            .await
+            .0,
+        404
+    );
+
+    // A link that needs approval: Dave sees only the (encrypted) info, cannot join, and asks.
+    let ask = Link::new();
+    assert_eq!(ask.create(&s, alice, 0, 0, true).await, 204);
+    let (st, opened) = post(&s, dave, "/v1/groups/links/open", &ask.open()).await;
+    assert_eq!((st, opened.len()), (200, 1 + 8 + 4), "no state, no members");
+    assert_eq!(opened[0], 1);
+    let mut req = ask.open();
+    req.extend_from_slice(&join);
+    let (st, reply) = post(&s, dave, "/v1/groups/join", &req).await;
+    assert_eq!(
+        (st, json(&reply)["error"].as_str()),
+        (403, Some("approval"))
+    );
+    assert_eq!(
+        post(&s, dave, "/v1/groups/requests", &ask.open()).await.0,
+        204
+    );
+    assert_eq!(
+        post(&s, dave, "/v1/groups/requests", &ask.open()).await.0,
+        204
+    );
+    assert_eq!(
+        post(&s, erin, "/v1/groups/requests", &ask.open()).await.0,
+        204
+    );
+    // A member asking: 409. A link that needs no approval: 409 (join instead).
+    let (st, reply) = post(&s, bob, "/v1/groups/requests", &ask.open()).await;
+    assert_eq!((st, json(&reply)["error"].as_str()), (409, Some("member")));
+    let open_link = Link::new();
+    assert_eq!(open_link.create(&s, alice, 0, 0, false).await, 204);
+    let (st, reply) = post(&s, dave, "/v1/groups/requests", &open_link.open()).await;
+    assert_eq!((st, json(&reply)["error"].as_str()), (409, Some("open")));
+
+    // The list is the members' who may add (here everyone); outsiders get 404.
+    assert_eq!(list(&s, dave).await.0, 404);
+    let (st, l) = list(&s, bob).await;
+    assert_eq!((st, u16::from_be_bytes([l[0], l[1]])), (200, 2));
+    let (rows, _) = l[2..].as_chunks::<24>();
+    let accounts: Vec<[u8; 16]> = rows.iter().map(|c| c[..16].try_into().unwrap()).collect();
+    assert_eq!(
+        accounts[0],
+        *s.people[dave].mls.account.as_bytes(),
+        "oldest first"
+    );
+    assert_eq!(accounts[1], *s.people[erin].mls.account.as_bytes());
+
+    // Approving Dave is adding him: the commit answers his request. Erin is declined.
+    add(&mut s, &[dave]).await;
+    let decline = body(s.people[erin].mls.account.as_bytes());
+    let (st, _) = s.people[bob]
+        .api
+        .send("POST", "/v1/groups/requests/decline", Some(&decline))
+        .await
+        .unwrap();
+    assert_eq!(st, 204);
+    let (st, l) = list(&s, alice).await;
+    assert_eq!((st, &l[..]), (200, &[0u8, 0][..]));
+
+    // Opening links at speed is throttled per device.
+    let mut throttled = false;
+    for _ in 0..30 {
+        if post(&s, frank, "/v1/groups/links/open", &Link::new().open())
+            .await
+            .0
+            == 429
+        {
+            throttled = true;
+            break;
+        }
+    }
+    assert!(throttled);
+}
+
+/// `POST /v1/groups/requests/list` as person `who`.
+async fn list(s: &Stack, who: usize) -> (u16, Bytes) {
+    s.people[who]
+        .api
+        .send("POST", "/v1/groups/requests/list", Some(&body(&[])))
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn parallel_joins_never_exceed_a_links_uses() {
+    let Some(mut s) = stack(6).await else { return };
+    create(&mut s, 0).await;
+    let link = Link::new();
+    assert_eq!(link.create(&s, 0, 0, 2, false).await, 204);
+    let mut pending: Vec<usize> = (1..6).collect();
+    let mut joined = Vec::new();
+    while !pending.is_empty() {
+        // Everyone still trying opens the link and joins from the epoch they saw, at once.
+        let mut tries = Vec::new();
+        for &i in &pending {
+            let (st, opened) = post(&s, i, "/v1/groups/links/open", &link.open()).await;
+            if st == 404 {
+                continue;
+            }
+            assert_eq!((st, opened[0]), (200, 0));
+            let state = &opened[17..];
+            let mut req = link.open();
+            req.extend_from_slice(&s.people[i].mls.rejoin(&info_of(state), &tree_of(state)));
+            tries.push((i, req));
+        }
+        let answers = futures_util::future::join_all(
+            tries
+                .iter()
+                .map(|(i, req)| post(&s, *i, "/v1/groups/join", req)),
+        )
+        .await;
+        let mut next = Vec::new();
+        let mut winners = 0;
+        for ((i, _), (st, reply)) in tries.iter().zip(&answers) {
+            match st {
+                200 => {
+                    winners += 1;
+                    joined.push(*i);
+                }
+                409 => {
+                    assert_eq!(json(reply)["error"].as_str(), Some("stale"));
+                    next.push(*i);
+                }
+                404 => {}
+                other => panic!("join answered {other}"),
+            }
+        }
+        assert!(winners <= 1, "one join per epoch");
+        pending = next;
+    }
+    assert_eq!(joined.len(), 2, "exactly the link's two uses: {joined:?}");
+    let row = s.registry.group(&GID).await.unwrap().unwrap();
+    assert_eq!(row.epoch, 2);
+    let link_row = s.registry.group_link(&link.handle).await.unwrap().unwrap();
+    assert!(!link_row.usable);
 }

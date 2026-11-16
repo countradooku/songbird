@@ -111,6 +111,72 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0071 — Prompt 5, milestone 3: invite links the server cannot read, joins by external commit, and join requests
+
+- Date: 2026-11-16
+- Status: accepted; built and passing live (report `P05-M3.md`); part of the Prompt 5 PR
+- Decided by: agent, under D-0065 and the standing instruction (Proton-level bar)
+- Context: Prompt 5 asks for invite links (with expiry, a use limit and revocation), "admin
+  approval for new members", and joining without the server learning more than it must.
+- Options considered:
+  - **The server holding the link's secret** was rejected. The link carries a secret the app
+    splits with HKDF: `auth` for the server, and a key for the group's encrypted info. The
+    server stores `SHA-256(auth)`, so its database alone opens no link, and it never sees the
+    key to the group's name and picture.
+  - **Joining by a Welcome from an admin's device** (the admin's app is online and adds the
+    joiner) was rejected for open links: the person would wait for an admin to be online. A
+    join is an external commit (RFC 9420 §12.4.3.2) that the server accepts once the link is
+    checked. It joins with the default role: external commits cannot change extensions.
+  - **Counting a link's use before validating the commit** was rejected: a failed commit would
+    spend the use. The use is counted in the transaction that stores the commit, so the last
+    use goes to exactly one join, and a retried join that already won is answered again.
+  - **Approval as an admin's signature over the request** was rejected as more machinery for
+    the same effect: approving someone is adding them in an ordinary commit, which the roles
+    rule already checks (`add` role), and the commit answers the request.
+  - **Distinct answers for wrong, used-up, expired and revoked links** were rejected: one 404
+    for all, and the secret compared in constant time.
+- Decision:
+  - **Endpoints** (`PROTOCOL.md` §6.8): `POST /v1/groups/links` and `/links/revoke` for the
+    `links` role; `/links/open`; `/join`; `/requests`; `/requests/list` and `/requests/decline`
+    for the `add` role.
+  - **Opening** gives the group's state if the device may join now. If a join needs approval
+    (the link's flag, or the group policy's), it gives only the encrypted info, no members.
+  - **Limits:** 16 links per group; 256 pending requests per group, lapsing after 7 days;
+    links live at most a year.
+  - **Budgets:** opening, joining and asking have their own budget per account (1 a second,
+    burst 5); managing links and requests uses the commit budget.
+  - **Retention:** an hourly sweep forgets lapsed requests and expired links. Used-up links go
+    when the group's next link is made.
+  - **Registry:** `grp_link` (by handle, indexed by group and expiry) and `grp_req` (by group
+    and account, indexed by group and time). `grp_log` gains an indexed `grp` field: reading a
+    group's change log no longer scans every group's.
+- Evidence (Windows 11, `rustc 1.99.1`; live: SurrealDB v4.0.1 and Valkey 9.1.3 under podman):
+  - Harness: a stranger's external commit is refused by `apply_commit`, accepted by
+    `apply_join` with the default role, and read by the members afterwards. A member's
+    ordinary commit is refused by `apply_join`.
+  - `gate_p05` live, 6 of 6. `parallel_joins_never_exceed_a_links_uses`: five people race a
+    two-use link, one join per epoch, exactly two get in. `invite_links_and_join_requests`
+    checks:
+    - the `links` role (403 for a member);
+    - a taken handle (409);
+    - wrong and unknown links get one answer (404), also when they carry a join;
+    - opening and joining by external commit (200, epoch 2), and the members reading the joiner;
+    - a lost answer to a join recognised after the link is spent;
+    - the use limit, expiry and the sweep, and revocation (403 for a member, then 404);
+    - approval: info only on opening, 403 `approval` on joining, asking twice, 409 `member` and
+      `open`, the list for members and 404 for outsiders, oldest first, approving by adding
+      (the request is gone), declining;
+    - opening links at speed: 429.
+  - Registry, `api`, send, proto and groups suites: 205; e2e: 45.
+- Consequences:
+  - Two threat-model §1 rows (links; pending requests naming the account that asks) and one §6
+    risk: whether a joiner held a link is the server's word. A malicious server can admit an
+    account, but not hide it: every member sees the join, its account and its default role.
+  - Apps must derive `auth` and the info key from the link's secret as §6.8 says.
+  - A client-checkable link proof (members verifying that a joiner held a link they made) is
+    possible later, if the owner wants it: the link's admins would share a MAC key in the
+    encrypted info.
+
 ## D-0070 — Prompt 5, milestone 2: roles in an MLS extension every client verifies, mirrored on the server; leaving by proposal; encrypted metadata and change log
 
 - Date: 2026-11-16

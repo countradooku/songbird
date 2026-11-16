@@ -424,3 +424,49 @@ fn change_log_entries_are_the_committers_and_bound_to_their_commit() {
     assert!(matches!(e, GroupError::LogSignature), "{e:?}");
     alice.discard();
 }
+
+#[test]
+fn a_stranger_joins_by_link_only_through_apply_join() {
+    let Setup {
+        mut dir,
+        mut alice,
+        server,
+        ..
+    } = setup();
+    let info = server.group_info().to_vec();
+    let tree = server.ratchet_tree().unwrap();
+    let rec = server.record();
+    let limits = Limits::default();
+
+    // Without a link, a stranger's external commit is refused (as above); with one, the
+    // delivery service lets it in (D-0071), with the group's default role.
+    let mut eve = Device::new(5, account(5), &mut dir);
+    let b = eve.rejoin(&info, &tree);
+    let err = apply(Group::load(rec.clone()).unwrap(), &eve, &b, &dir).unwrap_err();
+    assert!(matches!(err, GroupError::External), "{err:?}");
+    let (server, applied) = Group::load(rec.clone())
+        .unwrap()
+        .apply_join(&eve.id, &b, &dir, &limits)
+        .unwrap();
+    assert_eq!(server.roster().len(), 3);
+    assert!(
+        applied.added.is_empty(),
+        "an external commit has no Welcome"
+    );
+    let roles = server.roles().unwrap();
+    assert_eq!(roles.role(&account(5)), roles.policy.default_role);
+
+    // The members follow, and Eve reads the group from then on.
+    alice.receive(&b);
+    let msg = alice.message(b"welcome, eve");
+    assert_eq!(eve.read(&msg), b"welcome, eve");
+
+    // A join is an external commit: a member's ordinary commit is not one.
+
+    let b = alice.update();
+    let err = Group::load(server.record())
+        .unwrap()
+        .apply_join(&alice.id, &b, &dir, &limits)
+        .unwrap_err();
+    assert!(matches!(err, GroupError::Kind), "{err:?}");
+}

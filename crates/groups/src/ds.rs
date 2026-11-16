@@ -491,6 +491,7 @@ impl Group {
         sender: &DeviceId,
         sender_account: AccountId,
         external: bool,
+        by_link: bool,
         dir: &impl Directory,
     ) -> Result<BTreeSet<u32>, GroupError> {
         for q in staged.queued_proposals() {
@@ -547,7 +548,7 @@ impl Group {
                 .devices()
                 .any(|d| d != *sender && dir.account_of(&d) == Some(sender_account))
                 || self.roster.leaf(sender).is_some();
-            if !account_present {
+            if !account_present && !by_link {
                 return Err(GroupError::External);
             }
             for idx in &removed {
@@ -681,11 +682,35 @@ impl Group {
     /// Validates, authorizes and merges a commit bundle sent by `sender`. On success the group
     /// is at the next epoch; on error it is dropped, and the caller reloads its record.
     pub fn apply_commit(
+        self,
+        sender: &DeviceId,
+        bundle: &[u8],
+        dir: &impl Directory,
+        limits: &Limits,
+    ) -> Result<(Self, Applied), GroupError> {
+        self.apply(sender, bundle, dir, limits, false)
+    }
+
+    /// A person joining by invite link (M3, D-0071): an external commit from a device whose
+    /// account need not be in the group yet. Call it only once the link is checked; the link's
+    /// use is counted with the commit's store. It joins with the default role.
+    pub fn apply_join(
+        self,
+        sender: &DeviceId,
+        bundle: &[u8],
+        dir: &impl Directory,
+        limits: &Limits,
+    ) -> Result<(Self, Applied), GroupError> {
+        self.apply(sender, bundle, dir, limits, true)
+    }
+
+    fn apply(
         mut self,
         sender: &DeviceId,
         bundle: &[u8],
         dir: &impl Directory,
         limits: &Limits,
+        by_link: bool,
     ) -> Result<(Self, Applied), GroupError> {
         let b = Bundle::parse(bundle, limits.max_bundle)?;
         if wire::wire_format(b.commit)? != wire::WIRE_PUBLIC {
@@ -708,6 +733,8 @@ impl Group {
         }
         let sender_account = dir.account_of(sender).ok_or(GroupError::Sender)?;
         let external = match pm.sender() {
+            // A join by link is an external commit.
+            Sender::Member(_) if by_link => return Err(GroupError::Kind),
             Sender::Member(leaf) => {
                 if self.roster.leaf(sender) != Some(leaf.u32()) {
                     return Err(GroupError::Sender);
@@ -726,7 +753,8 @@ impl Group {
             return Err(GroupError::Kind);
         };
 
-        let removed_leaves = self.check_leaves(&staged, sender, sender_account, external, dir)?;
+        let removed_leaves =
+            self.check_leaves(&staged, sender, sender_account, external, by_link, dir)?;
         let added = self.check_adds(&staged, b.welcome, &removed_leaves, dir)?;
 
         let new_size = self.roster.len() + added.len() + usize::from(external)

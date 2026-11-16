@@ -190,6 +190,22 @@ DEFINE FIELD IF NOT EXISTS meta_v ON grp TYPE int;
 DEFINE TABLE IF NOT EXISTS grp_log SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS entry ON grp_log TYPE bytes;
 DEFINE FIELD IF NOT EXISTS at ON grp_log TYPE datetime;
+DEFINE FIELD IF NOT EXISTS grp ON grp_log TYPE bytes;
+DEFINE INDEX IF NOT EXISTS grp_log_grp ON grp_log FIELDS grp;
+DEFINE TABLE IF NOT EXISTS grp_link SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS grp ON grp_link TYPE bytes;
+DEFINE FIELD IF NOT EXISTS sha ON grp_link TYPE bytes;
+DEFINE FIELD IF NOT EXISTS max ON grp_link TYPE int;
+DEFINE FIELD IF NOT EXISTS uses ON grp_link TYPE int;
+DEFINE FIELD IF NOT EXISTS approval ON grp_link TYPE bool;
+DEFINE FIELD IF NOT EXISTS expires ON grp_link TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS grp_link_grp ON grp_link FIELDS grp;
+DEFINE TABLE IF NOT EXISTS grp_req SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS at ON grp_req TYPE datetime;
+DEFINE FIELD IF NOT EXISTS grp ON grp_req TYPE bytes;
+DEFINE INDEX IF NOT EXISTS grp_req_grp ON grp_req FIELDS grp;
+DEFINE INDEX IF NOT EXISTS grp_req_at ON grp_req FIELDS at;
+DEFINE INDEX IF NOT EXISTS grp_link_expires ON grp_link FIELDS expires;
 UPSERT directory:v SET version = version ?? 1 RETURN NONE;
 DEFINE TABLE IF NOT EXISTS store SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS generation ON store TYPE int;
@@ -252,6 +268,9 @@ pub enum RegistryError {
     /// a group that does not exist.
     #[error("stale group epoch")]
     StaleEpoch,
+    /// An invite link that is unknown, of another group, used up or expired (one answer).
+    #[error("group link refused")]
+    GroupLink,
 }
 
 /// One device's stored keys (opaque stored forms, `songbird_proto::keys`).

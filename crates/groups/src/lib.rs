@@ -7,6 +7,7 @@ pub mod crypto;
 pub mod ds;
 pub mod roles;
 pub mod state;
+pub mod tiers;
 pub mod wire;
 
 pub use ds::{Applied, Directory, Group, GroupError, Leaf, Limits, Record, Roster};

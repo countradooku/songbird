@@ -29,6 +29,7 @@ server in plaintext. Adding to this list requires the owner's approval.
 | Per MLS group: change-log entries (`grp_log`): ciphertext (≤ 2 KiB) and the committer's signature, keyed by the commit's epoch; the newest 1,000 | Show "View member changes" on devices that join later; the signature lets the server refuse forgeries | The newest 1,000 entries, or with the group | Prompt 5 (M2), D-0070; **awaiting the owner's approval** |
 | Per MLS group, its invite links (`grp_link`): a random handle, `SHA-256(auth)` (never the link's secret, nor the key to the group's info), whether joins need approval, a use count, a limit and an expiry; at most 16 | Let a person holding a link open and join the group, while the link is usable (D-0071) | Until revoked or expired (swept hourly); used-up ones until the group's next link is made; or with the group | Prompt 5 (M3), D-0071; **awaiting the owner's approval** |
 | Per MLS group, its pending join requests (`grp_req`): **the account asking to join**, and when it asked; at most 256 | Let members with the `add` role approve (add) or decline | Until approved, declined, or 7 days | Prompt 5 (M3), D-0071; **awaiting the owner's approval** |
+| Per community (`cmty`, `cmty_grp`): its ID, **which group is its announcement group and which groups belong to it** (opaque IDs; at most 100), and its encrypted info (name, description, picture: ciphertext under a key the members share) with its version | Let the announcement group's admins run the community; show its members the community's groups | Until a group is unlinked or the community deleted | Prompt 5 (M4), D-0072; **awaiting the owner's approval** |
 | Push registration (APNs, FCM or Web Push token / endpoint), **sealed to the push service's X25519 key** and stored under a keyed hash (HMAC-SHA256, push-index secret) of the device ID; `api` and `worker` hold only the public key | Wake an offline device | Until replaced, reported unregistered by the provider, or the device is deleted | Prompt 2 (M5), D-0036; **approved by the owner 2026-11-12** |
 | Attachment record: random 32-byte object ID, padded size, expiry, fetches still due; **no link to the uploading account** once uploaded. Before upload, a grant names the uploading device (at most 1 h) | Accept exactly the granted upload; delete after the last fetch or 30 days | Until the last fetch or 30 days; grant at most 1 h | Prompt 2 (M5), D-0036; **approved by the owner 2026-11-12** |
 | Attachment ciphertext in RustFS (client-encrypted, opaque), named by the object ID | Relay to recipients | As the attachment record | Prompt 2 (M5); the ciphertext the approved attachment row describes |
@@ -559,3 +560,9 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
   revoked, used up or expired; opening it shows the members' devices (the ratchet tree an
   external commit needs) before any join, unless joins need approval.
   A join request tells the server which account wants which group before it is a member.
+- Communities and channels (Prompt 5, M4; D-0072): the server knows which groups form a
+  community, so with the rosters it knows who shares a community. A private channel is an MLS
+  group: subscribers see each other's devices. A full-path commit right after many adds
+  encrypts to nearly every leaf (1.2 MiB at 1,024 X-Wing leaves): a member who adds many
+  people and then commits makes every member download that much. The channel rate class is per
+  node, like the WebSocket budgets: a channel posting through several nodes gets each one's.

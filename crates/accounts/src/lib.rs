@@ -34,6 +34,7 @@ use songbird_surreal::Value;
 use songbird_types::{AccountId, DeviceId, JobId};
 
 pub mod blocks;
+pub mod communities;
 pub mod devices;
 pub mod gdpr;
 pub mod groups;
@@ -206,6 +207,14 @@ DEFINE FIELD IF NOT EXISTS grp ON grp_req TYPE bytes;
 DEFINE INDEX IF NOT EXISTS grp_req_grp ON grp_req FIELDS grp;
 DEFINE INDEX IF NOT EXISTS grp_req_at ON grp_req FIELDS at;
 DEFINE INDEX IF NOT EXISTS grp_link_expires ON grp_link FIELDS expires;
+DEFINE TABLE IF NOT EXISTS cmty SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS ann ON cmty TYPE bytes;
+DEFINE FIELD IF NOT EXISTS meta ON cmty TYPE bytes;
+DEFINE FIELD IF NOT EXISTS meta_v ON cmty TYPE int;
+DEFINE TABLE IF NOT EXISTS cmty_grp SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS cmty ON cmty_grp TYPE bytes;
+DEFINE FIELD IF NOT EXISTS ann ON cmty_grp TYPE bool;
+DEFINE INDEX IF NOT EXISTS cmty_grp_cmty ON cmty_grp FIELDS cmty;
 UPSERT directory:v SET version = version ?? 1 RETURN NONE;
 DEFINE TABLE IF NOT EXISTS store SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS generation ON store TYPE int;
@@ -271,6 +280,9 @@ pub enum RegistryError {
     /// An invite link that is unknown, of another group, used up or expired (one answer).
     #[error("group link refused")]
     GroupLink,
+    /// No such community (Prompt 5, M4).
+    #[error("not found")]
+    NotFound,
 }
 
 /// One device's stored keys (opaque stored forms, `songbird_proto::keys`).

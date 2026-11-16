@@ -142,7 +142,7 @@ fn sha256(b: &[u8]) -> [u8; 32] {
 }
 
 /// The registry's roster (D-0070); an unreadable one names nobody.
-fn roster_of(roster: &[u8]) -> Option<songbird_send::Roster> {
+pub(crate) fn roster_of(roster: &[u8]) -> Option<songbird_send::Roster> {
     songbird_send::Roster::from_bytes(0, roster)
 }
 
@@ -177,7 +177,7 @@ fn reason(e: &GroupError) -> &'static str {
 }
 
 /// `version | group [16] | rest`.
-fn split(body: &[u8]) -> Option<([u8; 16], &[u8])> {
+pub(crate) fn split(body: &[u8]) -> Option<([u8; 16], &[u8])> {
     let (&v, rest) = body.split_first()?;
     if v != VERSION || rest.len() < 16 {
         return None;
@@ -458,7 +458,7 @@ impl Groups {
 
     /// Who may read a group's state and change log: a device in it, or a listed device of an
     /// account in it (to rejoin). Everyone else gets the answer for no group.
-    fn may_read(m: &Messages, roster: &[u8], device: &DeviceId) -> bool {
+    pub(crate) fn may_read(m: &Messages, roster: &[u8], device: &DeviceId) -> bool {
         let dir = m.path.directory();
         let roster = devices_of(roster);
         roster.binary_search(device).is_ok()
@@ -696,7 +696,7 @@ async fn state_blob(row: &songbird_accounts::groups::GroupRow, prefix: &[u8]) ->
     }
 }
 
-fn put_meta(out: &mut Vec<u8>, meta_v: u64, meta: &[u8]) {
+pub(crate) fn put_meta(out: &mut Vec<u8>, meta_v: u64, meta: &[u8]) {
     out.extend_from_slice(&meta_v.to_be_bytes());
     out.extend_from_slice(&u32::try_from(meta.len()).unwrap_or(u32::MAX).to_be_bytes());
     out.extend_from_slice(meta);

@@ -1000,3 +1000,133 @@ async fn parallel_joins_never_exceed_a_links_uses() {
     let link_row = s.registry.group_link(&link.handle).await.unwrap().unwrap();
     assert!(!link_row.usable);
 }
+
+/// `POST` `path` as person `who` with `version | ids… | rest`.
+async fn post_ids(s: &Stack, who: usize, path: &str, ids: &[&[u8; 16]], rest: &[u8]) -> u16 {
+    post_ids_reply(s, who, path, ids, rest).await.0
+}
+
+async fn post_ids_reply(
+    s: &Stack,
+    who: usize,
+    path: &str,
+    ids: &[&[u8; 16]],
+    rest: &[u8],
+) -> (u16, Bytes) {
+    let mut b = vec![1];
+    for id in ids {
+        b.extend_from_slice(*id);
+    }
+    b.extend_from_slice(rest);
+    s.people[who]
+        .api
+        .send("POST", path, Some(&b))
+        .await
+        .unwrap()
+}
+
+/// Person `who` registers `device`'s new group `id` (`device` may be a second handle on the
+/// person's device, for a second group).
+async fn create_group(
+    s: &Stack,
+    who: usize,
+    device: &mut Device,
+    id: [u8; 16],
+    policy: songbird_groups::roles::Policy,
+) {
+    let (info, tree) = device.create_in(id, policy);
+    let st = post_ids(s, who, "/v1/groups", &[&id], &parts(&info, &tree)).await;
+    assert_eq!(st, 204);
+}
+
+#[tokio::test]
+async fn communities_are_run_by_the_announcement_groups_admins() {
+    use songbird_groups::roles::Policy;
+    let Some(s) = stack(3).await else { return };
+    let (alice, bob, carol) = (0, 1, 2);
+    let (ann, g1, g2, plain) = ([0xA1; 16], [0xA2; 16], [0xA3; 16], [0xA4; 16]);
+    let (c, c2) = ([0xC1; 16], [0xC2; 16]);
+    let announcement = Policy {
+        send: Role::Admin,
+        ..Policy::GROUP
+    };
+
+    // Alice's announcement group, with Carol as a member; Alice's group G1; Bob's G2 and an
+    // ordinary group.
+    let mut a = Device::restored(&s.people[alice].mls);
+    create_group(&s, alice, &mut a, ann, announcement).await;
+    let b = a.add(&[s.people[carol].mls.key_package()]);
+    let mut req = ann.to_vec();
+    req.extend_from_slice(&b);
+    let (st, _) = post(&s, alice, "/v1/groups/commit", &req).await;
+    assert_eq!(st, 200);
+    let mut a1 = Device::restored(&s.people[alice].mls);
+    create_group(&s, alice, &mut a1, g1, Policy::GROUP).await;
+    let mut b2 = Device::restored(&s.people[bob].mls);
+    create_group(&s, bob, &mut b2, g2, Policy::GROUP).await;
+    let mut bp = Device::restored(&s.people[bob].mls);
+    create_group(&s, bob, &mut bp, plain, Policy::GROUP).await;
+
+    // Creating: an announcement-only group, by its admin, once.
+    let path = "/v1/communities";
+    let (st, reply) = post_ids_reply(&s, bob, path, &[&c, &plain], &[]).await;
+    assert_eq!(
+        (st, json(&reply)["error"].as_str()),
+        (400, Some("announcement"))
+    );
+    assert_eq!(post_ids(&s, carol, path, &[&c, &ann], &[]).await, 403);
+    assert_eq!(post_ids(&s, bob, path, &[&c, &ann], &[]).await, 404);
+    assert_eq!(post_ids(&s, alice, path, &[&c, &ann], &[]).await, 204);
+    assert_eq!(post_ids(&s, alice, path, &[&c2, &ann], &[]).await, 409);
+
+    // Linking groups: an admin of both.
+    let add = "/v1/communities/groups/add";
+    assert_eq!(post_ids(&s, carol, add, &[&c, &g1], &[]).await, 403);
+    assert_eq!(
+        post_ids(&s, alice, add, &[&c, &g2], &[]).await,
+        404,
+        "not Alice's"
+    );
+    assert_eq!(
+        post_ids(&s, bob, add, &[&c, &g2], &[]).await,
+        404,
+        "not Bob's community"
+    );
+    assert_eq!(post_ids(&s, alice, add, &[&c, &g1], &[]).await, 204);
+    assert_eq!(post_ids(&s, alice, add, &[&c, &g1], &[]).await, 409);
+    assert_eq!(post_ids(&s, alice, add, &[&c, &ann], &[]).await, 409);
+
+    // The state: for the announcement group's members only.
+    let state = "/v1/communities/state";
+    assert_eq!(post_ids(&s, bob, state, &[&c], &[]).await, 404);
+    let (st, view) = post_ids_reply(&s, carol, state, &[&c], &[]).await;
+    assert_eq!(st, 200);
+    assert_eq!(view[..16], ann);
+    assert_eq!(view[16..24], 0u64.to_be_bytes(), "no info yet");
+    assert_eq!(view[28..30], 1u16.to_be_bytes());
+    assert_eq!(view[30..46], g1);
+
+    // The encrypted info: admins, versioned.
+    let meta = "/v1/communities/meta";
+    let mut v0 = 0u64.to_be_bytes().to_vec();
+    v0.extend_from_slice(b"sealed: name and picture");
+    assert_eq!(post_ids(&s, carol, meta, &[&c], &v0).await, 403);
+    let (st, reply) = post_ids_reply(&s, alice, meta, &[&c], &v0).await;
+    assert_eq!((st, json(&reply)["version"].as_u64()), (200, Some(1)));
+    assert_eq!(post_ids(&s, alice, meta, &[&c], &v0).await, 409);
+    let (_, view) = post_ids_reply(&s, carol, state, &[&c], &[]).await;
+    assert_eq!(view[16..24], 1u64.to_be_bytes());
+
+    // Unlinking: a community admin or the group's own admin; deleting: an owner.
+    let remove = "/v1/communities/groups/remove";
+    assert_eq!(post_ids(&s, carol, remove, &[&c, &g1], &[]).await, 403);
+    assert_eq!(post_ids(&s, alice, remove, &[&c, &g1], &[]).await, 204);
+    let (_, view) = post_ids_reply(&s, carol, state, &[&c], &[]).await;
+    assert_eq!(view[view.len() - 2..], 0u16.to_be_bytes());
+    let delete = "/v1/communities/delete";
+    assert_eq!(post_ids(&s, carol, delete, &[&c], &[]).await, 403);
+    assert_eq!(post_ids(&s, alice, delete, &[&c], &[]).await, 204);
+    assert_eq!(post_ids(&s, carol, state, &[&c], &[]).await, 404);
+    // The announcement group is free again.
+    assert_eq!(post_ids(&s, alice, path, &[&c2, &ann], &[]).await, 204);
+}

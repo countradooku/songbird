@@ -111,6 +111,74 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0072 — Prompt 5, milestone 4: communities as opaque links run by the announcement group's admins; private channels capped at 2,048 devices with a rate class; receipt tiers
+
+- Date: 2026-11-16
+- Status: accepted by the agent; the benchmarks and caps await the owner (report `P05-M4.md`);
+  part of the Prompt 5 PR
+- Decided by: agent, under D-0065 (owner: tiers §5, public channels §4, X-Wing §3) and the
+  standing instruction (Proton-level bar)
+- Context: Prompt 5 asks for:
+  - communities (shared admins, an announcement group, opaque links, encrypted names);
+  - private channels up to a benchmarked cap;
+  - commit and Welcome costs at 1,024 and 5,000 members;
+  - D-0065 §3 keeps X-Wing unless those numbers say otherwise.
+- Options considered:
+  - **Community admins as their own list on the server** was rejected: it would be a second
+    source of truth that no client verifies. The announcement group's roles extension is
+    already verified by every member (D-0070), so the server reads the community's admins from
+    it.
+  - **A community admin linking any group** was rejected: linking needs an admin of the group
+    too, so nobody can pull a group into a community it did not choose. Unlinking needs either.
+  - **Community state for anyone with the ID** was rejected: only the announcement group's
+    members (as for group state, D-0067).
+  - **The channel cap at 5,000** was rejected on the numbers:
+    - a full-path X-Wing commit of a fresh 5,000-leaf tree is 5.6 MiB, over the 4 MiB bundle
+      limit, and every subscriber would download it;
+    - at 2,048 it is 2.3 MiB.
+  - **Classical ciphersuites for large groups** were not adopted. Welcomes and add commits stay
+    small with X-Wing (1.4 and 2.8 KiB). Its cost is full-path commits on fresh trees, 14 times
+    classical, falling to about 24 KiB as the tree fills. The owner may still choose otherwise
+    at the gate.
+  - **A cluster-wide channel budget in `valkey-hot`** was not built yet: the per-node budget
+    matches how WebSocket budgets already work (threat model §6).
+  - **Server-enforced receipts** are impossible (receipts are encrypted). The rule is one
+    function the apps share.
+- Decision:
+  - **Communities** (`PROTOCOL.md` §6.9):
+    - `cmty:[id]` holds the announcement group and the encrypted info with its version;
+      `cmty_grp:[group]` holds the community, so a group is in at most one;
+    - at most 100 groups;
+    - created by an admin of an announcement-only group (its `send` role at least `Admin`);
+    - linking needs an admin of both; info by the announcement group's admins; deleting by
+      its owners.
+  - **Private channels** (§6.10):
+    - `Limits::max_channel_members` is 2,048 devices; a group stays at 1,024. The limit
+      follows the policy the commit leaves.
+    - The send path's channel rate class is 1 post a second per channel, bursting to 10, per
+      node (`send::groups::ChannelBudget`). Over it, reason 1 with the wait.
+  - **Tiers** (`songbird_groups::tiers`):
+    - up to 32 people: every device sends delivered receipts, with a 1 s window;
+    - larger groups: primaries only, with a 10 s window;
+    - channels: no receipts.
+  - **rayon:** the delivery service never builds an update path, the only place OpenMLS uses
+    rayon, so `api` runs no rayon threads; nothing is configured.
+- Evidence (Windows 11, `rustc 1.99.1`; Ryzen 9 7950X; live: SurrealDB v4.0.1 and Valkey 9.1.3
+  under podman):
+  - `tests/groups/tests/scale.rs`, release: the tables in `P05-M4.md`. At 1,024 X-Wing leaves
+    the server takes 8 to 13 ms per commit, and joining from a Welcome takes 45 ms.
+  - Harness `a_channel_has_its_own_size_limit`.
+  - Send: `channels_have_their_own_rate_class`, `the_channel_budget_refills`. Groups:
+    `tiers::tests`.
+  - `gate_p05` live, 7 of 7, with `communities_are_run_by_the_announcement_groups_admins`
+    (every community cell refused for those who may not, accepted for those who may).
+- Consequences:
+  - One threat-model §1 row (communities) and one §6 risk (the community graph, channel
+    subscribers seeing each other, large commits on fresh trees, the per-node rate class).
+  - Apps should commit a key update soon after joining a large group or channel.
+  - The caps are configuration (`Limits`); raising the channel cap needs a larger bundle
+    limit and a fresh look at what each subscriber downloads.
+
 ## D-0071 — Prompt 5, milestone 3: invite links the server cannot read, joins by external commit, and join requests
 
 - Date: 2026-11-16

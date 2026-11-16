@@ -1464,6 +1464,56 @@ A commit the rule refuses gets 403 `role`, and clients drop it.
   default role (OpenMLS refuses an external commit that changes extensions). Apps show it in
   the chat. Whether the joiner held a valid link is the server's word; see the threat model.
 
+### 6.9 Communities (M4, D-0072)
+
+A community is a container of groups around an **announcement group**: a group whose policy lets
+only admins send. The server keeps opaque links between IDs and an encrypted info blob (name,
+description, picture: ciphertext under a key the members share). The community's admins are the
+announcement group's admins, as its roles extension says, which every member verifies (§6.6).
+
+- `POST /v1/communities` with `version | community [16] | announcement [16]`. For an admin of
+  the announcement group.
+  - 204;
+  - 400 `announcement` if its members may send;
+  - 409 `exists` if the community ID is taken or the group is already in a community.
+- `POST /v1/communities/groups/add` with `version | community | group [16]`. For a device that
+  is an admin of both the announcement group and the group (a community admin cannot claim
+  someone else's group).
+  - 204;
+  - 409 `exists` (the group is in a community) or `full` (100 groups).
+- `POST /v1/communities/groups/remove` with `version | community | group`. For an admin of the
+  announcement group or of the group (a group may leave). 204.
+- `POST /v1/communities/meta` with `version | community | expected u64 | blob` (1 byte to
+  16 KiB), for the announcement group's admins. 200 `{"version": n}`; 409 `stale`.
+- `POST /v1/communities/state` with `version | community`, for the announcement group's members
+  (and their accounts' other devices). It answers `announcement [16] | meta_v u64 | meta_len u32
+  | meta | n u16 | n × group [16]`.
+- `POST /v1/communities/delete` with `version | community`, for the announcement group's owners.
+  204. The groups stay.
+
+Where the device is not in a group it must be in, or the community does not exist, the answer is
+404. Joining a community is joining its announcement group (§6.8); its groups are joined one by
+one, by their own links.
+
+### 6.10 Private channels and group tiers (M4, D-0072)
+
+- **A private channel** is a group whose policy has the channel flag (`0x01`): admins post, add,
+  edit and manage links; subscribers join read-only (`Policy::CHANNEL`).
+  - **Size:** up to 2,048 devices; a group is up to 1,024 (`Limits`). The limit follows the
+    policy a commit leaves.
+  - **Rate class:** a channel takes at most 1 post a second, bursting to 10, on each node,
+    whoever of its admins posts. This is on top of each device's own budget. Over it, reason 1
+    `RateLimited` with the wait.
+  - **Subscribers see each other's devices** in the ratchet tree, as in any MLS group. Channels
+    suit audiences that know each other; public channels are not built (D-0065 §4).
+- **Tiers and receipts** (`songbird_groups::tiers`, the apps' rule; receipts are encrypted):
+
+  | Tier | People | Delivered receipts | Read receipts | Window |
+  | --- | --- | --- | --- | --- |
+  | Small group | up to 32 | every device | if enabled | 1 s |
+  | Large group | 33 and more | the primary device only | if enabled | 10 s |
+  | Channel | any | none | none | — |
+
 ## 7. Attachments and packs (Prompt 6)
 
 ## 8. Calls and the call key schedule (Prompt 7)

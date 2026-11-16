@@ -470,3 +470,43 @@ fn a_stranger_joins_by_link_only_through_apply_join() {
         .unwrap_err();
     assert!(matches!(err, GroupError::Kind), "{err:?}");
 }
+
+#[test]
+fn a_channel_has_its_own_size_limit() {
+    let mut dir = Dir::default();
+    let mut owner = Device::new(1, account(1), &mut dir);
+    let limits = Limits {
+        max_members: 2,
+        max_channel_members: 3,
+        ..Limits::default()
+    };
+    let subscribers: Vec<Device> = (2..=3)
+        .map(|n| Device::new(n, account(n), &mut dir))
+        .collect();
+    let kps: Vec<_> = subscribers.iter().map(Device::key_package).collect();
+
+    // A group of three is over the group limit...
+    let (gi, tree) = owner.create();
+    let group = Group::create(GID, &owner.id, &gi, &tree, &dir).unwrap();
+    let b = owner.add(&kps);
+    let err = group
+        .apply_commit(&owner.id, &b, &dir, &limits)
+        .unwrap_err();
+    assert!(matches!(err, GroupError::TooLarge { max: 2 }), "{err:?}");
+
+    // ...and within the channel limit, for a channel.
+    let mut owner = Device::restored(&owner);
+    let (gi, tree) = owner.create_with(songbird_groups::roles::Policy::CHANNEL);
+    let channel = Group::create(GID, &owner.id, &gi, &tree, &dir).unwrap();
+    let kps: Vec<_> = subscribers.iter().map(Device::key_package).collect();
+    let b = owner.add(&kps);
+    let (channel, _) = channel.apply_commit(&owner.id, &b, &dir, &limits).unwrap();
+    assert_eq!(channel.roster().len(), 3);
+    owner.merge();
+    let fourth = Device::new(4, account(4), &mut dir);
+    let b = owner.add(&[fourth.key_package()]);
+    let err = channel
+        .apply_commit(&owner.id, &b, &dir, &limits)
+        .unwrap_err();
+    assert!(matches!(err, GroupError::TooLarge { max: 3 }), "{err:?}");
+}

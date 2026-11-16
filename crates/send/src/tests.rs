@@ -1043,3 +1043,59 @@ fn rosters_have_one_encoding() {
     v1[0] = 1;
     assert!(Roster::from_bytes(7, &v1).is_none());
 }
+
+#[tokio::test]
+async fn channels_have_their_own_rate_class() {
+    // A channel (flag 0x01): admins post, subscribers read; two posts at once, then one a second.
+    const C: [u8; 16] = [0x5D; 16];
+    let mut f = Fixture::new();
+    let r = MemoryRosters::default();
+    r.set_roles(C, 4, [3, 3, 3, 3, 3, 0, 1], vec![(dev(1), 0), (dev(2), 3)]);
+    f.policy.rosters = Some(Arc::new(r));
+    f.policy.channels = Arc::new(groups::ChannelBudget::new(1, 2));
+    let mut scratch = Vec::new();
+    let post = |k: u8| {
+        let mut s = group_send(C, group_message(C, 4, 1));
+        s.idempotency_key = [k; 16];
+        s
+    };
+    let now = Instant::now();
+    for k in [1, 2] {
+        let st = f.path().send(&dev(2), post(k), now, &mut scratch).await;
+        assert_eq!(st, SendStatus::Accepted);
+    }
+    let st = f.path().send(&dev(2), post(3), now, &mut scratch).await;
+    let SendStatus::Rejected {
+        reason: RejectReason::RateLimited,
+        retry_after_ms,
+    } = st
+    else {
+        panic!("{st:?}")
+    };
+    assert!((1..=1_000).contains(&retry_after_ms), "{retry_after_ms}");
+    assert_eq!(f.mailbox.count_pending(&dev(1)).await.unwrap(), 2);
+    // A subscriber's post is refused before it costs the channel anything.
+    let st = f.path().send(&dev(1), post(4), now, &mut scratch).await;
+    assert!(
+        matches!(
+            st,
+            SendStatus::Rejected {
+                reason: RejectReason::NotAllowed,
+                ..
+            }
+        ),
+        "{st:?}"
+    );
+}
+
+#[test]
+fn the_channel_budget_refills() {
+    let b = groups::ChannelBudget::new(2, 1);
+    let t = Instant::now();
+    assert!(b.take(&[1; 16], t).is_ok());
+    let wait = b.take(&[1; 16], t).unwrap_err();
+    assert_eq!(wait, Duration::from_millis(500));
+    // Another channel is not affected; the first refills after its interval.
+    assert!(b.take(&[2; 16], t).is_ok());
+    assert!(b.take(&[1; 16], t + Duration::from_millis(500)).is_ok());
+}

@@ -11,6 +11,7 @@
     reason = "test harness: failing loudly is the point"
 )]
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use openmls::prelude::tls_codec::{Deserialize as _, Serialize as _};
@@ -22,6 +23,22 @@ use songbird_groups::roles::{self, Policy, ROLES_EXTENSION, Roles};
 use songbird_groups::wire::{Bundle, LogEntry, log_signed_content};
 use songbird_groups::{Directory, Group};
 use songbird_types::{AccountId, DeviceId};
+
+thread_local! {
+    static SUITE: Cell<Ciphersuite> = const { Cell::new(GROUP_CIPHERSUITE) };
+}
+
+/// The ciphersuite this thread's devices use for new groups and KeyPackages: Songbird's
+/// ([`GROUP_CIPHERSUITE`], X-Wing) unless a benchmark compares another.
+#[must_use]
+pub fn suite() -> Ciphersuite {
+    SUITE.with(Cell::get)
+}
+
+/// Sets [`suite`] for this thread (benchmarks only; the delivery service refuses other suites).
+pub fn set_suite(suite: Ciphersuite) {
+    SUITE.with(|c| c.set(suite));
+}
 
 /// A test directory: device → account.
 #[derive(Debug, Default, Clone)]
@@ -120,12 +137,7 @@ impl Device {
     pub fn key_package(&self) -> KeyPackage {
         KeyPackage::builder()
             .leaf_node_capabilities(caps())
-            .build(
-                GROUP_CIPHERSUITE,
-                &self.provider,
-                &self.signer,
-                self.cred.clone(),
-            )
+            .build(suite(), &self.provider, &self.signer, self.cred.clone())
             .unwrap()
             .key_package()
             .clone()
@@ -144,10 +156,16 @@ impl Device {
 
     /// Creates a group (or, with [`Policy::CHANNEL`], a channel) with this policy.
     pub fn create_with(&mut self, policy: Policy) -> (Vec<u8>, Vec<u8>) {
+        self.create_in(GID, policy)
+    }
+
+    /// Creates group `id` with this policy (a device holds one group at a time here; a second
+    /// group needs [`Device::restored`]).
+    pub fn create_in(&mut self, id: [u8; 16], policy: Policy) -> (Vec<u8>, Vec<u8>) {
         let roles = Roles::new(self.account, policy);
         let cfg = MlsGroupCreateConfig::builder()
             .wire_format_policy(PURE_PLAINTEXT_WIRE_FORMAT_POLICY)
-            .ciphersuite(GROUP_CIPHERSUITE)
+            .ciphersuite(suite())
             .max_past_epochs(1)
             .capabilities(caps())
             .with_group_context_extensions(roles_extensions(&roles))
@@ -156,7 +174,7 @@ impl Device {
             &self.provider,
             &self.signer,
             &cfg,
-            GroupId::from_slice(&GID),
+            GroupId::from_slice(&id),
             self.cred.clone(),
         )
         .unwrap();
@@ -553,7 +571,7 @@ impl Device {
 pub fn config() -> MlsGroupCreateConfig {
     MlsGroupCreateConfig::builder()
         .wire_format_policy(PURE_PLAINTEXT_WIRE_FORMAT_POLICY)
-        .ciphersuite(GROUP_CIPHERSUITE)
+        .ciphersuite(suite())
         .max_past_epochs(1)
         .capabilities(caps())
         .build()
@@ -565,7 +583,7 @@ pub fn config() -> MlsGroupCreateConfig {
 pub fn caps() -> Capabilities {
     Capabilities::new(
         None,
-        Some(&[GROUP_CIPHERSUITE]),
+        Some(&[suite()]),
         Some(&[ExtensionType::Unknown(ROLES_EXTENSION)]),
         Some(&[ProposalType::SelfRemove]),
         Some(&[CredentialType::Basic]),

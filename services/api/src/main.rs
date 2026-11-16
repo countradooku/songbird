@@ -159,6 +159,7 @@ async fn build_messages(
                     Arc::clone(registry),
                     songbird_send::groups::ROSTER_TTL,
                 ))),
+                channels: Arc::default(),
             },
         }),
         limits: s.limits.limits(),

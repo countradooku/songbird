@@ -78,11 +78,11 @@ pub const MAX_META: usize = 16 * 1024;
 /// A fan-out left to deliver: `(group, from_epoch, encoded plan)`.
 pub type Fanout = ([u8; 16], u64, bytes::Bytes);
 
-fn u64_of(v: &Value) -> Option<u64> {
+pub(crate) fn u64_of(v: &Value) -> Option<u64> {
     v.as_i64().and_then(|n| u64::try_from(n).ok())
 }
 
-fn bytes_of(v: &Value, key: &str) -> Option<bytes::Bytes> {
+pub(crate) fn bytes_of(v: &Value, key: &str) -> Option<bytes::Bytes> {
     v.get(key).and_then(|b| b.as_bytes().cloned())
 }
 

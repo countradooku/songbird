@@ -35,6 +35,7 @@
 pub mod admin;
 pub mod auth;
 pub mod client;
+pub mod communities;
 pub mod config;
 pub mod devices;
 pub mod groups;
@@ -441,7 +442,13 @@ impl App {
                 | "/v1/groups/join"
                 | "/v1/groups/requests"
                 | "/v1/groups/requests/list"
-                | "/v1/groups/requests/decline",
+                | "/v1/groups/requests/decline"
+                | "/v1/communities"
+                | "/v1/communities/groups/add"
+                | "/v1/communities/groups/remove"
+                | "/v1/communities/meta"
+                | "/v1/communities/state"
+                | "/v1/communities/delete",
                 None,
             ) => self.groups(req).await,
             (_, p, None) if p.starts_with("/v1/account/") => self.factors(req).await,
@@ -667,7 +674,7 @@ impl App {
             return Ok(device_outcome(devices::Outcome::Forbidden("pending")));
         }
         let budget = match path.as_str() {
-            "/v1/groups/state" | "/v1/groups/log" => None,
+            "/v1/groups/state" | "/v1/groups/log" | "/v1/communities/state" => None,
             // Anything a link opens has its own, smaller budget per account (D-0071), shared by
             // its devices: links are not guessable, but a leaked one should not be tried at speed.
             "/v1/groups/links/open" | "/v1/groups/join" | "/v1/groups/requests" => {
@@ -700,6 +707,12 @@ impl App {
             "/v1/groups/requests" => g.request(r, m, device, body).await,
             "/v1/groups/requests/list" => g.requests(r, device, body).await,
             "/v1/groups/requests/decline" => g.decline(r, device, body).await,
+            "/v1/communities" => g.create_community(r, device, body).await,
+            "/v1/communities/groups/add" => g.add_community_group(r, device, body).await,
+            "/v1/communities/groups/remove" => g.remove_community_group(r, device, body).await,
+            "/v1/communities/meta" => g.community_meta(r, device, body).await,
+            "/v1/communities/state" => g.community_state(r, m, device, body).await,
+            "/v1/communities/delete" => g.delete_community(r, device, body).await,
             _ => g.state(&self.registry, m, device, body).await,
         };
         Ok(device_outcome(outcome))

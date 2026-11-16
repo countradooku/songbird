@@ -31,6 +31,8 @@ pub const ROSTER_TTL: Duration = Duration::from_secs(1);
 pub const ROSTER_V2: u8 = 2;
 /// The role a member needs at least to be a full member (`songbird_groups::roles::Role`).
 pub const ROLE_MEMBER: u8 = 1;
+/// The policy flag of a channel (`songbird_groups::roles::FLAG_CHANNEL`).
+pub const FLAG_CHANNEL: u8 = 0x01;
 
 /// A group's roster at an epoch: member devices (sorted) with their roles, and the least role
 /// that may send.
@@ -46,6 +48,13 @@ pub struct Roster {
 }
 
 impl Roster {
+    /// A private channel (the policy's channel flag, `songbird_groups::roles::FLAG_CHANNEL`):
+    /// its posts take the channel rate class (D-0072).
+    #[must_use]
+    pub const fn is_channel(&self) -> bool {
+        self.policy[6] & FLAG_CHANNEL != 0
+    }
+
     /// Parses the registry's roster: `version u8 (2) | policy [7] | n × (device [16] |
     /// role u8)`, devices strictly ascending, roles 0 to 4.
     #[must_use]
@@ -212,5 +221,61 @@ impl MemoryRosters {
 impl Rosters for MemoryRosters {
     fn roster<'a>(&'a self, group: &'a [u8; 16], _epoch: u64) -> RosterFuture<'a> {
         Box::pin(async move { Ok(self.groups.pin().get(group).cloned()) })
+    }
+}
+
+/// The channel rate class (D-0072): posts per channel, across its admins, on this node. A post
+/// to a channel is stored for up to `max_channel_members` devices, so channels get a budget of
+/// their own, on top of each sender's device budget. GCRA: `per_sec` steady, `burst` at once.
+#[derive(Debug)]
+pub struct ChannelBudget {
+    interval: Duration,
+    tolerance: Duration,
+    /// Each channel's theoretical arrival time.
+    tat: std::sync::Mutex<std::collections::HashMap<[u8; 16], Instant>>,
+}
+
+/// Channels tracked before idle ones are forgotten.
+const CHANNEL_BUDGET_ENTRIES: usize = 4_096;
+
+impl ChannelBudget {
+    /// A budget of `per_sec` posts a second per channel, bursting to `burst`.
+    #[must_use]
+    pub fn new(per_sec: u32, burst: u32) -> Self {
+        let interval = Duration::from_secs(1) / per_sec.max(1);
+        Self {
+            interval,
+            tolerance: interval * burst.max(1).saturating_sub(1),
+            tat: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Takes one post for `channel` at `now`; `Err(wait)` if the channel is over budget.
+    ///
+    /// # Errors
+    /// How long until the channel may post again.
+    pub fn take(&self, channel: &[u8; 16], now: Instant) -> Result<(), Duration> {
+        let mut map = self
+            .tat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if map.len() >= CHANNEL_BUDGET_ENTRIES && !map.contains_key(channel) {
+            // Channels whose budget is full again need no entry.
+            map.retain(|_, tat| *tat > now);
+        }
+        let tat = map.get(channel).copied().unwrap_or(now).max(now);
+        let ahead = tat.saturating_duration_since(now);
+        if ahead > self.tolerance {
+            return Err(ahead.saturating_sub(self.tolerance));
+        }
+        map.insert(*channel, tat + self.interval);
+        Ok(())
+    }
+}
+
+impl Default for ChannelBudget {
+    /// One post a second per channel, bursting to ten.
+    fn default() -> Self {
+        Self::new(1, 10)
     }
 }

@@ -399,6 +399,7 @@ impl Service for Delivery {
                     ));
                 r
             }),
+            channels: Arc::default(),
         });
         let mut pusher_task = None;
         if let Some(jobs) = self.jobs {

@@ -74,6 +74,8 @@ pub struct Policy {
     pub max_broadcast_accounts: u32,
     /// Group rosters (Prompt 5). Without them a group message is refused as unavailable.
     pub rosters: Option<Arc<dyn Rosters>>,
+    /// The channel rate class (D-0072): posts per channel on this node.
+    pub channels: Arc<groups::ChannelBudget>,
 }
 
 impl Default for Policy {
@@ -83,6 +85,7 @@ impl Default for Policy {
             gate: None,
             max_broadcast_accounts: RequestLimits::default().max_broadcast_accounts,
             rosters: None,
+            channels: Arc::default(),
         }
     }
 }
@@ -94,6 +97,7 @@ impl std::fmt::Debug for Policy {
             .field("gate", &self.gate.is_some())
             .field("max_broadcast_accounts", &self.max_broadcast_accounts)
             .field("rosters", &self.rosters.is_some())
+            .field("channels", &self.channels)
             .finish()
     }
 }
@@ -394,6 +398,13 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
         }
         if p.epoch != roster.epoch && p.epoch.checked_add(1) != Some(roster.epoch) {
             return Err(reject(RejectReason::StaleEpoch, 0));
+        }
+        // The channel rate class (D-0072): a post reaches every subscriber.
+        if roster.is_channel()
+            && let Err(wait) = self.policy.channels.take(group, Instant::now())
+        {
+            let ms = u32::try_from(wait.as_millis()).unwrap_or(u32::MAX).max(1);
+            return Err(reject(RejectReason::RateLimited, ms));
         }
         devices.clear();
         devices.extend(roster.devices().filter(|d| *d != sender).copied());

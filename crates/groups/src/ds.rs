@@ -12,7 +12,7 @@
 //!   until a milestone defines them (roles, M2);
 //! - **external commits** rejoin a lost device only: the joining device's account already has a
 //!   device in the group, and the commit may remove only that account's own leaves;
-//! - **size**: at most `Limits::max_members` leaves;
+//! - **size**: at most `Limits::max_members` leaves (`max_channel_members` in a channel);
 //! - **Welcomes**: exactly one encrypted secret per added KeyPackage, none for anyone else;
 //! - **the `GroupInfo`** uploaded with the commit is the new epoch's, signed by the committer.
 //!
@@ -48,6 +48,9 @@ pub trait Directory {
 pub struct Limits {
     /// Most leaves (devices) in a group; Prompt 5 starts at 1,024.
     pub max_members: usize,
+    /// Most leaves in a private channel (D-0072: a full-path X-Wing commit to 2,048 leaves of a
+    /// fresh tree is 2.3 MiB, inside `max_bundle`; at 5,000 it is 5.6 MiB, outside).
+    pub max_channel_members: usize,
     /// Largest commit bundle accepted, checked before parsing.
     pub max_bundle: usize,
 }
@@ -56,7 +59,20 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             max_members: 1_024,
+            max_channel_members: 2_048,
             max_bundle: 4 << 20,
+        }
+    }
+}
+
+impl Limits {
+    /// The size limit for a group with this policy.
+    #[must_use]
+    pub const fn cap(&self, policy: &roles::Policy) -> usize {
+        if policy.is_channel() {
+            self.max_channel_members
+        } else {
+            self.max_members
         }
     }
 }
@@ -757,14 +773,6 @@ impl Group {
             self.check_leaves(&staged, sender, sender_account, external, by_link, dir)?;
         let added = self.check_adds(&staged, b.welcome, &removed_leaves, dir)?;
 
-        let new_size = self.roster.len() + added.len() + usize::from(external)
-            - removed_leaves.len().min(self.roster.len());
-        if new_size > limits.max_members {
-            return Err(GroupError::TooLarge {
-                max: limits.max_members,
-            });
-        }
-
         // Roles (D-0070): the commit's new roles extension must be valid and the change allowed
         // for the committer's role. External commits cannot change extensions, and only rejoin.
         let new_context = staged.group_context().clone();
@@ -772,6 +780,13 @@ impl Group {
             return Err(GroupError::Proposal);
         }
         let new_roles = roles_of(&new_context)?;
+        // A channel has its own size limit (D-0072), by the policy the commit leaves.
+        let max = limits.cap(&new_roles.policy);
+        let new_size = self.roster.len() + added.len() + usize::from(external)
+            - removed_leaves.len().min(self.roster.len());
+        if new_size > max {
+            return Err(GroupError::TooLarge { max });
+        }
         if !external {
             let old_roles = roles_of(self.public.group_context())?;
             let change = self.change(&staged, &removed_leaves, &added, dir)?;
@@ -801,10 +816,8 @@ impl Group {
             committer,
             committer_leaf.signature_key(),
         )?;
-        if self.roster.len() > limits.max_members {
-            return Err(GroupError::TooLarge {
-                max: limits.max_members,
-            });
+        if self.roster.len() > max {
+            return Err(GroupError::TooLarge { max });
         }
         self.info = b.group_info.to_vec();
 

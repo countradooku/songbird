@@ -20,9 +20,10 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
-- **Prompt 5, M1 (`P05-M1.md`, D-0066 to D-0068): waiting for the owner**: the milestone,
-  two threat-model §1 rows (group state; pending fan-outs) and three MPL-2.0 licence exceptions
-  for the test harness.
+- Prompt 5, M1 (`P05-M1.md`, D-0066 to D-0068): **approved by the owner on 2026-11-16**
+  ("Approve all three"): the milestone, the two threat-model §1 rows (group state; pending
+  fan-outs) and the three MPL-2.0 licence exceptions for the test harness. M2 (roles,
+  permissions, metadata, change log) is next.
 
 - Prompt 5 plan (`P05-plan.md`, D-0065): **approved by the owner on 2026-11-16** ("Approve
   all"), every recommendation. Delivered receipts in large groups: primaries only from 33
@@ -113,9 +114,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0068 — Prompt 5, milestone 1: the supply chain of OpenMLS and the client harness
 
 - Date: 2026-11-16
-- Status: accepted; cargo-deny and cargo-vet pass (CI's versions: cargo-deny 0.20.2, cargo-vet
-  0.10.2); **the licence exceptions are for the owner to confirm** (the repository's licence is
-  still open)
+- Status: accepted; cargo-deny, cargo-audit and cargo-vet pass (CI's versions); the licence
+  exceptions **approved by the owner on 2026-11-16** with the M1 gate ("Approve all three")
 - Decided by: agent, under D-0065 (owner)
 - Context: D-0065 §1 brought OpenMLS into the workspace, and D-0066 the test harness on OpenMLS's
   RustCrypto provider. cargo-deny refused three crates' licence and one advisory; cargo-vet
@@ -156,8 +156,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0067 — Prompt 5, milestone 1 (integration): groups in the registry, commits over `api`, group messages fanned out from the roster
 
 - Date: 2026-11-16
-- Status: accepted; built and passing live against SurrealDB and Valkey; the M1 gate waits for
-  the fuzz runs, the RustFS-backed gate suites and the owner
+- Status: accepted; built and passing live; the M1 gate (`P05-M1.md`) and the two
+  threat-model §1 rows **approved by the owner on 2026-11-16**
 - Decided by: agent, under D-0065 (owner) and the standing instruction (Proton-level bar)
 - Context: D-0066's core needed a home for each group's state, an authority for its epoch, a
   way for commits and Welcomes to reach devices, and a send path for group messages.
@@ -218,8 +218,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0066 — Prompt 5, milestone 1 (core): OpenMLS `PublicGroup` behind a verify-only aws-lc-rs provider; X-Wing `0x004F`; group state as postcard; commits over HTTP
 
 - Date: 2026-11-16
-- Status: accepted for the core (`crates/groups`, `tests/groups`); the registry, `api` and
-  send-path integration of M1 follow; the threat-model row is for the owner with the M1 gate
+- Status: accepted; built (`crates/groups`, `tests/groups`); integrated by D-0067; the M1 gate
+  **approved by the owner on 2026-11-16**
 - Decided by: agent, under D-0065 (owner) and the standing instruction (Proton-level bar)
 - Context: D-0065 §1 and §3 needed a concrete provider, ciphersuite, state format and transport.
 - Options considered and evidence (Windows 11, `rustc 1.99.1`, release build):

@@ -5,7 +5,7 @@
 - Status: **built; awaiting the owner's approval** (the items under "The owner's decisions").
   M1 was approved on 2026-11-16 ("Approve all three").
 - Reports: `P05-plan.md` (agreed, D-0065), `P05-M1.md` to `P05-M4.md`, and this report.
-- Decisions: D-0065 to D-0073.
+- Decisions: D-0065 to D-0074 (D-0074: the security review's fixes).
 - Branch: `claude/p05-groups`, one PR at the owner's request (2026-11-16: "solve all milestones
   in one PR").
 - Machine: Windows 11 Pro 10.0.26300, AMD Ryzen 9 7950X, `rustc 1.99.1`; nightly 2026-11-11 for
@@ -39,11 +39,58 @@
 
 ## Runs
 
-TODO
+All on the machine above, at `621d8d7` plus this report.
+
+| Run | Result |
+| --- | --- |
+| `cargo fmt --check`; `cargo clippy --workspace --all-targets --locked -D warnings`; workflow policy | Clean (`cargo xtask ci fast`'s first three steps) |
+| `cargo nextest run --workspace --locked --profile ci` (registry suites live against SurrealDB and Valkey; tests needing RustFS skip) | **635 passed**, 4 skipped |
+| `gate_p05`, live, `SONGBIRD_REQUIRE_STACK=1` | **10 of 10**: creation, commits and fan-out; races; crash re-drive; roles, metadata, change log and leaving; invite links and requests; parallel joins; communities; the export and deletion; a made-up KeyPackage refused; outsiders get 404 |
+| Groups, harness and send | 76 (matrix, convergence property tests, lifecycle, channel cap, tiers, channel rate class) |
+| Fuzzing, nightly 2026-11-11, ASan | `group_records`: 999,912 runs in 61 s, nothing found. `mls_wire` and `mls_commit` (M1): 8,477,711 and 254,179 runs. All three are in the nightly CI matrix |
+| The scale benchmark (`tests/groups/tests/scale.rs`, release) | The tables in `P05-M4.md` |
+
+The full CI run on Linux is the PR's checks.
 
 ## Security review
 
-TODO
+An independent, read-only review of the whole Prompt 5 diff (a separate agent, given the code
+and the documents, not this report's conclusions). Its findings and what was done (D-0074):
+
+| # | Finding | Severity | Done |
+| --- | --- | --- | --- |
+| 1 | Changing the default role changed every unnamed member's role unchecked: an admin could make everyone an owner, then demote the real owner | High | **Fixed:** a default-role change is a role change for every member it applies to (`the_default_role_moves_everyone_it_names`) |
+| 2 | An added KeyPackage was not bound to its device: a member could add a leaf under another device's ID with its own keys and speak as that device | High | **Fixed:** only KeyPackages the device published (claimed single-use, or last-resort) may be added; else 403 `key_package` (live `a_member_cannot_add_a_leaf_it_made_up_for_another_device`) |
+| 3 | A group whose only owner's devices are all gone froze for good | Medium | **Fixed:** succession whenever no owner is left, from the highest role left (`a_vanished_owner_has_successors_too`) |
+| 4 | `/v1/groups/state` (a whole-tree rebuild) had no budget; role checks read the whole state | Medium | **Fixed:** a read budget per device; role checks read the roster only |
+| 5 | A fan-out could stall for good if a recipient left the directory between attempts | Medium | **Fixed:** an idempotency conflict means the earlier store completed |
+| 6 | Outsiders' commits were processed before the membership check, and answered 400 (revealing the group) | Low–medium | **Fixed:** 404 before any work (live `outsiders_get_the_answer_for_no_group`) |
+| 7 | Any member could change `required_capabilities` | Low | **Fixed:** it must stay exactly Songbird's |
+| 8 | Role checks for metadata, links, requests and communities read before the write | Low | Recorded as a risk: one in-flight action by a just-demoted admin can land |
+| 9 | Succession went to whoever committed first, even a read-only subscriber | Low | **Fixed** with 3 (the highest role left) |
+| 10 | No per-account cap on creating groups; no group deletion; the roster cache keeps live groups | Low | Recorded as a risk |
+| 11 | PROTOCOL said join requests were the `links` role's; the code uses `add` | Low (docs) | **Fixed** (§6.6) |
+
+Plausible, not proven: different directory views on server and client could make a client
+refuse a commit the server accepted, until the client refreshes; one member can fill the
+64-proposal queue until the next commit. Both are threat-model §6 risks. The channel budget's
+map grows only for channels that post, cleaned when full.
+
+Checked and found sound by the review:
+
+- **Crypto:** the provider never signs or decrypts.
+- **Signatures:** `GroupInfo` and change-log signatures are verified against the committer's
+  new leaf.
+- **External commits:** limited to rejoining one's own device, or joining by link with the
+  default role.
+- **Concurrency:** epoch, revision and link-use compare-and-set, all in the commit's
+  transaction.
+- **SurrealQL:** parameterised throughout.
+- **Links:** constant-time comparison and one 404.
+- **Fan-out keys:** server-derived.
+- **Send path:** the prefix parser and the roster checks.
+- **Parsers:** bounded before allocating.
+- **GDPR:** covered.
 
 ## Open risks
 
@@ -66,7 +113,8 @@ From the threat model §6, in short:
 3. **Approve the threat-model §1 rows** "awaiting the owner's approval":
    - M2: the roles in group state; the encrypted metadata; the change-log entries;
    - M3: invite links; pending join requests (naming the account that asks);
-   - M4: communities.
+   - M4: communities;
+   - the review (D-0074): claimed KeyPackage references, kept until the packages expire.
 4. **Follow-ups**, proposed, not built:
    - server-proposed removal of deleted accounts' devices (MLS `external_senders`, D-0073);
    - a link proof members can check themselves (D-0071);

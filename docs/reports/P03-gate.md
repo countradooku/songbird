@@ -2,12 +2,12 @@
 
 - Date: 2026-11-15
 - Prompt: [03-identity.md](../prompts/03-identity.md), amended by D-0038.
-- Status: **built; the gate, the M4b/M5/M6/M7 milestones and their threat-model rows await the
-  owner's approval.** M4b–M7 were built in one pass at the owner's request ("lets do the rest of
-  milestones in one", 2026-11-15) on branch `feat/p03-rest` (one PR).
+- Status: **the Prompt 3 gate approved by the owner on 2026-11-16** ("i approve everything"), with
+  M4b–M7 and their threat-model rows (PR #54). The owner chose to adopt `akd` for key
+  transparency now (D-0057, next).
 - Reports:
-  - approved: `P03-plan.md`, `P03-M1.md`, `P03-M2.md`, `P03-M3.md`, `P03-M3b.md`, `P03-M4.md`;
-  - awaiting approval: `P03-M4b.md`, `P03-M5.md`, `P03-M6.md`, and this report for M7.
+  - all approved: `P03-plan.md`, `P03-M1.md`, `P03-M2.md`, `P03-M3.md`, `P03-M3b.md`,
+    `P03-M4.md`, `P03-M4b.md`, `P03-M5.md`, `P03-M6.md`, and this report for M7.
 - Decisions: D-0047–D-0056.
 
 ## The gate, item by item
@@ -138,13 +138,11 @@ These are gathered from the milestone reports and threat model §6:
   tests. The timing-sensitive `send_api put_messages_holds_…` flakes under the full live suite on
   `main` too.
 
-## The owner's decisions (asked)
+## The owner's decisions (decided 2026-11-16)
 
-1. **Approve the Prompt 3 gate** (this report, D-0056)?
-2. **Approve M4b, M5 and M6** (`P03-M4b.md`, `P03-M5.md`, `P03-M6.md`; D-0053–D-0055).
-3. **Confirm key transparency as the own RFC 9162 log, with `akd` as the upgrade path** (D-0055)?
-4. **Approve the new threat-model §1 rows**:
-   - the PIN verifier; passkeys (M4b);
-   - profiles, access keys and avatars; keyed throttle records (M5);
-   - the transparency log (M6);
-   - last use and inactivity (M7).
+The owner answered "i approve everything" and "we can use akd now":
+
+1. **Decided: the Prompt 3 gate is approved** (this report, D-0056).
+2. **Decided: M4b, M5 and M6 are approved** (D-0053–D-0055).
+3. **Decided: key transparency moves to `akd` now** (D-0057), the own log staying the interim.
+4. **Decided: the six new threat-model §1 rows are approved.**

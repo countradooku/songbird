@@ -92,7 +92,10 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   and device flags; link token hashes; provisioning channels; keyed throttle records).
 - The rest of Prompt 3 in one pass (owner, 2026-11-15: "lets do the rest of milestones in one"):
   M4b (D-0053), M5 (D-0054), M6 (D-0055) and M7 (D-0056, the final gate `P03-gate.md`) on one
-  branch and one PR; **every gate and new threat-model row awaiting the owner's approval**.
+  branch and one PR (#54). **Approved by the owner on 2026-11-16** ("i approve everything"): the
+  Prompt 3 gate, M4b–M7 and the six threat-model §1 rows. The owner also decided to **adopt
+  `akd` for key transparency now** (D-0055, superseded by D-0057 when built). Prompt 3 is done
+  but for that.
 - D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
   tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
   `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment
@@ -103,7 +106,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0056 — Prompt 3, milestone 7: GDPR export, deletion across every Prompt 3 store, inactivity deletion; the Prompt 3 gate
 
 - Date: 2026-11-15
-- Status: accepted; built (report `P03-gate.md`); **the Prompt 3 gate awaits the owner's approval**
+- Status: accepted; built (report `P03-gate.md`, PR #54); **the Prompt 3 gate approved by the owner
+  on 2026-11-16**
 - Decided by:
   - owner: the inactivity period, user-chosen from 6, 12 or 24 months with a default of 12 and
     a warning first (D-0047);
@@ -131,8 +135,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0055 — Prompt 3, milestone 6: key transparency as Songbird's own RFC 9162 log; akd recorded as the upgrade path
 
 - Date: 2026-11-15
-- Status: accepted; built (report P03-M6); **awaiting the owner's approval** (the choice of log
-  is an owner-level one; the agent recommends this one and asks)
+- Status: accepted; built (report P03-M6, PR #54); **gate approved by the owner on 2026-11-16**. The
+  owner's answer on the choice of log: **"we can use akd now"**, so `akd` replaces the own log
+  (D-0057, next); this log stays the interim and the test reference until then.
 - Decided by: agent (rest of Prompt 3 in one pass), for the owner to confirm
 - Options and evidence:
   - **Meta's `akd` 0.13.0** (MIT/Apache-2.0, used by WhatsApp): a verifiable map with VRF-private
@@ -166,7 +171,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0054 — Prompt 3, milestone 5: encrypted profiles, avatars and sealed sender behind a flag
 
 - Date: 2026-11-15
-- Status: accepted; built (report P03-M5); **awaiting the owner's approval**
+- Status: accepted; built (report P03-M5, PR #54); **gate approved by the owner on 2026-11-16**
 - Decided by: agent (rest of Prompt 3 in one pass, at the owner's request)
 - Decision:
   - **Profiles.** One opaque blob encrypted by the client under its profile key, at most 8 KiB,
@@ -197,8 +202,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0053 — Prompt 3, milestone 4b: two-step PIN and passkeys as second factors for linking; multiple accounts per installation
 
 - Date: 2026-11-15
-- Status: accepted; built (report P03-M4b); **awaiting the owner's approval** (the owner asked
-  for the rest of Prompt 3 in one pass on 2026-11-15)
+- Status: accepted; built (report P03-M4b, PR #54); **gate approved by the owner on 2026-11-16**
 - Decided by:
   - owner: the PIN as Argon2id + pepper + lockout, at least 6 digits (D-0047); Songbird's own
     minimal WebAuthn verifier (2026-11-15);

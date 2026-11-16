@@ -209,6 +209,7 @@ impl Drop for PrivateDir {
 fn private_dir(base: &Path) -> Result<PrivateDir> {
     let id = songbird_types::DeviceId::random()?;
     let path = base.join(format!(".scratch-{}", hex::encode(id.as_bytes())));
+    #[cfg_attr(not(unix), expect(unused_mut, reason = "only Unix sets a mode"))]
     let mut b = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {

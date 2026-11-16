@@ -106,6 +106,45 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0069 — The test suite and clippy on Windows (development only)
+
+- Date: 2026-11-16
+- Status: accepted
+- Decided by: agent
+- Context: the owner develops on Windows 11, where `cargo nextest run --workspace --profile ci`
+  failed 29 of 600 tests (the same 29 on `main` at `c5a14d1`) and clippy `-D warnings` failed on
+  `unused_mut` in code whose only mutation is `#[cfg(unix)]`. CI and the servers run Linux, where
+  nothing changes.
+- Root causes and fixes:
+  - **A refused loopback connection costs about 2 s on Windows** (it retries a refused SYN twice;
+    Linux answers at once). The push mocks listened on `127.0.0.1` only behind a
+    `https://localhost` URL; Windows resolves `localhost` to `::1` first, so every connection
+    spent the whole 2-second connect timeout on `::1` (20 push-provider tests, and the M5 gate's
+    "no push reached APNs"). The mock now listens on one port of both loopbacks (`127.0.0.1`
+    alone where there is no IPv6 loopback). The dead-first-address fallback stays proved by
+    `net::tests::a_dead_first_address_falls_through_to_the_next`. The link test
+    `a_stopped_server_serves_nothing_more_even_on_open_connections` ends on that same refused
+    reconnection: its bound is 1 s plus `REFUSAL` (2.5 s on Windows, zero elsewhere), still
+    inside the 5-second timeout it proves is not waited for.
+  - **Windows cannot open a directory as a `File`,** so the mailbox key store's directory fsync
+    failed every write (7 `iggy::keys` tests). `sync_dir` is now Unix-only; elsewhere it does
+    nothing (NTFS journals the rename; durability across a power cut is not promised on a
+    development machine). Production (Linux) is unchanged.
+  - **`/proc/no/such/dir` is an ordinary, writable path on Windows** (`C:\proc\...`), so
+    `an_unwritable_log_stops_the_action` found its log writable. The test now places the log
+    under a regular file, which no platform can create a directory in.
+  - **`unused_mut`:** the five `DirBuilder`s that only Unix gives a mode carry
+    `#[cfg_attr(not(unix), expect(unused_mut, reason = ...))]`.
+- Evidence (Windows 11, SurrealDB, valkey-hot, valkey-jobs and RustFS under Podman, CI's
+  environment variables without Iggy and age): clippy `--workspace --all-targets -D warnings`
+  clean; the workspace without `songbird-api`, `songbird-jobs` and `songbird-push` 497/497, then
+  those three one at a time with `-j 1` as CI runs them: 52/52, 12/12, 7/7. In one
+  workspace-wide run, those three crates fight the e2e tests over the shared job streams (on any
+  platform), and the jobs left in persistent valkey-jobs then fail the next run's deletion tests.
+- Consequences: no test is skipped or weakened on Linux. Not covered: `cargo xtask dev-env`
+  reads `/dev/urandom` and so does not run on Windows, and `cargo xtask compose` needs a `docker`
+  command (Podman alone does not provide one); the Iggy live suites were not run on Windows.
+
 ## D-0064 — Prompt 4: the independent security review's findings, fixed
 
 - Date: 2026-11-16

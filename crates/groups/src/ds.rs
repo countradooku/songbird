@@ -26,10 +26,16 @@ use openmls::prelude::*;
 use songbird_types::{AccountId, DeviceId};
 
 use crate::crypto::{GROUP_CIPHERSUITES, VerifyOnlyCrypto};
+use crate::roles::{self, Change, Denied, ROLES_EXTENSION, Role, Roles};
 use crate::state::{GroupState, StateError, StateParts};
 use crate::wire::{self, Bundle, GROUP_ID_LEN, WireError};
 
 const CRYPTO: VerifyOnlyCrypto = VerifyOnlyCrypto;
+
+/// The registry's roster format with roles (D-0070).
+pub const ROSTER_V2: u8 = 2;
+/// Largest proposal message accepted (a `SelfRemove` is a few hundred bytes).
+pub const MAX_PROPOSAL: usize = 4096;
 
 /// What the delivery service needs to know about devices.
 pub trait Directory {
@@ -88,8 +94,55 @@ pub enum GroupError {
     GroupInfo,
     #[error("rejected by MLS validation")]
     Invalid,
+    #[error("the roles extension is missing or malformed")]
+    Roles,
+    #[error("not allowed by the group's roles: {0}")]
+    Forbidden(Denied),
+    #[error("the change-log entry is not signed by the committer")]
+    LogSignature,
     #[error("state: {0}")]
     State(#[from] StateError),
+}
+
+/// The roles extension of a group context (D-0070).
+pub fn roles_of(ctx: &GroupContext) -> Result<Roles, GroupError> {
+    roles_in(ctx.extensions())
+}
+
+/// The roles extension among a group context's extensions (clients read them with
+/// `MlsGroup::extensions`).
+pub fn roles_in(exts: &Extensions<GroupContext>) -> Result<Roles, GroupError> {
+    let ext = exts.unknown(ROLES_EXTENSION).ok_or(GroupError::Roles)?;
+    Roles::decode(&ext.0).map_err(|_| GroupError::Roles)
+}
+
+/// A change-log entry (D-0070) is the committer's: signed by its leaf key, bound to this group
+/// and epoch. The server cannot read it and cannot forge one.
+fn verify_log(
+    group: &[u8; GROUP_ID_LEN],
+    from_epoch: u64,
+    log: &[u8],
+    key: &SignaturePublicKey,
+) -> Result<(), GroupError> {
+    let entry = wire::LogEntry::parse(log)?;
+    let content = wire::log_signed_content(group, from_epoch, entry.ciphertext);
+    CRYPTO
+        .verify_signature(
+            SignatureScheme::ED25519,
+            &content,
+            key.as_slice(),
+            entry.signature,
+        )
+        .map_err(|_| GroupError::LogSignature)
+}
+
+/// Only the roles extension (and `required_capabilities`) may be in a group's context.
+fn extensions_allowed(ctx: &GroupContext) -> bool {
+    ctx.extensions().iter().all(|e| match e {
+        Extension::Unknown(t, _) => *t == ROLES_EXTENSION,
+        Extension::RequiredCapabilities(_) => true,
+        _ => false,
+    })
 }
 
 /// One leaf of the roster.
@@ -164,6 +217,8 @@ pub struct Applied {
     pub removed: Vec<DeviceId>,
     /// SHA-256 of the commit message, to recognise a retried commit.
     pub commit_hash: [u8; 32],
+    /// The committer's change-log entry (`wire::LogEntry` bytes), its signature verified.
+    pub log: Option<Vec<u8>>,
 }
 
 /// The stored form of a group: what the registry keeps under the group ID, compared and set
@@ -258,9 +313,9 @@ impl Group {
         ratchet_tree: &[u8],
         dir: &impl Directory,
     ) -> Result<Self, GroupError> {
-        if dir.account_of(creator).is_none() {
+        let Some(creator_account) = dir.account_of(creator) else {
             return Err(GroupError::Credential);
-        }
+        };
         let MlsMessageBodyIn::GroupInfo(gi) = mls_message(group_info)? else {
             return Err(GroupError::Kind);
         };
@@ -271,8 +326,13 @@ impl Group {
         if !GROUP_CIPHERSUITES.contains(&ctx.ciphersuite()) {
             return Err(GroupError::Ciphersuite);
         }
-        if ctx.epoch().as_u64() != 0 || ctx.extensions().iter().next().is_some() {
+        if ctx.epoch().as_u64() != 0 || !extensions_allowed(ctx) {
             return Err(GroupError::Kind);
+        }
+        // The creator's account is the only owner, and the only entry.
+        let roles = roles_of(ctx)?;
+        if roles.explicit.len() != 1 || roles.explicit.get(&creator_account) != Some(&Role::Owner) {
+            return Err(GroupError::Roles);
         }
         if wire::group_info_signer(group_info)? != 0 {
             return Err(GroupError::GroupInfo);
@@ -349,6 +409,80 @@ impl Group {
             .map_err(|_| GroupError::Malformed)
     }
 
+    /// The accounts a commit adds and removes devices for (D-0070). Devices the directory no
+    /// longer lists are dead: anyone may remove them, so they are left out of `lost`.
+    fn change(
+        &self,
+        staged: &StagedCommit,
+        removed_leaves: &BTreeSet<u32>,
+        added: &[DeviceId],
+        dir: &impl Directory,
+    ) -> Result<Change, GroupError> {
+        // Leaves removed by their own proposal (leaving): the leaver authorized it.
+        let self_removed: BTreeSet<u32> = staged
+            .queued_proposals()
+            .filter_map(|q| match (q.proposal(), q.sender()) {
+                (Proposal::SelfRemove, Sender::Member(idx)) => Some(idx.u32()),
+                _ => None,
+            })
+            .collect();
+        let mut c = Change::default();
+        let mut removed_devices = BTreeSet::new();
+        for idx in removed_leaves {
+            let leaf = self
+                .public
+                .leaf(LeafNodeIndex::new(*idx))
+                .ok_or(GroupError::Proposal)?;
+            let device = device_of(leaf.credential())?;
+            removed_devices.insert(device);
+            if let Some(a) = dir.account_of(&device) {
+                if self_removed.contains(idx) {
+                    c.left.insert(a);
+                } else {
+                    c.lost.insert(a);
+                }
+            }
+        }
+        for d in self.roster.devices() {
+            if let Some(a) = dir.account_of(&d) {
+                c.before.insert(a);
+                if !removed_devices.contains(&d) {
+                    c.after.insert(a);
+                }
+            }
+        }
+        for d in added {
+            if let Some(a) = dir.account_of(d) {
+                c.gained.insert(a);
+                c.after.insert(a);
+            }
+        }
+        Ok(c)
+    }
+
+    /// The group's roles (its context's roles extension).
+    pub fn roles(&self) -> Result<Roles, GroupError> {
+        roles_of(self.public.group_context())
+    }
+
+    /// The roster as the registry keeps it for the send path and `api` (D-0070):
+    /// `version u8 (2) | policy [7] | n × (device [16] | role u8)`, devices ascending. A device
+    /// the directory no longer lists has the role `ReadOnly` (it cannot connect anyway).
+    pub fn roster_bytes(&self, dir: &impl Directory) -> Result<Vec<u8>, GroupError> {
+        let roles = self.roles()?;
+        let mut out = Vec::with_capacity(8 + self.roster.len() * 17);
+        out.push(ROSTER_V2);
+        out.extend_from_slice(&roles.policy.to_bytes());
+        for d in self.roster.devices() {
+            let role = dir
+                .account_of(&d)
+                .map_or(Role::ReadOnly, |a| roles.role(&a));
+            out.extend_from_slice(d.as_bytes());
+            out.push(role.as_u8());
+        }
+        Ok(out)
+    }
+
     /// Proposal kinds, identities of new and updated leaves, and the external-commit rule.
     /// Returns the leaves the commit removes.
     fn check_leaves(
@@ -366,6 +500,8 @@ impl Group {
                 | Proposal::Update(_)
                 | Proposal::SelfRemove => {}
                 Proposal::ExternalInit(_) if external => {}
+                // Roles and policy changes (M2), authorized by `roles::authorize`.
+                Proposal::GroupContextExtensions(_) if !external => {}
                 _ => return Err(GroupError::Proposal),
             }
         }
@@ -391,10 +527,17 @@ impl Group {
             }
         }
 
-        let removed: BTreeSet<u32> = staged
+        // Removed leaves: the commit's Remove proposals, and the self-removals it commits (a
+        // leaver's SelfRemove, by reference: queued by `apply_proposal`).
+        let mut removed: BTreeSet<u32> = staged
             .remove_proposals()
             .map(|r| r.remove_proposal().removed().u32())
             .collect();
+        for q in staged.queued_proposals() {
+            if let (Proposal::SelfRemove, Sender::Member(idx)) = (q.proposal(), q.sender()) {
+                removed.insert(idx.u32());
+            }
+        }
         if external {
             // A rejoin: the account already has a device here. The only leaf it may remove is
             // the joining device's own old one (a resync, RFC 9420 §12.4.3.2); another lost
@@ -482,6 +625,59 @@ impl Group {
         Ok(added)
     }
 
+    /// Queues a member's proposal to leave (D-0070): an MLS `SelfRemove` in a `PublicMessage`,
+    /// at the current epoch, signed by the leaf of `sender`. The next commit includes it by
+    /// reference; its committer needs no role to do so. Every other proposal is refused: the
+    /// rest of a group's changes travel inline in commits.
+    ///
+    /// Returns the message's SHA-256 (to recognise a retry). On error the group is dropped, as
+    /// for a commit.
+    pub fn apply_proposal(
+        mut self,
+        sender: &DeviceId,
+        msg: &[u8],
+    ) -> Result<(Self, [u8; 32]), GroupError> {
+        if msg.len() > MAX_PROPOSAL {
+            return Err(GroupError::Wire(WireError::TooLarge));
+        }
+        if wire::wire_format(msg)? != wire::WIRE_PUBLIC {
+            return Err(GroupError::Kind);
+        }
+        let MlsMessageBodyIn::PublicMessage(pm) = mls_message(msg)? else {
+            return Err(GroupError::Kind);
+        };
+        if pm.content_type() != ContentType::Proposal {
+            return Err(GroupError::Kind);
+        }
+        if pm.group_id().as_slice() != self.id {
+            return Err(GroupError::OtherGroup);
+        }
+        let current = self.epoch();
+        if pm.epoch().as_u64() != current {
+            return Err(GroupError::StaleEpoch { current });
+        }
+        let Sender::Member(leaf) = *pm.sender() else {
+            return Err(GroupError::Sender);
+        };
+        if self.roster.leaf(sender) != Some(leaf.u32()) {
+            return Err(GroupError::Sender);
+        }
+        let processed = self
+            .public
+            .process_message(&CRYPTO, pm)
+            .map_err(|_| GroupError::Invalid)?;
+        let ProcessedMessageContent::ProposalMessage(q) = processed.into_content() else {
+            return Err(GroupError::Kind);
+        };
+        if !matches!(q.proposal(), Proposal::SelfRemove) {
+            return Err(GroupError::Proposal);
+        }
+        self.public
+            .add_proposal(&self.state, *q)
+            .map_err(GroupError::State)?;
+        Ok((self, sha256(msg)))
+    }
+
     /// Validates, authorizes and merges a commit bundle sent by `sender`. On success the group
     /// is at the next epoch; on error it is dropped, and the caller reloads its record.
     pub fn apply_commit(
@@ -541,8 +737,21 @@ impl Group {
             });
         }
 
-        let old = self.roster.clone();
+        // Roles (D-0070): the commit's new roles extension must be valid and the change allowed
+        // for the committer's role. External commits cannot change extensions, and only rejoin.
         let new_context = staged.group_context().clone();
+        if !extensions_allowed(&new_context) {
+            return Err(GroupError::Proposal);
+        }
+        let new_roles = roles_of(&new_context)?;
+        if !external {
+            let old_roles = roles_of(self.public.group_context())?;
+            let change = self.change(&staged, &removed_leaves, &added, dir)?;
+            roles::authorize(&sender_account, &old_roles, &new_roles, &change)
+                .map_err(GroupError::Forbidden)?;
+        }
+
+        let old = self.roster.clone();
         self.public
             .merge_commit(&self.state, *staged)
             .map_err(|_| GroupError::Invalid)?;
@@ -571,6 +780,10 @@ impl Group {
         }
         self.info = b.group_info.to_vec();
 
+        if let Some(log) = b.log {
+            verify_log(&self.id, from_epoch, log, committer_leaf.signature_key())?;
+        }
+
         let removed = old
             .devices()
             .filter(|d| self.roster.leaf(d).is_none())
@@ -580,6 +793,7 @@ impl Group {
             added,
             removed,
             commit_hash: sha256(b.commit),
+            log: b.log.map(<[u8]>::to_vec),
         };
         Ok((self, applied))
     }

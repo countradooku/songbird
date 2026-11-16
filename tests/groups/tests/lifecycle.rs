@@ -2,13 +2,16 @@
 
 #![allow(
     clippy::unwrap_used,
+    clippy::many_single_char_names,
+    clippy::needless_pass_by_value,
+    clippy::type_complexity,
     clippy::panic,
     clippy::indexing_slicing,
     reason = "tests: failing loudly is the point"
 )]
-use songbird_groups::wire::{self, Bundle};
+use songbird_groups::wire::{self, Bundle, LogEntry};
 use songbird_groups::{Group, GroupError, Limits, Record};
-use songbird_groups_harness::{Device, Dir, GID, id_from, server_create, welcome_of};
+use songbird_groups_harness::{Device, Dir, GID, id_from, server_create, welcome_of, with_log};
 use songbird_types::{AccountId, DeviceId};
 
 fn account(n: u16) -> AccountId {
@@ -58,14 +61,22 @@ fn a_group_lives_through_adds_updates_removals_and_reloads() {
     alice.receive(&b);
     carol.receive(&b);
 
-    // Bob removes Carol; Carol is told (she gets the commit) and is out of the roster.
-    let b = bob.remove(&[carol.leaf()]);
+    // Bob, a member, may not remove Carol (D-0070); Alice, the owner, does. Carol is told (she
+    // gets the commit) and is out of the roster.
+    let refused = bob.remove(&[carol.leaf()]);
+    let e = Group::load(server.record())
+        .unwrap()
+        .apply_commit(&bob.id, &refused, &dir, &Limits::default())
+        .unwrap_err();
+    assert!(matches!(e, GroupError::Forbidden(_)), "{e:?}");
+    bob.discard();
+    let b = alice.remove(&[carol.leaf()]);
     let (s, applied) = server
-        .apply_commit(&bob.id, &b, &dir, &Limits::default())
+        .apply_commit(&alice.id, &b, &dir, &Limits::default())
         .unwrap();
     server = reload(&s);
-    bob.merge();
-    alice.receive(&b);
+    alice.merge();
+    bob.receive(&b);
     assert_eq!(applied.removed, vec![carol.id]);
     assert_eq!(applied.from_epoch, 2);
 
@@ -310,6 +321,7 @@ fn an_application_message_is_not_a_commit() {
         commit: &m,
         welcome: None,
         group_info: &info,
+        log: None,
     }
     .encode();
     let err = apply(server, &alice, &b, &dir).unwrap_err();
@@ -365,9 +377,50 @@ fn creation_is_checked() {
     let (gi, tree) = alice.create();
     let e = Group::create([0; 16], &alice.id, &gi, &tree, &dir).unwrap_err();
     assert!(matches!(e, GroupError::OtherGroup), "{e:?}");
+    // Bob registering Alice's group: he is neither its owner (roles) nor its leaf.
     let e = Group::create(GID, &bob.id, &gi, &tree, &dir).unwrap_err();
-    assert!(matches!(e, GroupError::Sender), "{e:?}");
+    assert!(matches!(e, GroupError::Roles | GroupError::Sender), "{e:?}");
     let e = Group::create(GID, &alice.id, &gi, &tree, &Dir::default()).unwrap_err();
     assert!(matches!(e, GroupError::Credential), "{e:?}");
     assert!(Group::create(GID, &alice.id, &gi, &tree, &dir).is_ok());
+}
+
+#[test]
+fn change_log_entries_are_the_committers_and_bound_to_their_commit() {
+    let Setup {
+        dir,
+        mut alice,
+        bob,
+        server,
+    } = setup();
+    let rec = server.record();
+
+    // Alice's update with her entry: accepted, and the entry comes back verified.
+    let b = alice.commit_logged(Vec::new(), &[], None, b"sealed: alice updated");
+    let (_, applied) = Group::load(rec.clone())
+        .unwrap()
+        .apply_commit(&alice.id, &b, &dir, &Limits::default())
+        .unwrap();
+    assert!(applied.log.is_some());
+    alice.discard();
+
+    // Bob's signature on Alice's commit: refused.
+    let forged_sig = bob.sign_log(1, b"sealed: forged");
+    let b = alice.update();
+    let forged = with_log(&b, &LogEntry::encode(b"sealed: forged", &forged_sig));
+    let e = Group::load(rec.clone())
+        .unwrap()
+        .apply_commit(&alice.id, &forged, &dir, &Limits::default())
+        .unwrap_err();
+    assert!(matches!(e, GroupError::LogSignature), "{e:?}");
+
+    // Alice's own entry from another epoch, replayed: refused.
+    let old_sig = alice.sign_log(0, b"sealed: replay");
+    let replayed = with_log(&b, &LogEntry::encode(b"sealed: replay", &old_sig));
+    let e = Group::load(rec)
+        .unwrap()
+        .apply_commit(&alice.id, &replayed, &dir, &Limits::default())
+        .unwrap_err();
+    assert!(matches!(e, GroupError::LogSignature), "{e:?}");
+    alice.discard();
 }

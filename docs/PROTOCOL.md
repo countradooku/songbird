@@ -55,7 +55,8 @@ envelope begins with `F5 53 42`, the prefix reserved for what the server writes 
 §3.9, franking stamps §5.13; never retryable), 10 access required (a send to another account with
 neither its access key, nor the right one, nor `REQUEST`: fetch the profile key again or send a
 request, §5.10), 11 an invalid request (not franked, or for more than one other account, §5.10),
-12 not a member of the group (or no such group, §6.5), 13 an invalid group message (§6.5).
+12 not a member of the group (or no such group, §6.5), 13 an invalid group message (§6.5), 14 the
+group's roles do not let the sender send ("only admins can send", a channel's subscribers, §6.6).
 1 and 6 are retryable after `retry_after_ms`, with the
 same idempotency key. Unknown reason codes are kept (forward compatibility).
 
@@ -1348,6 +1349,75 @@ The flag `0x01` (the MLS commit in a `Send`, D-0026) is retired: the decoder ref
 the sealed endpoint refuses `GROUP` (a sealed send hides the device membership is checked
 against). The mailboxes still hold their unused epoch table; it goes with their next storage
 format change.
+
+### 6.6 Roles and permissions (M2, D-0070)
+
+Every group's context carries two extensions from creation:
+
+- **`required_capabilities`**, naming the roles extension and the `SelfRemove` proposal. Every
+  member must support both; OpenMLS refuses to add a KeyPackage that does not.
+- **The roles extension** (`0xF5B0`):
+
+  ```text
+  version u8 (1) | send u8 | add u8 | edit_info u8 | links u8 | call u8 | default_role u8 |
+  flags u8 | n u16 | n × (account [16] | role u8)    accounts strictly ascending
+  ```
+
+  - **Roles:** 0 read-only, 1 member, 2 moderator, 3 admin, 4 owner.
+  - **Flags:** `0x01` channel, `0x02` joining needs approval.
+  - **Unlisted accounts** have `default_role` (1 in a group, 0 in a channel). An entry never
+    names the default role.
+
+  A new group's only entry is its creator's account, as owner.
+
+Roles are per account: every device of an account has its role. The server and every client
+apply the same rule to a commit (`songbird_groups::roles::authorize`):
+
+| Action | Who may |
+| --- | --- |
+| Add a person (an account not in the group) | Role ≥ `add` |
+| Add a device of an account already in it | Member and above (one's own: anyone) |
+| Remove another person's device | An admin or owner who outranks that person |
+| Remove one's own devices, or a device no longer listed | Anyone |
+| Change the policy (send, add, edit info, links, call, default role, flags) | Admin and above |
+| Change someone's role | An admin who outranks both the old and the new role, or an owner (who may make owners) |
+| Lower one's own role | Anyone |
+| Afterwards | At least one owner; entries only for accounts still in the group. When every owner leaves, the committer may name a new owner |
+| Send a message | Role ≥ `send`: the send path refuses others with reason 14 |
+| Edit the group's info | Role ≥ `edit_info`: `POST /v1/groups/meta` |
+| Manage invite links, approve requests | Role ≥ `links` (§6.8) |
+| Start a group call | Role ≥ `call` (Prompt 7) |
+| Pin a message, delete others' messages | Moderator and above, **enforced by clients only** (inside the ciphertext) |
+
+A commit the rule refuses gets 403 `role`, and clients drop it.
+
+### 6.7 Leaving, metadata and the change log (M2)
+
+- **Leaving:** `POST /v1/groups/propose` with `version u8 (1) | group [16] | MLSMessage`, a
+  `PublicMessage` with the member's own `SelfRemove`. No other proposal is taken standalone.
+  - The server queues it in the group's state and stores it in every other member's mailbox;
+    the answer is 204.
+  - The next committer includes it by reference and needs no role to. Members store it with
+    OpenMLS's `store_pending_proposal`.
+  - 409 `stale` with the epoch if a commit came first: propose again from that epoch.
+- **The group's info:** `POST /v1/groups/meta` with `version u8 (1) | group [16] | expected u64
+  | blob` (1 byte to 16 KiB). The blob is encrypted by the members; the server never reads it.
+  - 200 `{"version": n}`;
+  - 409 `stale` (the current version);
+  - 403 `role` below `edit_info`.
+
+  `POST /v1/groups/state` now ends with `meta_v u64 | meta_len u32 | meta`.
+- **The change log** ("View member changes", for devices that join later):
+  - **Writing:** a commit bundle of version 2 adds `log_len u32 | entry`, where entry is
+    `ciphertext_len u16 | ciphertext (≤ 2 KiB) | signature [64]`. The signature is the
+    committer's leaf key (Ed25519) over `"songbird.v1/change-log\0" | group | from_epoch u64 |
+    ciphertext`.
+  - **Checking:** the server verifies it and refuses the commit otherwise (400 `log`). An entry
+    cannot be forged by the server, or replayed onto another epoch.
+  - **Keeping:** the newest 1,000 entries per group.
+  - **Reading:** `POST /v1/groups/log` with `version u8 (1) | group [16] | after u64`
+    (`u64::MAX` for all) answers `n u16 | n × (epoch u64 | len u16 | entry)`, at most 200, for
+    the same devices as the state.
 
 ## 7. Attachments and packs (Prompt 6)
 

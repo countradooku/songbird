@@ -106,17 +106,84 @@ pub use songbird_proto::mls::{PrivatePrefix, private_prefix};
 
 /// Songbird's commit bundle (PROTOCOL §6): what a committer uploads.
 ///
-/// `version u8 (1) | commit_len u32 | commit | welcome_len u32 | welcome | info_len u32 | info`,
-/// each part an `MLSMessage`; `welcome_len` is 0 when no device is added.
+/// `version u8 | commit_len u32 | commit | welcome_len u32 | welcome | info_len u32 | info`
+/// and, in version 2 only, `log_len u32 | log` (a change-log entry, D-0070). The first three
+/// parts are `MLSMessage`s; `welcome_len` is 0 when no device is added; `log_len` is never 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bundle<'a> {
     pub commit: &'a [u8],
     pub welcome: Option<&'a [u8]>,
     pub group_info: &'a [u8],
+    /// The committer's signed, encrypted change-log entry (`LogEntry`), if any.
+    pub log: Option<&'a [u8]>,
 }
 
-/// The only bundle version.
+/// A bundle without a change-log entry.
 pub const BUNDLE_V1: u8 = 1;
+/// A bundle with one.
+pub const BUNDLE_V2: u8 = 2;
+
+/// A change-log entry (D-0070): `ciphertext_len u16 | ciphertext | signature [64]`. The
+/// ciphertext is encrypted by the members under a key the server never sees; the signature is
+/// the committer's leaf key over [`log_signed_content`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogEntry<'a> {
+    pub ciphertext: &'a [u8],
+    pub signature: &'a [u8; 64],
+}
+
+/// Longest change-log ciphertext.
+pub const MAX_LOG_CIPHERTEXT: usize = 2048;
+
+impl<'a> LogEntry<'a> {
+    /// Parses an entry, exactly.
+    pub fn parse(b: &'a [u8]) -> Result<Self, WireError> {
+        let mut r = Reader { buf: b };
+        let n = usize::from(r.u16()?);
+        if n == 0 || n > MAX_LOG_CIPHERTEXT {
+            return Err(WireError::TooLarge);
+        }
+        let ciphertext = r.take(n)?;
+        let signature: &[u8; 64] = r.take(64)?.try_into().map_err(|_| WireError::Truncated)?;
+        r.finish()?;
+        Ok(Self {
+            ciphertext,
+            signature,
+        })
+    }
+
+    /// Encodes an entry (clients and tests).
+    #[must_use]
+    pub fn encode(ciphertext: &[u8], signature: &[u8; 64]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(2 + ciphertext.len() + 64);
+        out.extend_from_slice(
+            &u16::try_from(ciphertext.len())
+                .unwrap_or(u16::MAX)
+                .to_be_bytes(),
+        );
+        out.extend_from_slice(ciphertext);
+        out.extend_from_slice(signature);
+        out
+    }
+}
+
+/// What a change-log entry's signature covers: a label, the group, the epoch the commit was
+/// made from, and the ciphertext. Bound to one commit, so an entry cannot be replayed onto
+/// another epoch or group.
+#[must_use]
+pub fn log_signed_content(
+    group: &[u8; GROUP_ID_LEN],
+    from_epoch: u64,
+    ciphertext: &[u8],
+) -> Vec<u8> {
+    let label = b"songbird.v1/change-log\0";
+    let mut out = Vec::with_capacity(label.len() + 16 + 8 + ciphertext.len());
+    out.extend_from_slice(label);
+    out.extend_from_slice(group);
+    out.extend_from_slice(&from_epoch.to_be_bytes());
+    out.extend_from_slice(ciphertext);
+    out
+}
 
 impl<'a> Bundle<'a> {
     /// Splits a bundle; `max` bounds the whole input before anything else is read.
@@ -125,7 +192,8 @@ impl<'a> Bundle<'a> {
             return Err(WireError::TooLarge);
         }
         let mut r = Reader { buf: bytes };
-        if r.u8()? != BUNDLE_V1 {
+        let version = r.u8()?;
+        if version != BUNDLE_V1 && version != BUNDLE_V2 {
             return Err(WireError::Version);
         }
         let n = usize::try_from(r.u32()?).map_err(|_| WireError::TooLarge)?;
@@ -134,6 +202,15 @@ impl<'a> Bundle<'a> {
         let welcome = if n == 0 { None } else { Some(r.take(n)?) };
         let n = usize::try_from(r.u32()?).map_err(|_| WireError::TooLarge)?;
         let group_info = r.take(n)?;
+        let log = if version == BUNDLE_V2 {
+            let n = usize::try_from(r.u32()?).map_err(|_| WireError::TooLarge)?;
+            if n == 0 {
+                return Err(WireError::Truncated);
+            }
+            Some(r.take(n)?)
+        } else {
+            None
+        };
         r.finish()?;
         if commit.is_empty() || group_info.is_empty() {
             return Err(WireError::Truncated);
@@ -142,17 +219,29 @@ impl<'a> Bundle<'a> {
             commit,
             welcome,
             group_info,
+            log,
         })
     }
 
-    /// Encodes a bundle (clients and tests).
+    /// Encodes a bundle (clients and tests): version 2 when it carries a log entry.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let welcome = self.welcome.unwrap_or(&[]);
-        let mut out =
-            Vec::with_capacity(13 + self.commit.len() + welcome.len() + self.group_info.len());
-        out.push(BUNDLE_V1);
-        for part in [self.commit, welcome, self.group_info] {
+        let log = self.log.unwrap_or(&[]);
+        let mut out = Vec::with_capacity(
+            17 + self.commit.len() + welcome.len() + self.group_info.len() + log.len(),
+        );
+        out.push(if self.log.is_some() {
+            BUNDLE_V2
+        } else {
+            BUNDLE_V1
+        });
+        let parts: &[&[u8]] = if self.log.is_some() {
+            &[self.commit, welcome, self.group_info, log]
+        } else {
+            &[self.commit, welcome, self.group_info]
+        };
+        for part in parts {
             // Parts above 4 GiB cannot exist under any limit; saturate rather than panic.
             out.extend_from_slice(&u32::try_from(part.len()).unwrap_or(u32::MAX).to_be_bytes());
             out.extend_from_slice(part);
@@ -189,6 +278,10 @@ pub fn group_info_signer(msg: &[u8]) -> Result<u32, WireError> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::many_single_char_names,
+        reason = "tests: short names for bundles"
+    )]
     use super::*;
 
     #[test]
@@ -197,15 +290,38 @@ mod tests {
             commit: b"commit",
             welcome: Some(b"welcome"),
             group_info: b"info",
+            log: None,
         };
         let bytes = b.encode();
+        assert_eq!(bytes.first(), Some(&BUNDLE_V1));
         assert_eq!(Bundle::parse(&bytes, 1 << 20), Ok(b));
         let n = Bundle {
             commit: b"c",
             welcome: None,
             group_info: b"i",
+            log: None,
         };
         assert_eq!(Bundle::parse(&n.encode(), 1 << 20), Ok(n));
+        // With a change-log entry: version 2, and the entry round-trips.
+        let entry = LogEntry::encode(b"sealed", &[7; 64]);
+        let l = Bundle {
+            commit: b"c",
+            welcome: None,
+            group_info: b"i",
+            log: Some(&entry),
+        };
+        let lb = l.encode();
+        assert_eq!(lb.first(), Some(&BUNDLE_V2));
+        assert_eq!(Bundle::parse(&lb, 1 << 20), Ok(l));
+        let e = LogEntry::parse(&entry).unwrap();
+        assert_eq!((e.ciphertext, e.signature), (&b"sealed"[..], &[7; 64]));
+        assert!(LogEntry::parse(&entry[..entry.len() - 1]).is_err());
+        assert!(LogEntry::parse(&LogEntry::encode(&[], &[0; 64])).is_err());
+        // A version-2 bundle with an empty log part is refused.
+        let mut empty = n.encode();
+        empty[0] = BUNDLE_V2;
+        empty.extend_from_slice(&0u32.to_be_bytes());
+        assert!(Bundle::parse(&empty, 1 << 20).is_err());
         assert_eq!(
             Bundle::parse(&bytes, bytes.len() - 1),
             Err(WireError::TooLarge)

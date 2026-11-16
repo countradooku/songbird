@@ -15,6 +15,7 @@ songbird-types.workspace = true
 openmls = { version = "=0.9.2", default-features = false, features = ["draft-ietf-mls-pq-ciphersuites"] }
 openmls_rust_crypto = { version = "=0.6.0", features = ["draft-ietf-mls-pq-ciphersuites"] }
 openmls_basic_credential = "=0.6.0"
+openmls_traits = { version = "=0.6.0", features = ["draft-ietf-mls-pq-ciphersuites"] }
 
 [dev-dependencies]
 songbird-keys.workspace = true

@@ -18,7 +18,8 @@ use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use songbird_groups::crypto::GROUP_CIPHERSUITE;
-use songbird_groups::wire::Bundle;
+use songbird_groups::roles::{self, Policy, ROLES_EXTENSION, Roles};
+use songbird_groups::wire::{Bundle, LogEntry, log_signed_content};
 use songbird_groups::{Directory, Group};
 use songbird_types::{AccountId, DeviceId};
 
@@ -118,6 +119,7 @@ impl Device {
     #[must_use]
     pub fn key_package(&self) -> KeyPackage {
         KeyPackage::builder()
+            .leaf_node_capabilities(caps())
             .build(
                 GROUP_CIPHERSUITE,
                 &self.provider,
@@ -134,18 +136,43 @@ impl Device {
         self.group.as_ref().map_or(0, |g| g.epoch().as_u64())
     }
 
-    /// Creates the group; returns `(GroupInfo, ratchet tree)` for the server.
+    /// Creates a group with this device's account as owner; returns `(GroupInfo, ratchet tree)`
+    /// for the server.
     pub fn create(&mut self) -> (Vec<u8>, Vec<u8>) {
+        self.create_with(Policy::GROUP)
+    }
+
+    /// Creates a group (or, with [`Policy::CHANNEL`], a channel) with this policy.
+    pub fn create_with(&mut self, policy: Policy) -> (Vec<u8>, Vec<u8>) {
+        let roles = Roles::new(self.account, policy);
+        let cfg = MlsGroupCreateConfig::builder()
+            .wire_format_policy(PURE_PLAINTEXT_WIRE_FORMAT_POLICY)
+            .ciphersuite(GROUP_CIPHERSUITE)
+            .max_past_epochs(1)
+            .capabilities(caps())
+            .with_group_context_extensions(roles_extensions(&roles))
+            .build();
         let group = MlsGroup::new_with_group_id(
             &self.provider,
             &self.signer,
-            &config(),
+            &cfg,
             GroupId::from_slice(&GID),
             self.cred.clone(),
         )
         .unwrap();
         self.group = Some(group);
         (self.group_info(), self.tree())
+    }
+
+    /// The group's roles, as this client sees them.
+    #[must_use]
+    pub fn roles(&self) -> Roles {
+        songbird_groups::ds::roles_in(self.group.as_ref().unwrap().extensions()).unwrap()
+    }
+
+    /// A commit that sets the group's roles and policy (pending).
+    pub fn set_roles(&mut self, roles: &Roles) -> Vec<u8> {
+        self.commit_with(Vec::new(), &[], false, Some(roles))
     }
 
     #[must_use]
@@ -170,13 +197,30 @@ impl Device {
     /// Builds a commit (pending until the server answers) with the new epoch's `GroupInfo`,
     /// and returns its bundle.
     pub fn commit(&mut self, adds: Vec<KeyPackage>, removes: &[u32], update: bool) -> Vec<u8> {
+        self.commit_with(adds, removes, update, None)
+    }
+
+    /// A commit with adds, removals, a key update and, if given, new roles.
+    pub fn commit_with(
+        &mut self,
+        adds: Vec<KeyPackage>,
+        removes: &[u32],
+        update: bool,
+        roles: Option<&Roles>,
+    ) -> Vec<u8> {
         let (p, s) = (&self.provider, &self.signer);
         let g = self.group.as_mut().unwrap();
-        let bundle = g
+        let mut builder = g
             .commit_builder()
             .propose_adds(adds)
             .propose_removals(removes.iter().map(|l| LeafNodeIndex::new(*l)))
-            .force_self_update(update)
+            .force_self_update(update);
+        if let Some(r) = roles {
+            builder = builder
+                .propose_group_context_extensions(roles_extensions(r))
+                .unwrap();
+        }
+        let bundle = builder
             .load_psks(p.storage())
             .unwrap()
             .create_group_info(true)
@@ -192,6 +236,7 @@ impl Device {
             commit: &commit,
             welcome: welcome.as_deref(),
             group_info: &info,
+            log: None,
         }
         .encode()
     }
@@ -243,6 +288,154 @@ impl Device {
                 .into_group(&self.provider)
                 .unwrap();
         self.group = Some(g);
+    }
+
+    /// Processes another member's commit as an app does: OpenMLS validates it, then the roles
+    /// rule (`songbird_groups::roles::authorize`) decides, with this client's own view of the
+    /// group and `dir`. A refused commit is not merged and the client stays at its epoch.
+    pub fn receive_checked(&mut self, bundle: &[u8], dir: &Dir) -> Result<(), String> {
+        self.judge(bundle, dir, true)
+    }
+
+    /// As [`Device::receive_checked`], but leaves the group as it is either way (to judge
+    /// several alternative commits from one epoch).
+    pub fn verify_commit(&mut self, bundle: &[u8], dir: &Dir) -> Result<(), String> {
+        self.judge(bundle, dir, false)
+    }
+
+    fn judge(&mut self, bundle: &[u8], dir: &Dir, merge: bool) -> Result<(), String> {
+        let b = Bundle::parse(bundle, usize::MAX).map_err(|e| e.to_string())?;
+        let msg = MlsMessageIn::tls_deserialize_exact(b.commit).map_err(|e| e.to_string())?;
+        let p = &self.provider;
+        let g = self.group.as_mut().unwrap();
+        let old_roles = songbird_groups::ds::roles_in(g.extensions()).map_err(|e| e.to_string())?;
+        let processed = g
+            .process_message(
+                p,
+                msg.try_into_protocol_message().map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+        let Sender::Member(idx) = *processed.sender() else {
+            return Err("not a member's commit".into());
+        };
+        let actor = g
+            .member(idx)
+            .and_then(|c| DeviceId::from_slice(c.serialized_content()).ok())
+            .and_then(|d| dir.account_of(&d))
+            .ok_or("unknown committer")?;
+        let ProcessedMessageContent::StagedCommitMessage(staged) = processed.into_content() else {
+            return Err("expected a commit".into());
+        };
+        let new_roles =
+            songbird_groups::ds::roles_of(staged.group_context()).map_err(|e| e.to_string())?;
+        let account = |c: &Credential| {
+            DeviceId::from_slice(c.serialized_content())
+                .ok()
+                .and_then(|d| dir.account_of(&d))
+        };
+        let mut change = roles::Change::default();
+        let removed: Vec<LeafNodeIndex> = staged
+            .remove_proposals()
+            .map(|r| r.remove_proposal().removed())
+            .collect();
+        let self_removed: Vec<LeafNodeIndex> = staged
+            .queued_proposals()
+            .filter_map(|q| match (q.proposal(), q.sender()) {
+                (Proposal::SelfRemove, Sender::Member(i)) => Some(*i),
+                _ => None,
+            })
+            .collect();
+        for m in g.members() {
+            if let Some(a) = account(&m.credential) {
+                change.before.insert(a);
+                if self_removed.contains(&m.index) {
+                    change.left.insert(a);
+                } else if removed.contains(&m.index) {
+                    change.lost.insert(a);
+                } else {
+                    change.after.insert(a);
+                }
+            }
+        }
+        for a in staged.add_proposals() {
+            if let Some(acc) = account(a.add_proposal().key_package().leaf_node().credential()) {
+                change.gained.insert(acc);
+                change.after.insert(acc);
+            }
+        }
+        if let Err(e) = roles::authorize(&actor, &old_roles, &new_roles, &change) {
+            return Err(format!("refused by the roles rule: {e}"));
+        }
+        if merge {
+            g.merge_staged_commit(p, *staged)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// A commit carrying a change-log entry (D-0070): `ciphertext` (already encrypted by the
+    /// app) signed with this device's leaf key for the epoch the commit is made from.
+    pub fn commit_logged(
+        &mut self,
+        adds: Vec<KeyPackage>,
+        removes: &[u32],
+        roles: Option<&Roles>,
+        ciphertext: &[u8],
+    ) -> Vec<u8> {
+        let from_epoch = self.epoch();
+        let signature = self.sign_log(from_epoch, ciphertext);
+        let bundle = self.commit_with(adds, removes, false, roles);
+        with_log(&bundle, &LogEntry::encode(ciphertext, &signature))
+    }
+
+    /// This device's signature on a change-log entry for `from_epoch`.
+    #[must_use]
+    pub fn sign_log(&self, from_epoch: u64, ciphertext: &[u8]) -> [u8; 64] {
+        use openmls_traits::signatures::Signer as _;
+        let content = log_signed_content(&GID, from_epoch, ciphertext);
+        self.signer.sign(&content).unwrap().try_into().unwrap()
+    }
+
+    /// Proposes to leave (an MLS `SelfRemove`, `PublicMessage`); another member's next commit
+    /// includes it.
+    pub fn leave(&mut self) -> Vec<u8> {
+        let (p, s) = (&self.provider, &self.signer);
+        self.group
+            .as_mut()
+            .unwrap()
+            .leave_group_via_self_remove(p, s)
+            .unwrap()
+            .tls_serialize_detached()
+            .unwrap()
+    }
+
+    /// Proposes one's own removal as a plain `Remove` (OpenMLS `leave_group`), which Songbird
+    /// does not take standalone (tests).
+    pub fn leave_by_remove(&mut self) -> Vec<u8> {
+        let (p, s) = (&self.provider, &self.signer);
+        self.group
+            .as_mut()
+            .unwrap()
+            .leave_group(p, s)
+            .unwrap()
+            .tls_serialize_detached()
+            .unwrap()
+    }
+
+    /// Stores another member's proposal (fanned out by the server) for the next commit.
+    pub fn receive_proposal(&mut self, msg: &[u8]) {
+        let msg = MlsMessageIn::tls_deserialize_exact(msg).unwrap();
+        let p = &self.provider;
+        let g = self.group.as_mut().unwrap();
+        let processed = g
+            .process_message(p, msg.try_into_protocol_message().unwrap())
+            .unwrap();
+        match processed.into_content() {
+            ProcessedMessageContent::ProposalMessage(q) => {
+                g.store_pending_proposal(p.storage(), *q).unwrap();
+            }
+            _ => panic!("expected a proposal"),
+        }
     }
 
     /// Processes another member's commit (from the bundle the server fanned out).
@@ -325,6 +518,11 @@ impl Device {
             .with_config(config().join_config().clone())
             .build_group(&self.provider, gi, self.cred.clone())
             .unwrap()
+            .leaf_node_parameters(
+                LeafNodeParameters::builder()
+                    .with_capabilities(caps())
+                    .build(),
+            )
             .load_psks(self.provider.storage())
             .unwrap()
             .create_group_info(true)
@@ -345,6 +543,7 @@ impl Device {
             commit: &commit,
             welcome: None,
             group_info: &info,
+            log: None,
         }
         .encode()
     }
@@ -356,7 +555,47 @@ pub fn config() -> MlsGroupCreateConfig {
         .wire_format_policy(PURE_PLAINTEXT_WIRE_FORMAT_POLICY)
         .ciphersuite(GROUP_CIPHERSUITE)
         .max_past_epochs(1)
+        .capabilities(caps())
         .build()
+}
+
+/// What every Songbird leaf supports: the group ciphersuite, basic credentials and the roles
+/// extension (OpenMLS refuses a group-context extension some member does not support).
+#[must_use]
+pub fn caps() -> Capabilities {
+    Capabilities::new(
+        None,
+        Some(&[GROUP_CIPHERSUITE]),
+        Some(&[ExtensionType::Unknown(ROLES_EXTENSION)]),
+        Some(&[ProposalType::SelfRemove]),
+        Some(&[CredentialType::Basic]),
+    )
+}
+
+/// A Songbird group's context extensions: `required_capabilities` naming the roles extension
+/// (OpenMLS accepts a change to a custom extension only if it is required) and the roles.
+#[must_use]
+pub fn roles_extensions(roles: &Roles) -> Extensions<GroupContext> {
+    Extensions::from_vec(vec![
+        Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
+            &[ExtensionType::Unknown(ROLES_EXTENSION)],
+            &[ProposalType::SelfRemove],
+            &[CredentialType::Basic],
+        )),
+        Extension::Unknown(ROLES_EXTENSION, UnknownExtension(roles.encode())),
+    ])
+    .unwrap()
+}
+
+/// A copy of `bundle` carrying the change-log entry `log`.
+#[must_use]
+pub fn with_log(bundle: &[u8], log: &[u8]) -> Vec<u8> {
+    let b = Bundle::parse(bundle, usize::MAX).unwrap();
+    Bundle {
+        log: Some(log),
+        ..b
+    }
+    .encode()
 }
 
 /// Splits a bundle into its Welcome.

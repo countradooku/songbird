@@ -16,14 +16,41 @@ use songbird_surreal::Value;
 
 use crate::{Registry, RegistryError, bytes, int, rows, var};
 
+/// What a validated commit writes (`Registry::commit_group`).
+#[derive(Debug, Clone, Copy)]
+pub struct GroupCommit<'a> {
+    /// The new state (`songbird_groups::Record`).
+    pub state: &'a [u8],
+    /// The new roster (format 2, with roles).
+    pub roster: &'a [u8],
+    /// SHA-256 of the commit message.
+    pub last: &'a [u8; 32],
+    /// Its fan-out plan.
+    pub fanout: &'a [u8],
+    /// Its change-log entry, if any.
+    pub log: Option<&'a [u8]>,
+}
+
 /// A group as stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupRow {
     pub epoch: u64,
+    /// Bumped by every write of `state` (commits and queued proposals), so two writers of one
+    /// epoch cannot overwrite each other.
+    pub rev: u64,
     pub state: bytes::Bytes,
     pub roster: bytes::Bytes,
     pub last: bytes::Bytes,
+    /// The encrypted group metadata (name, description, avatar pointer, settings; D-0070) and
+    /// its version; the server never reads it.
+    pub meta: bytes::Bytes,
+    pub meta_v: u64,
 }
+
+/// Change-log entries kept per group (the newest).
+pub const MAX_LOG_ENTRIES: u64 = 1_000;
+/// Longest encrypted metadata.
+pub const MAX_META: usize = 16 * 1024;
 
 /// A fan-out left to deliver: `(group, from_epoch, encoded plan)`.
 pub type Fanout = ([u8; 16], u64, bytes::Bytes);
@@ -47,7 +74,8 @@ impl Registry {
         state: &[u8],
         roster: &[u8],
     ) -> Result<(), RegistryError> {
-        let sql = "CREATE grp:[$g] SET epoch = 0, state = $s, roster = $r, last = $z RETURN NONE;";
+        let sql = "CREATE grp:[$g] SET epoch = 0, rev = 0, state = $s, roster = $r, last = $z,
+                   meta = $z, meta_v = 0 RETURN NONE;";
         self.retry(
             sql,
             || {
@@ -72,26 +100,41 @@ impl Registry {
         let v = self
             .db
             .query1(
-                "SELECT epoch, state, roster, last FROM ONLY grp:[$g];",
+                "SELECT epoch, rev, state, roster, last, meta, meta_v FROM ONLY grp:[$g];",
                 vec![var("g", bytes(group))],
             )
             .await?;
         if matches!(v, Value::Null) {
             return Ok(None);
         }
-        let (Some(epoch), Some(state), Some(roster), Some(last)) = (
+        let (
+            Some(epoch),
+            Some(rev),
+            Some(state),
+            Some(roster),
+            Some(last),
+            Some(meta),
+            Some(meta_v),
+        ) = (
             v.get("epoch").and_then(u64_of),
+            v.get("rev").and_then(u64_of),
             bytes_of(&v, "state"),
             bytes_of(&v, "roster"),
             bytes_of(&v, "last"),
-        ) else {
+            bytes_of(&v, "meta"),
+            v.get("meta_v").and_then(u64_of),
+        )
+        else {
             return Ok(None);
         };
         Ok(Some(GroupRow {
             epoch,
+            rev,
             state,
             roster,
             last,
+            meta,
+            meta_v,
         }))
     }
 
@@ -123,15 +166,19 @@ impl Registry {
         &self,
         group: &[u8; 16],
         from_epoch: u64,
-        state: &[u8],
-        roster: &[u8],
-        last: &[u8; 32],
-        fanout: &[u8],
+        commit: &GroupCommit<'_>,
     ) -> Result<(), RegistryError> {
+        // The change log keeps the newest `MAX_LOG_ENTRIES`: each entry written drops the one
+        // that many epochs older.
         let sql = "BEGIN TRANSACTION;
              IF ((SELECT VALUE epoch FROM ONLY grp:[$g]) ?? -1) != $e { THROW 'songbird:stale' };
-             UPDATE grp:[$g] SET epoch = $e + 1, state = $s, roster = $r, last = $l RETURN NONE;
+             UPDATE grp:[$g] SET epoch = $e + 1, rev += 1, state = $s, roster = $r, last = $l
+               RETURN NONE;
              UPSERT grp_fanout:[$g, $e] SET body = $f, at = time::now() RETURN NONE;
+             IF $has_log {
+               UPSERT grp_log:[$g, $e] SET entry = $log, at = time::now() RETURN NONE;
+               IF $e >= $keep { DELETE grp_log:[$g, $e - $keep] };
+             };
              COMMIT TRANSACTION;";
         self.retry(
             sql,
@@ -139,16 +186,117 @@ impl Registry {
                 vec![
                     var("g", bytes(group)),
                     var("e", int(from_epoch)),
-                    var("s", bytes(state)),
-                    var("r", bytes(roster)),
-                    var("l", bytes(last)),
-                    var("f", bytes(fanout)),
+                    var("s", bytes(commit.state)),
+                    var("r", bytes(commit.roster)),
+                    var("l", bytes(commit.last)),
+                    var("f", bytes(commit.fanout)),
+                    var("has_log", Value::Bool(commit.log.is_some())),
+                    var("log", bytes(commit.log.unwrap_or_default())),
+                    var("keep", int(MAX_LOG_ENTRIES)),
                 ]
             },
             |k| (k == "Thrown:stale").then_some(RegistryError::StaleEpoch),
             |_| Ok(()),
         )
         .await
+    }
+
+    /// Writes a group's state after a queued proposal (D-0070), only if the group is still at
+    /// `epoch` and revision `rev` (no commit or other proposal came in between).
+    ///
+    /// # Errors
+    /// [`RegistryError::StaleEpoch`] if either moved; [`RegistryError`] otherwise.
+    pub async fn propose_group(
+        &self,
+        group: &[u8; 16],
+        epoch: u64,
+        rev: u64,
+        state: &[u8],
+    ) -> Result<(), RegistryError> {
+        let sql = "BEGIN TRANSACTION;
+             LET $row = (SELECT epoch, rev FROM ONLY grp:[$g]);
+             IF $row = NONE OR $row.epoch != $e OR $row.rev != $v { THROW 'songbird:stale' };
+             UPDATE grp:[$g] SET rev += 1, state = $s RETURN NONE;
+             COMMIT TRANSACTION;";
+        self.retry(
+            sql,
+            || {
+                vec![
+                    var("g", bytes(group)),
+                    var("e", int(epoch)),
+                    var("v", int(rev)),
+                    var("s", bytes(state)),
+                ]
+            },
+            |k| (k == "Thrown:stale").then_some(RegistryError::StaleEpoch),
+            |_| Ok(()),
+        )
+        .await
+    }
+
+    /// Replaces the encrypted metadata if its version is still `expected` (the caller checked
+    /// the role). Returns the new version.
+    ///
+    /// # Errors
+    /// [`RegistryError::StaleEpoch`] if another write came first; [`RegistryError`] otherwise.
+    pub async fn put_group_meta(
+        &self,
+        group: &[u8; 16],
+        expected: u64,
+        meta: &[u8],
+    ) -> Result<u64, RegistryError> {
+        let sql = "BEGIN TRANSACTION;
+             IF ((SELECT VALUE meta_v FROM ONLY grp:[$g]) ?? -1) != $v { THROW 'songbird:stale' };
+             UPDATE grp:[$g] SET meta = $m, meta_v = $v + 1 RETURN NONE;
+             COMMIT TRANSACTION;";
+        self.retry(
+            sql,
+            || {
+                vec![
+                    var("g", bytes(group)),
+                    var("v", int(expected)),
+                    var("m", bytes(meta)),
+                ]
+            },
+            |k| (k == "Thrown:stale").then_some(RegistryError::StaleEpoch),
+            |_| Ok(()),
+        )
+        .await?;
+        Ok(expected + 1)
+    }
+
+    /// Change-log entries after `after_epoch` (exclusive), oldest first, at most `limit`:
+    /// `(the epoch its commit was made from, entry)`.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn group_log(
+        &self,
+        group: &[u8; 16],
+        after_epoch: Option<u64>,
+        limit: u64,
+    ) -> Result<Vec<(u64, bytes::Bytes)>, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "SELECT meta::id(id)[1] AS e, entry FROM grp_log
+                   WHERE meta::id(id)[0] = $g AND meta::id(id)[1] > $a
+                   ORDER BY e LIMIT $n;",
+                vec![
+                    var("g", bytes(group)),
+                    var("a", after_epoch.map_or(Value::Int(-1), int)),
+                    var("n", int(limit)),
+                ],
+            )
+            .await?;
+        rows(v)
+            .into_iter()
+            .map(|r| {
+                let e = r.get("e").and_then(u64_of).ok_or(RegistryError::Shape)?;
+                let entry = bytes_of(&r, "entry").ok_or(RegistryError::Shape)?;
+                Ok((e, entry))
+            })
+            .collect()
     }
 
     /// The fan-out a commit from `from_epoch` recorded, if still pending.

@@ -171,7 +171,10 @@ fn concurrent_commits_from_one_epoch_have_one_winner_and_never_fork() {
 #[derive(Debug, Clone)]
 enum Op {
     Add(usize),
-    Remove(usize, usize),
+    Remove(
+        #[allow(dead_code, reason = "kept for the generator's shape")] usize,
+        usize,
+    ),
     Race(Vec<usize>),
 }
 
@@ -195,10 +198,13 @@ proptest! {
             let n = w.members.len();
             match op {
                 Op::Add(by) if n < 12 => w.add(by % n),
-                Op::Remove(by, t) if n > 2 => {
-                    let (by, t) = (by % n, t % n);
-                    if by != t {
-                        w.remove(by, t);
+                // Honest clients act within their roles (D-0070): the owner (the creator,
+                // member 0) removes people; a member removes only themself (leaving is the
+                // server's self-remove, covered in `matrix.rs`).
+                Op::Remove(_, t) if n > 2 => {
+                    let t = t % n;
+                    if t != 0 {
+                        w.remove(0, t);
                     }
                 }
                 Op::Race(r) => {

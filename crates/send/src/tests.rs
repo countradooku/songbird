@@ -983,3 +983,63 @@ async fn group_messages_without_rosters_are_unavailable() {
         }
     ));
 }
+
+#[tokio::test]
+async fn only_roles_that_may_send_send() {
+    // "Only admins can send" (D-0070): the roster's send role is Admin (3); device 1 is a
+    // member, device 2 an admin.
+    const G: [u8; 16] = [0x5C; 16];
+    let mut f = Fixture::new();
+    let r = MemoryRosters::default();
+    r.set_roles(G, 4, [3, 1, 1, 3, 1, 1, 0], vec![(dev(1), 1), (dev(2), 3)]);
+    f.policy.rosters = Some(Arc::new(r));
+    let mut scratch = Vec::new();
+    let st = f
+        .path()
+        .send(
+            &dev(1),
+            group_send(G, group_message(G, 4, 1)),
+            Instant::now(),
+            &mut scratch,
+        )
+        .await;
+    assert_eq!(
+        st,
+        SendStatus::Rejected {
+            reason: RejectReason::NotAllowed,
+            retry_after_ms: 0
+        }
+    );
+    assert_eq!(
+        f.mailbox.count_pending(&dev(2)).await.unwrap(),
+        0,
+        "nothing stored"
+    );
+    let mut admin = group_send(G, group_message(G, 4, 1));
+    admin.idempotency_key = [0x79; 16];
+    let st = f
+        .path()
+        .send(&dev(2), admin, Instant::now(), &mut scratch)
+        .await;
+    assert_eq!(st, SendStatus::Accepted);
+    assert_eq!(f.mailbox.count_pending(&dev(1)).await.unwrap(), 1);
+}
+
+#[test]
+fn rosters_have_one_encoding() {
+    let policy = [1, 1, 1, 3, 1, 1, 0];
+    let members = vec![(dev(1), 1), (dev(2), 3)];
+    let b = Roster::encode(policy, &members);
+    let r = Roster::from_bytes(7, &b).unwrap();
+    assert_eq!(
+        (r.role(&dev(2)), r.role(&dev(9)), r.send_min),
+        (Some(3), None, 1)
+    );
+    // Unsorted, a role above Owner, a short entry, or another version: refused.
+    assert!(Roster::from_bytes(7, &Roster::encode(policy, &[(dev(2), 1), (dev(1), 1)])).is_none());
+    assert!(Roster::from_bytes(7, &Roster::encode(policy, &[(dev(1), 5)])).is_none());
+    assert!(Roster::from_bytes(7, &b[..b.len() - 1]).is_none());
+    let mut v1 = b.clone();
+    v1[0] = 1;
+    assert!(Roster::from_bytes(7, &v1).is_none());
+}

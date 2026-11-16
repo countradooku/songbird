@@ -379,6 +379,9 @@ pub enum RejectReason {
     /// A group message whose body is not an MLS `PrivateMessage` application message of the
     /// frame's group (Prompt 5).
     InvalidGroupMessage,
+    /// A group message from a member whose role may not send ("only admins can send", a
+    /// channel's subscribers; Prompt 5, D-0070).
+    NotAllowed,
     /// A code this version does not know (forward compatibility).
     Other(u16),
 }
@@ -401,6 +404,7 @@ impl RejectReason {
             Self::InvalidRequest => 11,
             Self::NotMember => 12,
             Self::InvalidGroupMessage => 13,
+            Self::NotAllowed => 14,
             Self::Other(c) => c,
         }
     }
@@ -422,6 +426,7 @@ impl RejectReason {
             11 => Self::InvalidRequest,
             12 => Self::NotMember,
             13 => Self::InvalidGroupMessage,
+            14 => Self::NotAllowed,
             c => Self::Other(c),
         }
     }

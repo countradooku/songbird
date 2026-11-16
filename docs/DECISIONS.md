@@ -111,6 +111,87 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0070 — Prompt 5, milestone 2: roles in an MLS extension every client verifies, mirrored on the server; leaving by proposal; encrypted metadata and change log
+
+- Date: 2026-11-16
+- Status: accepted; built and passing live (report `P05-M2.md`); part of the Prompt 5 PR
+- Decided by: agent, under D-0065 (owner: the matrix, client-only cells) and the standing
+  instruction (Proton-level bar)
+- Context: Prompt 5 asks for:
+  - roles owner, admin, moderator, member and read-only, in an MLS group-context extension that
+    every client verifies, mirrored on the server;
+  - a permission matrix with a negative test for every cell, on the client harness and on the
+    server;
+  - an encrypted, versioned metadata blob that only permitted roles may replace;
+  - a signed, encrypted change log for newly linked devices.
+- Options considered:
+  - **Roles per device** were rejected: a person is an account, and their devices share a role.
+  - **A role entry for every member** was rejected. Accounts not listed have the policy's
+    default role (`Member` in a group, `ReadOnly` in a channel). That keeps adding someone
+    a plain Add, and lets external commits (which RFC 9420 forbids from changing extensions)
+    keep working.
+  - **The server deciding roles from its own records** was rejected: the extension is in the
+    MLS group context, so a server that lied about roles would be detected by every client. The
+    server only mirrors it (in the roster) for the send path and `api`.
+  - **Leaving by a commit of one's own removal** is impossible in MLS (OpenMLS refuses
+    `CannotRemoveSelf`). A leaver sends a `SelfRemove` proposal; the server queues it and fans
+    it out; the next committer includes it and needs no role to.
+  - **The change log in clear for the server** was rejected: entries are ciphertext under a key
+    the members share. The server checks only the committer's signature, so it cannot forge one.
+- Decision:
+  - **The extension** `0xF5B0` (MLS private use; `crates/groups/src/roles.rs`). It holds the
+    policy, the least role for each of send, add, edit info, links and call, the default role
+    and flags (channel, approval), plus the explicit roles. It has one encoding. A
+    `required_capabilities` extension names it and `SelfRemove`, so every member must support
+    both (OpenMLS enforces it).
+  - **The matrix** is `roles::authorize`, run by the server before merging and by clients
+    before accepting:
+    - add a person: the `add` role;
+    - add a device to an account already present: `Member`;
+    - remove someone else: an admin who outranks them;
+    - one's own devices and dead devices: anyone;
+    - change the policy: `Admin`;
+    - change a role: an admin outranking both the old and the new role, or an owner;
+    - lowering one's own role: always;
+    - at least one owner; when every owner leaves, the committer names a successor;
+    - entries only for accounts still present.
+
+    The cells no commit carries:
+    - send: the send path, reason 14 `NotAllowed`;
+    - edit info: `POST /v1/groups/meta`;
+    - links and approval: M3;
+    - calls: Prompt 7;
+    - pin and delete others' messages: clients only (D-0065 §6).
+  - **The roster** in the registry becomes format 2: `version 2 | policy [7] | n × (device,
+    role)`. The send path reads it.
+  - **Leaving:** `POST /v1/groups/propose` takes only a member's own `SelfRemove`. The group's
+    state is compared and set on epoch and a new revision counter.
+  - **Metadata:** `POST /v1/groups/meta`, up to 16 KiB, compared and set on its version, for
+    roles at least `edit_info`. Returned with the state.
+  - **Change log:** bundle version 2 carries one entry (`ciphertext ≤ 2 KiB | Ed25519
+    signature` over a label, the group, the commit's epoch and the ciphertext). It is verified
+    against the committer's leaf key and stored in `grp_log`, the newest 1,000 per group.
+    `POST /v1/groups/log` serves it.
+- Evidence (Windows 11, `rustc 1.99.1`; live: SurrealDB v4.0.1 and Valkey 9.1.3 under podman):
+  - `crates/groups` `roles` unit tests (8): one encoding; every rule, with leaving and
+    succession.
+  - `tests/groups/tests/matrix.rs` (8): each commit-borne cell refused for the roles that may
+    not, and accepted for one that may, **on the server and on a client**. Also leaving and
+    succession, and that only self-removal is a standalone proposal.
+  - Change-log tests: an entry signed by another member, or replayed from another epoch, is
+    refused.
+  - `crates/send`: `only_roles_that_may_send_send`, and rosters with one encoding.
+  - `gate_p05` live, 4 of 4:
+    - the M1 tests;
+    - a member's removal of another refused (403);
+    - "only admins can send" (reason 14), metadata by role (403, 200, 409), the change log for
+      members, and leaving by proposal.
+  - Everything else in the registry, `api`, send, proto and e2e live suites passes (188).
+- Consequences:
+  - Three threat-model §1 changes: the group row names roles; the metadata ciphertext; the
+    change-log entries.
+  - Apps must support the roles extension and `SelfRemove` (or OpenMLS refuses to add them).
+
 ## D-0069 — The test suite and clippy on Windows (development only)
 
 - Date: 2026-11-16

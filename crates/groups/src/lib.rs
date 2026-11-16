@@ -5,6 +5,7 @@
 
 pub mod crypto;
 pub mod ds;
+pub mod roles;
 pub mod state;
 pub mod wire;
 

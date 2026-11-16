@@ -385,14 +385,18 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
             .await
             .map_err(|()| reject(RejectReason::Unavailable, RETRY_MS))?
             .ok_or_else(|| reject(RejectReason::NotMember, 0))?;
-        if !roster.contains(sender) {
+        let Some(role) = roster.role(sender) else {
             return Err(reject(RejectReason::NotMember, 0));
+        };
+        // "Only admins can send", a channel's subscribers (D-0070).
+        if role < roster.send_min {
+            return Err(reject(RejectReason::NotAllowed, 0));
         }
         if p.epoch != roster.epoch && p.epoch.checked_add(1) != Some(roster.epoch) {
             return Err(reject(RejectReason::StaleEpoch, 0));
         }
         devices.clear();
-        devices.extend(roster.devices.iter().filter(|d| *d != sender).copied());
+        devices.extend(roster.devices().filter(|d| *d != sender).copied());
         Ok(())
     }
 

@@ -77,11 +77,17 @@ impl Groups {
     }
 
     fn idempotency(&self, kind: &[u8], group: &[u8; 16], epoch: u64) -> [u8; 16] {
+        self.idempotency_of(kind, group, &epoch.to_be_bytes())
+    }
+
+    /// A fan-out key only servers can derive: HMAC over a length-framed kind, the group and
+    /// `data` (the epoch for commits and Welcomes, the message's hash for proposals).
+    fn idempotency_of(&self, kind: &[u8], group: &[u8; 16], data: &[u8]) -> [u8; 16] {
         let mut ctx = hmac::Context::with_key(&self.key);
         ctx.update(&[u8::try_from(kind.len()).unwrap_or(u8::MAX)]);
         ctx.update(kind);
         ctx.update(group);
-        ctx.update(&epoch.to_be_bytes());
+        ctx.update(data);
         let tag = ctx.sign();
         let mut out = [0u8; 16];
         out.copy_from_slice(tag.as_ref().get(..16).unwrap_or(&[0; 16]));
@@ -123,17 +129,23 @@ fn sha256(b: &[u8]) -> [u8; 32] {
     out
 }
 
-fn devices_of(roster: &[u8]) -> Vec<DeviceId> {
-    roster
-        .as_chunks::<16>()
-        .0
-        .iter()
-        .map(|c| DeviceId::from_bytes(*c))
-        .collect()
+/// The registry's roster (D-0070); an unreadable one names nobody.
+fn roster_of(roster: &[u8]) -> Option<songbird_send::Roster> {
+    songbird_send::Roster::from_bytes(0, roster)
 }
+
+fn devices_of(roster: &[u8]) -> Vec<DeviceId> {
+    roster_of(roster).map_or_else(Vec::new, |r| r.devices().copied().collect())
+}
+
+/// The policy byte for "edit the group's info" (`songbird_groups::roles::Policy::to_bytes`).
+const POLICY_EDIT_INFO: usize = 2;
 
 fn reason(e: &GroupError) -> &'static str {
     match e {
+        GroupError::Roles => "roles",
+        GroupError::Forbidden(_) => "role",
+        GroupError::LogSignature => "log",
         GroupError::Wire(_) | GroupError::Malformed => "malformed",
         GroupError::Kind => "kind",
         GroupError::OtherGroup => "group",
@@ -194,11 +206,7 @@ impl Groups {
         let (info, tree) = (info.to_vec(), tree.to_vec());
         let made = tokio::task::spawn_blocking(move || {
             let g = Group::create(group, &device, &info, &tree, &dir)?;
-            let roster: Vec<DeviceId> = g.roster().devices().collect();
-            Ok::<_, GroupError>((
-                g.record().encode()?,
-                songbird_send::Roster::to_bytes(&roster),
-            ))
+            Ok::<_, GroupError>((g.record().encode()?, g.roster_bytes(&dir)?))
         })
         .await;
         let (state, roster) = match made {
@@ -243,10 +251,10 @@ impl Groups {
             let g = Group::load(record)?;
             let (g, a) = g.apply_commit(&device, &bundle_owned, &dir, &limits)?;
             let roster: Vec<DeviceId> = g.roster().devices().collect();
-            Ok::<_, GroupError>((g.record().encode()?, roster, a))
+            Ok::<_, GroupError>((g.record().encode()?, roster, g.roster_bytes(&dir)?, a))
         })
         .await;
-        let (state, roster, applied) = match applied {
+        let (state, roster, roster_bytes, applied) = match applied {
             Ok(Ok(v)) => v,
             // The same commit again (an answer that was lost): it won; finish its fan-out.
             Ok(Err(GroupError::StaleEpoch { current })) if row.last.as_ref() == hash => {
@@ -257,6 +265,8 @@ impl Groups {
             Ok(Err(GroupError::StaleEpoch { current })) => {
                 return Outcome::Stale(current);
             }
+            // The roles rule refused it (D-0070).
+            Ok(Err(GroupError::Forbidden(_))) => return Outcome::Forbidden("role"),
             Ok(Err(e)) => return Outcome::Malformed(reason(&e)),
             Err(_) => return Outcome::Unavailable,
         };
@@ -278,10 +288,19 @@ impl Groups {
         let Ok(plan_bytes) = postcard::to_stdvec(&plan) else {
             return Outcome::Unavailable;
         };
-        let roster_bytes = songbird_send::Roster::to_bytes(&roster);
         let from = applied.from_epoch;
         match registry
-            .commit_group(&group, from, &state, &roster_bytes, &hash, &plan_bytes)
+            .commit_group(
+                &group,
+                from,
+                &songbird_accounts::groups::GroupCommit {
+                    state: &state,
+                    roster: &roster_bytes,
+                    last: &hash,
+                    fanout: &plan_bytes,
+                    log: applied.log.as_deref(),
+                },
+            )
             .await
         {
             Ok(()) => {}
@@ -381,28 +400,26 @@ impl Groups {
             Ok(None) => return Outcome::NotFound,
             Err(_) => return Outcome::Unavailable,
         };
-        let dir = m.path.directory();
-        let roster = devices_of(&row.roster);
-        let allowed = roster.binary_search(&device).is_ok()
-            || dir
-                .listed_account(&device)
-                .is_some_and(|a| roster.iter().any(|d| dir.listed_account(d) == Some(a)));
-        if !allowed {
+        if !Self::may_read(m, &row.roster, &device) {
             return Outcome::NotFound;
         }
         let Ok(record) = Record::decode(&row.state) else {
             return Outcome::Unavailable;
         };
+        let (meta_v, meta) = (row.meta_v, row.meta.clone());
         let built = tokio::task::spawn_blocking(move || {
             let g = Group::load(record)?;
             let tree = g.ratchet_tree()?;
             let info = g.group_info().to_vec();
-            let mut out = Vec::with_capacity(16 + info.len() + tree.len());
+            let mut out = Vec::with_capacity(32 + info.len() + tree.len() + meta.len());
             out.extend_from_slice(&g.epoch().to_be_bytes());
-            for part in [&info, &tree] {
+            for part in [&info[..], &tree[..]] {
                 out.extend_from_slice(&u32::try_from(part.len()).unwrap_or(u32::MAX).to_be_bytes());
                 out.extend_from_slice(part);
             }
+            out.extend_from_slice(&meta_v.to_be_bytes());
+            out.extend_from_slice(&u32::try_from(meta.len()).unwrap_or(u32::MAX).to_be_bytes());
+            out.extend_from_slice(&meta);
             Ok::<_, GroupError>(out)
         })
         .await;
@@ -410,6 +427,166 @@ impl Groups {
             Ok(Ok(b)) => Outcome::Blob(Bytes::from(b)),
             _ => Outcome::Unavailable,
         }
+    }
+
+    /// Who may read a group's state and change log: a device in it, or a listed device of an
+    /// account in it (to rejoin). Everyone else gets the answer for no group.
+    fn may_read(m: &Messages, roster: &[u8], device: &DeviceId) -> bool {
+        let dir = m.path.directory();
+        let roster = devices_of(roster);
+        roster.binary_search(device).is_ok()
+            || dir
+                .listed_account(device)
+                .is_some_and(|a| roster.iter().any(|d| dir.listed_account(d) == Some(a)))
+    }
+
+    /// `POST /v1/groups/propose` (D-0070): a member's proposal to leave (`version | group |
+    /// MLSMessage`). Queued in the group's state (compare-and-set on epoch and revision), then
+    /// stored in every other member's mailbox; 204 once stored. A retried proposal is queued
+    /// again harmlessly (same reference) and stored once (same key).
+    pub(crate) async fn propose(
+        &self,
+        registry: &songbird_accounts::Registry,
+        m: &Messages,
+        device: DeviceId,
+        body: Bytes,
+    ) -> Outcome {
+        let Some((group, msg)) = split(&body) else {
+            return Outcome::Malformed("request");
+        };
+        let row = match registry.group(&group).await {
+            Ok(Some(r)) => r,
+            Ok(None) => return Outcome::NotFound,
+            Err(_) => return Outcome::Unavailable,
+        };
+        let Ok(record) = Record::decode(&row.state) else {
+            return Outcome::Unavailable;
+        };
+        let msg_owned = msg.to_vec();
+        let queued = tokio::task::spawn_blocking(move || {
+            let (g, hash) = Group::load(record)?.apply_proposal(&device, &msg_owned)?;
+            Ok::<_, GroupError>((g.record().encode()?, hash))
+        })
+        .await;
+        let (state, hash) = match queued {
+            Ok(Ok(v)) => v,
+            Ok(Err(GroupError::StaleEpoch { current })) => return Outcome::Stale(current),
+            Ok(Err(e)) => return Outcome::Malformed(reason(&e)),
+            Err(_) => return Outcome::Unavailable,
+        };
+        match registry
+            .propose_group(&group, row.epoch, row.rev, &state)
+            .await
+        {
+            Ok(()) => {}
+            // A commit came first: propose again from its epoch. Only another proposal came
+            // first: the same request can simply be retried.
+            Err(RegistryError::StaleEpoch) => {
+                return match registry.group(&group).await {
+                    Ok(Some(now)) if now.epoch != row.epoch => Outcome::Stale(now.epoch),
+                    _ => Outcome::Unavailable,
+                };
+            }
+            Err(_) => return Outcome::Unavailable,
+        }
+        let members: Vec<DeviceId> = devices_of(&row.roster)
+            .into_iter()
+            .filter(|d| *d != device)
+            .collect();
+        // One key per proposal: two members leaving in one epoch never share it.
+        let key = self.idempotency_of(b"proposal", &group, &hash);
+        match m
+            .path
+            .shared(&members, Bytes::copy_from_slice(msg), key)
+            .await
+        {
+            Ok(()) => Outcome::Done,
+            Err(_) => Outcome::Unavailable,
+        }
+    }
+
+    /// `POST /v1/groups/meta` (D-0070): replaces the encrypted metadata (`version | group |
+    /// expected u64 | blob`, at most 16 KiB). Allowed to devices whose role reaches the policy's
+    /// "edit info" role ("only admins can edit group info"). 200 `{"version": n}`; 409
+    /// `{"error": "stale", "epoch": current}` (here the metadata's version); 403 `role`.
+    pub(crate) async fn meta(
+        &self,
+        registry: &songbird_accounts::Registry,
+        device: DeviceId,
+        body: Bytes,
+    ) -> Outcome {
+        let Some((group, rest)) = split(&body) else {
+            return Outcome::Malformed("request");
+        };
+        let Some((expected, blob)) = rest.split_at_checked(8) else {
+            return Outcome::Malformed("request");
+        };
+        let expected = u64::from_be_bytes(expected.try_into().unwrap_or([0; 8]));
+        if blob.is_empty() || blob.len() > songbird_accounts::groups::MAX_META {
+            return Outcome::Malformed("size");
+        }
+        let row = match registry.group(&group).await {
+            Ok(Some(r)) => r,
+            Ok(None) => return Outcome::NotFound,
+            Err(_) => return Outcome::Unavailable,
+        };
+        let Some(roster) = roster_of(&row.roster) else {
+            return Outcome::Unavailable;
+        };
+        let Some(role) = roster.role(&device) else {
+            return Outcome::NotFound;
+        };
+        if role < roster.policy[POLICY_EDIT_INFO] {
+            return Outcome::Forbidden("role");
+        }
+        match registry.put_group_meta(&group, expected, blob).await {
+            Ok(v) => Outcome::Json(serde_json::json!({ "version": v })),
+            Err(RegistryError::StaleEpoch) => Outcome::Stale(row.meta_v),
+            Err(_) => Outcome::Unavailable,
+        }
+    }
+
+    /// `POST /v1/groups/log` (D-0070): change-log entries after an epoch (`version | group |
+    /// after u64`, `u64::MAX` for all), at most 200: `n u16 | n × (epoch u64 | len u16 |
+    /// entry)`. For the same devices as the state.
+    pub(crate) async fn log(
+        &self,
+        registry: &songbird_accounts::Registry,
+        m: &Messages,
+        device: DeviceId,
+        body: Bytes,
+    ) -> Outcome {
+        let Some((group, rest)) = split(&body) else {
+            return Outcome::Malformed("request");
+        };
+        let Ok(after) = <[u8; 8]>::try_from(rest) else {
+            return Outcome::Malformed("request");
+        };
+        let after = u64::from_be_bytes(after);
+        let row = match registry.group(&group).await {
+            Ok(Some(r)) => r,
+            Ok(None) => return Outcome::NotFound,
+            Err(_) => return Outcome::Unavailable,
+        };
+        if !Self::may_read(m, &row.roster, &device) {
+            return Outcome::NotFound;
+        }
+        let after = (after != u64::MAX).then_some(after);
+        let Ok(entries) = registry.group_log(&group, after, 200).await else {
+            return Outcome::Unavailable;
+        };
+        let mut out = Vec::new();
+        out.extend_from_slice(
+            &u16::try_from(entries.len())
+                .unwrap_or(u16::MAX)
+                .to_be_bytes(),
+        );
+        for (e, entry) in &entries {
+            out.extend_from_slice(&e.to_be_bytes());
+            out.extend_from_slice(&u16::try_from(entry.len()).unwrap_or(u16::MAX).to_be_bytes());
+            out.extend_from_slice(entry);
+        }
+        Outcome::Blob(Bytes::from(out))
     }
 }
 

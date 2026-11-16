@@ -11,6 +11,7 @@
     clippy::indexing_slicing,
     clippy::too_many_lines,
     clippy::large_futures,
+    clippy::many_single_char_names,
     reason = "tests"
 )]
 
@@ -28,6 +29,7 @@ use songbird_client::DeviceKey;
 use songbird_delivery::{DeliveryMetrics, Directory, Shared};
 use songbird_e2e::{settings, test_mailbox};
 use songbird_groups::Limits;
+use songbird_groups::roles::Role;
 use songbird_groups_harness::{Device, GID};
 use songbird_mailbox::{AnyMailbox, Mailbox as _};
 use songbird_proto::frame::{RejectReason, SendFrame, SendHints, SendPayload, SendStatus};
@@ -378,18 +380,24 @@ async fn groups_are_created_committed_fanned_out_and_messaged() {
         })
     );
 
-    // Bob removes Carol: Alice and Carol receive the commit; Carol is out once rosters refresh.
+    // Bob, a member, may not remove Carol (D-0070): 403. Alice, the owner, does: Bob and Carol
+    // receive the commit; Carol is out once rosters refresh.
     let carol_leaf = s.people[2].mls.leaf();
     let b = s.people[1].mls.remove(&[carol_leaf]);
     let (st, reply) = commit(&s, 1, &b).await;
+    assert_eq!((st, reply["error"].as_str()), (403, Some("role")));
+    s.people[1].mls.discard();
+    let b = s.people[0].mls.remove(&[carol_leaf]);
+    let (st, reply) = commit(&s, 0, &b).await;
     assert_eq!((st, reply["epoch"].as_u64()), (200, Some(2)));
-    s.people[1].mls.merge();
-    let to_alice = s.pending(0).await.pop().unwrap();
-    s.people[0].mls.receive(
+    s.people[0].mls.merge();
+    let to_bob = s.pending(1).await.pop().unwrap();
+    s.people[1].mls.receive(
         &songbird_groups::wire::Bundle {
-            commit: &to_alice,
+            commit: &to_bob,
             welcome: None,
             group_info: b"-",
+            log: None,
         }
         .encode(),
     );
@@ -482,6 +490,7 @@ async fn a_lost_answer_is_recognised_and_an_interrupted_fan_out_is_redriven() {
             commit: &once,
             welcome: None,
             group_info: b"-",
+            log: None,
         }
         .encode(),
     );
@@ -510,15 +519,17 @@ async fn a_lost_answer_is_recognised_and_an_interrupted_fan_out_is_redriven() {
         Vec::<[u8; 16]>::new(),
     ))
     .unwrap();
-    let roster: Vec<DeviceId> = g.roster().devices().collect();
     s.registry
         .commit_group(
             &GID,
             applied.from_epoch,
-            &g.record().encode().unwrap(),
-            &songbird_send::Roster::to_bytes(&roster),
-            &applied.commit_hash,
-            &plan,
+            &songbird_accounts::groups::GroupCommit {
+                state: &g.record().encode().unwrap(),
+                roster: &g.roster_bytes(&dir).unwrap(),
+                last: &applied.commit_hash,
+                fanout: &plan,
+                log: None,
+            },
         )
         .await
         .unwrap();
@@ -540,9 +551,124 @@ async fn a_lost_answer_is_recognised_and_an_interrupted_fan_out_is_redriven() {
             commit: &delivered,
             welcome: None,
             group_info: b"-",
+            log: None,
         }
         .encode(),
     );
     assert_eq!(s.people[1].mls.epoch(), s.people[0].mls.epoch());
     let _ = &s.people[2];
+}
+
+/// Prompt 5, M2 (D-0070), live: roles and policy by commit, "only admins can send" on the send
+/// path, the encrypted metadata by role, the change log, and leaving by proposal.
+#[tokio::test]
+async fn roles_metadata_change_log_and_leaving() {
+    let Some(mut s) = stack(3).await else { return };
+    create(&mut s, 0).await;
+    add(&mut s, &[1, 2]).await;
+    // Alice (owner) makes Bob an admin, and the group admins-only for sending and info.
+    let mut roles = s.people[0].mls.roles();
+    roles.explicit.insert(s.people[1].mls.account, Role::Admin);
+    roles.policy.send = Role::Admin;
+    roles.policy.edit_info = Role::Admin;
+    let b = s.people[0]
+        .mls
+        .commit_logged(Vec::new(), &[], Some(&roles), b"sealed: settings");
+    let (st, reply) = commit(&s, 0, &b).await;
+    assert_eq!((st, reply["epoch"].as_u64()), (200, Some(2)), "{reply}");
+    s.people[0].mls.merge();
+    for i in [1, 2] {
+        let c = s.pending(i).await.pop().unwrap();
+        s.people[i].mls.receive(
+            &songbird_groups::wire::Bundle {
+                commit: &c,
+                welcome: None,
+                group_info: b"-",
+                log: None,
+            }
+            .encode(),
+        );
+    }
+
+    // Carol, a member, may no longer send; Bob, an admin, may.
+    let m = s.people[2].mls.message(b"hello?");
+    let (_, r) = s.people[2]
+        .api
+        .put_message(&group_frame(10, m))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.map(|r| r.1),
+        Some(SendStatus::Rejected {
+            reason: RejectReason::NotAllowed,
+            retry_after_ms: 0
+        })
+    );
+    let m = s.people[1].mls.message(b"announcement");
+    let (_, r) = s.people[1]
+        .api
+        .put_message(&group_frame(11, m))
+        .await
+        .unwrap();
+    assert_eq!(r.map(|r| r.1), Some(SendStatus::Accepted));
+
+    // The encrypted metadata: Carol may not replace it; Bob may; members read it with the
+    // state.
+    let meta = |expected: u64, blob: &[u8]| {
+        let mut b = expected.to_be_bytes().to_vec();
+        b.extend_from_slice(blob);
+        body(&b)
+    };
+    let (st, _) = s.people[2]
+        .api
+        .send("POST", "/v1/groups/meta", Some(&meta(0, b"sealed: name")))
+        .await
+        .unwrap();
+    assert_eq!(st, 403);
+    let (st, reply) = s.people[1]
+        .api
+        .send("POST", "/v1/groups/meta", Some(&meta(0, b"sealed: name")))
+        .await
+        .unwrap();
+    assert_eq!((st, json(&reply)["version"].as_u64()), (200, Some(1)));
+    let (st, _) = s.people[1]
+        .api
+        .send("POST", "/v1/groups/meta", Some(&meta(0, b"sealed: other")))
+        .await
+        .unwrap();
+    assert_eq!(st, 409, "a write from an old version loses");
+    let (_, state_bytes) = state(&s, 2).await;
+    assert!(state_bytes.ends_with(b"sealed: name"));
+
+    // The change log: Alice's entry, for any member (a newly linked device reads it too).
+    let (st, log) = s.people[2]
+        .api
+        .send(
+            "POST",
+            "/v1/groups/log",
+            Some(&body(&u64::MAX.to_be_bytes())),
+        )
+        .await
+        .unwrap();
+    assert_eq!(st, 200);
+    assert_eq!(u16::from_be_bytes([log[0], log[1]]), 1);
+    assert!(log.windows(16).any(|w| w == b"sealed: settings"));
+
+    // Carol leaves: her proposal reaches Alice and Bob; Bob commits her departure.
+    let p = s.people[2].mls.leave();
+    let (st, _) = s.people[2]
+        .api
+        .send("POST", "/v1/groups/propose", Some(&body(&p)))
+        .await
+        .unwrap();
+    assert_eq!(st, 204);
+    let got = s.pending(1).await.pop().unwrap();
+    s.people[1].mls.receive_proposal(&got);
+    let b = s.people[1].mls.update();
+    let (st, reply) = commit(&s, 1, &b).await;
+    assert_eq!(st, 200, "{reply}");
+    let row = s.registry.group(&GID).await.unwrap().unwrap();
+    let roster = songbird_send::Roster::from_bytes(row.epoch, &row.roster).unwrap();
+    assert!(!roster.contains(&s.people[2].mls.id), "Carol left");
+    assert_eq!(roster.members.len(), 2);
 }

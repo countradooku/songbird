@@ -427,9 +427,12 @@ impl App {
             ) => self.keys(req).await,
             (_, "/v1/blocks" | "/v1/account/requests", None) => self.requests(req).await,
             (&Method::POST, "/v1/reports", None) => self.report(req).await,
-            (&Method::POST, "/v1/groups" | "/v1/groups/commit" | "/v1/groups/state", None) => {
-                self.groups(req).await
-            }
+            (
+                &Method::POST,
+                "/v1/groups" | "/v1/groups/commit" | "/v1/groups/state" | "/v1/groups/propose"
+                | "/v1/groups/meta" | "/v1/groups/log",
+                None,
+            ) => self.groups(req).await,
             (_, p, None) if p.starts_with("/v1/account/") => self.factors(req).await,
             (_, p, None) if p.starts_with("/v1/kt/") => self.kt(req).await,
             (_, p, None) if p.starts_with("/v1/provisioning") || p.starts_with("/v1/devices") => {
@@ -652,8 +655,9 @@ impl App {
         if row.pending {
             return Ok(device_outcome(devices::Outcome::Forbidden("pending")));
         }
-        if path != "/v1/groups/state" {
-            // Validating a commit costs CPU: a per-device budget, shared by creations.
+        if !matches!(path.as_str(), "/v1/groups/state" | "/v1/groups/log") {
+            // Validating a commit costs CPU: a per-device budget, shared by creations,
+            // proposals and metadata writes.
             let wait = self
                 .gcra(&g.rate_record(&device), g.commits_per_sec, g.commit_burst)
                 .await
@@ -665,6 +669,9 @@ impl App {
         let outcome = match path.as_str() {
             "/v1/groups" => g.create(&self.registry, m, device, body).await,
             "/v1/groups/commit" => g.commit(&self.registry, m, device, body).await,
+            "/v1/groups/propose" => g.propose(&self.registry, m, device, body).await,
+            "/v1/groups/meta" => g.meta(&self.registry, device, body).await,
+            "/v1/groups/log" => g.log(&self.registry, m, device, body).await,
             _ => g.state(&self.registry, m, device, body).await,
         };
         Ok(device_outcome(outcome))

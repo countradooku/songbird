@@ -27,37 +27,90 @@ use songbird_types::DeviceId;
 /// Longest a cached roster is used without asking the registry again.
 pub const ROSTER_TTL: Duration = Duration::from_secs(1);
 
-/// A group's roster at an epoch: member devices, sorted.
+/// The registry's roster format with roles (D-0070, written by `crates/groups`).
+pub const ROSTER_V2: u8 = 2;
+/// The role a member needs at least to be a full member (`songbird_groups::roles::Role`).
+pub const ROLE_MEMBER: u8 = 1;
+
+/// A group's roster at an epoch: member devices (sorted) with their roles, and the least role
+/// that may send.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Roster {
     pub epoch: u64,
-    pub devices: Vec<DeviceId>,
+    /// `(device, role)`, devices ascending.
+    pub members: Vec<(DeviceId, u8)>,
+    /// The least role that may send (the policy's first byte).
+    pub send_min: u8,
+    /// The policy's seven bytes (`songbird_groups::roles::Policy`).
+    pub policy: [u8; 7],
 }
 
 impl Roster {
-    /// Parses the registry's roster bytes (16 bytes per device, sorted, no repeats).
+    /// Parses the registry's roster: `version u8 (2) | policy [7] | n × (device [16] |
+    /// role u8)`, devices strictly ascending, roles 0 to 4.
     #[must_use]
     pub fn from_bytes(epoch: u64, bytes: &[u8]) -> Option<Self> {
-        let (chunks, rest) = bytes.as_chunks::<16>();
-        if !rest.is_empty() {
+        let (&version, rest) = bytes.split_first()?;
+        if version != ROSTER_V2 {
             return None;
         }
-        let devices: Vec<DeviceId> = chunks.iter().map(|c| DeviceId::from_bytes(*c)).collect();
-        devices
-            .windows(2)
-            .all(|w| matches!(w, [a, b] if a < b))
-            .then_some(Self { epoch, devices })
+        let (policy, rest) = rest.split_at_checked(7)?;
+        let policy: [u8; 7] = policy.try_into().ok()?;
+        let (chunks, tail) = rest.as_chunks::<17>();
+        if !tail.is_empty() {
+            return None;
+        }
+        let mut members = Vec::with_capacity(chunks.len());
+        for c in chunks {
+            let (d, r) = c.split_at(16);
+            let role = *r.first()?;
+            if role > 4 {
+                return None;
+            }
+            members.push((DeviceId::from_slice(d).ok()?, role));
+        }
+        if !members.windows(2).all(|w| matches!(w, [a, b] if a.0 < b.0)) {
+            return None;
+        }
+        Some(Self {
+            epoch,
+            members,
+            send_min: policy[0],
+            policy,
+        })
     }
 
-    /// The registry's roster bytes.
+    /// Encodes a roster (tests and development; `crates/groups` writes the real one).
     #[must_use]
-    pub fn to_bytes(devices: &[DeviceId]) -> Vec<u8> {
-        devices.iter().flat_map(|d| *d.as_bytes()).collect()
+    pub fn encode(policy: [u8; 7], members: &[(DeviceId, u8)]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 + members.len() * 17);
+        out.push(ROSTER_V2);
+        out.extend_from_slice(&policy);
+        for (d, r) in members {
+            out.extend_from_slice(d.as_bytes());
+            out.push(*r);
+        }
+        out
+    }
+
+    /// The device's role, if it is a member.
+    #[must_use]
+    pub fn role(&self, device: &DeviceId) -> Option<u8> {
+        self.members
+            .binary_search_by(|(d, _)| d.cmp(device))
+            .ok()
+            .and_then(|i| self.members.get(i))
+            .map(|(_, r)| *r)
     }
 
     #[must_use]
     pub fn contains(&self, device: &DeviceId) -> bool {
-        self.devices.binary_search(device).is_ok()
+        self.role(device).is_some()
+    }
+
+    /// Every member device.
+    pub fn devices(&self) -> impl Iterator<Item = &DeviceId> {
+        self.members.iter().map(|(d, _)| d)
     }
 }
 
@@ -129,12 +182,30 @@ pub struct MemoryRosters {
 
 impl MemoryRosters {
     /// Sets a group's roster (devices are sorted here).
-    pub fn set(&self, group: [u8; 16], epoch: u64, mut devices: Vec<DeviceId>) {
-        devices.sort_unstable();
-        devices.dedup();
-        self.groups
-            .pin()
-            .insert(group, Arc::new(Roster { epoch, devices }));
+    pub fn set(&self, group: [u8; 16], epoch: u64, devices: Vec<DeviceId>) {
+        let members = devices.into_iter().map(|d| (d, ROLE_MEMBER)).collect();
+        self.set_roles(group, epoch, [ROLE_MEMBER, 1, 1, 3, 1, 1, 0], members);
+    }
+
+    /// Sets a group's roster with roles and policy (devices are sorted here).
+    pub fn set_roles(
+        &self,
+        group: [u8; 16],
+        epoch: u64,
+        policy: [u8; 7],
+        mut members: Vec<(DeviceId, u8)>,
+    ) {
+        members.sort_unstable();
+        members.dedup_by_key(|(d, _)| *d);
+        self.groups.pin().insert(
+            group,
+            Arc::new(Roster {
+                epoch,
+                members,
+                send_min: policy[0],
+                policy,
+            }),
+        );
     }
 }
 

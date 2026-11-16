@@ -477,6 +477,15 @@ async fn a_lost_answer_is_recognised_and_an_interrupted_fan_out_is_redriven() {
         1 + 1,
         "the Welcome, and the commit once"
     );
+    let once = s.pending(1).await.pop().unwrap();
+    s.people[1].mls.receive(
+        &songbird_groups::wire::Bundle {
+            commit: &once,
+            welcome: None,
+            group_info: b"-",
+        }
+        .encode(),
+    );
 
     // A crash after the registry recorded a commit, before the mailboxes stored it: the
     // fan-out row stays, and a re-drive pass delivers it.

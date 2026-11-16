@@ -109,8 +109,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0067 — Prompt 5, milestone 1 (integration): groups in the registry, commits over `api`, group messages fanned out from the roster
 
 - Date: 2026-11-16
-- Status: accepted; built, **live tests not yet run** (no SurrealDB or Valkey on the build
-  machine); the M1 gate waits for them, the fuzz runs and the owner
+- Status: accepted; built and passing live against SurrealDB and Valkey; the M1 gate waits for
+  the fuzz runs, the RustFS-backed gate suites and the owner
 - Decided by: agent, under D-0065 (owner) and the standing instruction (Proton-level bar)
 - Context: D-0066's core needed a home for each group's state, an authority for its epoch, a
   way for commits and Welcomes to reach devices, and a send path for group messages.
@@ -152,11 +152,16 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   - `crates/proto`: `group_messages_name_the_group_and_list_no_devices` (round trip, every flag
     rule) and the prefix parser's tests.
   - 219 tests across the changed crates pass; clippy `-D warnings` is clean on them.
-  - `tests/e2e/tests/gate_p05.rs` (live), **written but skipped here**:
+  - `tests/e2e/tests/gate_p05.rs`, live (SurrealDB v4.0.1 and Valkey 9.1.3, the pinned images,
+    under podman; memory mailbox), **3 of 3, ten runs in a row (30 of 30)**:
     - create, add, Welcome, state, a group message, removal, and a removed device refused
       after the roster cache's second;
     - five members committing concurrently over HTTP, one winner per epoch, no fork;
     - a retried commit answered once; an interrupted fan-out re-driven exactly once.
+  - The existing live suites with the new schema and send path: `crates/accounts`,
+    `services/api`, `crates/send`, and in `tests/e2e`: `invariants`, `send_api`,
+    `registration`, `restore`, `allocations`, `receipts_load`. All pass.
+  - `gate_m5`, `gate_p03` and `gate_p04` need RustFS and `valkey-jobs` and **did not run here**.
 - Consequences:
   - Threat model §1 gains two rows (below in the M1 report), for the owner.
   - The second-long window for removed devices is an open risk (§6).

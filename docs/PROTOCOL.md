@@ -610,6 +610,190 @@ Throttles (defaults), all as GCRA records in `valkey-hot` under keyed hashes:
 - per account: 20 link tokens and provisioning messages an hour;
 - per requesting account: 240 list fetches an hour.
 
+### 4.7 Second factors and multiple accounts
+
+Decision D-0053 (M4b). An account may set a two-step PIN and passkeys. Once it has either, linking
+a device needs one of them, and so will account recovery (Prompt 10). Only the primary sets,
+replaces or removes them.
+
+**The link request's factor.** These bytes follow `confirm` (§4.6). They are not covered by the
+link signatures; each factor binds itself:
+
+```text
+factor u8: 0 none
+         | 1 PIN:     len u8 | 6 to 12 ASCII digits
+         | 2 passkey: len u16 | credential_id | len u16 | authenticatorData | len u16 | clientDataJSON
+                      | len u8 | signature
+```
+
+- **PIN.** Stored as `salt [16] || Argon2id(m, t, p = 1, secret = pepper)(pin, salt)`. The pepper
+  is derived from `[api.keys] secret` (the secrets store, never the database or its backups).
+  Each attempt is counted before it is checked, so parallel guesses cannot exceed the limit:
+  - the first 5 attempts are free;
+  - each further attempt locks the next for `60 s · 2^(k-1)`, at most a week;
+  - after 20 attempts the PIN is unusable until the primary sets a new one;
+  - a correct PIN resets the count.
+  Refusals: 403 `{"error": "factor"}` for a missing or wrong factor, 403
+  `{"error": "locked", "retry_after": s}` while locked.
+- **Passkey.** WebAuthn with Songbird's own minimal verifier (`songbird_keys::webauthn`):
+  - ES256 or EdDSA (Ed25519) credentials;
+  - no attestation is trusted;
+  - user presence always, user verification required by default;
+  - the RP ID and allowed origins come from `[api.keys.devices]`;
+  - the signature counter must grow unless it is always zero.
+  The assertion's challenge is `SHA-256("songbird.v1/link-passkey\0" || identity-context
+  transcript)`, so it approves exactly this token, device ID, pair of keys and server, and needs
+  no server state.
+
+| Request | Body | Answers |
+| --- | --- | --- |
+| `PUT /v1/account/pin` | `{"pin": "6 to 12 digits"}` (primary) | 204; 400 `{"error": "pin"}`; 403 `{"error": "primary"}` |
+| `DELETE /v1/account/pin` | none (primary) | 204; 403 |
+| `POST /v1/account/passkeys/challenge` | none (primary) | 200 `{"challenge": hex, "rp_id"}`, single use, five minutes; 503 without an RP ID |
+| `PUT /v1/account/passkeys` | `{"client_data_json": hex, "attestation_object": hex}` (primary) | 200 `{"id": hex}`; 400 `{"error": "passkey"}`; 409 `{"error": "challenge" \| "limit" \| "duplicate"}` |
+| `DELETE /v1/account/passkeys` | `{"id": hex}` (primary) | 204 |
+| `GET /v1/account/factors` | none | 200 `{"pin", "pin_locked_secs", "pin_unusable", "passkeys": [hex]}` |
+
+**Multiple accounts on one installation.** Each account is a separate account on the server:
+its own device ID and authentication key, identity keys, mailbox and push registration. The app
+holds one device per account and signs each request as that account's device. One push token
+registered for several accounts is sealed and stored under a separate keyed index per device.
+The push service still opens each registration to deliver, so it can see that one token belongs
+to several devices: it links them. Where the platform allows several tokens per installation
+(FCM instance IDs, Web Push subscriptions), the app registers one per account. APNs gives one
+token per app installation, so on iOS the link remains (threat model §6).
+
+### 4.8 Encrypted profiles and sealed sender
+
+Decision D-0054 (M5).
+
+**Profiles.** A profile is one blob, encrypted by the client under its 32-byte profile key, which
+it shares only with contacts. The blob holds the name, avatar pointer, about, status line and
+profile links; the server never sees inside it.
+
+```text
+PUT /v1/profile:
+version u8 (1) | profile_version u64 | access_key [16] | flags u8 (1 anyone may send sealed)
+  | len u16 | blob (1..=8192)
+```
+
+- The version must exceed the stored one (409 `{"error": "version"}`).
+- A pending device may not change it (403 `pending`).
+- `POST /v1/profile/fetch` `{"account": hex}` answers `{"version", "profile": hex}` and is
+  throttled per requesting account.
+- Avatars are encrypted by the client and uploaded with `PUT /v1/profile/avatar` (a signed body,
+  at most 512 KiB). They are stored in RustFS under a fresh random 32-byte ID (`p/<hex>`), which
+  is answered as `{"avatar": hex}` and goes inside the profile blob.
+- `GET /v1/profile/avatar/<id>` serves only an account's current avatar. Replaced ones are
+  deleted by the worker after an hour; all of them go when the account is deleted.
+
+**Sealed sender** (behind `[api.profiles] sealed_sender`, off by default; Prompt 12 verifies it):
+
+- **Access key.** `access_key = HKDF-SHA256(salt = "songbird.v1", ikm = profile_key,
+  info = "unidentified-access")[..16]` (`songbird_keys::sealed::access_key`). Contacts derive it
+  from the profile key. The server stores only it, plus the "anyone may send" flag.
+- **Sender certificate.** `GET /v1/certificate`, from a listed device that has uploaded its
+  identity key:
+  `version u8 (1) | key_id [8] | account [16] | device [16] | identity_key [33] | expires_ms u64 | signature [64]`.
+  - The signature is Ed25519 by the certificate key over `"songbird.v1/sender-certificate\0"`
+    followed by every byte before it.
+  - `key_id` is the first 8 bytes of SHA-256 of the key; lifetime 24 hours (configurable, at
+    most a week).
+  - The sender puts the certificate inside the end-to-end encrypted envelope. The recipient
+    checks the signature against the pinned key, the expiry, and the identity key against the
+    sender's.
+- **Sealed send.** `PUT /v1/messages/sealed` carries an ordinary `Send` frame (no MLS commit),
+  with no device signature, and the header `Unidentified-Access-Key: hex(16)`. The header holds
+  the XOR of the access keys of every addressed account that is not open
+  (`songbird_keys::sealed::combine`).
+  - The server recomputes it from what it stores and compares in constant time.
+  - An account with no access key that is not open cannot be reached sealed (401).
+  - The device-list check applies as for any send.
+  - Throttles: per IP range and per recipient account.
+  - The server learns who receives, never who sent.
+
+### 4.9 Key transparency and security notifications
+
+Decision D-0055 (M6). The server keeps an append-only Merkle log (RFC 9162 §2.1) of what it
+vouches for about each account: the account identity key, every device list, the username.
+
+- **Leaf**: `version u8 (1) | kind u8 (1 identity, 2 device list, 3 username) | subject [32] |
+  value [32] | time_ms u64`.
+  - `subject = HMAC-SHA256(salt, "songbird.v1/kt-subject\0" || account)`, with a random
+    per-account salt. Whoever asks about the account receives the salt. It is deleted with the
+    account, which leaves that account's entries unlinkable while the log stays append-only.
+  - `value` is SHA-256 of the identity key or of the signed device list, or the username hash
+    (32 zero bytes once released).
+- **Hashes**: `SHA-256(0x00 || leaf)`, `SHA-256(0x01 || left || right)`; the empty tree's root is
+  `SHA-256("")`.
+- **Signed tree head**: `version u8 (1) | size u64 | root [32] | time_ms u64 | signature [64]`.
+  The signature is Ed25519 by the log key over `"songbird.v1/kt-head\0"` followed by the bytes
+  before it. Apps pin the log key.
+- **Logging**: a registration, a new device list, or a username claimed or released bumps the
+  account's generation in its own transaction. The worker appends a leaf for each value that
+  changed since the last one it logged, so nothing is missed and a crash only delays it.
+
+| Request | Body | Answers |
+| --- | --- | --- |
+| `GET /v1/kt/head` | none | 200 signed tree head |
+| `POST /v1/kt/account` | `{"account": hex}` | 200 `{"salt": hex, "head": hex, "entries": [{"index", "leaf": hex, "proof": [hex]}]}` (the newest 256, proofs at the head's size); 404 (nothing logged); 429 |
+| `POST /v1/kt/consistency` | `{"from", "to"}` | 200 `{"proof": [hex]}`; 400 for sizes out of order or beyond the log; 429 |
+
+**What clients do:**
+
+- Keep the newest head they have verified, and check every newer head with a consistency
+  proof. Two heads that no proof joins are evidence of a fork: show it and stop trusting the
+  server.
+- Before trusting a contact's identity key or device list, check that the log holds it,
+  under the contact's subject, included in a verified head.
+- Owners check their own account's entries regularly: an entry they did not make (another device
+  list) is the warning.
+
+**Security notifications.** An account identity key is never replaced (a new one is a new
+account), and a device's identity key is fixed when it is linked. What changes is the device
+list, and changes reach clients by three paths:
+
+- the account's own devices get a signed `DeviceListChanged` notice (§3.9);
+- a contact's next send is refused as stale by the device check (§3.1), and the contact fetches
+  the signed list;
+- the change appears in the transparency log.
+
+In each case the app compares the new list with the last one it accepted and warns the user
+about new devices.
+
+### 4.10 GDPR: export, deletion and inactivity
+
+Decision D-0056 (M7).
+
+- **Export** (`GET /v1/account/export`, the primary, signed): JSON of everything the registry
+  holds about the account:
+  - the account row: creation, invites left, identity key, username hash, whether a username key
+    is set, the signed device list, the profile, the access key, the PIN's state, the
+    transparency salt, last use and the inactivity period;
+  - username links, passkeys and avatars;
+  - every device: keys, flags, prekey and KeyPackage counts, whether a sealed push registration
+    exists, pending uploads.
+  Secrets derived from what the user knows (the PIN and username-key verifiers) are reported as
+  present, not handed out. What cannot be attributed to the account (mailbox ciphertext, sent
+  attachments, keyed throttle records, transparency leaves once the salt is gone, encrypted
+  backups) is listed with its retention.
+- **Deletion** (`DELETE /v1/account`, the primary): the outbox job deletes every Prompt 2 and 3
+  store, then verifies it:
+  - mailbox and push registrations;
+  - upload grants and objects, and avatar objects;
+  - devices, prekeys, KeyPackages and passkeys;
+  - username (held 30 days, unlinked) and links;
+  - link tokens;
+  - the profile, device list, PIN and transparency salt on the account row.
+  Encrypted backups keep the data until they expire (at most 93 days); a restore deletes it
+  again through the journal (D-0041).
+- **Inactivity** (owner, D-0047): each account chooses 6, 12 or 24 months
+  (`PUT /v1/account/inactivity {"months"}`, the primary; default 12; a month is 30 days).
+  - Any signed `api` request counts as use, recorded at most once a day.
+  - A month and a week before the period ends, the worker sends every device a wake-up push. The
+    app wakes, makes a request, and the clock restarts.
+  - At the end, the account is deleted exactly as if it had asked.
+
 ## 5. Encrypted content schemas (Prompt 4)
 
 ## 6. Groups, roles and channels (MLS) (Prompt 5)
@@ -703,3 +887,22 @@ Registration (Prompt 3, D-0048), from `crates/pow` and `crates/proto` tests:
   ```
 
   and each verifies the other's signature.
+
+Sender certificate (Prompt 3, D-0054), from `services/api` `certificate_vector`, cross-checked
+with OpenSSL 4.1. The inputs are: Ed25519 seed 32 × `42`; account 16 × `01`; device 16 × `02`;
+identity key `05` || 32 × `03`; expiry 1,800,000,000,000 ms. The certificate:
+
+```
+01 3097e2dee2cb4a34 01010101010101010101010101010101 02020202020202020202020202020202
+05 0303030303030303030303030303030303030303030303030303030303030303 000001a3185c5000
+e2ba85e62f8006c7ff540bbed16ff64f1636cb28133f05da28b9604b0d4d32596d486dd773916abf4a674b75813703d273e747b840ed8288da465c69f4c98804
+```
+
+WebAuthn (Prompt 3, D-0053): `crates/keys/tests/webauthn_vectors.rs` carries the W3C WebAuthn
+Level 3 test vectors (§16.2, §16.11) verbatim.
+
+Key transparency (Prompt 3, D-0055), from `crates/kt/tests/kt_vectors.rs`: the trees of the
+Certificate Transparency reference leaf set (`""`, `00`, `10`, `2021`, `3031`, `40414243`,
+`50…57`, `60…6f`) have the roots of RFC 6962's reference implementation. The size-8 root is
+`5dc9da79a70659a9ad559cb701ded9a2ab9d823aad2f4960cfe370eff4604328`. The roots were recomputed with
+an independent Python implementation.

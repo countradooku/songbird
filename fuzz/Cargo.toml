@@ -16,6 +16,7 @@ songbird-surreal = { path = "../crates/surreal" }
 songbird-mailbox = { path = "../crates/mailbox" }
 songbird-pow = { path = "../crates/pow" }
 songbird-keys = { path = "../crates/keys" }
+songbird-kt = { path = "../crates/kt" }
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
 
@@ -123,6 +124,20 @@ bench = false
 [[bin]]
 name = "devices"
 path = "fuzz_targets/devices.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "profile"
+path = "fuzz_targets/profile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kt"
+path = "fuzz_targets/kt.rs"
 test = false
 doc = false
 bench = false

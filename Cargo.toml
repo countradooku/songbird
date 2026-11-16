@@ -20,6 +20,7 @@ members = [
     "crates/send",
     "crates/pow",
     "crates/keys",
+    "crates/kt",
     "services/delivery",
     "services/api",
     "services/push",
@@ -63,6 +64,7 @@ songbird-delivery = { path = "services/delivery" }
 songbird-push-providers = { path = "crates/push-providers" }
 songbird-send = { path = "crates/send" }
 songbird-pow = { path = "crates/pow" }
+songbird-kt = { path = "crates/kt" }
 songbird-keys = { path = "crates/keys" }
 
 anyhow = "1.0.104"

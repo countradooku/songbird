@@ -89,13 +89,152 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   device).
 - Prompt 3, milestone 4 (report `docs/reports/P03-M4.md`, D-0052): gate **approved by the owner
   on 2026-11-15** ("Approve both"), with its four threat-model §1 rows (the signed device list
-  and device flags; link token hashes; provisioning channels; keyed throttle records). Next: M4b.
+  and device flags; link token hashes; provisioning channels; keyed throttle records).
+- The rest of Prompt 3 in one pass (owner, 2026-11-15: "lets do the rest of milestones in one"):
+  M4b (D-0053), M5 (D-0054), M6 (D-0055) and M7 (D-0056, the final gate `P03-gate.md`) on one
+  branch and one PR (#54). **Approved by the owner on 2026-11-16** ("i approve everything"): the
+  Prompt 3 gate, M4b–M7 and the six threat-model §1 rows. The owner also decided to **adopt
+  `akd` for key transparency now** (D-0055, superseded by D-0057 when built). Prompt 3 is done
+  but for that.
 - D-0035 (RustFS replaces Garage, owner's decision): the `rustfs/rustfs:1.0.5` image is pinned by
   tag only, because Docker Hub was unreachable from the agent's sandbox. Pin its digest in
   `deploy/compose/compose.yaml` and `deploy/ansible/group_vars/all.yml` before the next deployment
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0056 — Prompt 3, milestone 7: GDPR export, deletion across every Prompt 3 store, inactivity deletion; the Prompt 3 gate
+
+- Date: 2026-11-15
+- Status: accepted; built (report `P03-gate.md`, PR #54); **the Prompt 3 gate approved by the owner
+  on 2026-11-16**
+- Decided by:
+  - owner: the inactivity period, user-chosen from 6, 12 or 24 months with a default of 12 and
+    a warning first (D-0047);
+  - agent: the design below.
+- Decision:
+  - **Export** by the primary only (as deletion, D-0052): one JSON document of every registry
+    store. Derived secrets (the PIN and username-key verifiers) are reported as present, not
+    given out. Sealed push registrations are reported as present. What cannot be attributed to
+    the account is listed with its retention.
+  - **Deletion**: the existing outbox job extended to avatar objects; the registry deletion
+    extended to passkeys, avatars and link tokens. Profile, PIN, device list and transparency
+    salt go with the account row; the job verifies all of it.
+  - **Inactivity**:
+    - "use" is any signed `api` request, recorded at most daily through a keyed mark in
+      `valkey-hot`;
+    - warnings are wake-up pushes a month and a week before the end, which make the app
+      reconnect;
+    - at the end, the same deletion as a user's own.
+- Evidence: `an_account_is_exported_then_deleted_from_every_prompt_3_store` and
+  `inactivity_warns_a_month_and_a_week_before_then_deletes` (`tests/e2e/tests/gate_p03.rs`,
+  against SurrealDB, `RustFS` and both Valkeys). The Prompt 3 gate is in `P03-gate.md`.
+- Consequences: none new beyond the fields listed in the threat model row. Inactivity is
+  measured from `api` use, so apps must call `api` at least daily while in use.
+
+## D-0055 — Prompt 3, milestone 6: key transparency as Songbird's own RFC 9162 log; akd recorded as the upgrade path
+
+- Date: 2026-11-15
+- Status: accepted; built (report P03-M6, PR #54); **gate approved by the owner on 2026-11-16**. The
+  owner's answer on the choice of log: **"we can use akd now"**, so `akd` replaces the own log
+  (D-0057, next); this log stays the interim and the test reference until then.
+- Decided by: agent (rest of Prompt 3 in one pass), for the owner to confirm
+- Options and evidence:
+  - **Meta's `akd` 0.13.0** (MIT/Apache-2.0, used by WhatsApp): a verifiable map with VRF-private
+    labels, non-membership and history proofs. It adds **12 crates** to the tree (`akd`,
+    `akd_core`, `async-recursion`, `ed25519-dalek`, `ed25519`, `protobuf`, `sha2`, …), so a
+    second Ed25519 and SHA-2 stack. It needs its async `Database` trait implemented on
+    SurrealDB, a VRF key with its own lifecycle, and epoch publishing. Weeks of integration.
+  - **An own RFC 9162 log**: about 500 lines, aws-lc-rs only, proofs checkable by any CT
+    library. It is a log, not a map: no non-membership proofs, and a server could withhold an
+    account's newest entry from one reader (but not rewrite history without a detectable fork).
+- Decision (recommended): **the own log now, behind the same endpoints, with `akd` as the
+  upgrade** when non-membership and label privacy are worth its integration.
+  - The log covers identity keys, device lists and usernames.
+  - Subjects are salted HMACs, so deleting an account's salt leaves its entries unlinkable
+    (GDPR), while the log stays append-only.
+  - Logging is driven by a generation bumped in each change's transaction and reconciled by the
+    worker.
+  - Appends are serialized on the head row; only perfect-subtree hashes are stored.
+  - Heads are signed by a dedicated log key at serving time.
+- Evidence:
+  - the CT reference roots (independently recomputed; the size-8 root is the published value);
+  - every inclusion and consistency proof up to 70 leaves, with tampering refused;
+  - a forked log detected;
+  - 160 concurrent appends over 8 connections yield one consistent tree;
+  - logging once per change; deletion unlinks;
+  - a client's checks over HTTP;
+  - fuzz `kt`.
+- Consequences: new crate `songbird-kt`; `[api.kt]` with a log key for the secrets store. No
+  external auditor yet (a later operational decision).
+
+## D-0054 — Prompt 3, milestone 5: encrypted profiles, avatars and sealed sender behind a flag
+
+- Date: 2026-11-15
+- Status: accepted; built (report P03-M5, PR #54); **gate approved by the owner on 2026-11-16**
+- Decided by: agent (rest of Prompt 3 in one pass, at the owner's request)
+- Decision:
+  - **Profiles.** One opaque blob encrypted by the client under its profile key, at most 8 KiB,
+    whose version must grow. Avatars go to RustFS (encrypted, at most 512 KiB, random ID); only
+    an account's current avatar is served, and replaced ones are swept after an hour.
+  - **Unidentified-access key.** `HKDF-SHA256(salt "songbird.v1", profile key, info
+    "unidentified-access")[..16]`, stored with the profile, with an "anyone may send" flag.
+  - **Sealed sends** (`PUT /v1/messages/sealed`):
+    - unsigned, authorized by the XOR of the closed recipient accounts' keys, compared in
+      constant time;
+    - no MLS commits;
+    - throttled per IP range and per recipient account;
+    - the send path is entered with a sentinel sender that no device has.
+  - **Sender certificates.** Ed25519 by a dedicated certificate key (not the system key, so
+    rotating either does not touch the other), carrying the account, device, device identity key
+    and expiry; lifetime 24 hours.
+  - **Off by default** (`[api.profiles] sealed_sender`). Prompt 12 verifies it before it is
+    switched on.
+- Evidence:
+  - the certificate vector (`certificate_vector`), cross-checked with OpenSSL 4.1;
+  - live tests (`profile_live`; `profiles_certificates_and_sealed_sends`: versions, fetch,
+    certificates, sealed with the right, wrong, missing or combined keys, open accounts, the
+    device check, the flag off);
+  - fuzz `profile`.
+- Consequences: new settings `[api.profiles]` and a certificate key for the secrets store. No new
+  dependency.
+
+## D-0053 — Prompt 3, milestone 4b: two-step PIN and passkeys as second factors for linking; multiple accounts per installation
+
+- Date: 2026-11-15
+- Status: accepted; built (report P03-M4b, PR #54); **gate approved by the owner on 2026-11-16**
+- Decided by:
+  - owner: the PIN as Argon2id + pepper + lockout, at least 6 digits (D-0047); Songbird's own
+    minimal WebAuthn verifier (2026-11-15);
+  - agent: the design below.
+- Decision:
+  - **Where the factor applies.** Once an account has a PIN or a passkey, a link request must
+    carry one. This is the step a QR-scan phisher cannot complete. Recovery (Prompt 10) will
+    require the same.
+  - **PIN.** 6 to 12 digits, Argon2id under a pepper derived from the key directory's secret.
+    - Every attempt is spent in the account row's transaction before it is checked, so parallel
+      guesses cannot exceed the limit.
+    - 5 free attempts, then locks of `60 s · 2^(k-1)` up to a week; unusable after 20 until the
+      primary sets a new PIN.
+    - The comparison is constant-time.
+  - **Passkeys.** Songbird's own verifier (about 400 lines, fuzzed): ES256 and EdDSA; no
+    attestation trusted; user verification required by default; signature counters
+    compare-and-swapped. Registration takes a single-use challenge. The link assertion's
+    challenge is derived from the link transcript, so it needs no server state and cannot be
+    replayed onto another link.
+  - **Only the primary** manages factors.
+  - **Multiple accounts.** Each account on an installation is its own account on the server, with
+    nothing shared. A shared APNs token links them at the push service; this is documented, and
+    per-account registrations are used where the platform allows.
+- Evidence:
+  - the W3C WebAuthn Level 3 test vectors (ES256 with no attestation, Ed25519 with packed
+    attestation) pass, with their refusals;
+  - `racing_pin_guesses_never_exceed_the_free_attempts` (40 parallel guesses: 4 checked);
+  - live HTTP tests for PIN lockout, passkey linking and account isolation;
+  - fuzz `devices` (now including WebAuthn).
+- Consequences: no new dependency (`serde_json` is added to `songbird-keys` from the workspace).
+  `[api.keys.devices]` gains PIN and WebAuthn settings, and passkeys stay off (503) until
+  `rp_id` is set.
 
 ## D-0052 — Prompt 3, milestone 4: QR provisioning, linking with a confirmation the server cannot forge, and a signed, versioned device list
 

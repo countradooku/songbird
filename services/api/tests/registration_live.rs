@@ -125,6 +125,8 @@ async fn stack_with(reg: Option<RegistrationSettings>) -> Option<Stack> {
         registration,
         usernames: None,
         keys: None,
+        kt: None,
+        profiles: None,
         devices: None,
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

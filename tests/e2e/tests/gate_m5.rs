@@ -249,6 +249,8 @@ async fn account_deletion_is_verified_across_every_store() {
         registration: None,
         usernames: None,
         keys: None,
+        kt: None,
+        profiles: None,
         devices: None,
     });
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -549,6 +551,8 @@ async fn device_removal_is_verified_across_every_store_and_spares_the_rest() {
         registration: None,
         usernames: None,
         keys: None,
+        kt: None,
+        profiles: None,
         devices: Some(
             songbird_api::devices::Devices::new(
                 songbird_api::config::DeviceSettings::default(),
@@ -806,6 +810,8 @@ async fn an_offline_device_receives_a_push_end_to_end() {
         registration: None,
         usernames: None,
         keys: None,
+        kt: None,
+        profiles: None,
         devices: None,
     });
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1024,6 +1030,8 @@ async fn m5_numbers() {
         registration: None,
         usernames: None,
         keys: None,
+        kt: None,
+        profiles: None,
         devices: None,
     });
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

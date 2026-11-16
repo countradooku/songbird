@@ -34,7 +34,10 @@ use songbird_surreal::Value;
 use songbird_types::{AccountId, DeviceId, JobId};
 
 pub mod devices;
+pub mod gdpr;
 pub mod journal;
+pub mod kt;
+pub mod profile;
 pub use db::{Db, DbError, SurrealSettings};
 
 /// Ed25519 public key length.
@@ -101,6 +104,47 @@ DEFINE FIELD IF NOT EXISTS device ON ltoken TYPE bytes;
 DEFINE FIELD IF NOT EXISTS expires ON ltoken TYPE datetime;
 DEFINE INDEX IF NOT EXISTS ltoken_account ON ltoken FIELDS account;
 DEFINE INDEX IF NOT EXISTS ltoken_expires ON ltoken FIELDS expires;
+DEFINE FIELD IF NOT EXISTS pin ON account TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS pin_tries ON account TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS pin_lock ON account TYPE option<datetime>;
+DEFINE TABLE IF NOT EXISTS passkey SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS account ON passkey TYPE bytes;
+DEFINE FIELD IF NOT EXISTS cid ON passkey TYPE bytes;
+DEFINE FIELD IF NOT EXISTS key ON passkey TYPE bytes;
+DEFINE FIELD IF NOT EXISTS count ON passkey TYPE int;
+DEFINE FIELD IF NOT EXISTS at ON passkey TYPE datetime;
+DEFINE INDEX IF NOT EXISTS passkey_account ON passkey FIELDS account;
+DEFINE FIELD IF NOT EXISTS profile ON account TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS profile_v ON account TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS uak ON account TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS uak_open ON account TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS avatar ON account TYPE option<bytes>;
+DEFINE TABLE IF NOT EXISTS avatar SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS account ON avatar TYPE bytes;
+DEFINE FIELD IF NOT EXISTS at ON avatar TYPE datetime;
+DEFINE FIELD IF NOT EXISTS replaced_at ON avatar TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS avatar_replaced ON avatar FIELDS replaced_at;
+DEFINE INDEX IF NOT EXISTS avatar_account ON avatar FIELDS account;
+DEFINE INDEX IF NOT EXISTS avatar_at ON avatar FIELDS at;
+DEFINE FIELD IF NOT EXISTS kt_gen ON account TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS kt_logged ON account TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS kt_salt ON account TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS kt_v1 ON account TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS kt_v2 ON account TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS kt_v3 ON account TYPE option<bytes>;
+DEFINE INDEX IF NOT EXISTS account_kt ON account FIELDS kt_gen;
+DEFINE TABLE IF NOT EXISTS ktleaf SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS leaf ON ktleaf TYPE bytes;
+DEFINE FIELD IF NOT EXISTS subject ON ktleaf TYPE bytes;
+DEFINE INDEX IF NOT EXISTS ktleaf_subject ON ktleaf FIELDS subject;
+DEFINE TABLE IF NOT EXISTS ktnode SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS h ON ktnode TYPE bytes;
+DEFINE FIELD IF NOT EXISTS last_seen ON account TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS inactive_months ON account TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS inact_warned ON account TYPE option<int>;
+DEFINE INDEX IF NOT EXISTS account_last_seen ON account FIELDS last_seen;
+DEFINE TABLE IF NOT EXISTS kt SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS size ON kt TYPE int;
 DEFINE TABLE IF NOT EXISTS directory SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS version ON directory TYPE int;
 DEFINE TABLE IF NOT EXISTS push_token SCHEMAFULL;
@@ -351,7 +395,7 @@ pub struct Remnants {
     pub grants: u64,
     /// Usernames still naming the account.
     pub usernames: u64,
-    /// Username links and link tokens of the account.
+    /// Username links, link tokens, passkeys and avatar records of the account.
     pub links: u64,
     /// One-time prekeys (both kinds) and single-use KeyPackages of the devices.
     pub prekeys: u64,
@@ -442,7 +486,8 @@ impl Registry {
             .db
             .query(
                 "BEGIN TRANSACTION;
-                 CREATE account:[$a] SET at = time::now(), deleting = false RETURN NONE;
+                 CREATE account:[$a] SET at = time::now(), deleting = false, last_seen = time::now()
+                   RETURN NONE;
                  FOR $d IN $devices {
                    CREATE device:[$d[0]] SET account = $a, key = $d[1], disabled = false,
                      prim = $d[2], at = time::now() RETURN NONE;
@@ -491,7 +536,7 @@ impl Registry {
             "BEGIN TRANSACTION;
              {invite_sql}
              CREATE account:[$a] SET at = time::now(), deleting = false, identity = $identity,
-               invites = $allowance RETURN NONE;
+               invites = $allowance, kt_gen = 1, last_seen = time::now() RETURN NONE;
              CREATE device:[$d] SET account = $a, key = $k, disabled = false, prim = true,
                at = time::now() RETURN NONE;
              UPDATE directory:v SET version += 1 RETURN NONE;
@@ -744,7 +789,7 @@ impl Registry {
                DELETE ulink WHERE account = $a RETURN NONE;
              };
              UPSERT username:[$h] SET account = $a, held_until = NONE RETURN NONE;
-             UPDATE account:[$a] SET username = $h RETURN NONE;
+             UPDATE account:[$a] SET username = $h, kt_gen = (kt_gen ?? 0) + 1 RETURN NONE;
              COMMIT TRANSACTION;";
         self.retrying(sql, || {
             vec![
@@ -773,7 +818,7 @@ impl Registry {
                  held_until = time::now() + duration::from_secs($hold) RETURN NONE;
              };
              DELETE ulink WHERE account = $a RETURN NONE;
-             UPDATE account:[$a] SET username = NONE RETURN NONE;
+             UPDATE account:[$a] SET username = NONE, kt_gen = (kt_gen ?? 0) + 1 RETURN NONE;
              COMMIT TRANSACTION;";
         self.retrying(sql, || {
             vec![
@@ -1657,6 +1702,8 @@ impl Registry {
                    WHERE account = $a RETURN NONE;
                  DELETE ulink WHERE account = $a RETURN NONE;
                  DELETE ltoken WHERE account = $a RETURN NONE;
+                 DELETE passkey WHERE account = $a RETURN NONE;
+                 DELETE avatar WHERE account = $a RETURN NONE;
                  DELETE account:[$a] RETURN NONE;
                  UPDATE directory:v SET version += 1 RETURN NONE;
                  COMMIT TRANSACTION;",
@@ -1690,7 +1737,9 @@ impl Registry {
                  RETURN count(SELECT id FROM upload_grant WHERE device IN $ds);
                  RETURN count(SELECT id FROM username WHERE account = $a);
                  RETURN count(SELECT id FROM ulink WHERE account = $a)
-                   + count(SELECT id FROM ltoken WHERE account = $a);
+                   + count(SELECT id FROM ltoken WHERE account = $a)
+                   + count(SELECT id FROM passkey WHERE account = $a)
+                   + count(SELECT id FROM avatar WHERE account = $a);
                  RETURN count(SELECT id FROM otpk WHERE device IN $ds)
                    + count(SELECT id FROM otkem WHERE device IN $ds)
                    + count(SELECT id FROM mlskp WHERE device IN $ds);",

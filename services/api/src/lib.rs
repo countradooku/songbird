@@ -11,13 +11,17 @@
 //! | `PUT`, `GET /v1/keypackages`; `POST /v1/keypackages/fetch` | MLS KeyPackages: upload, counts, fetch ([`keys`]) |
 //! | `POST /v1/provisioning`; `PUT`, `GET /v1/provisioning/<channel>` | The QR provisioning channel ([`devices`]; open and read unsigned) |
 //! | `POST /v1/devices/link-token`; `POST /v1/devices/link` | Linking a new device ([`devices`]; the link itself unsigned, both keys proven) |
+//! | `PUT /v1/profile`; `POST /v1/profile/fetch`; `PUT`, `GET /v1/profile/avatar[/<id>]` | Encrypted profiles and avatars ([`profiles`]) |
+//! | `GET /v1/certificate`; `PUT /v1/messages/sealed` | Sealed sender ([`profiles`]; the sealed send unsigned, authorized by access keys) |
+//! | `GET /v1/kt/head`; `POST /v1/kt/account`; `POST /v1/kt/consistency` | Key transparency ([`kt`]) |
 //! | `GET /v1/devices`; `PUT /v1/devices/list`; `POST /v1/devices/list/fetch`; `DELETE /v1/devices/self` | The signed device list and removal ([`devices`]) |
 //! | `PUT /v1/push` | Registers the device's push channel, sealed to the push service's key |
 //! | `DELETE /v1/push` | Removes it |
 //! | `POST /v1/attachments` | An upload grant: exact (padded) size and recipient fetches due |
 //! | `PUT /v1/attachments/<id>` | The upload, streamed to `RustFS`; exactly the granted size |
 //! | `GET /v1/attachments/<id>` | A download; each completed one counts a fetch, the last deletes |
-//! | `DELETE /v1/account` | Deletes the device's account from every store (outbox job) |
+//! | `DELETE /v1/account` | Deletes the device's account from every store (outbox job; the primary only) |
+//! | `GET /v1/account/export`; `PUT /v1/account/inactivity` | GDPR export; the inactivity period (the primary only) |
 //! | `PUT /v1/messages` | A WebSocket `Send` frame, for clients with no open socket; answers its `SendResult` ([`messages`]) |
 //!
 //! Every request but the two registration steps, opening and reading a provisioning channel and
@@ -34,7 +38,9 @@ pub mod client;
 pub mod config;
 pub mod devices;
 pub mod keys;
+pub mod kt;
 pub mod messages;
+pub mod profiles;
 pub mod registration;
 pub mod server;
 pub mod usernames;
@@ -96,6 +102,8 @@ pub struct ApiMetrics {
     pub keys: keys::KeyMetrics,
     /// Devices.
     pub devices: devices::DeviceMetrics,
+    /// Profiles and sealed sender.
+    pub profiles: profiles::ProfileMetrics,
 }
 
 impl ApiMetrics {
@@ -152,6 +160,7 @@ impl ApiMetrics {
         self.usernames.register(m)?;
         self.keys.register(m)?;
         self.devices.register(m)?;
+        self.profiles.register(m)?;
         self.send.register(m, "api")
     }
 }
@@ -186,6 +195,10 @@ pub struct App {
     pub keys: Option<keys::KeyDirectory>,
     /// Devices: provisioning, linking, the signed list (absent: those endpoints answer 503).
     pub devices: Option<devices::Devices>,
+    /// Encrypted profiles and sealed sender (absent: those endpoints answer 503).
+    pub profiles: Option<profiles::Profiles>,
+    /// Key transparency (absent: those endpoints answer 503).
+    pub kt: Option<kt::Transparency>,
 }
 
 impl std::fmt::Debug for App {
@@ -368,6 +381,14 @@ impl App {
                 self.delete_account(device).await
             }
             (&Method::PUT, "/v1/messages", None) => self.put_message(req).await,
+            (_, p, None)
+                if p == "/v1/messages/sealed"
+                    || p == "/v1/certificate"
+                    || p == "/v1/profile"
+                    || p.starts_with("/v1/profile/") =>
+            {
+                self.profiles(req).await
+            }
             (&Method::POST, "/v1/registration/challenge", None) => {
                 let (r, peer) = self.registration_and_peer(&req)?;
                 Ok(outcome(r.challenge(&self.hot, peer).await))
@@ -391,6 +412,8 @@ impl App {
                 "/v1/keys" | "/v1/keys/fetch" | "/v1/keypackages" | "/v1/keypackages/fetch",
                 None,
             ) => self.keys(req).await,
+            (_, p, None) if p.starts_with("/v1/account/") => self.factors(req).await,
+            (_, p, None) if p.starts_with("/v1/kt/") => self.kt(req).await,
             (_, p, None) if p.starts_with("/v1/provisioning") || p.starts_with("/v1/devices") => {
                 self.devices(req).await
             }
@@ -412,6 +435,225 @@ impl App {
             .get::<registration::Peer>()
             .ok_or(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
         Ok((r, peer.0))
+    }
+
+    /// `/v1/profile…`, `/v1/certificate` and `/v1/messages/sealed` ([`profiles`]).
+    async fn profiles(self: &Arc<Self>, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let p = self.profiles.as_ref().ok_or_else(unavailable)?;
+        let method = req.method().clone();
+        let path = req.uri().path().to_owned();
+        // Who may change account-wide state: a listed (not pending) device of the account.
+        let listed = |device: DeviceId| async move {
+            let row = self
+                .registry
+                .device(&device)
+                .await
+                .map_err(|_| unavailable())?
+                .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+            Ok::<_, Refusal>((row.account, !row.pending))
+        };
+        let out = match (&method, path.as_str()) {
+            (&Method::PUT, "/v1/messages/sealed") => {
+                let peer = req
+                    .extensions()
+                    .get::<registration::Peer>()
+                    .map(|x| x.0)
+                    .ok_or_else(unavailable)?;
+                let key = req
+                    .headers()
+                    .get("unidentified-access-key")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| {
+                        let mut k = [0u8; 16];
+                        hex::decode_to_slice(v, &mut k).ok().map(|()| k)
+                    });
+                let max = self
+                    .messages
+                    .as_ref()
+                    .map_or(0, |m| m.limits.max_send_bytes);
+                let body = bounded_body(req, max.max(1)).await?;
+                p.sealed_send(
+                    &self.registry,
+                    &self.hot,
+                    self.messages.as_ref(),
+                    peer,
+                    key,
+                    body,
+                )
+                .await
+            }
+            (&Method::GET, "/v1/certificate") => {
+                let (device, _) = self.authenticate_json(req).await?;
+                match listed(device).await? {
+                    (a, true) => p.certificate(&self.registry, &a, &device).await,
+                    (_, false) => return Ok(pending_refusal()),
+                }
+            }
+            (&Method::PUT, "/v1/profile") => {
+                let (device, body) = self
+                    .authenticate_body(req, songbird_proto::profile::MAX_PROFILE + 64)
+                    .await?;
+                match listed(device).await? {
+                    (a, true) => p.put(&self.registry, &a, &body).await,
+                    (_, false) => return Ok(pending_refusal()),
+                }
+            }
+            (&Method::POST, "/v1/profile/fetch") => {
+                let (device, body) = self.authenticate_json(req).await?;
+                let (a, _) = listed(device).await?;
+                p.fetch(&self.registry, &self.hot, &a, &body).await
+            }
+            (&Method::PUT, "/v1/profile/avatar") => {
+                let (device, body) = self
+                    .authenticate_body(req, songbird_proto::profile::MAX_AVATAR)
+                    .await?;
+                match listed(device).await? {
+                    (a, true) => p.put_avatar(&self.registry, &self.s3, &a, body).await,
+                    (_, false) => return Ok(pending_refusal()),
+                }
+            }
+            (&Method::GET, path) if path.starts_with("/v1/profile/avatar/") => {
+                let mut id = [0u8; 32];
+                hex::decode_to_slice(path.trim_start_matches("/v1/profile/avatar/"), &mut id)
+                    .map_err(|_| Refusal::Status(StatusCode::NOT_FOUND))?;
+                let (device, _) = self.authenticate_json(req).await?;
+                let (a, _) = listed(device).await?;
+                if let Err(o) = p.avatar_allowed(&self.registry, &self.hot, &a, &id).await {
+                    return Ok(profile_outcome(o));
+                }
+                return self.serve_avatar(&id).await;
+            }
+            _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
+        };
+        Ok(profile_outcome(out))
+    }
+
+    /// `/v1/kt/…` ([`kt`]): signed like every device request.
+    async fn kt(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let t = self.kt.as_ref().ok_or_else(unavailable)?;
+        let method = req.method().clone();
+        let path = req.uri().path().to_owned();
+        let (device, body) = self.authenticate_json(req).await?;
+        let account = self
+            .registry
+            .device(&device)
+            .await
+            .map_err(|_| unavailable())?
+            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?
+            .account;
+        let out = match (&method, path.as_str()) {
+            (&Method::GET, "/v1/kt/head") => t.head(&self.registry).await,
+            (&Method::POST, "/v1/kt/account") => {
+                t.account(&self.registry, &self.hot, &account, &body).await
+            }
+            (&Method::POST, "/v1/kt/consistency") => {
+                t.consistency(&self.registry, &self.hot, &account, &body)
+                    .await
+            }
+            _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
+        };
+        Ok(match out {
+            kt::Outcome::Json(v) => json(StatusCode::OK, &v),
+            kt::Outcome::Blob(b) => profile_outcome(profiles::Outcome::Blob(b)),
+            kt::Outcome::Malformed(w) => profile_outcome(profiles::Outcome::Malformed(w)),
+            kt::Outcome::NotFound => empty(StatusCode::NOT_FOUND),
+            kt::Outcome::Throttled(w) => profile_outcome(profiles::Outcome::Throttled(w)),
+            kt::Outcome::Unavailable => empty(StatusCode::SERVICE_UNAVAILABLE),
+        })
+    }
+
+    /// An avatar object, streamed.
+    async fn serve_avatar(&self, id: &[u8; 32]) -> Result<Response<Body>, Refusal> {
+        let got = match self.s3.get_object(&profiles::avatar_name(id), None).await {
+            Ok(g) => g,
+            Err(songbird_s3::Error::NotFound) => {
+                return Err(Refusal::Status(StatusCode::NOT_FOUND));
+            }
+            Err(_) => return Err(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE)),
+        };
+        let counted = Counted {
+            inner: got.body,
+            left: got.length,
+            on_done: None,
+        };
+        let mut r = Response::new(StreamBody::new(counted).boxed_unsync());
+        r.headers_mut().insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        r.headers_mut()
+            .insert(CONTENT_LENGTH, HeaderValue::from(got.length));
+        Ok(r)
+    }
+
+    /// `/v1/account/…`: second factors ([`devices`], M4b), the export and the inactivity period
+    /// (M7); the primary's to change.
+    async fn factors(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let d = self.devices.as_ref().ok_or_else(unavailable)?;
+        let method = req.method().clone();
+        let path = req.uri().path().to_owned();
+        let (device, body) = self.authenticate_json(req).await?;
+        let row = self
+            .registry
+            .device(&device)
+            .await
+            .map_err(|_| unavailable())?
+            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+        let primary = row.primary.then_some(row.account);
+        let not_primary = || devices::Outcome::Forbidden("primary");
+        let out = match (&method, path.as_str()) {
+            (&Method::PUT, "/v1/account/pin") => match primary {
+                Some(a) => d.set_pin(&self.registry, &a, &body).await,
+                None => not_primary(),
+            },
+            (&Method::DELETE, "/v1/account/pin") => match primary {
+                Some(a) => d.clear_pin(&self.registry, &a).await,
+                None => not_primary(),
+            },
+            (&Method::POST, "/v1/account/passkeys/challenge") => match primary {
+                Some(a) => d.passkey_challenge(&self.hot, &a).await,
+                None => not_primary(),
+            },
+            (&Method::PUT, "/v1/account/passkeys") => match primary {
+                Some(a) => d.add_passkey(&self.registry, &self.hot, &a, &body).await,
+                None => not_primary(),
+            },
+            (&Method::DELETE, "/v1/account/passkeys") => match primary {
+                Some(a) => d.delete_passkey(&self.registry, &a, &body).await,
+                None => not_primary(),
+            },
+            (&Method::GET, "/v1/account/factors") => d.factors(&self.registry, &row.account).await,
+            // GDPR (M7): the export and the inactivity period, the primary's.
+            (&Method::GET, "/v1/account/export") => match primary {
+                Some(a) => match self.registry.export(&a, &self.push_index_secret).await {
+                    Ok(v) => devices::Outcome::Json(v),
+                    Err(_) => devices::Outcome::Unavailable,
+                },
+                None => not_primary(),
+            },
+            (&Method::PUT, "/v1/account/inactivity") => match primary {
+                Some(a) => {
+                    let months = serde_json::from_slice::<serde_json::Value>(&body)
+                        .ok()
+                        .and_then(|v| v.get("months").and_then(serde_json::Value::as_u64))
+                        .and_then(|m| u32::try_from(m).ok())
+                        .filter(|m| songbird_accounts::gdpr::INACTIVITY_CHOICES.contains(m));
+                    match months {
+                        Some(m) => match self.registry.set_inactivity(&a, m).await {
+                            Ok(()) => devices::Outcome::Done,
+                            Err(_) => devices::Outcome::Unavailable,
+                        },
+                        None => devices::Outcome::Malformed("months"),
+                    }
+                }
+                None => not_primary(),
+            },
+            _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
+        };
+        Ok(device_outcome(out))
     }
 
     /// `/v1/provisioning…` and `/v1/devices…` ([`devices`]).
@@ -451,7 +693,7 @@ impl App {
                     .await
             }
             (&Method::POST, "/v1/devices/link", None) => {
-                let body = bounded_body(req, songbird_proto::devices::LINK_LEN).await?;
+                let body = bounded_body(req, songbird_proto::devices::MAX_LINK_LEN).await?;
                 d.link(
                     &self.registry,
                     &self.hot,
@@ -851,6 +1093,7 @@ impl App {
             .device(&s.device)
             .await
             .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
+        let account = row.map(|r| r.account);
         let key = row.filter(|r| !r.disabled).map(|r| r.key);
         let t = auth::transcript(
             &self.server_name,
@@ -880,7 +1123,39 @@ impl App {
         if matches!(fresh, redis::Value::Nil) {
             return Err(unauthorized());
         }
+        if let Some(a) = account {
+            self.touch(&a).await;
+        }
         Ok(s.device)
+    }
+
+    /// Records that the account is in use, at most once a day (inactivity deletion, M7): a
+    /// keyed daily mark in `valkey-hot`, then the registry. Best effort.
+    async fn touch(&self, account: &songbird_types::AccountId) {
+        let k = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, &self.push_index_secret);
+        let mut ctx = aws_lc_rs::hmac::Context::with_key(&k);
+        ctx.update(b"songbird.v1/last-seen\0");
+        ctx.update(account.as_bytes());
+        let mark = format!(
+            "ls:{}",
+            hex::encode(ctx.sign().as_ref().get(..16).unwrap_or_default())
+        );
+        let first: Result<redis::Value, _> = self
+            .hot
+            .query(
+                redis::cmd("SET")
+                    .arg(mark)
+                    .arg(1)
+                    .arg("NX")
+                    .arg("EX")
+                    .arg(86_400),
+            )
+            .await;
+        if matches!(first, Ok(redis::Value::Okay))
+            && let Err(e) = self.registry.touch(account).await
+        {
+            tracing::warn!(error = %e, "last-seen not recorded");
+        }
     }
 
     async fn put_push(&self, device: DeviceId, body: &[u8]) -> Result<Response<Body>, Refusal> {
@@ -1061,6 +1336,42 @@ impl App {
     }
 }
 
+/// The HTTP answer for a profile outcome.
+fn profile_outcome(o: profiles::Outcome) -> Response<Body> {
+    use profiles::Outcome;
+    let bytes = |b: Bytes| {
+        let mut r = Response::new(Full::new(b).map_err(|e| match e {}).boxed_unsync());
+        r.headers_mut().insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        r
+    };
+    match o {
+        Outcome::Done => empty(StatusCode::NO_CONTENT),
+        Outcome::Json(v) => json(StatusCode::OK, &v),
+        Outcome::Blob(b) | Outcome::Sent(b) => bytes(b),
+        Outcome::Malformed(what) => json(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({ "error": what }),
+        ),
+        Outcome::Unauthorized => empty(StatusCode::UNAUTHORIZED),
+        Outcome::NotFound => empty(StatusCode::NOT_FOUND),
+        Outcome::Conflict(what) => {
+            json(StatusCode::CONFLICT, &serde_json::json!({ "error": what }))
+        }
+        Outcome::Throttled(wait_us) => {
+            let mut r = empty(StatusCode::TOO_MANY_REQUESTS);
+            let secs = wait_us.div_ceil(1_000_000).max(1);
+            if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
+                r.headers_mut().insert(hyper::header::RETRY_AFTER, v);
+            }
+            r
+        }
+        Outcome::Unavailable => empty(StatusCode::SERVICE_UNAVAILABLE),
+    }
+}
+
 /// 403 for an account-wide change from a pending device (D-0052).
 fn pending_refusal() -> Response<Body> {
     json(
@@ -1112,6 +1423,21 @@ fn device_outcome(o: devices::Outcome) -> Response<Body> {
         Outcome::NotFound => empty(StatusCode::NOT_FOUND),
         Outcome::Conflict(what) => {
             json(StatusCode::CONFLICT, &serde_json::json!({ "error": what }))
+        }
+        Outcome::Forbidden(what) => {
+            json(StatusCode::FORBIDDEN, &serde_json::json!({ "error": what }))
+        }
+        Outcome::Locked(left) => {
+            let mut r = json(
+                StatusCode::FORBIDDEN,
+                &serde_json::json!({ "error": "locked", "retry_after": left }),
+            );
+            if let Some(secs) = left
+                && let Ok(v) = HeaderValue::from_str(&secs.to_string())
+            {
+                r.headers_mut().insert(hyper::header::RETRY_AFTER, v);
+            }
+            r
         }
         Outcome::Throttled(wait_us) => {
             let mut r = empty(StatusCode::TOO_MANY_REQUESTS);

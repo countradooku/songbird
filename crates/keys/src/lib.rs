@@ -18,7 +18,9 @@
 pub mod kem;
 pub mod mls;
 pub mod provisioning;
+pub mod sealed;
 pub mod username;
+pub mod webauthn;
 pub mod xeddsa;
 
 use aws_lc_rs::signature::{ED25519, UnparsedPublicKey};

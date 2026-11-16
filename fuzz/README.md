@@ -15,7 +15,9 @@ every decoder). The crate is outside the main workspace because it needs nightly
 | `username` | username proof verification and parser (Prompt 3) | `songbird-keys` |
 | `keypackages` | MLS KeyPackage checks; KeyPackage upload and fetch decoders (Prompt 3) | `songbird-keys`, `songbird-proto` |
 | `prekeys` | key directory upload and bundle decoders; XEdDSA, X25519 and ML-KEM-1024 checks (Prompt 3) | `songbird-proto`, `songbird-keys` |
-| `devices` | signed device list, link request and provisioning decoders; provisioning envelopes (Prompt 3) | `songbird-proto`, `songbird-keys` |
+| `devices` | signed device list, link request and provisioning decoders; provisioning envelopes; WebAuthn checks (Prompt 3) | `songbird-proto`, `songbird-keys` |
+| `profile` | profile upload and sender-certificate decoders (Prompt 3) | `songbird-proto` |
+| `kt` | transparency leaf and tree-head decoders; inclusion and consistency verification (Prompt 3) | `songbird-kt` |
 
 ```bash
 cargo xtask fuzz --secs 60            # every target, 60 s each (CI fast checks do not fuzz)

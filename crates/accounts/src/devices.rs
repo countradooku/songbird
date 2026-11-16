@@ -278,7 +278,8 @@ impl Registry {
                RETURN NONE;
              UPDATE device SET pending = NONE, lconf = NONE
                WHERE account = $a AND meta::id(id)[0] INSIDE $ids RETURN NONE;
-             UPDATE account:[$a] SET dlist = $blob, dlist_v = $v RETURN NONE;
+             UPDATE account:[$a] SET dlist = $blob, dlist_v = $v, kt_gen = (kt_gen ?? 0) + 1
+               RETURN NONE;
              IF array::len($removed) > 0 {
                UPSERT outbox:[$j] SET job = $job, at = time::now() RETURN NONE;
              };
@@ -523,6 +524,350 @@ impl Registry {
                 "DELETE (SELECT VALUE id FROM ltoken WHERE expires <= time::now() LIMIT $n)
                    RETURN NONE;",
                 vec![var("n", int(u64::try_from(limit).unwrap_or(u64::MAX)))],
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+// ----- second factors (Prompt 3, M4b, D-0053) -----
+
+/// A PIN attempt could not be made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinRefusal {
+    /// The account has no PIN.
+    NoPin,
+    /// Locked: retry after this many seconds (`None`: until the primary sets a new PIN).
+    Locked(Option<u64>),
+}
+
+/// A registered passkey (stored form of `songbird_keys::webauthn::Credential`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredPasskey {
+    /// Credential ID.
+    pub id: Vec<u8>,
+    /// `CredentialKey::to_bytes`.
+    pub key: Vec<u8>,
+    /// Signature counter.
+    pub count: u32,
+}
+
+/// The account's second factors.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Factors {
+    /// A PIN is set.
+    pub pin: bool,
+    /// Seconds the PIN stays locked, if it is.
+    pub pin_locked: Option<u64>,
+    /// PIN attempts spent since the last correct one.
+    pub pin_tries: u32,
+    /// Registered passkeys' credential IDs.
+    pub passkeys: Vec<Vec<u8>>,
+}
+
+impl Factors {
+    /// Whether linking needs a second factor.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.pin || !self.passkeys.is_empty()
+    }
+}
+
+fn passkey_key(id: &[u8]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out.copy_from_slice(aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, id).as_ref());
+    out
+}
+
+impl Registry {
+    /// The account an unexpired link token belongs to (the token is not consumed).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn link_token_account(
+        &self,
+        token_hash: &[u8; 32],
+    ) -> Result<Option<AccountId>, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "SELECT VALUE account FROM ONLY ltoken:[$t] WHERE expires > time::now();",
+                vec![var("t", bytes(token_hash))],
+            )
+            .await?;
+        Ok(id16(&v).map(AccountId::from_bytes))
+    }
+
+    /// Sets (or replaces) the account's PIN verifier and clears its attempts and lock.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn set_pin(
+        &self,
+        account: &AccountId,
+        verifier: Option<&[u8]>,
+    ) -> Result<(), RegistryError> {
+        let sql = if verifier.is_some() {
+            "UPDATE account:[$a] SET pin = $v, pin_tries = 0, pin_lock = NONE RETURN NONE;"
+        } else {
+            "UPDATE account:[$a] SET pin = NONE, pin_tries = NONE, pin_lock = NONE RETURN NONE;"
+        };
+        self.db
+            .query(
+                sql,
+                vec![
+                    var("a", bytes(account.as_bytes())),
+                    var("v", bytes(verifier.unwrap_or_default())),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Spends one PIN attempt **before** it is checked (so parallel guesses cannot exceed the
+    /// limit), returning the verifier. The first `free` attempts are unthrottled; attempt
+    /// `free + k` locks further ones for `base · 2^(k-1)` (at most a week); after `max`
+    /// attempts the PIN is unusable until the primary sets a new one. A correct PIN resets the
+    /// count ([`Registry::pin_ok`]).
+    ///
+    /// # Errors
+    /// [`RegistryError`]; the refusal as `Ok(Err(..))`.
+    pub async fn spend_pin_attempt(
+        &self,
+        account: &AccountId,
+        free: u32,
+        base: Duration,
+        max: u32,
+    ) -> Result<Result<Vec<u8>, PinRefusal>, RegistryError> {
+        let sql = "BEGIN TRANSACTION;
+             LET $acc = (SELECT pin, pin_tries, pin_lock FROM ONLY account:[$a]);
+             IF $acc = NONE OR $acc.pin = NONE { THROW 'songbird:nopin' };
+             IF ($acc.pin_tries ?? 0) >= $max { THROW 'songbird:dead' };
+             IF $acc.pin_lock != NONE AND $acc.pin_lock > time::now() { THROW 'songbird:locked' };
+             LET $t = ($acc.pin_tries ?? 0) + 1;
+             LET $wait = IF $t > $free {
+               <int> math::min([$base * math::pow(2, $t - $free - 1), 604800])
+             } ELSE { 0 };
+             UPDATE account:[$a] SET pin_tries = $t,
+               pin_lock = IF $wait > 0 { time::now() + duration::from_secs($wait) } ELSE { NONE }
+               RETURN NONE;
+             RETURN $acc.pin;
+             COMMIT TRANSACTION;";
+        let r = self
+            .retry(
+                sql,
+                || {
+                    vec![
+                        var("a", bytes(account.as_bytes())),
+                        var("free", int(u64::from(free))),
+                        var("base", int(base.as_secs())),
+                        var("max", int(u64::from(max))),
+                    ]
+                },
+                |_| None,
+                |v| {
+                    Ok(v.into_iter()
+                        .rev()
+                        .find_map(|x| x.as_bytes().map(|b| b.to_vec())))
+                },
+            )
+            .await;
+        match r {
+            Ok(Some(v)) => Ok(Ok(v)),
+            Ok(None) => Err(RegistryError::Shape),
+            Err(RegistryError::Db(DbError::Statement(k))) => match k.as_str() {
+                "Thrown:nopin" => Ok(Err(PinRefusal::NoPin)),
+                "Thrown:dead" => Ok(Err(PinRefusal::Locked(None))),
+                "Thrown:locked" => {
+                    let left = self.pin_lock_secs(account).await?;
+                    Ok(Err(PinRefusal::Locked(Some(left.max(1)))))
+                }
+                _ => Err(RegistryError::Db(DbError::Statement(k))),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn pin_lock_secs(&self, account: &AccountId) -> Result<u64, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "RETURN IF account:[$a].pin_lock > time::now()
+                   { duration::secs(account:[$a].pin_lock - time::now()) } ELSE { 0 };",
+                vec![var("a", bytes(account.as_bytes()))],
+            )
+            .await?;
+        Ok(crate::first_int(&v)
+            .and_then(|s| u64::try_from(s).ok())
+            .unwrap_or(1))
+    }
+
+    /// A correct PIN: attempts and lock cleared.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn pin_ok(&self, account: &AccountId) -> Result<(), RegistryError> {
+        self.db
+            .query(
+                "UPDATE account:[$a] SET pin_tries = 0, pin_lock = NONE RETURN NONE;",
+                vec![var("a", bytes(account.as_bytes()))],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// The account's second factors.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn factors(&self, account: &AccountId) -> Result<Factors, RegistryError> {
+        let v = self
+            .db
+            .query(
+                "RETURN account:[$a].pin != NONE;
+                 RETURN account:[$a].pin_tries ?? 0;
+                 RETURN IF account:[$a].pin_lock > time::now() { true } ELSE { false };
+                 SELECT VALUE cid FROM passkey WHERE account = $a ORDER BY at;",
+                vec![var("a", bytes(account.as_bytes()))],
+            )
+            .await?;
+        let b = |i: usize| matches!(v.get(i), Some(Value::Bool(true)));
+        let tries = v.get(1).and_then(crate::first_int).unwrap_or(0);
+        let passkeys = v
+            .get(3)
+            .cloned()
+            .map(rows)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|x| x.as_bytes().map(|b| b.to_vec()))
+            .collect();
+        let locked = if b(2) {
+            Some(self.pin_lock_secs(account).await?.max(1))
+        } else {
+            None
+        };
+        Ok(Factors {
+            pin: b(0),
+            pin_locked: locked,
+            pin_tries: u32::try_from(tries).unwrap_or(u32::MAX),
+            passkeys,
+        })
+    }
+
+    /// Registers a passkey, at most `max` per account.
+    ///
+    /// # Errors
+    /// [`RegistryError::Full`], [`RegistryError::Duplicate`].
+    pub async fn add_passkey(
+        &self,
+        account: &AccountId,
+        p: &StoredPasskey,
+        max: u32,
+    ) -> Result<(), RegistryError> {
+        let sql = "BEGIN TRANSACTION;
+             UPDATE account:[$a] SET dgen = (dgen ?? 0) + 1 RETURN NONE;
+             IF count(SELECT id FROM passkey WHERE account = $a) >= $max { THROW 'songbird:full' };
+             CREATE passkey:[$a, $h] SET account = $a, cid = $cid, key = $k, count = $n,
+               at = time::now() RETURN NONE;
+             COMMIT TRANSACTION;";
+        self.retry(
+            sql,
+            || {
+                vec![
+                    var("a", bytes(account.as_bytes())),
+                    var("h", bytes(&passkey_key(&p.id))),
+                    var("cid", bytes(&p.id)),
+                    var("k", bytes(&p.key)),
+                    var("n", int(u64::from(p.count))),
+                    var("max", int(u64::from(max))),
+                ]
+            },
+            |k| match k {
+                "Thrown:full" => Some(RegistryError::Full),
+                k if k.contains("AlreadyExists") => Some(RegistryError::Duplicate),
+                _ => None,
+            },
+            |_| Ok(()),
+        )
+        .await
+    }
+
+    /// One of the account's passkeys.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn passkey(
+        &self,
+        account: &AccountId,
+        id: &[u8],
+    ) -> Result<Option<StoredPasskey>, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "SELECT cid, key, count FROM ONLY passkey:[$a, $h];",
+                vec![
+                    var("a", bytes(account.as_bytes())),
+                    var("h", bytes(&passkey_key(id))),
+                ],
+            )
+            .await?;
+        let (Some(cid), Some(key), Some(n)) = (
+            v.get("cid").and_then(|b| b.as_bytes()),
+            v.get("key").and_then(|b| b.as_bytes()),
+            v.get("count").and_then(Value::as_i64),
+        ) else {
+            return Ok(None);
+        };
+        Ok(Some(StoredPasskey {
+            id: cid.to_vec(),
+            key: key.to_vec(),
+            count: u32::try_from(n).unwrap_or(u32::MAX),
+        }))
+    }
+
+    /// Moves a passkey's counter from `old` to `new`; false if another assertion moved it first
+    /// (so one assertion is accepted once).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn bump_passkey(
+        &self,
+        account: &AccountId,
+        id: &[u8],
+        old: u32,
+        new: u32,
+    ) -> Result<bool, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "UPDATE passkey:[$a, $h] SET count = $new WHERE count = $old RETURN AFTER;",
+                vec![
+                    var("a", bytes(account.as_bytes())),
+                    var("h", bytes(&passkey_key(id))),
+                    var("old", int(u64::from(old))),
+                    var("new", int(u64::from(new))),
+                ],
+            )
+            .await?;
+        Ok(!rows(v).is_empty())
+    }
+
+    /// Removes one of the account's passkeys.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn delete_passkey(
+        &self,
+        account: &AccountId,
+        id: &[u8],
+    ) -> Result<(), RegistryError> {
+        self.db
+            .query(
+                "DELETE passkey:[$a, $h] RETURN NONE;",
+                vec![
+                    var("a", bytes(account.as_bytes())),
+                    var("h", bytes(&passkey_key(id))),
+                ],
             )
             .await?;
         Ok(())

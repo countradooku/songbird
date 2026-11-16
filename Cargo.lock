@@ -3094,11 +3094,14 @@ dependencies = [
  "aws-lc-rs",
  "bytes",
  "getrandom 0.4.3",
+ "hex",
  "proptest",
  "rustls",
  "rustls-pki-types",
  "serde",
+ "serde_json",
  "songbird-jobs",
+ "songbird-kt",
  "songbird-surreal",
  "songbird-types",
  "thiserror",
@@ -3166,6 +3169,7 @@ dependencies = [
  "songbird-accounts",
  "songbird-jobs",
  "songbird-keys",
+ "songbird-kt",
  "songbird-link",
  "songbird-mailbox",
  "songbird-pow",
@@ -3311,6 +3315,17 @@ version = "0.1.0"
 dependencies = [
  "aws-lc-rs",
  "curve25519-dalek",
+ "hex",
+ "proptest",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "songbird-kt"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
  "hex",
  "proptest",
  "thiserror",

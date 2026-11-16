@@ -3,4 +3,4 @@ allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-indexing-slicing-in-tests = true
 allow-print-in-tests = true
-doc-valid-idents = ["XEdDSA", "PQXDH", "KeyPackage", "KeyPackages", "KeyPackageRef", "OpenMLS", "LiveKit", "UnifiedPush", "SurrealDB", "OpenMLS", "OpenTofu", "WebSocket", "WebSockets", "OpenMetrics", "WhatsApp", ".."]
+doc-valid-idents = ["XEdDSA", "PQXDH", "KeyPackage", "KeyPackages", "KeyPackageRef", "OpenMLS", "LiveKit", "UnifiedPush", "SurrealDB", "OpenMLS", "OpenTofu", "WebSocket", "WebSockets", "OpenMetrics", "WhatsApp", "WebAuthn", "EdDSA", "ES256", ".."]

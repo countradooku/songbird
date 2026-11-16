@@ -154,6 +154,27 @@ async fn build_messages(
 ///
 /// # Errors
 /// A store is unreachable or a secret unreadable.
+/// `[api.profiles]` (Prompt 3, M5), if configured.
+fn profiles(
+    s: &ApiSettings,
+    metrics: &ApiMetrics,
+) -> Result<Option<songbird_api::profiles::Profiles>, BoxError> {
+    let Some(p) = &s.profiles else {
+        return Ok(None);
+    };
+    let cert = p
+        .certificate_key
+        .as_ref()
+        .map(songbird_types::SecretRef::resolve_key32)
+        .transpose()?;
+    Ok(Some(songbird_api::profiles::Profiles::new(
+        p.clone(),
+        &*p.secret.resolve_key32()?,
+        cert.as_deref(),
+        metrics.profiles.clone(),
+    )?))
+}
+
 async fn build(
     s: &ApiSettings,
     metrics: ApiMetrics,
@@ -216,7 +237,7 @@ async fn build(
                     metrics.keys.clone(),
                 )?),
                 Some(songbird_api::devices::Devices::new(
-                    k.devices,
+                    k.devices.clone(),
                     &k.throttle,
                     &secret,
                     seed.as_deref(),
@@ -225,6 +246,15 @@ async fn build(
             )
         }
         None => (None, None),
+    };
+    let profiles = profiles(s, &metrics)?;
+    let kt = match &s.kt {
+        Some(k) => Some(songbird_api::kt::Transparency::new(
+            k.clone(),
+            &*k.secret.resolve_key32()?,
+            &*k.log_key.resolve_key32()?,
+        )?),
+        None => None,
     };
     let app = Arc::new(App {
         server_name: s.server_name.clone(),
@@ -241,6 +271,8 @@ async fn build(
         usernames,
         keys,
         devices,
+        profiles,
+        kt,
     });
     Ok((app, tasks))
 }

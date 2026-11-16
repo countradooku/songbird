@@ -45,6 +45,12 @@ server in plaintext. Adding to this list requires the owner's approval.
 | Link token: SHA-256 of a random 32-byte token, the account and the device ID it reserves | Link exactly one new device, once | Until used, or ten minutes (expired ones swept); with the account | Prompt 3 (M4), D-0052; **approved by the owner on 2026-11-15** |
 | Provisioning channel in `valkey-hot`: a keyed hash (HMAC-SHA256, key derived from the key directory's secret) of a random channel ID, holding at most one sealed provisioning message (at most 4 KiB, sealed to the new device's key; the server cannot open it); no account or device ID | Carry the QR provisioning message from the primary to the new device | Until read (deleted on read) or ten minutes | Prompt 3 (M4), D-0052; **approved by the owner on 2026-11-15** |
 | Keyed hashes (same key) of an IP range or an account, with the next allowed time for channels, channel reads, link attempts, link tokens and list fetches, in `valkey-hot`; no identifier | Throttle provisioning and linking | At most the throttle window (about an hour at the defaults), then expired | Prompt 3 (M4), D-0052; keyed forms of data above; **approved by the owner on 2026-11-15** |
+| Two-step PIN verifier: random salt and Argon2id output under a pepper from the secrets store (not in the database or backups); attempts since the last correct PIN and the lock's end | Require the PIN to link a device (and to recover, Prompt 10) without it being guessable from the database | Until removed or replaced, or with the account | Prompt 3 (M4b), D-0053; **approved by the owner on 2026-11-16** |
+| Passkeys: credential ID, public key (ES256 or Ed25519), signature counter, registration time | Require a passkey to link a device (and to recover) | Until removed, or with the account | Prompt 3 (M4b), D-0053; **approved by the owner on 2026-11-16** |
+| Per account: the encrypted profile and its version, the unidentified-access key (16 bytes derived from the profile key; reveals nothing of it) and whether anyone may send to it sealed; encrypted avatar objects in RustFS with their random IDs and upload times | Serve profiles and avatars to contacts who hold the key; authorize sealed sends | Until replaced (avatars: an hour after replacement) or with the account | Prompt 3 (M5), D-0054; ciphertext and a derived key; **approved by the owner on 2026-11-16** |
+| Keyed hashes (HMAC-SHA256, key from the profiles secret) of a requesting account, an IP range or a recipient account, with the next allowed time for profile and avatar fetches and sealed sends, in `valkey-hot`; no identifier | Throttle fetches and sealed sends | At most the throttle window (about an hour), then expired | Prompt 3 (M5), D-0054; keyed forms; **approved by the owner on 2026-11-16** |
+| Key transparency log: per change, a leaf with the kind, a salted HMAC of the account (salt per account, deleted with it), SHA-256 of the identity key or device list or the username hash, and the time; the Merkle tree's hashes; per account the salt, the last logged values and generations | Let anyone check what the server vouches for, and detect a server that shows different keys to different people | The log is append-only and kept for the service's life; a deleted account's salt goes with it, which leaves its leaves unlinkable | Prompt 3 (M6), D-0055; **approved by the owner on 2026-11-16** |
+| Per account: last use (a day's precision), the chosen inactivity period and which warnings were sent; a keyed daily "seen" mark in `valkey-hot` (no identifier) | Delete accounts after the inactivity period the user chose, warning twice first | Last use until the next use or the account's deletion; the mark 24 hours | Prompt 3 (M7), D-0056; **approved by the owner on 2026-11-16** |
 | Deletion journal: per deleted account, an empty tombstone in the backup bucket named by the deletion time and HMAC-SHA256(journal key, account ID); no account ID | A restore must not bring a deleted account back | Write-once, 93 days (the longest backup retention) | Prompt 2 (M6), D-0041; **approved under the owner's delegation** |
 
 Prompt 1 adds two operational views, neither of which is user data on the server:
@@ -282,6 +288,50 @@ the key directory (M3) and key transparency (M6).
 | **A linked device, or one linked by phishing a QR scan and still pending, deletes the account or changes its username or invites** before the primary removes it | E, T | Phisher, thief of a linked device | Only the primary deletes the account, checked inside the deletion transaction; pending devices are refused every account-wide change (usernames, username key and link, invites) | `a_pending_device_changes_nothing_account_wide_and_only_the_primary_deletes` |
 | Flooding provisioning channels or link attempts | D | Anyone | Per-IP-range throttles on opening and reading channels and on linking; bounded message size and lifetime | `channels_and_links_are_throttled_per_range` |
 
+### 3.13 Second factors and multiple accounts (Prompt 3, milestone 4b)
+
+| Threat | STRIDE | Attacker | Mitigation | Test or proof |
+| --- | --- | --- | --- | --- |
+| **Linking by phishing a QR scan**: the victim's primary approves an attacker's device | S, E | Phisher | With a PIN or passkey set, the new device must present one; the passkey assertion is bound to this link's transcript (it cannot be replayed onto another link) | `a_pin_gates_linking_with_attempt_limits_and_lockout`; `a_passkey_registers_and_approves_a_link_bound_to_its_transcript` |
+| **Guessing the PIN online**, also in parallel | S | Anyone holding a link token | Every attempt counted before it is checked (account-row transaction); 5 free, then doubling locks, unusable after 20 until the primary sets a new PIN | `racing_pin_guesses_never_exceed_the_free_attempts` (40 parallel guesses: exactly 4 checked); `a_pin_gates_linking_with_attempt_limits_and_lockout` |
+| **Guessing the PIN offline** from a stolen database or backup | I | Database or backup thief | Argon2id with a pepper held only in the secrets store; without it the verifier cannot be searched | D-0053; the pepper's derivation in `devices.rs` |
+| A forged, replayed or cloned passkey assertion | S | Attacker with a copied credential or a recorded assertion | Signature over authenticator data and client data checked with the stored key; RP ID hash, origin, type and challenge checked; the counter must grow (compare and swap, so one assertion counts once) | W3C WebAuthn test vectors (`webauthn_vectors.rs`: other challenge, origin, RP ID, flipped signature or data, counter); live test (cloned counter refused) |
+| Malformed WebAuthn data (parser differentials) | T | Malicious client | A strict CBOR subset (minimal encodings, no tags or floats, no duplicate keys, bounded depth); fuzzed | `cbor_refuses_non_minimal_indefinite_tags_and_duplicates`; fuzz `devices` |
+| A linked or pending device changing the account's factors | E | Thief of a linked device | Only the primary sets or removes a PIN or passkey | `a_pin_gates_linking…` (403 `primary`) |
+| One account's actions reaching another account on the same installation | E, I | Malicious app state, bug | Accounts share nothing on the server; every request is the authenticated device's own account | `accounts_sharing_an_installation_stay_apart` |
+
+### 3.14 Profiles and sealed sender (Prompt 3, milestone 5)
+
+| Threat | STRIDE | Attacker | Mitigation | Test or proof |
+| --- | --- | --- | --- | --- |
+| Reading profiles or avatars on the server | I | Insider, seized server, backups | Encrypted by the client under a profile key the server never holds; stored opaque; avatars under random IDs | `profiles_certificates_and_sealed_sends` (the server stores and returns only ciphertext) |
+| Rolling a profile back to an older one | T | Malicious client, replay | Versions only grow | `profiles_only_grow_and_access_keys_follow_devices`; the e2e test (409) |
+| **Sending sealed without being a contact** (spam, harassment) | S, E | Anyone | A sealed send needs every closed recipient account's access key (derived from the profile key, compared in constant time); accounts without one are unreachable sealed unless open; throttles per IP range and per recipient account | `profiles_certificates_and_sealed_sends` (wrong key, no key, no profile: 401; combined keys) |
+| **Impersonating a sender** inside a sealed message | S | Malicious client | Certificates signed by the server's certificate key, bound to the account, device and identity key, valid 24 hours; the recipient checks them | `certificate_vector` (OpenSSL cross-check; another device, expiry); the e2e test |
+| Learning who sent a sealed message | I | Server, insider | The sealed endpoint takes no device signature; the sender's IP range is used only for a keyed throttle record; the envelope (with the certificate) is end-to-end encrypted | D-0054; the code path (`SEALED_SENDER`) |
+| Sealed sender running before it is verified | E | Configuration error | Off by default; on needs a certificate key; off answers 404 | the e2e test (flag off) |
+| Malformed certificate or profile bytes | T | Malicious client | Strict, bounded decoders; fuzzed | `uploads_and_certificates_round_trip_and_decode_strictly`; fuzz `profile` |
+
+### 3.15 Key transparency (Prompt 3, milestone 6)
+
+| Threat | STRIDE | Attacker | Mitigation | Test or proof |
+| --- | --- | --- | --- | --- |
+| **Key substitution by the server**: a contact is given a different identity key or device list | S, T | Malicious or compelled server | Every key and list is logged; clients check inclusion in a signed head before trusting one, and owners check their own entries | `clients_verify_the_transparency_log`; `changes_are_logged_once_with_proofs_and_deletion_unlinks` |
+| **A forked or rewritten log** (different histories for different people) | T | Malicious server | Clients keep the last verified head and require consistency proofs; heads are signed, so a fork is evidence | `a_forked_or_rewritten_log_is_detected`; `every_proof_of_every_tree_up_to_70_leaves_verifies_and_tampering_fails` |
+| Racing appends corrupting the tree | T | Concurrency | Appends serialized on the head row (size check in the transaction) and on leaf IDs that cannot be created twice | `concurrent_appends_keep_one_consistent_log` (160 appends over 8 connections: indices 0–159, the root equals an in-memory tree of those leaves) |
+| A change never logged | T | Crash, bug | The change bumps a generation in its own transaction; the worker logs until the logged generation catches up | `changes_are_logged_once_with_proofs_and_deletion_unlinks` |
+| The log identifying people forever (GDPR) | I | Anyone reading the log | Leaves carry a salted HMAC of the account; the salt is deleted with the account | the same test (the deleted account's entries no longer resolve) |
+| Malformed proofs or heads | T | Malicious server | Bounded, strict decoders and verifiers (RFC 9162); fuzzed | fuzz `kt` |
+
+### 3.16 GDPR (Prompt 3, milestone 7)
+
+| Threat | STRIDE | Attacker | Mitigation | Test or proof |
+| --- | --- | --- | --- | --- |
+| Data outliving an account's deletion | I | Compromised server later, insider | The outbox job deletes every Prompt 2 and 3 store and verifies it; the transparency salt goes with the row (its leaves unlinkable); backups expire within 93 days and a restore deletes again | `an_account_is_exported_then_deleted_from_every_prompt_3_store`; `account_deletion_is_verified_across_every_store` |
+| Exporting someone else's data, or a thief exporting with a linked device | I, E | Thief of a linked device | Export only by the account's primary, signed; it carries public keys and ciphertext, never the PIN or username-key verifiers | the same test (the PIN verifier absent from the export); `a_pending_device_changes_nothing_account_wide…` |
+| An active user's account deleted for inactivity | D | Bug, a user who only uses the WebSocket | Any signed `api` request counts as use (apps call `api` at least daily); two wake-up warnings first; the user chooses the period | `inactivity_warns_a_month_and_a_week_before_then_deletes` |
+| Inactivity deletion as an attack (keeping someone's devices from reaching `api`) | D | Network attacker | Months-long periods, two warnings, any single request resets; censorship resistance is the proxy's (Prompt 1) | D-0056 |
+
 ## 4. Server-enforced settings
 
 ## 5. Compliance notes (GDPR, age of digital consent per EU country)
@@ -361,3 +411,27 @@ the key directory (M3) and key transparency (M6).
   a rollback (they keep the highest version they have seen), so the primary must sign a new list.
   The deletion journal covers accounts, not single devices. Losing the primary means deleting
   the account until M4b's recovery (two-step PIN, passkeys) and a primary transfer exist.
+- Second factors (M4b, D-0053): the PIN stops a database or backup thief, not a fully
+  compromised `api` (which holds the pepper and sees PINs in requests). Hardware guess-limiting
+  is issue #26 (Prompt 10). Passkeys sync through Apple or Google accounts, so whoever controls
+  that account can use the passkey; the PIN and the signed device list remain. No authenticator
+  attestation is checked: any authenticator the user picks is accepted. APNs gives one token per
+  app installation, so on iOS several accounts on one phone are linked by their shared push token
+  at the push service (the app documents this; FCM and Web Push register one per account).
+- Sealed sender (M5, D-0054): the server still sees the sender's IP address (as for any
+  request) and the time, so traffic analysis can link a sealed send to a connection. Users who
+  need that hidden use the proxy or Tor. The access key is shared with every contact who has the
+  profile key, so revoking a contact means rotating the profile key. Spam from one contact is
+  bounded by the per-recipient throttle, not by identity. The certificate key is not deployed yet
+  (it goes in the secrets store at deployment; rotation by `key_id`).
+- Key transparency (M6, D-0055): the log is a transparency log, not a verifiable map. A server
+  can omit an account's newest entry when answering one person (though it cannot rewrite what it
+  already logged without forking), so this relies on owners checking their own entries and on
+  clients gossiping heads. There are no non-membership proofs and no VRF privacy: whoever has an
+  account ID can ask for its salt and see how many keys and lists it has had. Meta's `akd`
+  (verifiable map, VRF, used by WhatsApp) is the recorded upgrade path behind the same endpoints.
+  The log key is not deployed yet (secrets store; apps pin it). There is no external auditor yet.
+- GDPR (M7, D-0056): the export does not include what the mailbox holds (ciphertext the user's
+  devices receive anyway); `api` has no read path into it. A device that only holds a WebSocket
+  and never calls `api` would not count as use; the apps call `api` at least daily (prekey and
+  KeyPackage counts). Inactivity warnings are wake-up pushes: a device without push gets none.

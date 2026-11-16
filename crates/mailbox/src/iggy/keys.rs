@@ -1282,8 +1282,22 @@ fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// Makes the directory's entries (the renames and removals in it) durable.
+#[cfg(unix)]
 fn sync_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::File::open(dir)?.sync_all()
+}
+
+/// Windows (development only; servers run Linux) cannot open a directory as a `File`, so there is
+/// no directory to fsync: NTFS journals the rename itself. Durability across a power cut is not
+/// promised there.
+#[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the same signature as the Unix version"
+)]
+fn sync_dir(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn idx(n: u32) -> usize {
@@ -1462,6 +1476,7 @@ mod tests {
                 t
             });
         let dir = parent.join(format!("{name}-{tag}"));
+        #[cfg_attr(not(unix), expect(unused_mut, reason = "only Unix sets a mode"))]
         let mut b = std::fs::DirBuilder::new();
         #[cfg(unix)]
         std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);

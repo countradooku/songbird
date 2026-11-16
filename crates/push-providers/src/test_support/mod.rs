@@ -10,7 +10,7 @@
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -250,7 +250,7 @@ pub struct MockServer {
     addr: SocketAddr,
     state: Arc<State>,
     goaway: watch::Sender<u64>,
-    task: tokio::task::JoinHandle<()>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for MockServer {
@@ -264,7 +264,9 @@ impl std::fmt::Debug for MockServer {
 
 impl Drop for MockServer {
     fn drop(&mut self) {
-        self.task.abort();
+        for t in &self.tasks {
+            t.abort();
+        }
     }
 }
 
@@ -305,8 +307,8 @@ impl MockServer {
     }
 
     async fn start(ca: &TestCa, flavor: Flavor) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("addr");
+        let (v4, v6) = bind_loopback().await;
+        let addr = v4.local_addr().expect("addr");
         let state = Arc::new(State {
             flavor,
             requests: Mutex::default(),
@@ -319,17 +321,22 @@ impl MockServer {
         });
         let (goaway, _) = watch::channel(0u64);
         let acceptor = TlsAcceptor::from(Arc::clone(&ca.server));
-        let task = tokio::spawn(accept_loop(
-            listener,
-            acceptor,
-            Arc::clone(&state),
-            goaway.clone(),
-        ));
+        let tasks = std::iter::once(v4)
+            .chain(v6)
+            .map(|listener| {
+                tokio::spawn(accept_loop(
+                    listener,
+                    acceptor.clone(),
+                    Arc::clone(&state),
+                    goaway.clone(),
+                ))
+            })
+            .collect();
         Self {
             addr,
             state,
             goaway,
-            task,
+            tasks,
         }
     }
 
@@ -383,6 +390,30 @@ impl MockServer {
     pub fn goaway_all(&self) {
         self.goaway.send_modify(|g| *g += 1);
     }
+}
+
+/// Listeners on one port of both loopbacks, `127.0.0.1` first, so that `localhost` reaches the
+/// mock whichever address it resolves to first. Without the `::1` listener a client that tries
+/// `::1` first waits for the refusal before trying `127.0.0.1`: at once on Linux, but about two
+/// seconds on Windows (it retries a refused SYN), the whole 2-second connect timeout. Where the
+/// host has no IPv6 loopback (or no port is free on both), `127.0.0.1` alone.
+async fn bind_loopback() -> (TcpListener, Option<TcpListener>) {
+    let bind_v4 = || async {
+        TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind 127.0.0.1")
+    };
+    for _ in 0..16 {
+        let v4 = bind_v4().await;
+        let port = v4.local_addr().expect("addr").port();
+        match TcpListener::bind((Ipv6Addr::LOCALHOST, port)).await {
+            Ok(v6) => return (v4, Some(v6)),
+            // Someone else holds this port on `::1`: try another.
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(_) => return (v4, None),
+        }
+    }
+    (bind_v4().await, None)
 }
 
 async fn accept_loop(

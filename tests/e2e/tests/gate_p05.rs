@@ -306,7 +306,6 @@ fn group_frame(key: u8, msg: Vec<u8>) -> SendFrame {
     SendFrame {
         req_id: u32::from(key),
         idempotency_key: [key; 16],
-        mls: None,
         hints: SendHints {
             group: Some(GID),
             ..SendHints::default()

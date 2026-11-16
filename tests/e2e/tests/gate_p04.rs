@@ -656,7 +656,6 @@ async fn contacts_requests_blocks_and_the_request_policy_end_to_end() {
         hints: SendHints::default(),
         req_id: 7,
         idempotency_key: key(),
-        mls: None,
         payload: songbird_proto::frame::SendPayload::Shared {
             devices: bob.ids().into_iter().chain(carol.ids()).collect(),
             body: Bytes::from_static(b"group"),

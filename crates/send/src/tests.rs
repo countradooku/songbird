@@ -180,7 +180,6 @@ async fn user_envelopes_in_the_system_frame_format_are_refused() {
         hints: songbird_proto::frame::SendHints::default(),
         req_id: 1,
         idempotency_key: [4; 16],
-        mls: None,
         payload: SendPayload::Shared {
             devices: vec![dev(2), dev(3)],
             body: forged,
@@ -746,7 +745,6 @@ async fn groups_and_sealed_sends_are_not_classified_as_strangers() {
         hints: songbird_proto::frame::SendHints::default(),
         req_id: 1,
         idempotency_key: [1; 16],
-        mls: None,
         payload: SendPayload::Shared {
             devices: vec![dev(2), dev(3), dev(5)],
             body: Bytes::from_static(b"group"),
@@ -851,7 +849,6 @@ fn group_send(g: [u8; 16], body: Bytes) -> SendFrame {
     SendFrame {
         req_id: 9,
         idempotency_key: [0x77; 16],
-        mls: None,
         hints: songbird_proto::frame::SendHints {
             group: Some(g),
             ..Default::default()

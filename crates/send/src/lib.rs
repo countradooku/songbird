@@ -40,9 +40,7 @@ pub mod system;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use songbird_mailbox::{
-    MailboxError, MlsCommit, NewEnvelope, Payload, StoreOutcome, StoreRequest, StoreSend,
-};
+use songbird_mailbox::{MailboxError, NewEnvelope, Payload, StoreOutcome, StoreRequest, StoreSend};
 use songbird_proto::control;
 use songbird_proto::frame::{RejectReason, SendFrame, SendPayload, SendStatus};
 use songbird_router::{Live, Routed, Router};
@@ -757,10 +755,9 @@ pub fn store_request(s: &SendFrame) -> StoreRequest {
             .expire_after_s
             .map(|t| Duration::from_secs(u64::from(t))),
         idempotency_key: Some(s.idempotency_key),
-        mls: s.mls.map(|c| MlsCommit {
-            group: c.group,
-            epoch: c.epoch,
-        }),
+        // Commits no longer come through the send path (PROTOCOL §6.3; the frame's MLS flag is
+        // retired), so nothing here asks the mailbox to order an epoch.
+        mls: None,
         payload,
     }
 }

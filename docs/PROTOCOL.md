@@ -37,7 +37,7 @@ above, so every frame has one encoding):
 
 | Flag | Meaning | Rules |
 | --- | --- | --- |
-| `0x01` | MLS commit (§3.1) | |
+| `0x01` | Retired (was D-0026's MLS commit block); never reused | Refused since Prompt 5: commits go to `POST /v1/groups/commit` (§6.3) |
 | `0x02` | One shared body for every device | |
 | `0x04` | `ACCESS`: the XOR of the access keys of every addressed account that is not open (§5.10), per device or with a shared body | Not with `0x08` |
 | `0x08` | `REQUEST`: a message request (§5.10) | Not with `0x04`, `0x02` or `0x01` |
@@ -192,11 +192,9 @@ address all of that account's devices except the sending device. Otherwise the a
 not exist), `stale` (devices whose keys changed; filled from Prompt 3). The client updates its view,
 re-encrypts and retries with the same idempotency key.
 
-**MLS commits.** A `Send` with flag `0x01` names the group and the epoch the commit was made
-from. The server stores it only if the group is at that epoch and advances the group to `epoch +
-1` in the same transaction, so of several concurrent commits exactly one is accepted; the others
-are rejected with reason 8 and stored nothing. The group ID is 16 opaque bytes chosen by the
-clients.
+**MLS commits** no longer travel in a `Send` (Prompt 5): `POST /v1/groups/commit` validates a
+commit against the group, orders it by epoch and fans it out (§6.3). The `Send` flag `0x01` that
+carried one (D-0026) is refused.
 
 ### 3.2 Idempotency
 
@@ -1346,8 +1344,10 @@ Delivery nodes cache rosters for at most a second, or less when a message names 
 A removed device can therefore still post at its last epoch for up to a second on a node that
 has not refreshed. Members who processed the removal know it was removed.
 
-The flag `0x01` (the MLS commit in a `Send`, D-0026) is superseded by §6.3 and is retired before
-the M1 gate.
+The flag `0x01` (the MLS commit in a `Send`, D-0026) is retired: the decoder refuses it, and
+the sealed endpoint refuses `GROUP` (a sealed send hides the device membership is checked
+against). The mailboxes still hold their unused epoch table; it goes with their next storage
+format change.
 
 ## 7. Attachments and packs (Prompt 6)
 
@@ -1380,7 +1380,7 @@ Frames (hex; from `crates/proto` tests and the fuzz seeds in `fuzz/corpus/proto_
 | `SendResult{req_id: 7, rejected: rate limited, retry 500 ms}` | `82 00000007 01 0001 000001f4` |
 | `Ephemeral{to: 44…44, "typing"}` | `03 44444444444444444444444444444444 747970696e67` |
 | `Send{req_id 7, key 11…11, [(22…22, "abc"), (33…33, "z")]}` | `01 00000007 11111111111111111111111111111111 00 0002 22222222222222222222222222222222 00000003 616263 33333333333333333333333333333333 00000001 7a` |
-| `Send{req_id 8, key 11…11, MLS commit (group 44…44, epoch 3), shared "grp" to 22…22, 33…33}` | `01 00000008 11111111111111111111111111111111 03 44444444444444444444444444444444 0000000000000003 0002 22222222222222222222222222222222 33333333333333333333333333333333 00000003 677270` |
+| `Send{req_id 8, key 11…11, group message (group 44…44), shared "grp", no devices}` (Prompt 5; replaces D-0026's MLS commit vector, whose bytes are now refused) | `01 00000008 11111111111111111111111111111111 42 44444444444444444444444444444444 0000 00000003 677270` |
 
 Authentication transcript for server name `chat.example`, nonce 32 × `11`, device 16 × `22`,
 version 1, channel binding 32 × `33`:

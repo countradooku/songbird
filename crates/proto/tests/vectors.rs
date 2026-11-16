@@ -3,7 +3,7 @@
 
 use bytes::Bytes;
 use songbird_proto::frame::{
-    MlsCommitRef, Recipient, RejectReason, SendFrame, SendHints, SendPayload, SendStatus,
+    Recipient, RejectReason, SendFrame, SendHints, SendPayload, SendStatus,
 };
 use songbird_proto::{ClientFrame, Limits, ServerFrame};
 use songbird_types::DeviceId;
@@ -47,22 +47,21 @@ fn client_frames() {
              33333333333333333333333333333333 00000001 7a",
         ),
         (
+            // A group message (Prompt 5, D-0067): `SHARED | GROUP`, the group last, no devices.
             ClientFrame::Send(SendFrame {
-                hints: SendHints::default(),
+                hints: SendHints {
+                    group: Some([0x44; 16]),
+                    ..SendHints::default()
+                },
                 req_id: 8,
                 idempotency_key: [0x11; 16],
-                mls: Some(MlsCommitRef {
-                    group: [0x44; 16],
-                    epoch: 3,
-                }),
                 payload: SendPayload::Shared {
-                    devices: vec![dev(0x22), dev(0x33)],
+                    devices: Vec::new(),
                     body: Bytes::from_static(b"grp"),
                 },
             }),
-            "01 00000008 11111111111111111111111111111111 03 \
-             44444444444444444444444444444444 0000000000000003 0002 \
-             22222222222222222222222222222222 33333333333333333333333333333333 \
+            "01 00000008 11111111111111111111111111111111 42 \
+             44444444444444444444444444444444 0000 \
              00000003 677270",
         ),
     ];
@@ -71,6 +70,14 @@ fn client_frames() {
         assert_eq!(frame.to_bytes(), want);
         assert_eq!(ClientFrame::decode(&want, &Limits::DEFAULT).unwrap(), frame);
     }
+    // The retired MLS commit flag (D-0026's vector, until Prompt 5) is refused.
+    let retired = unhex(
+        "01 00000008 11111111111111111111111111111111 03 \
+         44444444444444444444444444444444 0000000000000003 0002 \
+         22222222222222222222222222222222 33333333333333333333333333333333 \
+         00000003 677270",
+    );
+    assert!(ClientFrame::decode(&retired, &Limits::DEFAULT).is_err());
 }
 
 /// Prompt 4 (D-0061, D-0062): a franked, disappearing message request, and a contact's send

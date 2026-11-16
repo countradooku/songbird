@@ -59,7 +59,9 @@ pub mod ty {
 pub const DELIVER_HEADER_LEN: usize = 1 + 8;
 /// Bytes in a `Send` frame before the first recipient (no MLS block).
 pub const SEND_HEADER_LEN: usize = 1 + 4 + IDEMPOTENCY_KEY_LEN + 1 + 2;
-/// `Send` flag: an MLS commit block (`group [16]`, `epoch u64`) follows the flags.
+/// Retired `Send` flag (D-0026's MLS commit block, `group [16]`, `epoch u64`): refused since
+/// Prompt 5. Commits go to `POST /v1/groups/commit`, which validates them against the group
+/// before anything is stored (D-0067). The bit is never reused.
 pub const SEND_FLAG_MLS: u8 = 0x01;
 /// `Send` flag: one shared body for every recipient device.
 pub const SEND_FLAG_SHARED: u8 = 0x02;
@@ -79,9 +81,9 @@ pub const SEND_FLAG_EXPIRES: u8 = 0x20;
 /// the frame lists no devices. Needs [`SEND_FLAG_SHARED`]; not with [`SEND_FLAG_MLS`],
 /// [`SEND_FLAG_ACCESS`] or [`SEND_FLAG_REQUEST`] (membership is the authorization).
 pub const SEND_FLAG_GROUP: u8 = 0x40;
-/// Every `Send` flag this version knows; other bits are refused.
-pub const SEND_FLAGS: u8 = SEND_FLAG_MLS
-    | SEND_FLAG_SHARED
+/// Every `Send` flag this version takes; other bits (and the retired [`SEND_FLAG_MLS`]) are
+/// refused.
+pub const SEND_FLAGS: u8 = SEND_FLAG_SHARED
     | SEND_FLAG_ACCESS
     | SEND_FLAG_REQUEST
     | SEND_FLAG_FRANKED
@@ -245,23 +247,6 @@ impl std::fmt::Debug for SendPayload {
     }
 }
 
-/// The MLS commit a `Send` carries: stored only if the group is at `epoch` (D-0026).
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct MlsCommitRef {
-    /// Group identifier (opaque, chosen by clients).
-    pub group: [u8; 16],
-    /// Epoch the commit was made from.
-    pub epoch: u64,
-}
-
-impl std::fmt::Debug for MlsCommitRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MlsCommitRef")
-            .field("epoch", &self.epoch)
-            .finish_non_exhaustive()
-    }
-}
-
 /// What a `Send` tells the server beyond its recipients (Prompt 4): each set only by its flag.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub struct SendHints {
@@ -299,9 +284,7 @@ pub struct SendFrame {
     pub req_id: u32,
     /// Random per logical message; a retry reuses it so the server stores it once.
     pub idempotency_key: [u8; IDEMPOTENCY_KEY_LEN],
-    /// Set when this send is an MLS commit.
-    pub mls: Option<MlsCommitRef>,
-    /// Access key, request, franking commitment, disappearing hint.
+    /// Access key, request, franking commitment, disappearing hint, group.
     pub hints: SendHints,
     /// Recipients and ciphertext, at most [`Limits::max_recipients`] devices.
     pub payload: SendPayload,
@@ -318,7 +301,6 @@ impl SendFrame {
         Self {
             req_id,
             idempotency_key,
-            mls: None,
             hints: SendHints {
                 access: None,
                 request: false,
@@ -335,7 +317,6 @@ impl std::fmt::Debug for SendFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SendFrame")
             .field("req_id", &self.req_id)
-            .field("mls", &self.mls)
             .field("hints", &self.hints)
             .field("payload", &self.payload)
             .finish_non_exhaustive()
@@ -665,30 +646,18 @@ impl ClientFrame {
 }
 
 /// The flag-selected blocks of a `Send`: the MLS commit and the hints, with the flag rules.
-fn decode_send_blocks(
-    c: &mut Cursor<'_>,
-    flags: u8,
-) -> Result<(Option<MlsCommitRef>, SendHints), FrameError> {
+fn decode_send_blocks(c: &mut Cursor<'_>, flags: u8) -> Result<SendHints, FrameError> {
     let has = |f: u8| flags & f != 0;
+    // Unknown bits and the retired MLS flag are refused by the mask.
     if flags & !SEND_FLAGS != 0
-        // A contact or a request, not both; a request is one 1:1 message, never a shared body
-        // or an MLS commit.
+        // A contact or a request, not both; a request is one 1:1 message, never a shared body.
         || (has(SEND_FLAG_ACCESS) && has(SEND_FLAG_REQUEST))
-        || (has(SEND_FLAG_REQUEST) && (has(SEND_FLAG_SHARED) || has(SEND_FLAG_MLS)))
+        || (has(SEND_FLAG_REQUEST) && has(SEND_FLAG_SHARED))
         // A group message is one shared body for the roster; membership authorizes it.
-        || (has(SEND_FLAG_GROUP)
-            && (!has(SEND_FLAG_SHARED) || has(SEND_FLAG_MLS) || has(SEND_FLAG_ACCESS)))
+        || (has(SEND_FLAG_GROUP) && (!has(SEND_FLAG_SHARED) || has(SEND_FLAG_ACCESS)))
     {
         return Err(FrameError::Control("send.flags"));
     }
-    let mls = if has(SEND_FLAG_MLS) {
-        Some(MlsCommitRef {
-            group: c.array()?,
-            epoch: c.u64()?,
-        })
-    } else {
-        None
-    };
     let access = if has(SEND_FLAG_ACCESS) {
         Some(c.array::<ACCESS_KEY_LEN>()?)
     } else {
@@ -720,7 +689,7 @@ fn decode_send_blocks(
         expire_after_s,
         group,
     };
-    Ok((mls, hints))
+    Ok(hints)
 }
 
 fn decode_send(msg: &Bytes, limits: &Limits) -> Result<SendFrame, FrameError> {
@@ -729,7 +698,7 @@ fn decode_send(msg: &Bytes, limits: &Limits) -> Result<SendFrame, FrameError> {
     let req_id = c.u32()?;
     let idempotency_key = c.array::<IDEMPOTENCY_KEY_LEN>()?;
     let [flags] = c.array::<1>()?;
-    let (mls, hints) = decode_send_blocks(&mut c, flags)?;
+    let hints = decode_send_blocks(&mut c, flags)?;
     let count = usize::from(c.u16()?);
     // A group message lists no devices (the server takes the roster); every other send lists
     // at least one.
@@ -792,7 +761,6 @@ fn decode_send(msg: &Bytes, limits: &Limits) -> Result<SendFrame, FrameError> {
     Ok(SendFrame {
         req_id,
         idempotency_key,
-        mls,
         hints,
         payload,
     })
@@ -815,9 +783,6 @@ fn encode_send(s: &SendFrame, out: &mut BytesMut) {
     out.put_u32(s.req_id);
     out.put_slice(&s.idempotency_key);
     let mut flags = 0;
-    if s.mls.is_some() {
-        flags |= SEND_FLAG_MLS;
-    }
     if matches!(s.payload, SendPayload::Shared { .. }) {
         flags |= SEND_FLAG_SHARED;
     }
@@ -838,10 +803,6 @@ fn encode_send(s: &SendFrame, out: &mut BytesMut) {
         flags |= SEND_FLAG_GROUP;
     }
     out.put_u8(flags);
-    if let Some(m) = &s.mls {
-        out.put_slice(&m.group);
-        out.put_u64(m.epoch);
-    }
     if let Some(k) = &h.access {
         out.put_slice(k);
     }
@@ -1055,11 +1016,10 @@ mod tests {
             (
                 any::<u32>(),
                 any::<[u8; 16]>(),
-                proptest::option::of((any::<[u8; 16]>(), any::<u64>())),
                 proptest::collection::vec(arb_device(), 1..8),
                 arb_payload(64)
             )
-                .prop_map(|(req_id, idempotency_key, mls, devices, body)| {
+                .prop_map(|(req_id, idempotency_key, devices, body)| {
                     ClientFrame::Send(SendFrame {
                         hints: SendHints {
                             // A group's body may be franked and disappear too.
@@ -1069,7 +1029,6 @@ mod tests {
                         },
                         req_id,
                         idempotency_key,
-                        mls: mls.map(|(group, epoch)| MlsCommitRef { group, epoch }),
                         payload: SendPayload::Shared { devices, body },
                     })
                 }),

@@ -440,8 +440,10 @@ impl Profiles {
         let Some(frame) = crate::messages::decode(&body, &m.limits) else {
             return Outcome::Malformed("request");
         };
-        if frame.mls.is_some() {
-            return Outcome::Malformed("mls");
+        // A group message is authorized by its sending device's membership (PROTOCOL §6.5),
+        // which a sealed send hides.
+        if frame.hints.group.is_some() {
+            return Outcome::Malformed("group");
         }
         // The access keys are in the header; a sealed send is never a request (requests are
         // identified, so they can be blocked and reported, D-0062).

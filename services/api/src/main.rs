@@ -77,6 +77,7 @@ fn s3_config(s: &S3Settings) -> Result<songbird_s3::Config, BoxError> {
 /// jobs. Returns the endpoint and its background tasks (directory follower, push batcher).
 async fn build_messages(
     s: &SendSettings,
+    gate: Option<(Arc<dyn songbird_send::Gate>, u32)>,
     registry: &Arc<songbird_accounts::Registry>,
     queue: &Arc<songbird_jobs::Queue>,
     metrics: &ApiMetrics,
@@ -139,10 +140,28 @@ async fn build_messages(
             router,
             push,
             metrics: metrics.send.clone(),
+            policy: songbird_send::Policy {
+                franking: s
+                    .franking_key
+                    .as_ref()
+                    .map(|k| {
+                        let secret = k.resolve_key32().map_err(BoxError::from)?;
+                        songbird_send::Franker::from_secret(&secret)
+                            .map_err(|_| BoxError::from("franking key derivation failed"))
+                    })
+                    .transpose()?,
+                max_broadcast_accounts: gate.as_ref().map_or(
+                    songbird_send::RequestLimits::default().max_broadcast_accounts,
+                    |(_, n)| *n,
+                ),
+                gate: gate.map(|(g, _)| g),
+            },
         }),
         limits: s.limits.limits(),
         sends_per_sec: s.sends_per_sec,
         send_burst: s.send_burst,
+        group_sends_per_sec: s.group_sends_per_sec,
+        group_send_burst: s.group_send_burst,
         rate_key: songbird_api::messages::rate_key(&cluster_secret)
             .map_err(|_| "rate-limit key derivation failed")?,
         metrics: metrics.send.clone(),
@@ -194,6 +213,91 @@ fn profiles(
     )?))
 }
 
+/// `[api.requests]` (Prompt 4, D-0062), if configured: the blocks and request-policy endpoints,
+/// and the gate of requests and broadcasts on `PUT /v1/messages`.
+#[allow(
+    clippy::type_complexity,
+    reason = "the endpoints, and the gate with its broadcast limit"
+)]
+async fn requests(
+    s: &ApiSettings,
+    registry: &Arc<songbird_accounts::Registry>,
+    metrics: &ApiMetrics,
+) -> Result<
+    (
+        Option<songbird_api::requests::Requests>,
+        Option<(Arc<dyn songbird_send::Gate>, u32)>,
+    ),
+    BoxError,
+> {
+    let Some(r) = &s.requests else {
+        return Ok((None, None));
+    };
+    let secret = r.secret.resolve_key32()?;
+    let keys = songbird_send::GateKeys::from_cluster_secret(&secret)
+        .map_err(|_| BoxError::from("gate key derivation failed"))?;
+    // Every node must hold the same requests secret: block rows written by one are found by all.
+    if !registry
+        .pin_fingerprint("requests", &keys.fingerprint())
+        .await?
+    {
+        return Err(BoxError::from(
+            "the requests secret differs from the one every other node uses (registry pin)",
+        ));
+    }
+    let gate: Arc<dyn songbird_send::Gate> = Arc::new(songbird_send::RegistryGate::new(
+        Arc::clone(registry),
+        songbird_valkey::ValkeyConn::connect(s.valkey_hot.client()?).await?,
+        keys.clone(),
+        r.limits,
+    ));
+    Ok((
+        Some(songbird_api::requests::Requests::new(
+            keys,
+            metrics.blocks.clone(),
+        )),
+        Some((gate, r.limits.max_broadcast_accounts)),
+    ))
+}
+
+/// `[api.reports]` (Prompt 4, D-0063), if configured: the franking keys reports are verified
+/// against (`[api.send]`: current and previous), the gate's keys and the moderation key.
+fn reports(
+    s: &ApiSettings,
+    metrics: &ApiMetrics,
+) -> Result<Option<songbird_api::reports::Reports>, BoxError> {
+    let (Some(r), Some(req), Some(send)) = (&s.reports, &s.requests, &s.send) else {
+        return Ok(None);
+    };
+    let franker = |k: &songbird_types::SecretRef| -> Result<songbird_send::Franker, BoxError> {
+        let secret = k.resolve_key32()?;
+        songbird_send::Franker::from_secret(&secret)
+            .map_err(|_| BoxError::from("franking key derivation failed"))
+    };
+    let current = franker(
+        send.franking_key
+            .as_ref()
+            .ok_or("[api.reports] needs [api.send] franking_key")?,
+    )?;
+    let previous = send
+        .previous_franking_keys
+        .iter()
+        .map(franker)
+        .collect::<Result<Vec<_>, _>>()?;
+    let secret = req.secret.resolve_key32()?;
+    let keys = songbird_send::GateKeys::from_cluster_secret(&secret)
+        .map_err(|_| BoxError::from("gate key derivation failed"))?;
+    let mut moderation = [0u8; 32];
+    hex::decode_to_slice(&r.moderation_key, &mut moderation)?;
+    Ok(Some(songbird_api::reports::Reports::new(
+        songbird_send::Frankers { current, previous },
+        keys,
+        moderation,
+        r.clone(),
+        metrics.reports.clone(),
+    )))
+}
+
 async fn build(
     s: &ApiSettings,
     metrics: ApiMetrics,
@@ -213,9 +317,10 @@ async fn build(
     let mut push_public = [0u8; 32];
     hex::decode_to_slice(&s.push_public_key, &mut push_public)?;
     let queue = Arc::new(queue);
+    let (requests, gate) = requests(s, &registry, &metrics).await?;
     let (messages, tasks) = match &s.send {
         Some(send) => {
-            let (m, t) = build_messages(send, &registry, &queue, &metrics, stop).await?;
+            let (m, t) = build_messages(send, gate, &registry, &queue, &metrics, stop).await?;
             (Some(m), t)
         }
         None => (None, Vec::new()),
@@ -268,7 +373,10 @@ async fn build(
     };
     let profiles = profiles(s, &metrics)?;
     let kt = transparency(s).await?;
+    let reports = reports(s, &metrics)?;
     let app = Arc::new(App {
+        reports,
+        requests,
         server_name: s.server_name.clone(),
         registry,
         s3,

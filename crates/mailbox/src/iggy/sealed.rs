@@ -1,8 +1,8 @@
-//! Sealed records: what the mailbox writes to Iggy (record format version 4, D-0031; version 3,
-//! the same without `Forget`, is still read).
+//! Sealed records: what the mailbox writes to Iggy (record format version 5, D-0031, D-0061;
+//! version 4, the same without deadlines, and version 3, also without `Forget`, are still read).
 //!
 //! ```text
-//! u8 version (4) | u8 kind | u64 window | u32 first_leaf | u32 slots |
+//! u8 version (5) | u8 kind | u64 window | u32 first_leaf | u32 slots |
 //! u32 meta_len | meta (AES-256-GCM, window metadata key, random nonce) |
 //! slots × (u32 len | sealed slot (AES-256-GCM, leaf key first_leaf + i, constant nonce))
 //! ```
@@ -12,18 +12,18 @@
 //!
 //! | Kind | Metadata (window key) | Slots (leaf keys, punctured on ACK) |
 //! | --- | --- | --- |
-//! | Store | flags, tag and fingerprint, `at_ms`, MLS group and epoch, local count, remote partitions | each local entry (`device`, `seq`, envelope; shared: `device`, `seq`), the shared body, each remote part |
-//! | Relocate | count | each entry (`device`, `seq`, `at_ms`, envelope) |
+//! | Store | flags, tag and fingerprint, `at_ms`, the deadline (v5, flag `0x08`), MLS group and epoch, local count, remote partitions | each local entry (`device`, `seq`, envelope; shared: `device`, `seq`), the shared body, each remote part |
+//! | Relocate | count | each entry (`device`, `seq`, `at_ms`, the deadline (v5; `u64::MAX` for none), envelope) |
 //! | Ack, Owner, Snapshot, Forget | the record | none |
 
 use bytes::{BufMut, Bytes, BytesMut};
 use songbird_types::DeviceId;
 
 use super::keys::{KeyError, KeyRing, open_leaf, open_meta, seal_leaf, seal_meta};
-use super::record::{Local, Record, Remote};
+use super::record::{Local, NEVER, Record, Remote};
 
-/// Sealed record format version written (4 added `Forget`, D-0036).
-pub(crate) const VERSION: u8 = 4;
+/// Sealed record format version written (4 added `Forget`, D-0036; 5 deadlines, D-0061).
+pub(crate) const VERSION: u8 = 5;
 /// Oldest version still read.
 pub(crate) const MIN_VERSION: u8 = 3;
 
@@ -37,6 +37,7 @@ const KIND_FORGET: u8 = 6;
 const FLAG_TAG: u8 = 0x01;
 const FLAG_MLS: u8 = 0x02;
 const FLAG_SHARED: u8 = 0x04;
+const FLAG_EXPIRES: u8 = 0x08;
 
 const HEADER: usize = 1 + 1 + 8 + 4 + 4;
 /// Largest record accepted.
@@ -91,6 +92,8 @@ fn put_bytes(buf: &mut BytesMut, b: &[u8]) {
 pub(crate) struct StoreMeta {
     pub(crate) tag: Option<([u8; 32], [u8; 16])>,
     pub(crate) at_ms: u64,
+    /// The send's deadline (the disappearing hint).
+    pub(crate) expires_ms: Option<u64>,
     pub(crate) mls: Option<([u8; 16], u64)>,
     pub(crate) shared: bool,
     pub(crate) n_local: u32,
@@ -128,6 +131,9 @@ pub(crate) struct EntrySlot {
     pub(crate) seq: u64,
     /// Relocated entries carry their original time.
     pub(crate) at_ms: Option<u64>,
+    /// Relocated entries carry their deadline ([`NEVER`] for none); store entries take the
+    /// record's.
+    pub(crate) expires_ms: u64,
     /// Per-device envelope (absent for shared entries: see the body slot).
     pub(crate) envelope: Option<Bytes>,
 }
@@ -205,6 +211,7 @@ fn parts_of(rec: &Record) -> (u8, BytesMut, Vec<BytesMut>) {
         Record::Store {
             tag,
             at_ms,
+            expires_ms,
             mls,
             local,
             remote,
@@ -213,6 +220,9 @@ fn parts_of(rec: &Record) -> (u8, BytesMut, Vec<BytesMut>) {
             let mut flags = 0;
             if tag.is_some() {
                 flags |= FLAG_TAG;
+            }
+            if expires_ms.is_some() {
+                flags |= FLAG_EXPIRES;
             }
             if mls.is_some() {
                 flags |= FLAG_MLS;
@@ -226,6 +236,9 @@ fn parts_of(rec: &Record) -> (u8, BytesMut, Vec<BytesMut>) {
                 meta.put_slice(fp);
             }
             meta.put_u64(*at_ms);
+            if let Some(t) = expires_ms {
+                meta.put_u64(*t);
+            }
             if let Some((g, e)) = mls {
                 meta.put_slice(g);
                 meta.put_u64(*e);
@@ -274,11 +287,12 @@ fn parts_of(rec: &Record) -> (u8, BytesMut, Vec<BytesMut>) {
         }
         Record::Relocate(items) => {
             meta.put_u32(u32::try_from(items.len()).unwrap_or(u32::MAX));
-            for (d, s, at, env) in items {
-                let mut b = BytesMut::with_capacity(32 + env.len());
+            for (d, s, at, exp, env) in items {
+                let mut b = BytesMut::with_capacity(40 + env.len());
                 b.put_slice(d.as_bytes());
                 b.put_u64(*s);
                 b.put_u64(*at);
+                b.put_u64(*exp);
                 b.put_slice(env);
                 slots.push(b);
             }
@@ -368,6 +382,11 @@ impl Sealed {
         })
     }
 
+    /// The record's format version.
+    pub(crate) const fn version(&self) -> u8 {
+        self.header[0]
+    }
+
     /// Number of slots.
     pub(crate) fn slots(&self) -> u32 {
         u32::try_from(self.slots.len()).unwrap_or(u32::MAX)
@@ -382,7 +401,12 @@ impl Sealed {
         let meta = match self.kind {
             KIND_STORE => {
                 let flags = r.u8()?;
-                if flags & !(FLAG_TAG | FLAG_MLS | FLAG_SHARED) != 0 {
+                let known = if self.version() >= 5 {
+                    FLAG_TAG | FLAG_MLS | FLAG_SHARED | FLAG_EXPIRES
+                } else {
+                    FLAG_TAG | FLAG_MLS | FLAG_SHARED
+                };
+                if flags & !known != 0 {
                     return Err(OpenError::Malformed);
                 }
                 let tag = if flags & FLAG_TAG == 0 {
@@ -391,6 +415,11 @@ impl Sealed {
                     Some((r.arr::<32>()?, r.arr::<16>()?))
                 };
                 let at_ms = r.u64()?;
+                let expires_ms = if flags & FLAG_EXPIRES == 0 {
+                    None
+                } else {
+                    Some(r.u64()?)
+                };
                 let mls = if flags & FLAG_MLS == 0 {
                     None
                 } else {
@@ -406,6 +435,7 @@ impl Sealed {
                 let m = StoreMeta {
                     tag,
                     at_ms,
+                    expires_ms,
                     mls,
                     shared,
                     n_local,
@@ -480,20 +510,23 @@ pub(crate) fn decode_entry(plain: &[u8], shared: bool) -> Result<EntrySlot, Open
         device,
         seq,
         at_ms: None,
+        expires_ms: NEVER,
         envelope,
     })
 }
 
-/// Decodes a relocated entry slot.
-pub(crate) fn decode_relocated(plain: &[u8]) -> Result<EntrySlot, OpenError> {
+/// Decodes a relocated entry slot of a record of format `version`.
+pub(crate) fn decode_relocated(plain: &[u8], version: u8) -> Result<EntrySlot, OpenError> {
     let mut r = Rd { b: plain, pos: 0 };
     let device = DeviceId::from_bytes(r.arr()?);
     let seq = r.u64()?;
     let at = r.u64()?;
+    let expires_ms = if version >= 5 { r.u64()? } else { NEVER };
     Ok(EntrySlot {
         device,
         seq,
         at_ms: Some(at),
+        expires_ms,
         envelope: Some(Bytes::copy_from_slice(
             plain.get(r.pos..).unwrap_or_default(),
         )),
@@ -578,6 +611,7 @@ mod tests {
         Record::Store {
             tag: Some(([7; 32], [8; 16])),
             at_ms: 42,
+            expires_ms: Some(60_042),
             mls: Some(([9; 16], 3)),
             local: Local::PerDevice(vec![
                 (d(1), 5, Bytes::from_static(b"one")),
@@ -643,11 +677,20 @@ mod tests {
             panic!()
         };
         assert_eq!(back, ack);
-        let rel = Record::Relocate(vec![(d(3), 4, 77, Bytes::from_static(b"x"))]);
+        let rel = Record::Relocate(vec![
+            (d(3), 4, 77, 900, Bytes::from_static(b"x")),
+            (d(3), 5, 78, NEVER, Bytes::from_static(b"y")),
+        ]);
         let (p, _) = seal(&rel, &mut ring, w, 0).unwrap();
         let s = Sealed::parse(&p).unwrap();
-        let e = decode_relocated(&s.slot(&ring, 0, 0).unwrap().unwrap()).unwrap();
-        assert_eq!((e.device, e.seq, e.at_ms), (d(3), 4, Some(77)));
+        let e = decode_relocated(&s.slot(&ring, 0, 0).unwrap().unwrap(), s.version()).unwrap();
+        assert_eq!(
+            (e.device, e.seq, e.at_ms, e.expires_ms),
+            (d(3), 4, Some(77), 900)
+        );
+        assert_eq!(e.envelope.as_deref(), Some(&b"x"[..]));
+        let e = decode_relocated(&s.slot(&ring, 0, 1).unwrap().unwrap(), s.version()).unwrap();
+        assert_eq!(e.expires_ms, NEVER);
     }
 
     #[test]

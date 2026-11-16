@@ -27,6 +27,7 @@ use songbird_proto::Limits;
 
 pub use config::{DeliveryConfig, DeliverySettings};
 pub use metrics::DeliveryMetrics;
+pub use songbird_send::Policy;
 pub use songbird_send::{Directory, LiveDirectory, Pusher, directory, push};
 use songbird_send::{SendMetrics, SendPath};
 
@@ -52,6 +53,8 @@ pub struct Shared<M, R> {
     /// The store generation from the registry (D-0040); 0 until known, then the mailbox's
     /// configured value is not used.
     pub generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Franking and the contact gate (Prompt 4).
+    pub policy: Policy,
 }
 
 impl<M, R> Shared<M, R> {
@@ -74,6 +77,7 @@ impl<M, R> Shared<M, R> {
             metrics,
             push: Pusher::disabled(),
             generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            policy: Policy::default(),
         }
     }
 
@@ -86,6 +90,7 @@ impl<M, R> Shared<M, R> {
             router: &self.router,
             push: &self.push,
             metrics: &self.send_metrics,
+            policy: &self.policy,
         }
     }
 
@@ -93,6 +98,13 @@ impl<M, R> Shared<M, R> {
     #[must_use]
     pub fn with_push(mut self, push: Pusher) -> Self {
         self.push = push;
+        self
+    }
+
+    /// With franking and the contact gate (Prompt 4).
+    #[must_use]
+    pub fn with_policy(mut self, policy: Policy) -> Self {
+        self.policy = policy;
         self
     }
 }

@@ -29,6 +29,7 @@ songbird-valkey.workspace = true
 songbird-api = { path = "../../services/api" }
 songbird-send.workspace = true
 songbird-keys.workspace = true
+songbird-content.workspace = true
 hyper.workspace = true
 songbird-worker = { path = "../../services/worker" }
 songbird-push = { path = "../../services/push" }

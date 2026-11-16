@@ -89,6 +89,11 @@ pub async fn run<S, M, R>(
                     shared.config.session.frame_burst,
                     std::time::Instant::now(),
                 ),
+                group_sends: Bucket::new(
+                    shared.config.session.group_sends_per_sec,
+                    shared.config.session.group_send_burst,
+                    std::time::Instant::now(),
+                ),
                 ephemerals: Bucket::new(
                     shared.config.session.ephemeral_per_sec,
                     shared.config.session.ephemeral_burst,
@@ -247,6 +252,8 @@ struct Session<M, R> {
     shared: Arc<Shared<M, R>>,
     sends: Bucket,
     frames: Bucket,
+    /// Group sends (shared bodies): their own budget within `sends` (Prompt 4).
+    group_sends: Bucket,
     ephemerals: Bucket,
     /// A drain failed (store unavailable) and must be retried.
     needs_drain: bool,
@@ -582,13 +589,20 @@ impl<M: Mailbox, R: Router> Session<M, R> {
     async fn on_send<S>(
         &mut self,
         ws: &mut WebSocketStream<S>,
-        s: SendFrame,
+        mut s: SendFrame,
         now: std::time::Instant,
     ) -> Res
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        if let Err(wait) = self.sends.take(now) {
+        let group = matches!(s.payload, frame::SendPayload::Shared { .. });
+        if let Err(wait) = self.sends.take(now).and_then(|()| {
+            if group {
+                self.group_sends.take(now)
+            } else {
+                Ok(())
+            }
+        }) {
             let ms = u32::try_from(wait.as_millis()).unwrap_or(u32::MAX).max(1);
             // The path counts its own refusals; this one is the session's.
             self.shared.metrics.sends_rejected.inc();
@@ -602,7 +616,10 @@ impl<M: Mailbox, R: Router> Session<M, R> {
         // send would be a contended cache line).
         let path = self.shared.send_path();
         // Invariant 1: store first; only then acknowledge and route.
-        let outcome = match path.store(&self.device, &s, now, &mut self.scratch).await {
+        let outcome = match path
+            .store(&self.device, &mut s, now, &mut self.scratch)
+            .await
+        {
             Ok(o) => o,
             Err(status) => return self.reply(ws, s.req_id, status).await,
         };

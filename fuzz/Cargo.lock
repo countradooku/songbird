@@ -3128,6 +3128,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "songbird-content"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "prost",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "songbird-fuzz"
 version = "0.0.0"
 dependencies = [
@@ -3136,6 +3145,7 @@ dependencies = [
  "libfuzzer-sys",
  "serde",
  "songbird-akd",
+ "songbird-content",
  "songbird-keys",
  "songbird-mailbox",
  "songbird-pow",

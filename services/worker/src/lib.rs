@@ -191,6 +191,9 @@ pub struct Worker {
     pub propagation: Duration,
     /// The akd writer (Prompt 3, D-0057); `None` publishes nothing.
     pub kt: Option<Arc<songbird_akd::Publisher>>,
+    /// The keys of block rows (Prompt 4, D-0062): an account's blocks are found by its keyed
+    /// owner tag. `None` only in development (no blocks exist without `[api.requests]`).
+    pub block_keys: Option<songbird_accounts::blocks::GateKeys>,
     /// Metrics.
     pub metrics: WorkerMetrics,
 }
@@ -370,6 +373,23 @@ impl Worker {
                 return Err(Left::Objects);
             }
         }
+        // The account's blocks (Prompt 4): rows named by keyed hashes, found by its owner tag.
+        if let Some(k) = &self.block_keys {
+            let owner = k.owner(account);
+            self.registry
+                .delete_blocks(&owner)
+                .await
+                .map_err(unavailable)?;
+            if self
+                .registry
+                .block_count(&owner)
+                .await
+                .map_err(unavailable)?
+                != 0
+            {
+                return Err(Left::Rows);
+            }
+        }
         self.registry
             .delete_account_rows(account)
             .await
@@ -530,6 +550,12 @@ impl Worker {
     /// One sweep: attachments past 30 days or fully fetched, expired grants, expired invite
     /// codes, expired KeyPackages, expired link tokens, released usernames whose hold ended, the outbox.
     pub async fn sweep(&self) {
+        // Queued reports past their retention (Prompt 4, D-0063).
+        if let Ok(n) = self.registry.sweep_reports().await
+            && n > 0
+        {
+            tracing::info!(n, "expired reports deleted");
+        }
         match self.registry.expired_attachments(SWEEP_BATCH).await {
             Ok(objects) => {
                 for o in objects {

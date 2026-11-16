@@ -57,6 +57,16 @@ impl Validate for DeliveryConfig {
                 "is required in staging and production (account deletion)",
             );
             v.check(
+                d.franking_key.is_some(),
+                "delivery.franking_key",
+                "is required in staging and production (franked sends)",
+            );
+            v.check(
+                d.requests.as_ref().is_some_and(|r| r.valkey.tls()),
+                "delivery.requests",
+                "is required in staging and production, with TLS to Valkey (message requests)",
+            );
+            v.check(
                 d.mailbox.backend == MailboxBackend::Iggy,
                 "delivery.mailbox.backend",
                 "must be iggy in staging and production",
@@ -78,6 +88,14 @@ impl Validate for DeliveryConfig {
                 "delivery.router.valkey.tls_ca",
                 "and tls_cert are required in staging and production",
             );
+        }
+        v.check(
+            d.requests.is_none() || d.registry.is_some(),
+            "delivery.requests",
+            "needs delivery.registry (block lists)",
+        );
+        if let Some(r) = &d.requests {
+            v.section("delivery.requests.limits", &r.limits);
         }
         v.check(
             d.session.drain_window_ms < self.common.shutdown_grace_secs.saturating_mul(1000),
@@ -129,6 +147,27 @@ pub struct DeliverySettings {
     /// this node.
     #[serde(default)]
     pub internal: Option<InternalSettings>,
+    /// The franking key (64 hex characters, the same on every node that sends; Prompt 4,
+    /// D-0061): franked sends are stamped with it. Absent: franked sends are refused.
+    #[serde(default)]
+    pub franking_key: Option<SecretRef>,
+    /// The gate of message requests and broadcasts (Prompt 4, D-0062). Absent: requests and
+    /// broadcasts to accounts that are not open are refused as unavailable.
+    #[serde(default)]
+    pub requests: Option<RequestsSettings>,
+}
+
+/// `[delivery.requests]` (Prompt 4, D-0062).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestsSettings {
+    /// 64 hex characters: `[api.requests] secret`, the same on every node.
+    pub secret: SecretRef,
+    /// `valkey-hot`: the request budgets, shared with every node.
+    pub valkey: songbird_valkey::ValkeySettings,
+    /// The budgets: `[api.requests] limits`.
+    #[serde(default)]
+    pub limits: songbird_send::RequestLimits,
 }
 
 /// `[delivery.registry]`.
@@ -862,6 +901,11 @@ pub struct SessionConfig {
     pub sends_per_sec: u32,
     /// Send burst.
     pub send_burst: u32,
+    /// Sustained group sends (shared bodies, up to `max_recipients` devices each) per second per
+    /// connection, within `sends_per_sec` (Prompt 4: rate limits per conversation type).
+    pub group_sends_per_sec: u32,
+    /// Group send burst.
+    pub group_send_burst: u32,
     /// Sustained frames per second per connection (all types); exceeding closes with 4103.
     pub frames_per_sec: u32,
     /// Frame burst.
@@ -897,6 +941,8 @@ impl Default for SessionConfig {
             drain_window_ms: 2_000,
             sends_per_sec: 50,
             send_burst: 200,
+            group_sends_per_sec: 10,
+            group_send_burst: 40,
             frames_per_sec: 400,
             frame_burst: 800,
             ephemeral_per_sec: 20,
@@ -994,6 +1040,16 @@ impl Validate for SessionConfig {
             self.send_burst >= self.sends_per_sec,
             "send_burst",
             "must be >= sends_per_sec",
+        );
+        range(
+            (1..=self.sends_per_sec).contains(&self.group_sends_per_sec),
+            "group_sends_per_sec",
+            "must be in 1..=sends_per_sec",
+        );
+        range(
+            self.group_send_burst >= self.group_sends_per_sec,
+            "group_send_burst",
+            "must be >= group_sends_per_sec",
         );
         range(self.frames_per_sec >= 1, "frames_per_sec", "must be >= 1");
         range(

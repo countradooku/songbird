@@ -107,6 +107,7 @@ impl Partitions {
                 let j = StoreJob {
                     tag: job.tag,
                     mls: job.mls,
+                    expires_ms: job.expires_ms,
                     local: job.local,
                     remote: job.remote,
                     reply: tx,
@@ -260,9 +261,11 @@ pub(crate) async fn fetch_local(
         st.devices
             .get(device)
             .map(|s| {
+                let now = super::now_ms();
                 s.pending
                     .iter()
-                    .filter(|e| e.seq > after_seq)
+                    // Never delivered after its deadline (the disappearing hint).
+                    .filter(|e| e.seq > after_seq && e.expires_ms > now)
                     .take(limit)
                     .copied()
                     .collect()

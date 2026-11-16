@@ -10,7 +10,10 @@
 //! - [`Mailbox::fetch_after`]: the oldest envelopes after a `seq`, in order (a range scan).
 //! - [`Mailbox::ack_up_to`]: hard-delete everything up to and including a `seq` (invariant 3);
 //!   implementations may batch the deletes for a few tens of milliseconds.
-//! - [`Mailbox::expire_older_than`]: delete what has waited too long (30 days, invariant 3).
+//! - [`Mailbox::expire_older_than`]: delete what has waited too long (30 days, invariant 3), and
+//!   every envelope whose own deadline has passed ([`StoreRequest::expires_after`], the
+//!   disappearing hint). An envelope past its deadline is never fetched, even before the sweep
+//!   deletes it: its `seq` is skipped (PROTOCOL §3.3 allows it).
 //!
 //! Implementations: [`memory::MemoryMailbox`] (tests and development),
 //! [`surreal::SurrealMailbox`] (SurrealDB with group commit, milestone 2's first design) and
@@ -154,6 +157,10 @@ pub struct StoreRequest {
     pub mls: Option<MlsCommit>,
     /// What to store.
     pub payload: Payload,
+    /// The disappearing hint (PROTOCOL §5.13): the envelopes are deleted this long after the
+    /// store even if no device ever fetched them, and never delivered after it. `None`: the
+    /// usual 30 days.
+    pub expires_after: Option<Duration>,
 }
 
 /// Result of [`Mailbox::store`].

@@ -20,7 +20,10 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
-- Group read receipts follow the read-receipt setting or not (Prompt 4).
+- Prompt 5 (deferred from Prompt 4 by the owner on 2026-11-16, `P04-gate.md`): delivered receipts
+  in groups above 32 members from primaries only (34 % of envelopes instead of 47 % in the busy
+  case of the M2 load test), or from every device (as built). Decide with the group tiers.
+
 - Public channels: build or not (Prompt 5).
 - WhatsApp interop legal gate (Prompt 14).
 - Second EU provider (D-0009): Hetzner only for now (D-0042); the Scaleway code stays dormant.
@@ -102,6 +105,368 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0064 — Prompt 4: the independent security review's findings, fixed
+
+- Date: 2026-11-16
+- Status: accepted; built (report `P04-gate.md`, "Security review"); amends D-0059, D-0061,
+  D-0062 and D-0063; **approved by the owner on 2026-11-16** with the Prompt 4 gate
+- Decided by: agent, at the owner's bar
+- Context: the review of `120c7a5..HEAD`, by an independent read-only reviewer, found one high,
+  two medium, one low–medium and two low issues, all confirmed against the code.
+- Decision (the fixes):
+  1. **High: a shared body skipped the contact gate and blocks.** A send with the shared-body
+     flag reached any closed account with no key, no request budget and no block check.
+     - Fix: a shared body is classified like a broadcast. Every closed account it reaches needs
+       its key in the combined `ACCESS` key, which the frame now allows with a shared body; a
+       request is never a shared body.
+     - There is no allocation when every account is open (the development directories and the
+       allocation gate). Prompt 5 replaces this with group membership.
+  2. **Medium: a block could be detected through idempotency.** A dropped request wrote no
+     idempotency record, so reusing its key (for other devices, or a subset) answered
+     differently.
+     - Fix: a dropped send now stores the whole send, under its own key, already expired: never
+       fetched or routed, swept. The record and every answer match a delivered send's.
+     - The sender's own envelopes go on live under a derived key. The expired copy waits for the
+       next sweep (minutes); the risk is listed in threat model §6.
+  3. **Medium: a linked device could open the account,** bypassing the primary-only loosening
+     rule, and blocks never applied to open accounts.
+     - Fix: opening the account (false to true) is refused unless the primary asks, checked in
+       the profile's transaction (`put_profile_as`).
+     - Sends to an open account go through a new `Open` lane, where the gate drops those from
+       senders it blocked. That is one registry lookup, for open accounts only.
+  4. **Low–medium: the profile key was inside the committed content,** so a report would hand
+     moderators the sender's profile key, and with it its access key.
+     - Fix: it moves to `Plaintext.profile_key`, beside the franking key, outside what a report
+       reveals. `Content` field 5 is reserved.
+     - There are now 33 vectors (new: `plaintext_accept`), and the independent compiler agrees.
+     - `songbird-admin reports open` prints the rendered message, not raw bytes.
+  5. **Low: a sender missing from the snapshot was stamped as sealed.** It is now refused as
+     unavailable (retry); only the sealed endpoint's sentinel is sealed.
+  6. **Low: configuration gaps.**
+     - `max_broadcast_accounts` must not exceed `broadcast_burst`.
+     - Every node pins a keyed fingerprint of the requests secret in the registry, and a node
+       with another secret refuses to start. A worker with the wrong secret could otherwise "verify"
+       a deletion that missed the block rows.
+     - A franking key that differs between delivery and `api` stays a deployment check (runbook).
+  7. **Notes:**
+     - keyed tags are now length-framed;
+     - the directory loader's comment is corrected;
+     - group-report dedupe (the first reporter takes a shared body's slot), re-reporting after
+       deletion and replays past a deadline are recorded in the gate report.
+- Evidence:
+  - new unit tests:
+    - shared bodies need every closed member's key;
+    - an unknown sender is refused;
+    - open accounts take anyone, but their blocks apply;
+    - a dropped request's key, reused for other devices or a subset, gets reason 7 as an
+      undropped one does, and a retry is answered as a retry with the sync transcript once;
+    - the profile key never appears in the committed bytes;
+  - `blocks_live`: only the primary opens an account; a node with another secret is detected;
+  - `gate_p04`: a shared body refused without the keys and delivered with them;
+  - `tools/content-vectors` 33 of 33; all suites re-run (`P04-gate.md`).
+- Consequences: groups need their members' profile keys (shared inside the group) until
+  Prompt 5. A dropped send briefly occupies the recipient's mailbox, unreadable, until the next
+  sweep.
+
+## D-0063 — Prompt 4, milestone 5: reporting with message franking; reports sealed to an offline moderation key
+
+- Date: 2026-11-16
+- Status: accepted; built (report `P04-M5.md`, and the Prompt 4 gate `P04-gate.md`); the gate
+  and the two threat-model §1 rows **approved by the owner on 2026-11-16**
+- Decided by: agent, under the owner's plan (D-0058) and standing instruction (Proton-level bar)
+- Context: Prompt 4: "The reporter submits the plaintext and the franking opening; the server
+  verifies the commitment it stamped at send time, then queues a minimal report for moderation
+  with short retention. Nothing else about the conversation is revealed."
+- Options considered:
+  - **Storing reports in the clear** for moderators was rejected: the registry and its backups
+    would hold message plaintext. Reports are sealed to a moderation key whose private half stays
+    offline, so the servers can verify and queue but never read them back.
+  - **Naming the reporter in the report** was rejected as more than moderation needs; repeat
+    reports are stopped by the keyed stamp ID and the budget.
+  - **Several messages (context) per report** was rejected: the prompt says nothing else about
+    the conversation, and each message carries its own stamp, so an app may send several reports.
+  - **Decoding the content on the server** to check it is a message was rejected (the server
+    never links `songbird-content`); moderators decode it in `songbird-admin`.
+- Decision:
+  - `POST /v1/reports` with the binary body of PROTOCOL §5.14 (`songbird_proto::report`, fuzzed).
+  - **Checks, in order:** the reporter's budget (spent first), the franking key, the 30-day
+    window, the stamp (sender attested or sealed; this recipient or a group), then the commitment
+    (constant time).
+  - **The minimal report:** eight fields, sealed with `seal_with(Domain::Report, …)` (salt
+    `songbird.v1/report`). The row is named by a keyed hash of the stamp's tag (one per
+    message), kept 30 days (at most 90), and swept by the worker.
+  - **`songbird-admin reports`:** `keygen`, `list`, `open` (decrypt and decode) and `delete`
+    (audit-logged).
+  - `[api.reports]` is required in staging and production, and needs `[api.requests]` and
+    `[api.send] franking_key`.
+- Evidence (Apple M5 Pro, macOS 27.2.1):
+  - verification known answers (identified, sealed, group, other reporter, other sender, other
+    words or key or commitment or time, forged tag, unknown or previous key, too old, future);
+  - the commitment's known answer equals `songbird_content`'s, and the live test checks both
+    implementations agree on random keys;
+  - `gate_p04` live:
+    - a request reported by its recipient, queued sealed;
+    - duplicate 409; another reporter, other words or another sender 403; garbage 400;
+    - only the moderation key opens it, the content is not in the clear, and no reporter is in
+      it;
+    - floods give 204, 409 ×4, 429 ×2;
+    - export and deletion of Prompt 4's stores;
+  - admin seal and open tests; fuzz `franking` (with reports), 60 s: 27,774,418 runs.
+- Consequences: a moderation key for the owner to generate and hold offline; two threat-model §1
+  rows. Reports of sealed sends name a claimed sender only.
+
+## D-0062 — Prompt 4, milestone 4: the contact gate, message requests, blocking, rate limits per conversation type, broadcast lists
+
+- Date: 2026-11-16
+- Status: accepted; built (report `P04-M4.md`); the gate and the three threat-model §1
+  rows **approved by the owner on 2026-11-16**
+- Decided by:
+  - owner: access key or request (D-0058 §3); tighten from any listed device, loosen from the
+    primary (D-0058 §4);
+  - agent: the design below.
+- Context: Prompt 4's server part: message requests the recipient controls, rate-limited; a
+  server-side drop of blocked identified senders with block lists stored as little as possible;
+  rate limits per conversation type; broadcast lists rate-limited as bulk.
+- Options considered:
+  - **A contact list on the server** was rejected: it is a social graph. The sender proves
+    contact by holding the recipient's access key, which only contacts hold (D-0054).
+  - **Checking access keys with a store query per send** was rejected (hot path). The directory
+    snapshot every node already holds (D-0036) gains each account's key, open flag and request
+    policy; profile and policy changes bump its version.
+  - **Blocks as account IDs** were rejected. They are keyed hashes of the pair, with a keyed
+    owner tag and a per-owner counter, and the full list syncs between the user's devices in
+    encrypted content.
+  - **Telling a blocked sender** was rejected (WhatsApp does not either). To keep the block
+    invisible:
+    - its requests are accepted and dropped;
+    - the budgets are spent before the block check;
+    - the timing difference is stated as an open risk.
+  - **Requests over HTTP only** were rejected: one gate behind a trait (`songbird_send::Gate`),
+    used by the WebSocket and `PUT /v1/messages` alike.
+- Decision:
+  - **Lanes** (PROTOCOL §5.10): sync, direct, broadcast, request, group, sealed, decided from the
+    snapshot. No allocation for 1:1 sends; access keys compared in constant time. Reason 10
+    ("access required") and 11 ("invalid request").
+  - **The gate** (`RegistryGate`):
+    - budgets per sender, per pair and per recipient for requests, and accounts per hour for
+      broadcasts. These use a cost-weighted GCRA in `valkey-hot` under keyed names and fail
+      closed;
+    - then the request policy and the block row in SurrealDB.
+    The keys derive from `[api.requests]` and `[delivery.requests] secret` (and the worker's
+    `requests_secret`).
+  - **Endpoints:** `PUT`/`DELETE /v1/blocks`, `GET`/`PUT /v1/account/requests`, with D-0058's
+    tighten/loosen rule.
+  - **Per-class rate limits:** group sends get their own budget within the per-device one (10 a
+    second, burst 40, on both transports). Requests and broadcasts are budgeted per account
+    across the cluster. Channels wait for Prompt 5.
+  - **GDPR:**
+    - the worker deletes an account's block rows by owner tag and verifies none are left;
+    - the export reports the policy and the block count;
+    - the policy flag goes with the account row.
+  - **Static development directories** treat every account as open, so the delivery invariants,
+    load and allocation tests are unchanged; a registry directory is closed by default.
+  - `SEALED_SENDER` moves into `songbird-send`; the sealed endpoint refuses `ACCESS`/`REQUEST`.
+- Evidence (Apple M5 Pro, macOS 27.2.1; compose stack under podman without Iggy):
+  - `crates/send`, 22 tests, among them every lane's rules, silent drops, floods (one to many,
+    many to one, one pair), a blocked sender seeing the same budgets, broadcasts (keys, size,
+    budget), groups and sealed sends unaffected, and no gate meaning unavailable;
+  - `blocks_live` (2): keyed rows; 1,020 racing adds never exceed 1,000; deletion by owner; the
+    policy and profiles bump the directory;
+  - `gate_p04` (2, live): every rule end to end over the WebSocket and HTTP, with
+    stamps verified, the linked device refused to loosen, and floods held cluster-wide;
+  - the earlier live tests updated to the contact flow (`registration`, `gate_m5`, `send_api`)
+    pass, and the non-live suite passes (555).
+- Consequences:
+  - Apps must publish a profile at registration and handle reasons 10 and 11.
+  - Blocking rotates the profile key (a client rule).
+  - Three threat-model §1 rows.
+  - `[api.requests]`, `[delivery.requests]` and the worker's `requests_secret` are required in
+    staging and production.
+  - The open risks (timing, sybil recipient budget, snapshot reloads, ephemeral frames) are in
+    threat model §6; shared bodies, idempotency and open accounts were fixed by D-0064.
+
+## D-0061 — Prompt 4, milestone 3: franking stamps and disappearing envelopes; the `Send` frame's hints
+
+- Date: 2026-11-16
+- Status: accepted; built (report `P04-M3.md`); the gate and the two threat-model §1 rows
+  **approved by the owner on 2026-11-16**
+- Decided by: agent, under the owner's plan (D-0058) and standing instruction (Proton-level bar)
+- Context: Prompt 4 asks for reporting with message franking (the server verifies the commitment
+  it stamped at send time) and for an envelope flag that expires undelivered envelopes early.
+  Both need something the server can see; the content stays opaque.
+- Options considered:
+  - **Hints inside the ciphertext** were rejected: the server would have to parse client content.
+  - **A new protocol version** was rejected while no app exists. Instead, v1's `Send` frame gains
+    four optional blocks behind new flag bits. Unknown bits stay refused, and each block appears
+    only with its flag, in a fixed order, so there is still one encoding per frame.
+  - **A stamp that names the sender** was rejected: it would store the sender with the envelope in
+    the clear (threat model §1, "never stored with the envelope"). It is a MAC over the accounts
+    instead.
+  - **A deadline in a server-written envelope header** was rejected: Iggy rebuilds its index from
+    record metadata, without opening envelopes. The deadline goes into the records instead (sealed
+    format 5).
+  - **A new Iggy record kind for dropped entries** was rejected as unnecessary: an expired
+    entry's key is punctured, so replay leaves it out (punctured slots are absent), and the
+    deadline in the metadata re-drops anything a crash left unpunctured.
+- Decision:
+  - **Frame:** `ACCESS 0x04` (16-byte key), `REQUEST 0x08`, `FRANKED 0x10` (32-byte commitment),
+    `EXPIRES 0x20` (`u32` seconds, 1 to 30 days). Access or request, never both, and neither on a
+    shared body; a request is never an MLS commit. Reasons 10 (access required) and 11 (invalid
+    request) are defined here and enforced in M4.
+  - **Stamps:** envelopes for another account are stored as `stamp ‖ envelope`, with a MAC by the
+    franking key over the key ID, commitment, time, sender and recipient accounts (zeros where
+    unknown or shared). The sender's own devices are not stamped. One allocation per stamped
+    envelope; unfranked sends are unchanged.
+  - **Reserved prefix:** `F5 53 42` covers system frames, stamps and any later server format.
+  - **Deadlines:** `StoreRequest::expires_after`, kept by every mailbox:
+    - memory: per entry;
+    - SurrealDB: `exp` with an index;
+    - Iggy: in the store metadata and the relocated slots (format 5; 3 and 4 still read), carried
+      over node links (wire 2) and by the re-driver.
+    Fetch skips expired entries, and the sweep deletes them (Iggy punctures their keys).
+  - **Keys:** `[delivery] franking_key` and `[api.send] franking_key` (+ `previous_franking_keys`
+    for reports), required in staging and production. Without a key a franked send is refused as
+    unavailable.
+- Evidence (Apple M5 Pro, macOS 27.2.1):
+  - the stamp's known answer, recomputed with Python's `hmac` and `hashlib`;
+  - stamps bound to key, sender, recipient, time and commitment; own devices unstamped; shared
+    bodies once; sealed without a sender; forged prefixes refused;
+  - frame vectors and flag rules, with proptest round trips including hints;
+  - deadlines in the memory mailbox, SurrealDB (live) and the Iggy state (unit; the Iggy live
+    test runs in CI);
+  - fuzz: `franking` 14,180,569 runs, `proto_client_frame` 7,624,430 and `iggy_record` 147,775 in
+    30 s each, nothing found.
+- Consequences: no new dependency. Iggy's sealed format is 5 and the node-link wire format is 2;
+  every node of a cluster runs one build. Two threat-model §1 rows for the owner.
+
+## D-0060 — Prompt 4, milestone 2: order-independent chat state and message status; receipt batching sized by measurement
+
+- Date: 2026-11-16
+- Status: accepted; built (report `P04-M2.md`); **gate approved by the owner on 2026-11-16**
+- Decided by:
+  - owner: group read receipts follow the setting; 24-hour edit and delete windows (D-0058);
+  - agent: the semantics below.
+- Context: Prompt 4 asks that polls tally the same on every device whatever the arrival order
+  ("last vote per voter wins, by a per-voter counter"), proven by property tests; statuses that
+  only move forward; batched and coalesced receipts; group aggregation as members come and go;
+  and a measured share of receipt traffic in a 1,024-member group.
+- Decision:
+  - **Convergence by construction:**
+    - per-author slots keep the greatest `(counter, value)`: reactions, votes, RSVPs, edits;
+    - shared chat state takes the greatest `(time, author, message ID)`: pins, timer, policy;
+    - every state is a function of the set of operations.
+  - **Closing a poll fixes its result:**
+    - the author's close lists each voter's counter as the author saw it;
+    - only those votes count afterwards, so a late vote cannot make devices disagree;
+    - closes by others, or naming another poll, are dropped.
+  - **Edit and delete windows** are judged from the messages' own times, never from arrival.
+  - **Status:** each recipient's greatest receipt. A group's audience is fixed at send time;
+    members who leave are dropped, and joiners are never counted.
+  - **Batching window:** 1 s, and **10 s in groups above 32 members**, chosen from the load test
+    below. Every device that saves a message sends a delivered receipt, which keeps "at least
+    one device" exact.
+- Evidence (Apple M5 Pro, macOS 27.2.1, release build):
+  - property tests, 512 cases each, two random orders with random repeats: polls (with closes,
+    forged closes and invalid votes), reactions and RSVPs, edits and deletes, pins, timers and
+    policies, and statuses (forward only);
+  - a broken merge ("the last arrival wins") fails at once;
+  - known cases: a closed poll, group ticks as members leave and join, a receipt lifting a failed
+    message, 200 unread messages giving one read receipt, splitting above 512, the setting off.
+  - **Load test** (`tests/e2e/tests/receipts_load.rs`): the real coalescer drives the real send
+    path. Setup: 1,024 members with 2 devices each; 60 messages in an hour; 20 % of devices offline
+    and catching up; 3 chat openings per member. Receipt share of all envelopes:
+
+    | Traffic | Window | Delivered from | Receipts |
+    | --- | --- | --- | --- |
+    | Steady, random authors | 1 s or 10 s | every device | 72.6 % |
+    | Steady, random authors | 1 s or 10 s | primaries only | 62.6 % |
+    | Bursts of two people chatting | 1 s | every device | 65.9 % |
+    | Bursts of two people chatting | 1 s | primaries only | 51.0 % |
+    | Bursts of two people chatting | **10 s** | **every device** | **47.2 %** (chosen) |
+    | Bursts of two people chatting | 10 s | primaries only | 34.3 % |
+
+    Receipts go to each author only (the prompt's rule), so they batch only across one author's
+    messages, and "read up to here" saves little in a big group whose messages have many
+    authors (9,624 read receipts for 47,360 messages read in the chosen case).
+- Consequences: no new dependency. Large groups see receipt envelopes close to half of all
+  traffic. Delivered receipts from primaries only would save another 13 points, at the cost of
+  "delivered" waiting for the primary; this is left to the owner (P04 gate) and to Prompt 5's
+  group tiers.
+
+## D-0059 — Prompt 4, milestone 1: the encrypted content schema (`crates/content`), never linked by a service
+
+- Date: 2026-11-16
+- Status: accepted; built (report `P04-M1.md`); **gate approved by the owner on 2026-11-16**
+- Decided by: agent, under the owner's plan (D-0058) and standing instruction (Proton-level bar)
+- Context: Prompt 4 asks for the content inside the encrypted payload, "specified so future apps
+  interoperate exactly": protobuf, versioned, tolerant of unknown fields, never decoded by the
+  server, with byte-exact vectors and a compatibility suite.
+- Options considered:
+  - **Types generated at build time** (`prost-build` with `protoc`) was rejected. It needs
+    `protoc` on every build machine and puts generated code out of review. Instead, `prost`
+    types are written by hand, field for field, as `crates/proto` already does. The `.proto` file
+    is the specification, and an independent compiler proves the two agree.
+  - **Signal's single `DataMessage` with every part optional** was rejected in favour of `oneof`
+    kinds: a message is exactly one thing (a message, a reaction, an edit…), which makes
+    validation and app code unambiguous.
+  - **UTF-16 offsets for spans** (Signal) were rejected in favour of UTF-8 bytes:
+    one unambiguous unit, checkable on character boundaries.
+- Decision:
+  - **Layers:**
+    - the session layer's ciphertext;
+    - a padded `Plaintext` (`0x80 0x00*` to a multiple of 160 bytes);
+    - `Plaintext { content bytes, franking key }`;
+    - `Content` (version, required version, message ID, time, profile key, and one body: data,
+      receipt, typing, sync or request response).
+  - **Franking commitment:** `HMAC-SHA256(franking_key, "songbird.v1/franking\0" || content)`
+    over the exact content bytes. The server stamps it (M3); a report submits the bytes and the
+    key (M5).
+  - **Validation after decoding:** every list, string and ID bound written in the `.proto`, with
+    sizes checked before decoding. Unknown fields, kinds and enum values are accepted, so a newer
+    writer is never refused. `required_version` drives "update to see this".
+  - **Message IDs:** 16 random bytes per message; (author, ID) deduplicates resends.
+  - **The server never decodes content:** no service or server crate may depend on
+    `songbird-content`, enforced by a test over every manifest.
+  - **`Debug` prints type names only** (invariant 6 in apps too).
+- Evidence (Apple M5 Pro, macOS 27.2.1):
+  - 16 tests in `crates/content`: padding, franking known answer (recomputed with Python's
+    `hmac`), bounds, a newer writer's fields at three depths, unknown kinds and enums, the
+    manifest check, and property tests;
+  - **33 vectors** in `vectors/v1/vectors.json`. Their protobuf JSON is written by hand
+    (`make_json.py`) and their hex comes from the Rust types. `tools/content-vectors` (protox
+    0.10.0 and prost-reflect 0.16.5, outside the workspace) compiles `content.proto` and
+    encodes each JSON to exactly that hex, with no unknown field on decoding: **33 of 33**. With
+    one field retyped (`sint32` to `int32`) it fails at once;
+  - fuzz `content`, 60 s: 7,892,926 runs, nothing found.
+- Consequences: no new dependency in the workspace (`prost`, `aws-lc-rs`, `thiserror`); the tool
+  brings `protox` and `prost-reflect` outside it. Apps generate their types from
+  `content.proto`, and attachment pointers are extended by Prompt 6.
+
+## D-0058 — Prompt 4: the plan, and the owner's decisions it needed
+
+- Date: 2026-11-16
+- Status: accepted (owner, 2026-11-16)
+- Decided by: owner (each answer below), on the agent's plan `docs/reports/P04-plan.md`
+- Context: Prompt 4 leaves group read receipts to the owner (the open decision above); its
+  message-request rule changes how identified sends are admitted (PROTOCOL §3.1); blocks and the
+  request policy are account-wide changes (D-0052); edit and delete limits are product choices.
+- Decisions:
+  1. **Plan agreed:** five milestones on one branch and one PR (the owner's request for speed):
+     M1 the content schema (`crates/content`); M2 convergence and message status; M3 franking
+     and disappearing envelopes; M4 message requests, blocking, rate limits per conversation
+     type, broadcast lists; M5 reporting and the Prompt 4 gate.
+  2. **Group read receipts follow the read-receipt setting**, reciprocal, as in Signal.
+  3. **Contact gate:** every send to another account carries that account's access key (the
+     account is open, or the key is in the send) or goes as a message request: rate-limited,
+     franked, blockable. Blocking rotates the profile key (a client rule).
+  4. **Blocks and the request policy:** any listed device may tighten them (block, refuse
+     requests); only the primary may loosen them (unblock, accept requests again). Pending
+     devices change nothing.
+  5. **Edit window and delete for everyone: 24 hours each**, as in Signal.
+- Consequences: identified sends between accounts need the access key from Prompt 4 on, so every
+  account should publish a profile (with its access key) at registration; apps must handle the new
+  refusal reason by sending a request or fetching the new profile key.
 
 ## D-0057 — Key transparency on Meta's akd (supersedes D-0055's own log)
 

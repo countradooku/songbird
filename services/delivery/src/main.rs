@@ -349,6 +349,32 @@ impl Service for Delivery {
         );
         let (stop_tx, stop_rx) = watch::channel(false);
         let (directory, follow) = load_directory(self.registry, self.directory).await?;
+        let franking = franker(self.settings.franking_key.as_ref())?;
+        let gate = match (&self.settings.requests, &follow) {
+            (Some(r), Some((registry, ..))) => {
+                let secret = r.secret.resolve_key32()?;
+                let keys = songbird_send::GateKeys::from_cluster_secret(&secret)
+                    .map_err(|_| BoxError::from("gate key derivation failed"))?;
+                if !registry
+                    .pin_fingerprint("requests", &keys.fingerprint())
+                    .await?
+                {
+                    return Err(BoxError::from(
+                        "the requests secret differs from the other nodes' (registry pin)",
+                    ));
+                }
+                let gate: Arc<dyn songbird_send::Gate> =
+                    Arc::new(songbird_send::RegistryGate::new(
+                        Arc::clone(registry),
+                        songbird_valkey::ValkeyConn::connect(r.valkey.client()?).await?,
+                        keys,
+                        r.limits,
+                    ));
+                tracing::info!("message requests and broadcasts enabled");
+                Some((gate, r.limits.max_broadcast_accounts))
+            }
+            _ => None,
+        };
         let mut shared = Shared::new(
             self.settings,
             directory,
@@ -356,6 +382,14 @@ impl Service for Delivery {
             router,
             self.metrics.clone(),
         );
+        shared = shared.with_policy(songbird_delivery::Policy {
+            franking,
+            max_broadcast_accounts: gate.as_ref().map_or(
+                songbird_send::RequestLimits::default().max_broadcast_accounts,
+                |(_, n)| *n,
+            ),
+            gate: gate.map(|(g, _)| g),
+        });
         let mut pusher_task = None;
         if let Some(jobs) = self.jobs {
             let (pusher, task) = start_pusher(jobs, &self.metrics, stop_rx.clone()).await?;
@@ -569,4 +603,16 @@ impl Drop for StorageRuntime {
 fn main() -> std::process::ExitCode {
     sockudo_ws::init_clock();
     songbird_service::main::<Delivery>()
+}
+
+/// The franking key from the secrets store (Prompt 4, D-0061), if configured.
+fn franker(
+    key: Option<&songbird_types::SecretRef>,
+) -> Result<Option<songbird_send::Franker>, BoxError> {
+    key.map(|k| {
+        let secret = k.resolve_key32()?;
+        songbird_send::Franker::from_secret(&secret)
+            .map_err(|_| BoxError::from("franking key derivation failed"))
+    })
+    .transpose()
 }

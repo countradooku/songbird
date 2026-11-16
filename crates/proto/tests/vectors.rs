@@ -3,7 +3,7 @@
 
 use bytes::Bytes;
 use songbird_proto::frame::{
-    MlsCommitRef, Recipient, RejectReason, SendFrame, SendPayload, SendStatus,
+    MlsCommitRef, Recipient, RejectReason, SendFrame, SendHints, SendPayload, SendStatus,
 };
 use songbird_proto::{ClientFrame, Limits, ServerFrame};
 use songbird_types::DeviceId;
@@ -48,6 +48,7 @@ fn client_frames() {
         ),
         (
             ClientFrame::Send(SendFrame {
+                hints: SendHints::default(),
                 req_id: 8,
                 idempotency_key: [0x11; 16],
                 mls: Some(MlsCommitRef {
@@ -66,6 +67,47 @@ fn client_frames() {
         ),
     ];
     for (frame, hex) in cases {
+        let want = unhex(hex);
+        assert_eq!(frame.to_bytes(), want);
+        assert_eq!(ClientFrame::decode(&want, &Limits::DEFAULT).unwrap(), frame);
+    }
+}
+
+/// Prompt 4 (D-0061, D-0062): a franked, disappearing message request, and a contact's send
+/// with its access key.
+#[test]
+fn send_frames_with_hints() {
+    let one = |envelope: &'static [u8]| {
+        vec![Recipient {
+            device: dev(0x22),
+            envelope: Bytes::from_static(envelope),
+        }]
+    };
+    let mut request = SendFrame::per_device(9, [0x11; 16], one(b"abc"));
+    request.hints = SendHints {
+        access: None,
+        request: true,
+        commitment: Some([0x55; 32]),
+        expire_after_s: Some(3600),
+    };
+    let mut contact = SendFrame::per_device(10, [0x11; 16], one(b"z"));
+    contact.hints.access = Some([0x66; 16]);
+    let cases = [
+        (
+            request,
+            "01 00000009 11111111111111111111111111111111 38 \
+             5555555555555555555555555555555555555555555555555555555555555555 00000e10 \
+             0001 22222222222222222222222222222222 00000003 616263",
+        ),
+        (
+            contact,
+            "01 0000000a 11111111111111111111111111111111 04 \
+             66666666666666666666666666666666 \
+             0001 22222222222222222222222222222222 00000001 7a",
+        ),
+    ];
+    for (frame, hex) in cases {
+        let frame = ClientFrame::Send(frame);
         let want = unhex(hex);
         assert_eq!(frame.to_bytes(), want);
         assert_eq!(ClientFrame::decode(&want, &Limits::DEFAULT).unwrap(), frame);

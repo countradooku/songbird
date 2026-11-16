@@ -3429,13 +3429,16 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "prost",
  "rcgen",
  "rustls",
  "rustls-pki-types",
  "serde",
  "serde_json",
  "songbird-accounts",
+ "songbird-content",
  "songbird-jobs",
+ "songbird-keys",
  "songbird-proto",
  "songbird-s3",
  "songbird-surreal",
@@ -3541,6 +3544,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "songbird-content"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "hex",
+ "proptest",
+ "prost",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "songbird-delivery"
 version = "0.1.0"
 dependencies = [
@@ -3596,6 +3611,7 @@ dependencies = [
  "songbird-alloc-count",
  "songbird-api",
  "songbird-client",
+ "songbird-content",
  "songbird-delivery",
  "songbird-jobs",
  "songbird-keys",
@@ -3853,6 +3869,7 @@ dependencies = [
  "bytes",
  "getrandom 0.4.3",
  "hex",
+ "redis",
  "serde",
  "songbird-accounts",
  "songbird-jobs",
@@ -3861,6 +3878,7 @@ dependencies = [
  "songbird-router",
  "songbird-service",
  "songbird-types",
+ "songbird-valkey",
  "thiserror 2.0.21",
  "tokio",
  "toml",

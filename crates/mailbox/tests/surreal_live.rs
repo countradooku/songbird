@@ -62,6 +62,7 @@ fn d(b: u8) -> DeviceId {
 
 fn per(items: &[(DeviceId, &'static str)]) -> StoreRequest {
     StoreRequest {
+        expires_after: None,
         idempotency_key: None,
         mls: None,
         payload: Payload::PerDevice(
@@ -165,6 +166,7 @@ async fn shared_body_is_stored_once() {
     let t0 = Instant::now();
     let out = m
         .store(StoreRequest {
+            expires_after: None,
             idempotency_key: Some([1; 16]),
             mls: None,
             payload: Payload::Shared {
@@ -218,6 +220,7 @@ async fn mls_commits_are_ordered_by_epoch() {
     let Some(cfg) = config("mls") else { return };
     let m = Arc::new(SurrealMailbox::connect(cfg).await.unwrap());
     let commit = |epoch, key: u8| StoreRequest {
+        expires_after: None,
         idempotency_key: Some([key; 16]),
         mls: Some(MlsCommit {
             group: [5; 16],
@@ -294,6 +297,7 @@ async fn expiry_deletes_old_entries_and_bodies() {
     let m = SurrealMailbox::connect(cfg).await.unwrap();
     m.store(per(&[(d(1), "old")])).await.unwrap();
     m.store(StoreRequest {
+        expires_after: None,
         idempotency_key: None,
         mls: None,
         payload: Payload::Shared {
@@ -358,4 +362,53 @@ async fn many_devices_ack_in_bulk() {
         .await
         .unwrap();
     assert_eq!(left.as_i64(), Some(0));
+}
+
+#[tokio::test]
+async fn the_disappearing_hint_skips_then_deletes() {
+    let Some(cfg) = config("disappearing") else {
+        return;
+    };
+    let m = SurrealMailbox::connect(cfg).await.unwrap();
+    m.store(per(&[(d(1), "keep")])).await.unwrap();
+    let mut short = per(&[(d(1), "gone")]);
+    short.expires_after = Some(Duration::from_secs(1));
+    m.store(short).await.unwrap();
+    m.store(StoreRequest {
+        expires_after: Some(Duration::from_secs(1)),
+        idempotency_key: None,
+        mls: None,
+        payload: Payload::Shared {
+            devices: vec![d(1), d(2)],
+            body: Bytes::from_static(b"group"),
+        },
+    })
+    .await
+    .unwrap();
+    assert_eq!(m.fetch_after(&d(1), 0, 10).await.unwrap().len(), 3);
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    // Past the deadline: never fetched, though the sweep has not run.
+    let got: Vec<u64> = m
+        .fetch_after(&d(1), 0, 10)
+        .await
+        .unwrap()
+        .iter()
+        .map(|s| s.seq)
+        .collect();
+    assert_eq!(got, vec![1]);
+    assert_eq!(m.fetch_after(&d(2), 0, 10).await.unwrap().len(), 0);
+    // The sweep deletes them (and the shared body) although no device fetched them.
+    assert_eq!(
+        m.expire_older_than(Duration::from_hours(1)).await.unwrap(),
+        3
+    );
+    assert_eq!(m.count_pending(&d(1)).await.unwrap(), 1);
+    let bodies = m
+        .query_one(
+            "RETURN count(SELECT id FROM body);",
+            vec![("x".into(), Value::Null)],
+        )
+        .await
+        .unwrap();
+    assert_eq!(bodies.as_i64(), Some(0));
 }

@@ -5,6 +5,7 @@
 //! - `generation`: the store generation clients see in `Hello` (D-0040): shown, or bumped after
 //!   a restore or a loss of the mailbox, so clients resend what has no delivery receipt.
 //! - `accounts import`: a static directory file as registry accounts (drills, development).
+//! - `reports`: the moderation key, and the queue of reports sealed to it (Prompt 4, D-0063).
 //! - `invites create`: a batch of invite codes for early testers (D-0038); `invites grant`: more
 //!   invites for one account. Codes are printed once and stored only as hashes; the audit log
 //!   records how many, never the codes.
@@ -32,6 +33,7 @@
 mod audit;
 mod backup;
 mod ca;
+mod reports;
 mod store;
 
 use std::path::PathBuf;
@@ -67,6 +69,9 @@ enum Cmd {
     /// Invite codes (invite-only registration, D-0038).
     #[command(subcommand)]
     Invites(InvitesCmd),
+    /// Reports (Prompt 4, D-0063): the moderation key, and the sealed queue.
+    #[command(subcommand)]
+    Reports(reports::ReportsCmd),
 }
 
 #[derive(Debug, Subcommand)]
@@ -227,6 +232,7 @@ fn main() -> ExitCode {
             directory,
         }) => accounts_import(&store, &guard, &directory),
         Cmd::Invites(cmd) => invites_cmd(cmd),
+        Cmd::Reports(cmd) => reports::run(cmd),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

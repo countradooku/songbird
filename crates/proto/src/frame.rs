@@ -6,7 +6,7 @@
 //!
 //! | Type | Direction | Frame | Body |
 //! | --- | --- | --- | --- |
-//! | `0x01` | C→S | `Send` | `req_id u32`, `idempotency_key [16]`, `flags u8`, [MLS: `group [16]`, `epoch u64`], `count u16`, then per device `count ×` (`device_id [16]`, `len u32`, `envelope [len]`) or shared `count × device_id [16]`, `len u32`, `body [len]` |
+//! | `0x01` | C→S | `Send` | `req_id u32`, `idempotency_key [16]`, `flags u8`, [MLS: `group [16]`, `epoch u64`], [access: `access_key [16]`], [franked: `commitment [32]`], [expires: `expire_after_s u32`], `count u16`, then per device `count ×` (`device_id [16]`, `len u32`, `envelope [len]`) or shared `count × device_id [16]`, `len u32`, `body [len]` |
 //! | `0x02` | C→S | `Ack` | `up_to_seq u64` |
 //! | `0x03` | C→S | `Ephemeral` | `to [16]`, `payload` |
 //! | `0x10` | C→S | `Auth` | protobuf [`control::Auth`] |
@@ -63,6 +63,30 @@ pub const SEND_HEADER_LEN: usize = 1 + 4 + IDEMPOTENCY_KEY_LEN + 1 + 2;
 pub const SEND_FLAG_MLS: u8 = 0x01;
 /// `Send` flag: one shared body for every recipient device.
 pub const SEND_FLAG_SHARED: u8 = 0x02;
+/// `Send` flag: the combined access key of the addressed accounts follows (Prompt 4, M4): a send
+/// from a contact (per device or a group's shared body). Not with [`SEND_FLAG_REQUEST`].
+pub const SEND_FLAG_ACCESS: u8 = 0x04;
+/// `Send` flag: this send is a message request (Prompt 4, M4). Not with [`SEND_FLAG_ACCESS`],
+/// [`SEND_FLAG_SHARED`] or [`SEND_FLAG_MLS`].
+pub const SEND_FLAG_REQUEST: u8 = 0x08;
+/// `Send` flag: a franking commitment follows; the server stamps it (Prompt 4, M3).
+pub const SEND_FLAG_FRANKED: u8 = 0x10;
+/// `Send` flag: the disappearing hint follows, a deadline in seconds from the store (Prompt 4,
+/// M3).
+pub const SEND_FLAG_EXPIRES: u8 = 0x20;
+/// Every `Send` flag this version knows; other bits are refused.
+pub const SEND_FLAGS: u8 = SEND_FLAG_MLS
+    | SEND_FLAG_SHARED
+    | SEND_FLAG_ACCESS
+    | SEND_FLAG_REQUEST
+    | SEND_FLAG_FRANKED
+    | SEND_FLAG_EXPIRES;
+/// Longest disappearing hint: the 30 days an envelope is kept anyway.
+pub const MAX_EXPIRE_AFTER_S: u32 = 30 * 24 * 3600;
+/// Length of an access key.
+pub const ACCESS_KEY_LEN: usize = 16;
+/// Length of a franking commitment.
+pub const COMMITMENT_LEN: usize = 32;
 /// Bytes per recipient in a `Send` frame, before its envelope.
 pub const RECIPIENT_HEADER_LEN: usize = ID_LEN + 4;
 
@@ -232,6 +256,32 @@ impl std::fmt::Debug for MlsCommitRef {
     }
 }
 
+/// What a `Send` tells the server beyond its recipients (Prompt 4): each set only by its flag.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct SendHints {
+    /// The XOR of the access keys of every addressed account that is not open: the sender is a
+    /// contact (`ACCESS`).
+    pub access: Option<[u8; ACCESS_KEY_LEN]>,
+    /// The send is a message request (`REQUEST`).
+    pub request: bool,
+    /// The franking commitment the server stamps (`FRANKED`).
+    pub commitment: Option<[u8; COMMITMENT_LEN]>,
+    /// Delete undelivered envelopes this many seconds after the store, and never deliver them
+    /// later (`EXPIRES`, 1 to [`MAX_EXPIRE_AFTER_S`]).
+    pub expire_after_s: Option<u32>,
+}
+
+impl std::fmt::Debug for SendHints {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SendHints")
+            .field("access", &self.access.is_some())
+            .field("request", &self.request)
+            .field("franked", &self.commitment.is_some())
+            .field("expire_after_s", &self.expire_after_s)
+            .finish()
+    }
+}
+
 /// A `Send` frame.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SendFrame {
@@ -241,6 +291,8 @@ pub struct SendFrame {
     pub idempotency_key: [u8; IDEMPOTENCY_KEY_LEN],
     /// Set when this send is an MLS commit.
     pub mls: Option<MlsCommitRef>,
+    /// Access key, request, franking commitment, disappearing hint.
+    pub hints: SendHints,
     /// Recipients and ciphertext, at most [`Limits::max_recipients`] devices.
     pub payload: SendPayload,
 }
@@ -257,6 +309,12 @@ impl SendFrame {
             req_id,
             idempotency_key,
             mls: None,
+            hints: SendHints {
+                access: None,
+                request: false,
+                commitment: None,
+                expire_after_s: None,
+            },
             payload: SendPayload::PerDevice(recipients),
         }
     }
@@ -267,6 +325,7 @@ impl std::fmt::Debug for SendFrame {
         f.debug_struct("SendFrame")
             .field("req_id", &self.req_id)
             .field("mls", &self.mls)
+            .field("hints", &self.hints)
             .field("payload", &self.payload)
             .finish_non_exhaustive()
     }
@@ -312,9 +371,16 @@ pub enum RejectReason {
     IdempotencyConflict,
     /// An MLS commit from an epoch the group has left: process the winning commit, retry.
     StaleEpoch,
-    /// An envelope begins with the prefix reserved for server-signed system frames
-    /// ([`crate::system::MAGIC`]); system frames are never user messages.
+    /// An envelope begins with the prefix reserved for what the server writes
+    /// ([`crate::envelope::RESERVED_PREFIX`]: system frames, franking stamps); never a user
+    /// message.
     ReservedEnvelope,
+    /// A send to another account with neither its access key (or the right one) nor the request
+    /// flag (Prompt 4): fetch the profile key again, or send a message request.
+    AccessRequired,
+    /// A message request that breaks the request rules: not franked, or addressed to more than
+    /// one other account (Prompt 4).
+    InvalidRequest,
     /// A code this version does not know (forward compatibility).
     Other(u16),
 }
@@ -333,6 +399,8 @@ impl RejectReason {
             Self::IdempotencyConflict => 7,
             Self::StaleEpoch => 8,
             Self::ReservedEnvelope => 9,
+            Self::AccessRequired => 10,
+            Self::InvalidRequest => 11,
             Self::Other(c) => c,
         }
     }
@@ -350,6 +418,8 @@ impl RejectReason {
             7 => Self::IdempotencyConflict,
             8 => Self::StaleEpoch,
             9 => Self::ReservedEnvelope,
+            10 => Self::AccessRequired,
+            11 => Self::InvalidRequest,
             c => Self::Other(c),
         }
     }
@@ -573,23 +643,63 @@ impl ClientFrame {
     }
 }
 
+/// The flag-selected blocks of a `Send`: the MLS commit and the hints, with the flag rules.
+fn decode_send_blocks(
+    c: &mut Cursor<'_>,
+    flags: u8,
+) -> Result<(Option<MlsCommitRef>, SendHints), FrameError> {
+    let has = |f: u8| flags & f != 0;
+    if flags & !SEND_FLAGS != 0
+        // A contact or a request, not both; a request is one 1:1 message, never a shared body
+        // or an MLS commit.
+        || (has(SEND_FLAG_ACCESS) && has(SEND_FLAG_REQUEST))
+        || (has(SEND_FLAG_REQUEST) && (has(SEND_FLAG_SHARED) || has(SEND_FLAG_MLS)))
+    {
+        return Err(FrameError::Control("send.flags"));
+    }
+    let mls = if has(SEND_FLAG_MLS) {
+        Some(MlsCommitRef {
+            group: c.array()?,
+            epoch: c.u64()?,
+        })
+    } else {
+        None
+    };
+    let access = if has(SEND_FLAG_ACCESS) {
+        Some(c.array::<ACCESS_KEY_LEN>()?)
+    } else {
+        None
+    };
+    let commitment = if has(SEND_FLAG_FRANKED) {
+        Some(c.array::<COMMITMENT_LEN>()?)
+    } else {
+        None
+    };
+    let expire_after_s = if has(SEND_FLAG_EXPIRES) {
+        let s = c.u32()?;
+        if s == 0 || s > MAX_EXPIRE_AFTER_S {
+            return Err(FrameError::Control("send.expire_after_s"));
+        }
+        Some(s)
+    } else {
+        None
+    };
+    let hints = SendHints {
+        access,
+        request: has(SEND_FLAG_REQUEST),
+        commitment,
+        expire_after_s,
+    };
+    Ok((mls, hints))
+}
+
 fn decode_send(msg: &Bytes, limits: &Limits) -> Result<SendFrame, FrameError> {
     check_len("send", msg.len(), limits.max_send_bytes)?;
     let mut c = Cursor::new(msg, 1);
     let req_id = c.u32()?;
     let idempotency_key = c.array::<IDEMPOTENCY_KEY_LEN>()?;
     let [flags] = c.array::<1>()?;
-    if flags & !(SEND_FLAG_MLS | SEND_FLAG_SHARED) != 0 {
-        return Err(FrameError::Control("send.flags"));
-    }
-    let mls = if flags & SEND_FLAG_MLS == 0 {
-        None
-    } else {
-        Some(MlsCommitRef {
-            group: c.array()?,
-            epoch: c.u64()?,
-        })
-    };
+    let (mls, hints) = decode_send_blocks(&mut c, flags)?;
     let count = usize::from(c.u16()?);
     if count == 0 {
         return Err(FrameError::NoRecipients);
@@ -647,6 +757,7 @@ fn decode_send(msg: &Bytes, limits: &Limits) -> Result<SendFrame, FrameError> {
         req_id,
         idempotency_key,
         mls,
+        hints,
         payload,
     })
 }
@@ -659,7 +770,11 @@ fn encode_send(s: &SendFrame, out: &mut BytesMut) {
             .fold(0, usize::saturating_add),
         SendPayload::Shared { devices, body } => (devices.len() * ID_LEN) + 4 + body.len(),
     };
-    out.reserve(SEND_HEADER_LEN.saturating_add(24).saturating_add(body));
+    out.reserve(
+        SEND_HEADER_LEN
+            .saturating_add(24 + 16 + 32 + 4)
+            .saturating_add(body),
+    );
     out.put_u8(ty::SEND);
     out.put_u32(s.req_id);
     out.put_slice(&s.idempotency_key);
@@ -670,10 +785,32 @@ fn encode_send(s: &SendFrame, out: &mut BytesMut) {
     if matches!(s.payload, SendPayload::Shared { .. }) {
         flags |= SEND_FLAG_SHARED;
     }
+    let h = &s.hints;
+    if h.access.is_some() {
+        flags |= SEND_FLAG_ACCESS;
+    }
+    if h.request {
+        flags |= SEND_FLAG_REQUEST;
+    }
+    if h.commitment.is_some() {
+        flags |= SEND_FLAG_FRANKED;
+    }
+    if h.expire_after_s.is_some() {
+        flags |= SEND_FLAG_EXPIRES;
+    }
     out.put_u8(flags);
     if let Some(m) = &s.mls {
         out.put_slice(&m.group);
         out.put_u64(m.epoch);
+    }
+    if let Some(k) = &h.access {
+        out.put_slice(k);
+    }
+    if let Some(c) = &h.commitment {
+        out.put_slice(c);
+    }
+    if let Some(t) = h.expire_after_s {
+        out.put_u32(t);
     }
     out.put_u16(u16::try_from(s.payload.len()).unwrap_or(u16::MAX));
     match &s.payload {
@@ -844,17 +981,34 @@ mod tests {
             (
                 any::<u32>(),
                 any::<[u8; 16]>(),
-                proptest::collection::vec((arb_device(), arb_payload(64)), 1..8)
+                proptest::collection::vec((arb_device(), arb_payload(64)), 1..8),
+                // None, a contact's access key, or a request.
+                prop_oneof![
+                    Just((None, false)),
+                    any::<[u8; 16]>().prop_map(|k| (Some(k), false)),
+                    Just((None, true)),
+                ],
+                proptest::option::of(any::<[u8; 32]>()),
+                proptest::option::of(1..=MAX_EXPIRE_AFTER_S),
             )
-                .prop_map(|(req_id, idempotency_key, rs)| ClientFrame::Send(
-                    SendFrame::per_device(
-                        req_id,
-                        idempotency_key,
-                        rs.into_iter()
-                            .map(|(device, envelope)| Recipient { device, envelope })
-                            .collect(),
-                    )
-                )),
+                .prop_map(
+                    |(req_id, idempotency_key, rs, (access, request), commitment, expire)| {
+                        let mut s = SendFrame::per_device(
+                            req_id,
+                            idempotency_key,
+                            rs.into_iter()
+                                .map(|(device, envelope)| Recipient { device, envelope })
+                                .collect(),
+                        );
+                        s.hints = SendHints {
+                            access,
+                            request,
+                            commitment,
+                            expire_after_s: expire,
+                        };
+                        ClientFrame::Send(s)
+                    }
+                ),
             (
                 any::<u32>(),
                 any::<[u8; 16]>(),
@@ -864,6 +1018,12 @@ mod tests {
             )
                 .prop_map(|(req_id, idempotency_key, mls, devices, body)| {
                     ClientFrame::Send(SendFrame {
+                        hints: SendHints {
+                            // A group's body may be franked and disappear too.
+                            commitment: (req_id % 3 == 0).then_some([7; 32]),
+                            expire_after_s: (req_id % 5 == 0).then_some(60),
+                            ..SendHints::default()
+                        },
                         req_id,
                         idempotency_key,
                         mls: mls.map(|(group, epoch)| MlsCommitRef { group, epoch }),
@@ -926,6 +1086,62 @@ mod tests {
                 }
             )),
         ]
+    }
+
+    #[test]
+    fn send_hint_flags_are_exclusive_and_bounded() {
+        let base = |flags: u8, extra: &[u8]| {
+            let mut b = BytesMut::new();
+            b.put_u8(ty::SEND);
+            b.put_u32(1);
+            b.put_slice(&[3; 16]);
+            b.put_u8(flags);
+            b.put_slice(extra);
+            b.put_u16(1);
+            b.put_slice(&[2; 16]);
+            // One device and a one-byte envelope (per device) or body (shared): the same bytes.
+            b.put_u32(1);
+            b.put_u8(b'x');
+            ClientFrame::decode(&b.freeze(), &Limits::DEFAULT)
+        };
+        let refused = Err(FrameError::Control("send.flags"));
+        // Access and request together; either with a shared body; a request that is a commit.
+        assert_eq!(
+            base(SEND_FLAG_ACCESS | SEND_FLAG_REQUEST, &[0; 16]),
+            refused
+        );
+        assert!(
+            base(SEND_FLAG_ACCESS | SEND_FLAG_SHARED, &[0; 16]).is_ok(),
+            "a group's key"
+        );
+        assert_eq!(base(SEND_FLAG_REQUEST | SEND_FLAG_SHARED, &[]), refused);
+        assert_eq!(base(SEND_FLAG_REQUEST | SEND_FLAG_MLS, &[0; 24]), refused);
+        assert_eq!(base(0x40, &[]), refused);
+        assert_eq!(base(0x80, &[]), refused);
+        // The disappearing hint: 1 s to 30 days.
+        let exp = |s: u32| base(SEND_FLAG_EXPIRES, &s.to_be_bytes());
+        assert_eq!(exp(0), Err(FrameError::Control("send.expire_after_s")));
+        assert_eq!(
+            exp(MAX_EXPIRE_AFTER_S + 1),
+            Err(FrameError::Control("send.expire_after_s"))
+        );
+        for ok in [1, MAX_EXPIRE_AFTER_S] {
+            let Ok(ClientFrame::Send(s)) = exp(ok) else {
+                panic!("{ok}")
+            };
+            assert_eq!(s.hints.expire_after_s, Some(ok));
+        }
+        // Franked shared bodies are allowed (stamped once); every hint round-trips.
+        let Ok(ClientFrame::Send(s)) = base(SEND_FLAG_SHARED | SEND_FLAG_FRANKED, &[9; 32]) else {
+            panic!("franked shared")
+        };
+        assert_eq!(s.hints.commitment, Some([9; 32]));
+        assert_eq!(
+            ClientFrame::decode(&ClientFrame::Send(s.clone()).to_bytes(), &Limits::DEFAULT),
+            Ok(ClientFrame::Send(s))
+        );
+        // A truncated block.
+        assert_eq!(base(SEND_FLAG_ACCESS, &[0; 3]).ok(), None);
     }
 
     proptest! {

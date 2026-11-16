@@ -67,6 +67,12 @@ pub struct DeliveryMetrics {
     /// Push wake-ups dropped (buffer full or job queue unreachable; the message is safe in the
     /// mailbox).
     pub push_dropped: Counter,
+    /// Message requests stored (Prompt 4).
+    pub requests: Counter,
+    /// Message requests dropped silently (blocked, or requests refused).
+    pub requests_dropped: Counter,
+    /// Broadcast sends stored.
+    pub broadcasts: Counter,
     /// From a `Send` frame read to the send durably stored (group commit included): the
     /// server-side part of send-to-deliver that the 2 ms target is about (master prompt §8).
     pub store_seconds: ShardedHistogram,
@@ -84,6 +90,9 @@ impl DeliveryMetrics {
             routes_lagged: self.routes_lagged.clone(),
             routes_offline: self.routes_offline.clone(),
             mailbox_errors: self.mailbox_errors.clone(),
+            requests: self.requests.clone(),
+            requests_dropped: self.requests_dropped.clone(),
+            broadcasts: self.broadcasts.clone(),
             store_seconds: self.store_seconds.clone(),
         }
     }
@@ -108,7 +117,7 @@ impl DeliveryMetrics {
             "WebSocket connections open",
             self.connections_open.clone(),
         )?;
-        let counters: [(&str, &str, &Counter); 27] = [
+        let counters: [(&str, &str, &Counter); 30] = [
             (
                 "delivery_connections",
                 "WebSocket connections accepted",
@@ -239,6 +248,21 @@ impl DeliveryMetrics {
                 "delivery_push_dropped",
                 "Push wake-ups dropped (the message stays in the mailbox)",
                 &self.push_dropped,
+            ),
+            (
+                "delivery_requests",
+                "Message requests stored",
+                &self.requests,
+            ),
+            (
+                "delivery_requests_dropped",
+                "Message requests dropped silently (blocked or refused)",
+                &self.requests_dropped,
+            ),
+            (
+                "delivery_broadcasts",
+                "Broadcast sends stored",
+                &self.broadcasts,
             ),
         ];
         for (name, help, c) in counters {

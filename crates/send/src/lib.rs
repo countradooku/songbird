@@ -17,7 +17,11 @@
 //! - **Routing never blocks on a recipient**, and a device with no session anywhere gets a
 //!   debounced push wake-up ([`Pusher`]); the message waits in the mailbox either way.
 //! - **System frames are never user messages** ([`system`]): user envelopes that begin with the
-//!   reserved system-frame prefix are refused, and server notices are signed.
+//!   prefix reserved for what the server writes are refused, and server notices are signed.
+//! - **Franking** ([`franking`], Prompt 4): a franked send's envelopes for other accounts are
+//!   stored behind a stamp the server MACs, so a recipient can later report them.
+//! - **The disappearing hint** (Prompt 4): a send's deadline goes to the mailbox, which never
+//!   delivers its envelopes after it and deletes them then.
 //!
 //! The hot path (one delivery core) allocates nothing here that it did not allocate before the
 //! extraction: [`SendPath`] is a set of borrows built per send, the recipient scratch list is the
@@ -27,10 +31,12 @@
 
 pub mod config;
 pub mod directory;
+pub mod franking;
+pub mod gate;
 pub mod push;
 pub mod system;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use songbird_mailbox::{
@@ -41,11 +47,82 @@ use songbird_proto::frame::{RejectReason, SendFrame, SendPayload, SendStatus};
 use songbird_router::{Live, Routed, Router};
 use songbird_service::telemetry::sharded::{ShardedCounter as Counter, ShardedHistogram};
 use songbird_service::telemetry::{Metrics, TelemetryError};
-use songbird_types::DeviceId;
+use songbird_types::{AccountId, DeviceId};
+use std::sync::Arc;
 
 pub use config::LimitsConfig;
 pub use directory::{Directory, LiveDirectory, Mismatch};
+pub use franking::{Franker, Frankers};
+pub use gate::{Admit, Gate, GateKeys, MemoryGate, RegistryGate, RequestLimits};
 pub use push::{PushMetrics, Pusher};
+
+/// The device a sealed send (`PUT /v1/messages/sealed`, D-0054) passes as its sender: no real
+/// device has this ID, and the sealed endpoint has already checked the recipients' access keys.
+pub const SEALED_SENDER: DeviceId = DeviceId::from_bytes([0; 16]);
+
+/// What the send path enforces beyond limits and the device list (Prompt 4). One per service,
+/// borrowed by every send.
+pub struct Policy {
+    /// Stamps franked sends. Without it a franked send is refused as unavailable (a deployment
+    /// must configure it; configuration validation requires it outside development).
+    pub franking: Option<Franker>,
+    /// The cluster-wide checks of requests and broadcasts. Without it those sends are refused as
+    /// unavailable (only a registry directory has closed accounts, and deployments configure
+    /// it).
+    pub gate: Option<Arc<dyn Gate>>,
+    /// Most other accounts one broadcast may address.
+    pub max_broadcast_accounts: u32,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self {
+            franking: None,
+            gate: None,
+            max_broadcast_accounts: RequestLimits::default().max_broadcast_accounts,
+        }
+    }
+}
+
+impl std::fmt::Debug for Policy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Policy")
+            .field("franking", &self.franking)
+            .field("gate", &self.gate.is_some())
+            .field("max_broadcast_accounts", &self.max_broadcast_accounts)
+            .finish()
+    }
+}
+
+/// What the gate decided for a send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admitted {
+    /// Store it as it is.
+    Store,
+    /// Drop this account's part silently.
+    Drop(AccountId),
+}
+
+/// What kind of conversation a send belongs to (Prompt 4, D-0062), from what the server can see:
+/// the addressed accounts, the frame's flags and the directory snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lane {
+    /// Only the sender's own other devices (sync messages).
+    Sync,
+    /// One other account, a contact: its access key is in the send.
+    Direct,
+    /// One other account that is open (anyone may send): no key needed, but its blocks apply.
+    Open(AccountId),
+    /// Several other accounts, each a contact or open: a broadcast list.
+    Broadcast(u32),
+    /// A shared body: a group or channel. Until Prompt 5 authorizes membership, every closed
+    /// account it reaches needs its access key in the combined key.
+    Group,
+    /// A message request to one closed account.
+    Request(AccountId),
+    /// A sealed send: the sealed endpoint checked the access keys.
+    Sealed,
+}
 
 /// Retry hint (milliseconds) for a send refused because the store is unavailable.
 pub const RETRY_MS: u32 = 1_000;
@@ -68,6 +145,12 @@ pub struct SendMetrics {
     pub routes_offline: Counter,
     /// Stores that failed (mailbox full or unavailable).
     pub mailbox_errors: Counter,
+    /// Message requests stored.
+    pub requests: Counter,
+    /// Message requests accepted and dropped (blocked, or requests refused).
+    pub requests_dropped: Counter,
+    /// Broadcast sends stored.
+    pub broadcasts: Counter,
     /// From the request read to the send durably stored, group commit included.
     pub store_seconds: ShardedHistogram,
 }
@@ -106,6 +189,13 @@ impl SendMetrics {
                 "Sends that failed in the mailbox",
                 &self.mailbox_errors,
             ),
+            ("requests", "Message requests stored", &self.requests),
+            (
+                "requests_dropped",
+                "Message requests dropped silently (blocked or refused)",
+                &self.requests_dropped,
+            ),
+            ("broadcasts", "Broadcast sends stored", &self.broadcasts),
         ] {
             m.register(&format!("{prefix}_{name}"), help, c.clone())?;
         }
@@ -129,6 +219,8 @@ pub struct SendPath<'a, M, R> {
     pub push: &'a Pusher,
     /// Counters.
     pub metrics: &'a SendMetrics,
+    /// Franking and (M4) the contact gate.
+    pub policy: &'a Policy,
 }
 
 impl<M, R> std::fmt::Debug for SendPath<'_, M, R> {
@@ -157,6 +249,9 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
     /// caller acknowledges it, then calls [`route`](Self::route) with the frame's payload and the
     /// returned `seq`s. `Err` is the status to answer; nothing was stored.
     ///
+    /// A franked send's payload is replaced, in `s`, by the stamped envelopes that were stored, so
+    /// the caller routes exactly what the mailbox holds.
+    ///
     /// `received` is when the request was read (the store latency metric starts there).
     /// `scratch` is the caller's reusable recipient list (no allocation per send).
     ///
@@ -166,7 +261,7 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
     pub async fn store(
         &self,
         sender: &DeviceId,
-        s: &SendFrame,
+        s: &mut SendFrame,
         received: Instant,
         scratch: &mut Vec<DeviceId>,
     ) -> Result<StoreOutcome, SendStatus> {
@@ -174,6 +269,41 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
         if let Err(status) = self.check(sender, &s.payload, scratch) {
             m.sends_rejected.inc();
             return Err(status);
+        }
+        let lane = match self.lane(sender, s) {
+            Ok(l) => l,
+            Err(status) => {
+                m.sends_rejected.inc();
+                return Err(status);
+            }
+        };
+        match self.admit(sender, lane).await {
+            Ok(Admitted::Store) => {}
+            // Dropped silently: answered as accepted (see `drop_part`).
+            Ok(Admitted::Drop(r)) => match self.drop_part(s, r).await {
+                Ok(true) => {
+                    return Ok(StoreOutcome {
+                        seqs: Vec::new(),
+                        replayed: false,
+                    });
+                }
+                Ok(false) => {}
+                Err(status) => {
+                    m.sends_rejected.inc();
+                    return Err(status);
+                }
+            },
+            Err(status) => {
+                m.sends_rejected.inc();
+                return Err(status);
+            }
+        }
+        if let Some(c) = s.hints.commitment {
+            let Some(f) = &self.policy.franking else {
+                m.sends_rejected.inc();
+                return Err(reject(RejectReason::Unavailable, RETRY_MS));
+            };
+            self.stamp(f, sender, &c, &mut s.payload);
         }
         let req = store_request(s);
         let recipients = req.payload.len();
@@ -240,6 +370,236 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
         Ok(())
     }
 
+    /// The send's lane (D-0062), from the directory snapshot alone: no store round trip, and no
+    /// allocation unless the send addresses several other accounts of which one is closed.
+    ///
+    /// # Errors
+    /// Access required (no key, a wrong one, or an account without a profile), an invalid
+    /// request, too many accounts for a broadcast, or unavailable when the sender's account is not
+    /// in the snapshot yet (never stamped as sealed).
+    pub fn lane(&self, sender: &DeviceId, s: &SendFrame) -> Result<Lane, SendStatus> {
+        if *sender == SEALED_SENDER {
+            return Ok(Lane::Sealed);
+        }
+        let dir = self.directory.load();
+        let Some(from) = dir.account_of(sender) else {
+            return Err(reject(RejectReason::Unavailable, RETRY_MS));
+        };
+        let (mut first, mut several, mut closed) = (None, false, false);
+        for d in s.payload.devices() {
+            let Some(a) = dir.account_of(d) else { continue };
+            if a == from {
+                continue;
+            }
+            closed |= !dir.access(&a).open;
+            match first {
+                None => first = Some(a),
+                Some(f) if f != a => several = true,
+                Some(_) => {}
+            }
+        }
+        let Some(first) = first else {
+            return Ok(Lane::Sync);
+        };
+        let h = &s.hints;
+        let shared = matches!(s.payload, SendPayload::Shared { .. });
+        if !several && !shared {
+            let acc = dir.access(&first);
+            if h.access
+                .is_some_and(|k| acc.key.is_some_and(|key| ct_eq(&key, &k)))
+            {
+                return Ok(Lane::Direct);
+            }
+            if acc.open {
+                return Ok(Lane::Open(first));
+            }
+            if h.access.is_some() {
+                return Err(reject(RejectReason::AccessRequired, 0));
+            }
+            if h.request {
+                if h.commitment.is_none() {
+                    return Err(reject(RejectReason::InvalidRequest, 0));
+                }
+                return Ok(Lane::Request(first));
+            }
+            return Err(reject(RejectReason::AccessRequired, 0));
+        }
+        // Several accounts (a broadcast), or a shared body (a group): every other account a
+        // contact (one combined key) or open. Until Prompt 5 authorizes group membership, a group's
+        // members prove they are contacts the same way (groups share their members' profile keys).
+        if h.request {
+            return Err(reject(RejectReason::InvalidRequest, 0));
+        }
+        let mut accounts: Vec<AccountId> = Vec::new();
+        if closed || !shared {
+            accounts = s
+                .payload
+                .devices()
+                .filter_map(|d| dir.account_of(d))
+                .filter(|a| *a != from)
+                .collect();
+            accounts.sort_unstable();
+            accounts.dedup();
+        }
+        let n = u32::try_from(accounts.len()).unwrap_or(u32::MAX);
+        if !shared && n > self.policy.max_broadcast_accounts {
+            return Err(reject(RejectReason::TooManyRecipients, 0));
+        }
+        if closed {
+            let mut combined = [0u8; 16];
+            for a in &accounts {
+                let acc = dir.access(a);
+                if acc.open {
+                    continue;
+                }
+                let Some(key) = acc.key else {
+                    return Err(reject(RejectReason::AccessRequired, 0));
+                };
+                combined.iter_mut().zip(key).for_each(|(c, k)| *c ^= k);
+            }
+            if !h.access.is_some_and(|k| ct_eq(&combined, &k)) {
+                return Err(reject(RejectReason::AccessRequired, 0));
+            }
+        }
+        Ok(if shared {
+            Lane::Group
+        } else {
+            Lane::Broadcast(n)
+        })
+    }
+
+    /// The cluster-wide part of a request, a send to an open account or a broadcast ([`gate`]).
+    async fn admit(&self, sender: &DeviceId, lane: Lane) -> Result<Admitted, SendStatus> {
+        let (Lane::Request(_) | Lane::Broadcast(_) | Lane::Open(_)) = lane else {
+            return Ok(Admitted::Store);
+        };
+        let Some(gate) = &self.policy.gate else {
+            // Without a gate there are no blocks to apply (a static development directory, where
+            // every account is open); requests and broadcasts cannot be held to budgets.
+            return match lane {
+                Lane::Open(_) => Ok(Admitted::Store),
+                _ => Err(reject(RejectReason::Unavailable, RETRY_MS)),
+            };
+        };
+        let (from, refused) = {
+            let dir = self.directory.load();
+            let from = dir
+                .account_of(sender)
+                .ok_or(reject(RejectReason::Unavailable, RETRY_MS))?;
+            let refused = match lane {
+                Lane::Request(r) => dir.access(&r).requests_off,
+                _ => false,
+            };
+            (from, refused)
+        };
+        let admit = match lane {
+            Lane::Request(r) => gate.request(&from, &r, refused).await,
+            Lane::Broadcast(n) => gate.broadcast(&from, n).await,
+            Lane::Open(r) => gate.blocked(&from, &r).await,
+            _ => Admit::Allow,
+        };
+        match (admit, lane) {
+            (Admit::Allow, Lane::Request(_)) => {
+                self.metrics.requests.inc();
+                Ok(Admitted::Store)
+            }
+            (Admit::Allow, Lane::Broadcast(_)) => {
+                self.metrics.broadcasts.inc();
+                Ok(Admitted::Store)
+            }
+            (Admit::Drop, Lane::Request(r) | Lane::Open(r)) => {
+                self.metrics.requests_dropped.inc();
+                Ok(Admitted::Drop(r))
+            }
+            // A broadcast is never dropped (the gate only drops requests and open accounts).
+            (Admit::Allow | Admit::Drop, _) => Ok(Admitted::Store),
+            (Admit::Limited(ms), _) => Err(reject(RejectReason::RateLimited, ms)),
+            (Admit::Unavailable, _) => Err(reject(RejectReason::Unavailable, RETRY_MS)),
+        }
+    }
+
+    /// A dropped send (blocked, or requests refused), so that nothing the sender sees differs from
+    /// a delivered one:
+    ///
+    /// - the whole send, every envelope of it, is stored under its own idempotency key with a
+    ///   deadline that has already passed: never fetched or routed, deleted by the next sweep. The
+    ///   idempotency record therefore names exactly the devices an undropped send's would, and the
+    ///   store's answer (a conflict for a reused key, a replay, unavailable) is the send's answer;
+    /// - the sender's own envelopes (its sync transcript) are then stored live under a key derived
+    ///   from it, so its other devices still see what it sent.
+    ///
+    /// Returns `Ok(true)` if nothing is left to store.
+    async fn drop_part(&self, s: &mut SendFrame, recipient: AccountId) -> Result<bool, SendStatus> {
+        let SendPayload::PerDevice(rs) = &mut s.payload else {
+            return Ok(false);
+        };
+        let all: Vec<NewEnvelope> = rs
+            .iter()
+            .map(|r| NewEnvelope {
+                device: r.device,
+                envelope: r.envelope.clone(),
+            })
+            .collect();
+        {
+            let dir = self.directory.load();
+            rs.retain(|x| dir.account_of(&x.device) != Some(recipient));
+        }
+        let expired = StoreRequest {
+            idempotency_key: Some(s.idempotency_key),
+            mls: None,
+            expires_after: Some(Duration::ZERO),
+            payload: Payload::PerDevice(all),
+        };
+        match self.mailbox.store_send(expired).await {
+            Ok(_) => {}
+            Err(MailboxError::IdempotencyConflict) => {
+                return Err(reject(RejectReason::IdempotencyConflict, 0));
+            }
+            Err(MailboxError::StaleEpoch) => return Err(reject(RejectReason::StaleEpoch, 0)),
+            Err(MailboxError::Full | MailboxError::Unavailable) => {
+                self.metrics.mailbox_errors.inc();
+                return Err(reject(RejectReason::Unavailable, RETRY_MS));
+            }
+        }
+        for (i, b) in s.idempotency_key.iter_mut().enumerate() {
+            *b ^= 0xA5 ^ u8::try_from(i).unwrap_or(0);
+        }
+        Ok(rs.is_empty())
+    }
+
+    /// Stamps every envelope for another account (a shared body once, for no one in particular);
+    /// the sender's own devices get their envelopes as sent. The sender is all zeros for a sealed
+    /// send (no device of it is in the directory). One allocation per stamped envelope.
+    fn stamp(
+        &self,
+        f: &Franker,
+        sender: &DeviceId,
+        commitment: &[u8; 32],
+        payload: &mut SendPayload,
+    ) {
+        let dir = self.directory.load();
+        let from = dir.account_of(sender);
+        let sender_account = from.map_or([0; 16], |a| *a.as_bytes());
+        let now = now_ms();
+        match payload {
+            SendPayload::PerDevice(rs) => {
+                for r in rs.iter_mut() {
+                    let to = dir.account_of(&r.device);
+                    if to.is_none() || to == from {
+                        continue;
+                    }
+                    let recipient = to.map_or([0; 16], |a| *a.as_bytes());
+                    let st = f.stamp(commitment, now, &sender_account, &recipient);
+                    r.envelope = st.prepend(&r.envelope);
+                }
+            }
+            SendPayload::Shared { body, .. } => {
+                let st = f.stamp(commitment, now, &sender_account, &[0; 16]);
+                *body = st.prepend(body);
+            }
+        }
+    }
+
     /// Routes a stored send to its recipients' sessions, wherever they are; a device with no
     /// session gets a push wake-up (debounced, never blocking the caller).
     pub async fn route(&self, payload: SendPayload, seqs: Vec<u64>) {
@@ -276,11 +636,11 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
     pub async fn send(
         &self,
         sender: &DeviceId,
-        s: SendFrame,
+        mut s: SendFrame,
         received: Instant,
         scratch: &mut Vec<DeviceId>,
     ) -> SendStatus {
-        match self.store(sender, &s, received, scratch).await {
+        match self.store(sender, &mut s, received, scratch).await {
             Ok(outcome) => {
                 self.route(s.payload, outcome.seqs).await;
                 SendStatus::Accepted
@@ -290,14 +650,25 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
     }
 }
 
-/// Whether any envelope begins with the reserved system-frame prefix.
+/// Whether any envelope begins with the prefix reserved for what the server writes (system
+/// frames, franking stamps).
 fn reserved(payload: &SendPayload) -> bool {
+    use songbird_proto::envelope::is_reserved;
     match payload {
-        SendPayload::PerDevice(rs) => rs
-            .iter()
-            .any(|r| songbird_proto::system::is_system(&r.envelope)),
-        SendPayload::Shared { body, .. } => songbird_proto::system::is_system(body),
+        SendPayload::PerDevice(rs) => rs.iter().any(|r| is_reserved(&r.envelope)),
+        SendPayload::Shared { body, .. } => is_reserved(body),
     }
+}
+
+/// Constant-time comparison of two access keys.
+fn ct_eq(a: &[u8; 16], b: &[u8; 16]) -> bool {
+    aws_lc_rs::constant_time::verify_slices_are_equal(a, b).is_ok()
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// The mailbox request for a decoded `Send` (payload bytes are shared, not copied).
@@ -318,6 +689,10 @@ pub fn store_request(s: &SendFrame) -> StoreRequest {
         },
     };
     StoreRequest {
+        expires_after: s
+            .hints
+            .expire_after_s
+            .map(|t| Duration::from_secs(u64::from(t))),
         idempotency_key: Some(s.idempotency_key),
         mls: s.mls.map(|c| MlsCommit {
             group: c.group,

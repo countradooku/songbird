@@ -74,6 +74,8 @@ async fn stack(k: Option<KeySettings>) -> Option<Stack> {
     getrandom::fill(&mut secret).unwrap();
     let keys = k.map(|k| KeyDirectory::new(k, &secret, None, KeyMetrics::default()).unwrap());
     let app = Arc::new(App {
+        requests: None,
+        reports: None,
         server_name: SERVER.into(),
         registry,
         s3: songbird_s3::Client::new(songbird_s3::Config::new(

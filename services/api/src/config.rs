@@ -55,7 +55,22 @@ impl Validate for ApiConfig {
                 "api.valkey_hot.tls_ca",
                 "and api.jobs.valkey.tls_ca are required in staging and production",
             );
+            v.check(
+                api.requests.is_some(),
+                "api.requests",
+                "is required in staging and production (blocks, message requests)",
+            );
+            v.check(
+                api.reports.is_some(),
+                "api.reports",
+                "is required in staging and production (reporting)",
+            );
             if let Some(s) = &api.send {
+                v.check(
+                    s.franking_key.is_some(),
+                    "api.send.franking_key",
+                    "is required in staging and production (franked sends, reports)",
+                );
                 v.check(
                     s.valkey.tls(),
                     "api.send.valkey.tls_ca",
@@ -121,6 +136,87 @@ pub struct ApiSettings {
     /// `[api.kt]`: key transparency (Prompt 3, M6, D-0055). Absent: those endpoints answer 503.
     #[serde(default)]
     pub kt: Option<KtSettings>,
+    /// `[api.requests]` (Prompt 4, D-0062): blocks, the request policy, and the gate of message
+    /// requests and broadcasts on `PUT /v1/messages`. Absent: those endpoints answer 503, and
+    /// requests and broadcasts over HTTP are refused as unavailable.
+    #[serde(default)]
+    pub requests: Option<RequestsSettings>,
+    /// `[api.reports]` (Prompt 4, D-0063): reporting with message franking. Needs
+    /// `[api.requests]` and `[api.send]` (the franking keys). Absent: `POST /v1/reports` answers
+    /// 503.
+    #[serde(default)]
+    pub reports: Option<ReportSettings>,
+}
+
+/// `[api.reports]` (Prompt 4, D-0063).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportSettings {
+    /// The moderation public key (X25519, 64 hex characters) reports are sealed to. Its private
+    /// half stays offline with the moderators (`songbird-admin reports keygen`).
+    pub moderation_key: String,
+    /// Days a queued report is kept (1 to 90).
+    #[serde(default = "default_report_days")]
+    pub retention_days: u32,
+    /// How old a stamp may be to be reported, in days (1 to 30: undelivered envelopes are kept 30
+    /// days at most).
+    #[serde(default = "default_report_days")]
+    pub window_days: u32,
+    /// Reports per hour per reporting account.
+    #[serde(default = "default_reports_per_hour")]
+    pub per_hour: u32,
+    /// Burst of the above.
+    #[serde(default = "default_report_burst")]
+    pub burst: u32,
+}
+
+const fn default_report_days() -> u32 {
+    30
+}
+const fn default_reports_per_hour() -> u32 {
+    20
+}
+const fn default_report_burst() -> u32 {
+    10
+}
+
+impl Validate for ReportSettings {
+    fn validate(&self, v: &mut Validator) {
+        let mut k = [0u8; 32];
+        v.check(
+            hex::decode_to_slice(&self.moderation_key, &mut k).is_ok()
+                && songbird_keys::xeddsa::x25519_public_key_ok(&k),
+            "moderation_key",
+            "must be an X25519 public key (64 hex characters)",
+        );
+        v.check(
+            (1..=90).contains(&self.retention_days),
+            "retention_days",
+            "must be in 1..=90",
+        );
+        v.check(
+            (1..=30).contains(&self.window_days),
+            "window_days",
+            "must be in 1..=30",
+        );
+        v.check(
+            (1..=10_000).contains(&self.per_hour) && (1..=10_000).contains(&self.burst),
+            "per_hour",
+            "and burst must be in 1..=10000",
+        );
+    }
+}
+
+/// `[api.requests]` and `[delivery.requests]` (Prompt 4, D-0062).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestsSettings {
+    /// 64 hex characters, the same on every `api` and delivery node: the keys of block rows and
+    /// request budgets derive from it.
+    pub secret: SecretRef,
+    /// The budgets.
+    #[serde(default)]
+    pub limits: songbird_send::RequestLimits,
 }
 
 /// `[api.kt]` (Prompt 3, M6, D-0055).
@@ -263,6 +359,18 @@ impl Validate for ApiSettings {
         v.section("jobs", &self.jobs);
         v.section("s3", &self.s3);
         v.section("attachments", &self.attachments);
+        if let Some(r) = &self.requests {
+            v.section("requests.limits", &r.limits);
+        }
+        if let Some(r) = &self.reports {
+            v.section("reports", r);
+            v.check(
+                self.requests.is_some()
+                    && self.send.as_ref().is_some_and(|s| s.franking_key.is_some()),
+                "reports",
+                "needs [api.requests] and [api.send] franking_key",
+            );
+        }
         let mut k = [0u8; 32];
         v.check(
             hex::decode_to_slice(&self.push_public_key, &mut k).is_ok(),
@@ -448,6 +556,13 @@ pub struct SendSettings {
     /// Send burst: the delivery nodes' `session.send_burst`.
     #[serde(default = "default_send_burst")]
     pub send_burst: u32,
+    /// Group sends (shared bodies) per second per device: the delivery nodes'
+    /// `session.group_sends_per_sec`.
+    #[serde(default = "default_group_sends_per_sec")]
+    pub group_sends_per_sec: u32,
+    /// Group send burst: the delivery nodes' `session.group_send_burst`.
+    #[serde(default = "default_group_send_burst")]
+    pub group_send_burst: u32,
     /// Iggy stream of the mailbox: the delivery nodes' `mailbox.iggy.stream`.
     pub stream: String,
     /// Iggy topic: the delivery nodes' `mailbox.iggy.topic`.
@@ -481,10 +596,23 @@ pub struct SendSettings {
     /// At most one push job per device per this window, milliseconds.
     #[serde(default = "default_push_debounce_ms")]
     pub push_debounce_ms: u64,
+    /// The delivery nodes' `franking_key` (64 hex characters; Prompt 4, D-0061): franked sends
+    /// over HTTP are stamped with it, and reports are verified against it.
+    #[serde(default)]
+    pub franking_key: Option<SecretRef>,
+    /// Earlier franking keys, still accepted when verifying reports (rotation).
+    #[serde(default)]
+    pub previous_franking_keys: Vec<SecretRef>,
 }
 
 const fn default_sends_per_sec() -> u32 {
     50
+}
+const fn default_group_sends_per_sec() -> u32 {
+    10
+}
+const fn default_group_send_burst() -> u32 {
+    40
 }
 const fn default_send_burst() -> u32 {
     200

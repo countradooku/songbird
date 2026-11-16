@@ -146,6 +146,7 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
             });
         }
         let req = StoreRequest {
+            expires_after: None,
             idempotency_key: Some(notice_id),
             mls: None,
             payload: Payload::PerDevice(

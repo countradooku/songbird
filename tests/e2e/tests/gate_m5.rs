@@ -234,6 +234,8 @@ async fn account_deletion_is_verified_across_every_store() {
     // api.
     let (_, push_public) = songbird_accounts::push_token::key_pair(&[0x23; 32]).unwrap();
     let app = Arc::new(App {
+        requests: None,
+        reports: None,
         server_name: API.into(),
         registry: Arc::clone(&registry),
         s3: s3.clone(),
@@ -361,6 +363,7 @@ async fn account_deletion_is_verified_across_every_store() {
     let journal_s3 = s3_bucket(&e, "songbird-gate-journal");
     journal_s3.create_bucket_locked().await.unwrap();
     let worker = Worker {
+        block_keys: None,
         registry: Arc::clone(&registry),
         s3: s3.clone(),
         queue: queue(&e, "gate-worker").await,
@@ -509,6 +512,12 @@ async fn device_removal_is_verified_across_every_store_and_spares_the_rest() {
         .create_account(&bob, &[(b1.id, b1.key().public_key())])
         .await
         .unwrap();
+    // Alice lets anyone write to her (Prompt 4: otherwise Bob needs her access key or a
+    // request; this test is about deletion).
+    registry
+        .put_profile(&alice, 1, b"profile", &[0xA1; 16], true)
+        .await
+        .unwrap();
     let mut cfg = settings();
     cfg.listen = "127.0.0.1:0".parse().unwrap();
     let listener = tokio::net::TcpListener::bind(cfg.listen).await.unwrap();
@@ -537,6 +546,8 @@ async fn device_removal_is_verified_across_every_store_and_spares_the_rest() {
     ));
     let (_, push_public) = songbird_accounts::push_token::key_pair(&[0x23; 32]).unwrap();
     let app = Arc::new(App {
+        requests: None,
+        reports: None,
         server_name: API.into(),
         registry: Arc::clone(&registry),
         s3: s3.clone(),
@@ -648,6 +659,7 @@ async fn device_removal_is_verified_across_every_store_and_spares_the_rest() {
 
     // The worker runs the job.
     let worker = Worker {
+        block_keys: None,
         registry: Arc::clone(&registry),
         s3: s3.clone(),
         queue: queue(&e, "gate-devices-worker").await,
@@ -797,6 +809,8 @@ async fn an_offline_device_receives_a_push_end_to_end() {
     let push_key = [0x24; 32];
     let (_, push_public) = songbird_accounts::push_token::key_pair(&push_key).unwrap();
     let app = Arc::new(App {
+        requests: None,
+        reports: None,
         server_name: API.into(),
         registry: Arc::clone(&registry),
         s3,
@@ -1017,6 +1031,8 @@ async fn m5_numbers() {
         .unwrap();
     let (_, push_public) = songbird_accounts::push_token::key_pair(&[0x24; 32]).unwrap();
     let app = Arc::new(App {
+        requests: None,
+        reports: None,
         server_name: API.into(),
         registry: Arc::clone(&registry),
         s3,

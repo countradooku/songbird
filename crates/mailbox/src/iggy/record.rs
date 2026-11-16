@@ -6,9 +6,9 @@
 //!
 //! | Kind | Content |
 //! | --- | --- |
-//! | 1 `Store` | `tag?`, `at_ms`, `mls?`, local entries (`device`, `seq`, envelope or one shared body), remote parts not yet stored on their own partitions |
+//! | 1 `Store` | `tag?`, `at_ms`, `expires_ms?` (the disappearing hint, D-0061), `mls?`, local entries (`device`, `seq`, envelope or one shared body), remote parts not yet stored on their own partitions |
 //! | 2 `Ack` | (`device`, acknowledged `seq`)* |
-//! | 3 `Relocate` | (`device`, `seq`, `at_ms`, envelope)*: pending entries copied forward by compaction |
+//! | 3 `Relocate` | (`device`, `seq`, `at_ms`, `expires_ms` ([`NEVER`] for none), envelope)*: pending entries copied forward by compaction (only ever written sealed, never in this plain form) |
 //! | 4 `Owner` | the writer's producer epoch, written when a writer starts |
 //! | 5 `Snapshot` | producer epoch, (`device`, last `seq`, acknowledged `seq`)*, (`group`, epoch)*: counters, so compaction may drop old records |
 //! | 6 `Forget` | `device`*: deleted devices; their pending entries are acknowledged and their counters dropped (D-0036) |
@@ -30,6 +30,10 @@ const KIND_FORGET: u8 = 6;
 const FLAG_TAG: u8 = 0x01;
 const FLAG_MLS: u8 = 0x02;
 const FLAG_SHARED: u8 = 0x04;
+const FLAG_EXPIRES: u8 = 0x08;
+
+/// An entry's deadline when it has none.
+pub(crate) const NEVER: u64 = u64::MAX;
 
 /// Largest record accepted by the decoder.
 pub(crate) const MAX_RECORD: usize = 64 << 20;
@@ -107,6 +111,8 @@ pub(crate) enum Record {
         tag: Option<([u8; 32], [u8; 16])>,
         /// When the send was accepted (ms since the Unix epoch).
         at_ms: u64,
+        /// The send's deadline (ms since the Unix epoch), from the disappearing hint.
+        expires_ms: Option<u64>,
         /// MLS commit: group and the epoch it moves the group to.
         mls: Option<([u8; 16], u64)>,
         /// Entries for this partition.
@@ -116,8 +122,9 @@ pub(crate) enum Record {
     },
     /// Acknowledged `seq`s.
     Ack(Vec<(DeviceId, u64)>),
-    /// Pending entries copied forward: (device, seq, `at_ms`, envelope).
-    Relocate(Vec<(DeviceId, u64, u64, Bytes)>),
+    /// Pending entries copied forward: (device, seq, `at_ms`, `expires_ms` or [`NEVER`],
+    /// envelope).
+    Relocate(Vec<(DeviceId, u64, u64, u64, Bytes)>),
     /// A writer started with this producer epoch.
     Owner {
         /// The epoch.
@@ -181,6 +188,7 @@ impl Record {
             Self::Store {
                 tag,
                 at_ms,
+                expires_ms,
                 mls,
                 local,
                 remote,
@@ -189,6 +197,9 @@ impl Record {
                 let mut flags = 0;
                 if tag.is_some() {
                     flags |= FLAG_TAG;
+                }
+                if expires_ms.is_some() {
+                    flags |= FLAG_EXPIRES;
                 }
                 if mls.is_some() {
                     flags |= FLAG_MLS;
@@ -202,6 +213,9 @@ impl Record {
                     buf.put_slice(fp);
                 }
                 buf.put_u64(*at_ms);
+                if let Some(t) = expires_ms {
+                    buf.put_u64(*t);
+                }
                 if let Some((g, e)) = mls {
                     buf.put_slice(g);
                     buf.put_u64(*e);
@@ -251,10 +265,11 @@ impl Record {
             Self::Relocate(items) => {
                 buf.put_u8(KIND_RELOCATE);
                 put_len(&mut buf, items.len());
-                for (d, s, at, env) in items {
+                for (d, s, at, exp, env) in items {
                     buf.put_slice(d.as_bytes());
                     buf.put_u64(*s);
                     buf.put_u64(*at);
+                    buf.put_u64(*exp);
                     put_bytes(&mut buf, env);
                 }
             }
@@ -306,10 +321,10 @@ impl Record {
                             + r.shared.as_ref().map_or(0, |b| b.len() + 4)
                     })
                     .sum();
-                80 + l + r
+                88 + l + r
             }
             Self::Ack(a) => 8 + a.len() * 24,
-            Self::Relocate(r) => 8 + r.iter().map(|(_, _, _, e)| 36 + e.len()).sum::<usize>(),
+            Self::Relocate(r) => 8 + r.iter().map(|(_, _, _, _, e)| 44 + e.len()).sum::<usize>(),
             Self::Owner { .. } => 4,
             Self::Snapshot {
                 devices, groups, ..
@@ -335,7 +350,7 @@ impl Record {
         let rec = match r.u8()? {
             KIND_STORE => {
                 let flags = r.u8()?;
-                if flags & !(FLAG_TAG | FLAG_MLS | FLAG_SHARED) != 0 {
+                if flags & !(FLAG_TAG | FLAG_MLS | FLAG_SHARED | FLAG_EXPIRES) != 0 {
                     return Err(RecordError::Malformed);
                 }
                 let tag = if flags & FLAG_TAG == 0 {
@@ -344,6 +359,11 @@ impl Record {
                     Some((r.array::<32>()?, r.array::<16>()?))
                 };
                 let at_ms = r.u64()?;
+                let expires_ms = if flags & FLAG_EXPIRES == 0 {
+                    None
+                } else {
+                    Some(r.u64()?)
+                };
                 let mls = if flags & FLAG_MLS == 0 {
                     None
                 } else {
@@ -392,6 +412,7 @@ impl Record {
                 Self::Store {
                     tag,
                     at_ms,
+                    expires_ms,
                     mls,
                     local,
                     remote,
@@ -406,10 +427,10 @@ impl Record {
                 Self::Ack(items)
             }
             KIND_RELOCATE => {
-                let n = r.count(36)?;
+                let n = r.count(44)?;
                 let mut items = Vec::with_capacity(n);
                 for _ in 0..n {
-                    items.push((r.device()?, r.u64()?, r.u64()?, r.bytes()?));
+                    items.push((r.device()?, r.u64()?, r.u64()?, r.u64()?, r.bytes()?));
                 }
                 Self::Relocate(items)
             }
@@ -520,6 +541,7 @@ mod tests {
             Record::Store {
                 tag: Some(([7; 32], [8; 16])),
                 at_ms: 1_700_000_000_000,
+                expires_ms: Some(1_700_000_060_000),
                 mls: Some(([9; 16], 4)),
                 local: Local::PerDevice(vec![
                     (d(1), 3, Bytes::from_static(b"abc")),
@@ -541,6 +563,7 @@ mod tests {
             Record::Store {
                 tag: None,
                 at_ms: 5,
+                expires_ms: None,
                 mls: None,
                 local: Local::Shared {
                     entries: vec![(d(1), 1), (d(2), 9)],
@@ -549,7 +572,10 @@ mod tests {
                 remote: vec![],
             },
             Record::Ack(vec![(d(1), 3), (d(2), 1)]),
-            Record::Relocate(vec![(d(1), 4, 77, Bytes::from_static(b"x"))]),
+            Record::Relocate(vec![
+                (d(1), 4, 77, NEVER, Bytes::from_static(b"x")),
+                (d(2), 5, 78, 99, Bytes::from_static(b"y")),
+            ]),
             Record::Owner { epoch: 12 },
             Record::Snapshot {
                 owner: 3,
@@ -621,6 +647,7 @@ mod tests {
             let rec = Record::Store {
                 tag,
                 at_ms: at,
+                expires_ms: None,
                 mls: None,
                 local: Local::PerDevice(items.into_iter().map(|(d, s, e)| (DeviceId::from_bytes(d), s, Bytes::from(e))).collect()),
                 remote: vec![],

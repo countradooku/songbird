@@ -55,6 +55,11 @@ impl Validate for WorkerConfig {
                 "is required in staging and production, over TLS (D-0041)",
             );
             v.check(
+                w.requests_secret.is_some(),
+                "worker.requests_secret",
+                "is required in staging and production (deleting blocks, D-0062)",
+            );
+            v.check(
                 w.s3.tls_ca.is_some() && w.surrealdb.tls_ca.is_some() && w.jobs.valkey.tls(),
                 "worker.s3.tls_ca",
                 "worker.surrealdb.tls_ca and worker.jobs.valkey.tls_ca are required in staging and production",
@@ -86,6 +91,10 @@ struct WorkerSettings {
     /// characters). Absent: nothing is published (development).
     #[serde(default)]
     kt_vrf_key: Option<SecretRef>,
+    /// `[api.requests] secret` (Prompt 4, D-0062): finds a deleted account's block rows.
+    /// Required in staging and production.
+    #[serde(default)]
+    requests_secret: Option<SecretRef>,
 }
 
 const fn default_propagation_ms() -> u64 {
@@ -159,6 +168,30 @@ fn default_region() -> String {
 
 const fn default_true() -> bool {
     true
+}
+
+/// The keys of block rows (Prompt 4, D-0062), from `requests_secret`, checked against the
+/// fingerprint every node pins in the registry: a worker with another secret would find none of a
+/// deleted account's block rows and still report the deletion verified.
+async fn block_keys(
+    secret: Option<&SecretRef>,
+    registry: &songbird_accounts::Registry,
+) -> Result<Option<songbird_accounts::blocks::GateKeys>, BoxError> {
+    let Some(k) = secret else {
+        return Ok(None);
+    };
+    let secret = k.resolve_key32()?;
+    let keys = songbird_accounts::blocks::GateKeys::from_cluster_secret(&secret)
+        .map_err(|_| BoxError::from("block key derivation failed"))?;
+    if !registry
+        .pin_fingerprint("requests", &keys.fingerprint())
+        .await?
+    {
+        return Err(BoxError::from(
+            "requests_secret differs from the other nodes' (registry pin)",
+        ));
+    }
+    Ok(Some(keys))
 }
 
 fn journal(s: &JournalSettings) -> Result<songbird_worker::Journal, BoxError> {
@@ -325,6 +358,7 @@ impl Service for WorkerService {
             }
             None => None,
         };
+        let block_keys = block_keys(s.requests_secret.as_ref(), &registry).await?;
         let worker = Arc::new(Worker {
             registry,
             s3: songbird_s3::Client::new(s3_config(&s.s3)?)?,
@@ -334,6 +368,7 @@ impl Service for WorkerService {
             journal: s.deletion_journal.as_ref().map(journal).transpose()?,
             propagation: Duration::from_millis(s.propagation_ms),
             kt,
+            block_keys,
             metrics: self.metrics,
         });
         let (stop_tx, stop_rx) = watch::channel(false);

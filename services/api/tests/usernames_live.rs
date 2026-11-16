@@ -97,6 +97,8 @@ async fn stack(u: Option<UsernameSettings>) -> Option<Stack> {
     getrandom::fill(&mut secret).unwrap();
     let usernames = u.map(|u| Usernames::new(u, &secret, UsernameMetrics::default()).unwrap());
     let app = Arc::new(App {
+        requests: None,
+        reports: None,
         server_name: SERVER.into(),
         registry,
         s3,

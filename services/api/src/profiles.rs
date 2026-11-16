@@ -32,7 +32,7 @@ use crate::registration::{Registration, range_of};
 
 /// The "sender" a sealed send passes to the send path: no real device has this ID, so the
 /// device-list check leaves no device out on its account.
-pub const SEALED_SENDER: DeviceId = DeviceId::from_bytes([0; 16]);
+pub const SEALED_SENDER: DeviceId = songbird_send::SEALED_SENDER;
 
 /// Counters (aggregate only).
 #[derive(Debug, Clone, Default)]
@@ -110,6 +110,8 @@ pub enum Outcome {
     NotFound,
     /// 409 with a reason.
     Conflict(&'static str),
+    /// 403 with a reason.
+    Forbidden(&'static str),
     /// 429 (microseconds).
     Throttled(u64),
     /// 503.
@@ -259,12 +261,27 @@ impl Profiles {
     }
 
     /// `PUT /v1/profile`.
-    pub async fn put(&self, registry: &Registry, account: &AccountId, body: &[u8]) -> Outcome {
+    /// Opening the account ("anyone may send") is the primary's (D-0058): a linked device may
+    /// keep it open or close it, never open it.
+    pub async fn put(
+        &self,
+        registry: &Registry,
+        account: &AccountId,
+        primary: bool,
+        body: &[u8],
+    ) -> Outcome {
         let Ok(u) = ProfileUpload::decode(body) else {
             return Outcome::Malformed("profile");
         };
         match registry
-            .put_profile(account, u.profile_version, &u.blob, &u.access_key, u.open)
+            .put_profile_as(
+                account,
+                u.profile_version,
+                &u.blob,
+                &u.access_key,
+                u.open,
+                primary,
+            )
             .await
         {
             Ok(()) => {
@@ -272,6 +289,7 @@ impl Profiles {
                 Outcome::Done
             }
             Err(RegistryError::Rollback) => Outcome::Conflict("version"),
+            Err(RegistryError::NotPrimary) => Outcome::Forbidden("primary"),
             Err(_) => Outcome::Unavailable,
         }
     }
@@ -424,6 +442,11 @@ impl Profiles {
         };
         if frame.mls.is_some() {
             return Outcome::Malformed("mls");
+        }
+        // The access keys are in the header; a sealed send is never a request (requests are
+        // identified, so they can be blocked and reported, D-0062).
+        if frame.hints.access.is_some() || frame.hints.request {
+            return Outcome::Malformed("hints");
         }
         let devices: Vec<DeviceId> = frame.payload.devices().copied().collect();
         let Ok(keys) = registry.access_keys(&devices).await else {

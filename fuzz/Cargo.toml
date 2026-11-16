@@ -16,7 +16,8 @@ songbird-surreal = { path = "../crates/surreal" }
 songbird-mailbox = { path = "../crates/mailbox" }
 songbird-pow = { path = "../crates/pow" }
 songbird-keys = { path = "../crates/keys" }
-songbird-kt = { path = "../crates/kt" }
+songbird-akd = { path = "../crates/akd" }
+akd = { version = "=0.13.0", default-features = false, features = ["whatsapp_v1", "serde_serialization", "public_auditing"] }
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
 

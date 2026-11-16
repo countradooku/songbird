@@ -714,40 +714,53 @@ version u8 (1) | profile_version u64 | access_key [16] | flags u8 (1 anyone may 
 
 ### 4.9 Key transparency and security notifications
 
-Decision D-0055 (M6). The server keeps an append-only Merkle log (RFC 9162 §2.1) of what it
-vouches for about each account: the account identity key, every device list, the username.
+Decisions D-0055 and D-0057. Key transparency runs on Meta's `akd` 0.13 (the owner's decision of
+2026-11-16), a verifiable key directory with the WhatsApp v1 configuration:
 
-- **Leaf**: `version u8 (1) | kind u8 (1 identity, 2 device list, 3 username) | subject [32] |
-  value [32] | time_ms u64`.
-  - `subject = HMAC-SHA256(salt, "songbird.v1/kt-subject\0" || account)`, with a random
-    per-account salt. Whoever asks about the account receives the salt. It is deleted with the
-    account, which leaves that account's entries unlinkable while the log stays append-only.
-  - `value` is SHA-256 of the identity key or of the signed device list, or the username hash
-    (32 zero bytes once released).
-- **Hashes**: `SHA-256(0x00 || leaf)`, `SHA-256(0x01 || left || right)`; the empty tree's root is
-  `SHA-256("")`.
-- **Signed tree head**: `version u8 (1) | size u64 | root [32] | time_ms u64 | signature [64]`.
-  The signature is Ed25519 by the log key over `"songbird.v1/kt-head\0"` followed by the bytes
-  before it. Apps pin the log key.
-- **Logging**: a registration, a new device list, or a username claimed or released bumps the
-  account's generation in its own transaction. The worker appends a leaf for each value that
-  changed since the last one it logged, so nothing is missed and a crash only delays it.
+- labels hidden behind a VRF;
+- lookup proofs of a label's current value (and of non-membership);
+- key-history proofs;
+- append-only (audit) proofs between epochs.
+
+What the directory records about each account:
+
+- **Label** = `kind u8 (1 identity, 2 device list, 3 username) || account [16]`. Labels are
+  deterministic, so each account has one label per kind. akd shows everyone the one value of a
+  label, and its VRF keeps labels out of the tree.
+- **Value** = `HMAC-SHA256(salt, "songbird.v1/kt-value\0" || kind || raw)`.
+  - `raw` is SHA-256 of the identity key or of the signed device list, or the username hash (32
+    zero bytes once released).
+  - `salt` is a random per-account salt that whoever asks receives. A server that hands someone
+    another salt cannot make the published value match another key.
+  - The salt is deleted with the account, which leaves its values unlinkable (`akd` 0.13 cannot
+    tombstone them). The labels keep the account ID and the epochs of its changes.
+- **Publishing**: a registration, a new device list, or a username claimed or released bumps the
+  account's generation in its own transaction. The worker publishes one epoch per sweep with the
+  values that changed. There is one writer, enforced by the store: an epoch commits only from the
+  epoch before it (a compare and swap in the same transaction). Nothing is missed, and a crash only delays it.
+- **Signed head**: `version u8 (1) | epoch u64 | root [32] | time_ms u64 | signature [64]`. The
+  signature is Ed25519 by the log key over `"songbird.v1/kt-head\0"` followed by the bytes
+  before it. Apps pin the log key and the VRF key.
+- **Proofs** travel in akd's own protobuf encoding (`akd::proto`), hex in JSON.
 
 | Request | Body | Answers |
 | --- | --- | --- |
-| `GET /v1/kt/head` | none | 200 signed tree head |
-| `POST /v1/kt/account` | `{"account": hex}` | 200 `{"salt": hex, "head": hex, "entries": [{"index", "leaf": hex, "proof": [hex]}]}` (the newest 256, proofs at the head's size); 404 (nothing logged); 429 |
-| `POST /v1/kt/consistency` | `{"from", "to"}` | 200 `{"proof": [hex]}`; 400 for sizes out of order or beyond the log; 429 |
+| `GET /v1/kt/keys` | none | 200 `{"vrf": hex, "log": hex}` |
+| `GET /v1/kt/head` | none | 200 signed head |
+| `POST /v1/kt/lookup` | `{"account": hex, "kind": "identity" \| "device_list" \| "username"}` | 200 `{"salt", "head", "proof"}`; 404 (nothing published); 400; 429 |
+| `POST /v1/kt/history` | the same | 200 `{"salt", "head", "most_recent": 64, "proof"}`; 404; 400; 429 |
+| `POST /v1/kt/audit` | `{"from", "to"}` (at most 1,000 epochs apart) | 200 `{"proof"}`; 400 for epochs out of order or beyond the directory; 429 |
 
-**What clients do:**
+**What clients do** (with `akd_core`'s verifiers, `lookup_verify`, `key_history_verify` and
+`audit_verify`):
 
-- Keep the newest head they have verified, and check every newer head with a consistency
-  proof. Two heads that no proof joins are evidence of a fork: show it and stop trusting the
-  server.
-- Before trusting a contact's identity key or device list, check that the log holds it,
-  under the contact's subject, included in a verified head.
-- Owners check their own account's entries regularly: an entry they did not make (another device
-  list) is the warning.
+- Check every head's signature; keep the newest verified head.
+- Before trusting a contact's identity key or device list, verify a lookup proof for the
+  contact's label (`kind || account`) against a verified head. The proven value must equal
+  `HMAC(salt, context || kind || SHA-256(key or list in hand))`.
+- Verify an audit proof between the last head seen and a newer one. Two signed heads that no audit
+  proof joins are evidence of a fork: show it and stop trusting the server.
+- Owners check their own key history regularly. A version they did not publish is the warning.
 
 **Security notifications.** An account identity key is never replaced (a new one is a new
 account), and a device's identity key is fixed when it is linked. What changes is the device
@@ -756,7 +769,7 @@ list, and changes reach clients by three paths:
 - the account's own devices get a signed `DeviceListChanged` notice (§3.9);
 - a contact's next send is refused as stale by the device check (§3.1), and the contact fetches
   the signed list;
-- the change appears in the transparency log.
+- the change appears in the directory with a new version.
 
 In each case the app compares the new list with the last one it accepted and warns the user
 about new devices.
@@ -901,8 +914,7 @@ e2ba85e62f8006c7ff540bbed16ff64f1636cb28133f05da28b9604b0d4d32596d486dd773916abf
 WebAuthn (Prompt 3, D-0053): `crates/keys/tests/webauthn_vectors.rs` carries the W3C WebAuthn
 Level 3 test vectors (§16.2, §16.11) verbatim.
 
-Key transparency (Prompt 3, D-0055), from `crates/kt/tests/kt_vectors.rs`: the trees of the
-Certificate Transparency reference leaf set (`""`, `00`, `10`, `2021`, `3031`, `40414243`,
-`50…57`, `60…6f`) have the roots of RFC 6962's reference implementation. The size-8 root is
-`5dc9da79a70659a9ad559cb701ded9a2ab9d823aad2f4960cfe370eff4604328`. The roots were recomputed with
-an independent Python implementation.
+Key transparency (Prompt 3, D-0057): `akd` 0.13's proofs and their protobuf encoding are akd's
+own. `crates/akd/tests/akd_live.rs` checks Songbird's storage with akd's client verifiers. The
+proofs are accepted, and refused under another label, another root, another VRF key or a
+rewritten history.

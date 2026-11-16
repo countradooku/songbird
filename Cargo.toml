@@ -20,7 +20,7 @@ members = [
     "crates/send",
     "crates/pow",
     "crates/keys",
-    "crates/kt",
+    "crates/akd",
     "services/delivery",
     "services/api",
     "services/push",
@@ -64,7 +64,7 @@ songbird-delivery = { path = "services/delivery" }
 songbird-push-providers = { path = "crates/push-providers" }
 songbird-send = { path = "crates/send" }
 songbird-pow = { path = "crates/pow" }
-songbird-kt = { path = "crates/kt" }
+songbird-akd = { path = "crates/akd" }
 songbird-keys = { path = "crates/keys" }
 
 anyhow = "1.0.104"
@@ -116,6 +116,9 @@ zeroize = "1.9.1"
 # bodies), already in the tree through the Iggy SDK; Mozilla's root store for APNs, FCM and Web
 # Push endpoints, already in the tree (licence exception in deny.toml).
 serde_json = "1.0.154"
+async-trait = "0.1"
+protobuf = "=3.7.2"
+akd = { version = "=0.13.0", default-features = false, features = ["whatsapp_v1", "serde_serialization", "public_auditing"] }
 webpki-roots = "1.0.12"
 # Registration proof of work (D-0048): Argon2id as the prompt requires; aws-lc-rs has no Argon2.
 # RustCrypto, MIT OR Apache-2.0; default features (password-hash strings, getrandom) off.

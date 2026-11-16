@@ -154,6 +154,25 @@ async fn build_messages(
 ///
 /// # Errors
 /// A store is unreachable or a secret unreadable.
+/// `[api.kt]` (Prompt 3, D-0057), if configured: akd's read-only directory on its own connection.
+async fn transparency(s: &ApiSettings) -> Result<Option<songbird_api::kt::Transparency>, BoxError> {
+    let Some(k) = &s.kt else {
+        return Ok(None);
+    };
+    let store = songbird_akd::SurrealStore::connect(Arc::new(
+        songbird_accounts::Db::connect(s.surrealdb.config()?).await?,
+    ))
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(Some(songbird_api::kt::Transparency::new(
+        k.clone(),
+        &*k.secret.resolve_key32()?,
+        &*k.log_key.resolve_key32()?,
+        &*k.vrf_key.resolve_key32()?,
+        store,
+    )?))
+}
+
 /// `[api.profiles]` (Prompt 3, M5), if configured.
 fn profiles(
     s: &ApiSettings,
@@ -248,14 +267,7 @@ async fn build(
         None => (None, None),
     };
     let profiles = profiles(s, &metrics)?;
-    let kt = match &s.kt {
-        Some(k) => Some(songbird_api::kt::Transparency::new(
-            k.clone(),
-            &*k.secret.resolve_key32()?,
-            &*k.log_key.resolve_key32()?,
-        )?),
-        None => None,
-    };
+    let kt = transparency(s).await?;
     let app = Arc::new(App {
         server_name: s.server_name.clone(),
         registry,
@@ -303,7 +315,7 @@ impl Service for Api {
             return songbird_service::idle_until_shutdown(ctx).await;
         };
         let (stop_tx, stop_rx) = watch::channel(false);
-        let (app, send_tasks) = build(&settings, self.metrics, &stop_rx).await?;
+        let (app, send_tasks) = Box::pin(build(&settings, self.metrics, &stop_rx)).await?;
         let listener = tokio::net::TcpListener::bind(settings.listen).await?;
         tracing::info!(tls = self.tls.is_some(), "api listening");
         let server = tokio::spawn(songbird_api::server::serve(

@@ -17,6 +17,7 @@ filter = "info"
 # push_index_secret = { file = "/path/to/push-index-secret.hex" }
 # propagation_ms = 3000   # at least delivery's registry poll interval, with a margin
 # sweep_secs = 60
+# kt_vrf_key = { file = "/path/to/kt-vrf-seed.hex" }   # akd's VRF key (D-0057); the api's [api.kt] vrf_key
 # [worker.surrealdb]
 # addr = "127.0.0.1:47800"
 # host = "localhost"

@@ -371,6 +371,7 @@ async fn account_deletion_is_verified_across_every_store() {
             key: JOURNAL_KEY,
         }),
         propagation: Duration::from_millis(400),
+        kt: None,
         metrics: WorkerMetrics::default(),
     };
     let mut done = false;
@@ -654,6 +655,7 @@ async fn device_removal_is_verified_across_every_store_and_spares_the_rest() {
         push_index_secret: PUSH_INDEX,
         journal: None,
         propagation: Duration::from_millis(400),
+        kt: None,
         metrics: WorkerMetrics::default(),
     };
     let mut done = false;

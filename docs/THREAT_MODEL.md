@@ -49,7 +49,7 @@ server in plaintext. Adding to this list requires the owner's approval.
 | Passkeys: credential ID, public key (ES256 or Ed25519), signature counter, registration time | Require a passkey to link a device (and to recover) | Until removed, or with the account | Prompt 3 (M4b), D-0053; **approved by the owner on 2026-11-16** |
 | Per account: the encrypted profile and its version, the unidentified-access key (16 bytes derived from the profile key; reveals nothing of it) and whether anyone may send to it sealed; encrypted avatar objects in RustFS with their random IDs and upload times | Serve profiles and avatars to contacts who hold the key; authorize sealed sends | Until replaced (avatars: an hour after replacement) or with the account | Prompt 3 (M5), D-0054; ciphertext and a derived key; **approved by the owner on 2026-11-16** |
 | Keyed hashes (HMAC-SHA256, key from the profiles secret) of a requesting account, an IP range or a recipient account, with the next allowed time for profile and avatar fetches and sealed sends, in `valkey-hot`; no identifier | Throttle fetches and sealed sends | At most the throttle window (about an hour), then expired | Prompt 3 (M5), D-0054; keyed forms; **approved by the owner on 2026-11-16** |
-| Key transparency log: per change, a leaf with the kind, a salted HMAC of the account (salt per account, deleted with it), SHA-256 of the identity key or device list or the username hash, and the time; the Merkle tree's hashes; per account the salt, the last logged values and generations | Let anyone check what the server vouches for, and detect a server that shows different keys to different people | The log is append-only and kept for the service's life; a deleted account's salt goes with it, which leaves its leaves unlinkable | Prompt 3 (M6), D-0055; **approved by the owner on 2026-11-16** |
+| Key transparency directory (`akd`, D-0057): per change, a label (the kind and the account ID, hidden from the tree by the VRF), a value salted per account (HMAC of the identity key's or device list's hash or the username hash; the salt deleted with the account), its version and epoch; akd's tree nodes; per account the salt, the last published values and generations | Let anyone verify what the server vouches for, and detect a server that shows different keys to different people | The directory is append-only and kept for the service's life; a deleted account's salt goes with it, which leaves its entries unlinkable | Prompt 3 (M6), D-0055, D-0057; **approved by the owner on 2026-11-16** (as the log; the move to `akd` stores the same data in akd's form) |
 | Per account: last use (a day's precision), the chosen inactivity period and which warnings were sent; a keyed daily "seen" mark in `valkey-hot` (no identifier) | Delete accounts after the inactivity period the user chose, warning twice first | Last use until the next use or the account's deletion; the mark 24 hours | Prompt 3 (M7), D-0056; **approved by the owner on 2026-11-16** |
 | Deletion journal: per deleted account, an empty tombstone in the backup bucket named by the deletion time and HMAC-SHA256(journal key, account ID); no account ID | A restore must not bring a deleted account back | Write-once, 93 days (the longest backup retention) | Prompt 2 (M6), D-0041; **approved under the owner's delegation** |
 
@@ -312,16 +312,17 @@ the key directory (M3) and key transparency (M6).
 | Sealed sender running before it is verified | E | Configuration error | Off by default; on needs a certificate key; off answers 404 | the e2e test (flag off) |
 | Malformed certificate or profile bytes | T | Malicious client | Strict, bounded decoders; fuzzed | `uploads_and_certificates_round_trip_and_decode_strictly`; fuzz `profile` |
 
-### 3.15 Key transparency (Prompt 3, milestone 6)
+### 3.15 Key transparency on `akd` (Prompt 3, milestone 6; D-0057)
 
 | Threat | STRIDE | Attacker | Mitigation | Test or proof |
 | --- | --- | --- | --- | --- |
-| **Key substitution by the server**: a contact is given a different identity key or device list | S, T | Malicious or compelled server | Every key and list is logged; clients check inclusion in a signed head before trusting one, and owners check their own entries | `clients_verify_the_transparency_log`; `changes_are_logged_once_with_proofs_and_deletion_unlinks` |
-| **A forked or rewritten log** (different histories for different people) | T | Malicious server | Clients keep the last verified head and require consistency proofs; heads are signed, so a fork is evidence | `a_forked_or_rewritten_log_is_detected`; `every_proof_of_every_tree_up_to_70_leaves_verifies_and_tampering_fails` |
-| Racing appends corrupting the tree | T | Concurrency | Appends serialized on the head row (size check in the transaction) and on leaf IDs that cannot be created twice | `concurrent_appends_keep_one_consistent_log` (160 appends over 8 connections: indices 0–159, the root equals an in-memory tree of those leaves) |
-| A change never logged | T | Crash, bug | The change bumps a generation in its own transaction; the worker logs until the logged generation catches up | `changes_are_logged_once_with_proofs_and_deletion_unlinks` |
-| The log identifying people forever (GDPR) | I | Anyone reading the log | Leaves carry a salted HMAC of the account; the salt is deleted with the account | the same test (the deleted account's entries no longer resolve) |
-| Malformed proofs or heads | T | Malicious server | Bounded, strict decoders and verifiers (RFC 9162); fuzzed | fuzz `kt` |
+| **Key substitution by the server**: a contact is given a different identity key or device list, or a different view than the owner | S, T | Malicious or compelled server | Every key and list is published to `akd` under a deterministic label (one per account and kind), so everyone is shown the same value; clients verify a lookup proof against a signed head and that the value equals the salted hash of the key in hand; another salt cannot match it; owners verify their key history | `clients_verify_the_transparency_log`; `another_salt_never_matches_the_published_value`; `published_epochs_verify_with_akds_own_client_checks` |
+| **A forked or rewritten directory** | T | Malicious server | Signed heads, with clients requiring akd's append-only (audit) proofs between heads; two heads no proof joins are evidence | `published_epochs_verify…` (a rewritten epoch root fails the audit); `clients_verify…` (a forked root fails) |
+| Proofs forged under another VRF key | S | Malicious server | Apps pin the VRF key; lookup verification fails under another key | `published_epochs_verify…` |
+| Storage corrupting akd's state (partial epochs, an epoch overwritten by a second writer) | T | Faults, concurrency, a second worker | Each epoch written in one transaction with the Azks record last; **an epoch commits only from the epoch before it** (compare and swap); the store matches akd's retrieval rules | `epochs_cannot_be_rewritten_and_racing_writers_never_both_commit`; `the_store_keeps_akds_semantics` |
+| A change never published | T | Crash, bug | The change bumps a generation in its own transaction; the worker publishes until the published generation catches up | `each_change_is_reported_once_under_a_stored_salt_and_deletion_unlinks` |
+| The directory identifying people forever (GDPR) | I | Anyone reading the directory, the database or backups | Values are salted per account (including the computable username hash); the salt is deleted with the account; labels keep only the account ID and the epochs of its changes | `each_change_is_reported_once…` (no salt after deletion); `another_salt_never_matches…` |
+| Malformed proofs or heads | T | Malicious server | akd's protobuf decoding and verifiers; bounded input; fuzzed | fuzz `kt` |
 
 ### 3.16 GDPR (Prompt 3, milestone 7)
 
@@ -424,13 +425,13 @@ the key directory (M3) and key transparency (M6).
   profile key, so revoking a contact means rotating the profile key. Spam from one contact is
   bounded by the per-recipient throttle, not by identity. The certificate key is not deployed yet
   (it goes in the secrets store at deployment; rotation by `key_id`).
-- Key transparency (M6, D-0055): the log is a transparency log, not a verifiable map. A server
-  can omit an account's newest entry when answering one person (though it cannot rewrite what it
-  already logged without forking), so this relies on owners checking their own entries and on
-  clients gossiping heads. There are no non-membership proofs and no VRF privacy: whoever has an
-  account ID can ask for its salt and see how many keys and lists it has had. Meta's `akd`
-  (verifiable map, VRF, used by WhatsApp) is the recorded upgrade path behind the same endpoints.
-  The log key is not deployed yet (secrets store; apps pin it). There is no external auditor yet.
+- Key transparency (D-0057): `akd` 0.13 brings 27 newly exempted crates into cargo-vet, among
+  them a second Ed25519 and curve25519 stack (`ed25519-dalek`, `curve25519-dalek` 4) and
+  protobuf code generation at build time. `akd` cannot tombstone values in 0.13, which is why
+  values are salted and deletion removes the salt. A deleted account's ID and the epochs of its
+  changes stay in the directory's labels, which are needed for its integrity. Records are stored as serde JSON (larger than
+  needed). There is no external auditor yet; the log and VRF keys are not deployed (secrets store;
+  apps pin both).
 - GDPR (M7, D-0056): the export does not include what the mailbox holds (ciphertext the user's
   devices receive anyway); `api` has no read path into it. A device that only holds a WebSocket
   and never calls `api` would not count as use; the apps call `api` at least daily (prekey and

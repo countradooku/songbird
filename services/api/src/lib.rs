@@ -13,7 +13,7 @@
 //! | `POST /v1/devices/link-token`; `POST /v1/devices/link` | Linking a new device ([`devices`]; the link itself unsigned, both keys proven) |
 //! | `PUT /v1/profile`; `POST /v1/profile/fetch`; `PUT`, `GET /v1/profile/avatar[/<id>]` | Encrypted profiles and avatars ([`profiles`]) |
 //! | `GET /v1/certificate`; `PUT /v1/messages/sealed` | Sealed sender ([`profiles`]; the sealed send unsigned, authorized by access keys) |
-//! | `GET /v1/kt/head`; `POST /v1/kt/account`; `POST /v1/kt/consistency` | Key transparency ([`kt`]) |
+//! | `GET /v1/kt/keys`, `GET /v1/kt/head`; `POST /v1/kt/lookup`, `/history`, `/audit` | Key transparency on akd ([`kt`]) |
 //! | `GET /v1/devices`; `PUT /v1/devices/list`; `POST /v1/devices/list/fetch`; `DELETE /v1/devices/self` | The signed device list and removal ([`devices`]) |
 //! | `PUT /v1/push` | Registers the device's push channel, sealed to the push service's key |
 //! | `DELETE /v1/push` | Removes it |
@@ -544,14 +544,15 @@ impl App {
             .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?
             .account;
         let out = match (&method, path.as_str()) {
-            (&Method::GET, "/v1/kt/head") => t.head(&self.registry).await,
-            (&Method::POST, "/v1/kt/account") => {
-                t.account(&self.registry, &self.hot, &account, &body).await
+            (&Method::GET, "/v1/kt/keys") => t.keys().await,
+            (&Method::GET, "/v1/kt/head") => t.head().await,
+            (&Method::POST, "/v1/kt/lookup") => {
+                t.lookup(&self.registry, &self.hot, &account, &body).await
             }
-            (&Method::POST, "/v1/kt/consistency") => {
-                t.consistency(&self.registry, &self.hot, &account, &body)
-                    .await
+            (&Method::POST, "/v1/kt/history") => {
+                t.history(&self.registry, &self.hot, &account, &body).await
             }
+            (&Method::POST, "/v1/kt/audit") => t.audit(&self.hot, &account, &body).await,
             _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
         };
         Ok(match out {

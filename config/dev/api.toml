@@ -79,10 +79,11 @@ filter = "info"
 # certificate_key = { file = "/path/to/certificate-seed.hex" }   # with sealed_sender
 # sealed_sender = false                                           # the flag; Prompt 12 verifies it
 #
-# Key transparency (Prompt 3, M6, D-0055). Absent: those endpoints answer 503.
+# Key transparency on akd (Prompt 3, D-0057). Absent: those endpoints answer 503.
 # [api.kt]
 # secret = { file = "/path/to/kt-secret.hex" }                    # 64 hex; same on every api node
-# log_key = { file = "/path/to/kt-log-seed.hex" }                 # apps pin its public key
+# log_key = { file = "/path/to/kt-log-seed.hex" }                 # signs epoch heads; apps pin it
+# vrf_key = { file = "/path/to/kt-vrf-seed.hex" }                 # the worker's kt_vrf_key (akd, D-0057)
 #
 # [api.keys.devices]                                             # device linking (Prompt 3, M4, D-0052); defaults
 # max_devices = 6                                                 # primary + 5 (D-0047)

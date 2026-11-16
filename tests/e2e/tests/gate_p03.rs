@@ -182,6 +182,7 @@ async fn stack() -> Option<Stack> {
         push_index_secret: PUSH_INDEX,
         journal: None,
         propagation: Duration::from_millis(200),
+        kt: None,
         metrics: WorkerMetrics::default(),
     };
     Some(Stack {
@@ -307,13 +308,11 @@ async fn an_account_is_exported_then_deleted_from_every_prompt_3_store() {
         .0,
         204
     );
-    r.kt_reconcile(100, 1).await.unwrap();
-    assert!(
-        r.kt_account(&a, r.kt_size().await.unwrap(), 10)
-            .await
-            .unwrap()
-            .is_some()
-    );
+    // The worker's publish pass (the akd epoch itself is `songbird-akd`'s test).
+    for p in r.kt_pending(100).await.unwrap() {
+        r.kt_logged(&p).await.unwrap();
+    }
+    assert!(r.kt_salt(&a).await.unwrap().is_some());
 
     // The export: everything above, from the primary only.
     let (st, b) = c.send("GET", "/v1/account/export", None).await.unwrap();
@@ -378,12 +377,7 @@ async fn an_account_is_exported_then_deleted_from_every_prompt_3_store() {
             .unwrap()
             .is_none()
     );
-    assert!(
-        r.kt_account(&a, r.kt_size().await.unwrap(), 10)
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(r.kt_salt(&a).await.unwrap().is_none());
     let left: Value = r
         .db()
         .query1(
@@ -427,7 +421,20 @@ async fn inactivity_warns_a_month_and_a_week_before_then_deletes() {
             .await
             .unwrap();
     };
-    let pushes = || async { s.worker.queue.depth(Stream::Push).await.unwrap() };
+    // Which warning an account has been sent (the worker marks it once the wake-up jobs are
+    // queued; counting the shared push stream would race the other gate tests).
+    let warned = |a: AccountId| async move {
+        r.db()
+            .query1(
+                "RETURN account:[$a].inact_warned ?? 0;",
+                vec![(
+                    "a".to_owned(),
+                    Value::Bytes(Bytes::copy_from_slice(a.as_bytes())),
+                )],
+            )
+            .await
+            .unwrap()
+    };
     let recent = |a: AccountId| async move {
         r.db()
             .query1(
@@ -456,9 +463,11 @@ async fn inactivity_warns_a_month_and_a_week_before_then_deletes() {
     // 160 and 170 days unused (six months is 180): the month's warning, a wake-up per device.
     set_seen(160, n.account).await;
     set_seen(170, busy.account).await;
-    let before = pushes().await;
     s.worker.inactivity().await;
-    assert_eq!(pushes().await, before + 2);
+    assert_eq!(
+        (warned(n.account).await, warned(busy.account).await),
+        (Value::Int(1), Value::Int(1))
+    );
     // The busy account is used again (any signed request, at most once a day counts): its clock
     // and warnings reset. Its daily mark was set by the request above, so clear it first.
     r.touch(&busy.account).await.unwrap();
@@ -472,11 +481,17 @@ async fn inactivity_warns_a_month_and_a_week_before_then_deletes() {
     );
     // Not twice for the same stage, and nothing for the busy one.
     s.worker.inactivity().await;
-    assert_eq!(pushes().await, before + 2);
+    assert_eq!(
+        (warned(n.account).await, warned(busy.account).await),
+        (Value::Int(1), Value::Int(0))
+    );
     // 175 days: the week's warning, for the idle account only.
     set_seen(175, n.account).await;
     s.worker.inactivity().await;
-    assert_eq!(pushes().await, before + 3);
+    assert_eq!(
+        (warned(n.account).await, warned(busy.account).await),
+        (Value::Int(2), Value::Int(0))
+    );
     // 181 days: deletion starts (as if it had asked), the busy one is untouched.
     set_seen(181, n.account).await;
     s.worker.inactivity().await;

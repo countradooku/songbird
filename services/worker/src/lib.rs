@@ -189,6 +189,8 @@ pub struct Worker {
     /// How long every delivery node takes to drop a disabled device (its directory poll
     /// interval with a margin).
     pub propagation: Duration,
+    /// The akd writer (Prompt 3, D-0057); `None` publishes nothing.
+    pub kt: Option<Arc<songbird_akd::Publisher>>,
     /// Metrics.
     pub metrics: WorkerMetrics,
 }
@@ -568,12 +570,11 @@ impl Worker {
             Err(e) => tracing::warn!(error = %e, "avatar sweep failed"),
         }
         self.inactivity().await;
-        // Key transparency (Prompt 3, M6): log what changed since the last pass.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-        if let Err(e) = self.registry.kt_reconcile(SWEEP_BATCH, now).await {
-            tracing::warn!(error = %e, "transparency log pass failed");
+        // Key transparency (Prompt 3, D-0057): publish what changed as one akd epoch.
+        if let Some(kt) = &self.kt
+            && let Err(e) = kt.publish_pending(&self.registry, SWEEP_BATCH).await
+        {
+            tracing::warn!(error = %e, "transparency publish failed");
         }
         // Expired link tokens are refused already; this only stops them taking space.
         if let Err(e) = self.registry.delete_expired_link_tokens(SWEEP_BATCH).await {

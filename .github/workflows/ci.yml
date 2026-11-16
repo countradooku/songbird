@@ -108,7 +108,7 @@ jobs:
           export SONGBIRD_REQUIRE_STACK=1
           # Backups (M6): restore against tampering on RustFS and SurrealDB with the age tool.
           export SONGBIRD_TEST_AGE="$RUNNER_TEMP/age"
-          cargo nextest run --locked --profile ci -p songbird-surreal -p songbird-mailbox -p songbird-router -p songbird-s3 -p songbird-e2e -p songbird-accounts -p songbird-admin
+          cargo nextest run --locked --profile ci -p songbird-surreal -p songbird-mailbox -p songbird-router -p songbird-s3 -p songbird-e2e -p songbird-accounts -p songbird-admin -p songbird-akd
           # These share the job streams (one consumer group; some wipe them): one crate at a
           # time, one test at a time.
           cargo nextest run --locked --profile ci -p songbird-api -j 1

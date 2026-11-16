@@ -33,6 +33,8 @@ use songbird_types::{AccountId, DeviceId, Secret};
 const SERVER: &str = "api.test";
 /// The transparency log key's seed in these tests.
 const LOG_SEED: [u8; 32] = [0x61; 32];
+/// The akd VRF key's seed in these tests.
+const VRF_SEED: [u8; 32] = [0x62; 32];
 
 fn env(name: &str) -> Option<String> {
     let v = std::env::var(name).ok();
@@ -45,6 +47,7 @@ fn env(name: &str) -> Option<String> {
 
 struct Stack {
     app: Arc<App>,
+    akd_store: songbird_akd::SurrealStore,
     addr: std::net::SocketAddr,
     _stop: tokio::sync::watch::Sender<bool>,
 }
@@ -60,7 +63,7 @@ fn settings() -> DeviceSettings {
 async fn stack(d: DeviceSettings) -> Option<Stack> {
     let surreal = env("SONGBIRD_TEST_SURREALDB")?;
     let hot = env("SONGBIRD_TEST_VALKEY")?;
-    let db = Db::connect(songbird_surreal::Config {
+    let cfg = songbird_surreal::Config {
         addr: surreal,
         host: "localhost".into(),
         tls: None,
@@ -73,9 +76,12 @@ async fn stack(d: DeviceSettings) -> Option<Stack> {
         ),
         timeout: Duration::from_secs(30),
         max_message_bytes: 16 << 20,
-    })
-    .await
-    .unwrap();
+    };
+    let akd_store =
+        songbird_akd::SurrealStore::connect(Arc::new(Db::connect(cfg.clone()).await.unwrap()))
+            .await
+            .unwrap();
+    let db = Db::connect(cfg).await.unwrap();
     let registry = Arc::new(Registry::connect(db).await.unwrap());
     // A secret of its own per test: throttle records never meet.
     let devices = Devices::new(
@@ -121,11 +127,14 @@ async fn stack(d: DeviceSettings) -> Option<Stack> {
                 songbird_api::config::KtSettings {
                     secret: songbird_types::SecretRef::Env("UNUSED".into()),
                     log_key: songbird_types::SecretRef::Env("UNUSED".into()),
+                    vrf_key: songbird_types::SecretRef::Env("UNUSED".into()),
                     fetches_per_hour: 600,
                     fetch_burst: 120,
                 },
                 &rand32(),
                 &LOG_SEED,
+                &VRF_SEED,
+                akd_store.clone(),
             )
             .unwrap(),
         ),
@@ -144,6 +153,7 @@ async fn stack(d: DeviceSettings) -> Option<Stack> {
     ));
     Some(Stack {
         app,
+        akd_store,
         addr,
         _stop: stop,
     })
@@ -1086,155 +1096,191 @@ async fn accounts_sharing_an_installation_stay_apart() {
     );
 }
 
-/// Prompt 3, M6 (D-0055): what a client checks. The signed head; the account's entries (its
-/// identity key, then each device list) under the subject its salt gives, each included in the
-/// head; and every newer head consistent with the last one it saw.
+/// Prompt 3 (D-0057): what a client checks on akd. The signed head (log key); the account's
+/// identity key and device list by lookup proofs against that head, under the label its salt
+/// gives (VRF key); the identity key's history; and that the directory only grew between two
+/// consecutive heads (audit).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn clients_verify_the_transparency_log() {
-    use songbird_kt::{Kind, verify_consistency};
+    use akd::verify::history::{HistoryParams, HistoryVerificationParams};
+    use songbird_akd::{Config, Kind, SignedHead, label, proofs};
 
     let Some(s) = stack(settings()).await else {
         return;
     };
-    let log_public: [u8; 32] = {
-        let k = Ed25519KeyPair::from_seed_unchecked(&LOG_SEED).unwrap();
-        pk(&k)
-    };
+    let log_public: [u8; 32] = pk(&Ed25519KeyPair::from_seed_unchecked(&LOG_SEED).unwrap());
     let p = primary(&s).await;
-    let reg = &s.app.registry;
-    // The worker's pass (run here directly).
-    reg.kt_reconcile(100, 1).await.unwrap();
     let other = primary(&s).await;
-    let h1 = kt_head(&other.client, &log_public).await;
-    // Another account's device sees p's identity key logged.
-    let (_, e) = kt_entries(&other.client, &log_public, p.account).await;
-    assert_eq!(e.len(), 1);
+    let reg = &s.app.registry;
+    // The worker's publisher on the same database (the only writer).
+    let publisher =
+        songbird_akd::Publisher::open(s.akd_store.clone(), songbird_akd::SecretVrf::new(&VRF_SEED))
+            .await
+            .unwrap();
+    publisher.publish_pending(reg, 100).await.unwrap();
+    // The keys apps pin.
+    let (st, b) = other.client.send("GET", "/v1/kt/keys", None).await.unwrap();
+    assert_eq!(st, 200);
+    let keys = json(&b);
+    assert_eq!(keys["log"], hex::encode(log_public));
+    let vrf = hex::decode(keys["vrf"].as_str().unwrap()).unwrap();
+    let head = |b: &[u8]| {
+        let h = SignedHead::decode(b).unwrap();
+        assert!(songbird_keys::ed25519_verify(
+            &log_public,
+            &h.signed_bytes(),
+            &h.signature
+        ));
+        h
+    };
+    let verify = |v: &serde_json::Value, account: AccountId, kind: Kind| {
+        let salt: [u8; 32] = hex::decode(v["salt"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let h = head(&hex::decode(v["head"].as_str().unwrap()).unwrap());
+        let proof =
+            proofs::decode_lookup(&hex::decode(v["proof"].as_str().unwrap()).unwrap()).unwrap();
+        let l = label(kind, account.as_bytes());
+        let r = akd::client::lookup_verify::<Config>(&vrf, h.root, h.epoch, l, proof).unwrap();
+        (h, salt, r.value.0)
+    };
+    // Another account's device verifies p's identity key.
+    let (st, v) = kt_lookup(&other.client, p.account, "identity").await;
+    assert_eq!(st, 200);
+    let v = v.unwrap();
+    let (h1, salt, value) = verify(&v, p.account, Kind::Identity);
     assert_eq!(
-        (e[0].kind, e[0].value),
-        (Kind::Identity, songbird_kt::sha256(&pk(&p.account_key)))
+        value,
+        songbird_akd::value(&salt, Kind::Identity, &sha(&pk(&p.account_key))).0
     );
-    // p links a device and signs a list; the pass logs it.
+    // The proof does not hold for another account's label, nor against another root.
+    let proof =
+        || proofs::decode_lookup(&hex::decode(v["proof"].as_str().unwrap()).unwrap()).unwrap();
+    let wrong = label(Kind::Identity, other.account.as_bytes());
+    assert!(akd::client::lookup_verify::<Config>(&vrf, h1.root, h1.epoch, wrong, proof()).is_err());
+    let right = label(Kind::Identity, p.account.as_bytes());
+    assert!(akd::client::lookup_verify::<Config>(&vrf, [9; 32], h1.epoch, right, proof()).is_err());
+    // No device list yet: not found.
+    assert_eq!(
+        kt_lookup(&other.client, p.account, "device_list").await.0,
+        404
+    );
+    // p links a device and signs a list; the next epoch carries it.
     let (_, l) = link_flow(&s, &p, |_| {}).await;
     let l = l.unwrap();
     let list = signed_list(&p, 1, &[&l], &p.account_key);
     assert_eq!(put_list(&p, &list).await.0, 204);
-    reg.kt_reconcile(100, 2).await.unwrap();
-    let (h2, e) = kt_entries(&other.client, &log_public, p.account).await;
-    assert_eq!(e.len(), 2);
+    publisher.publish_pending(reg, 100).await.unwrap();
+    let (st, v) = kt_lookup(&other.client, p.account, "device_list").await;
+    assert_eq!(st, 200);
+    let (h2, _, value) = verify(v.as_ref().unwrap(), p.account, Kind::DeviceList);
     assert_eq!(
-        (e[1].kind, e[1].value),
-        (Kind::DeviceList, songbird_kt::sha256(&list.encode()))
+        value,
+        songbird_akd::value(&salt, Kind::DeviceList, &sha(&list.encode())).0
     );
-    // The newer head is consistent with the one seen before.
-    let body = format!(r#"{{"from":{},"to":{}}}"#, h1.size, h2.size);
+    // A server handing out another salt cannot make the published value match another list.
+    assert_ne!(
+        value,
+        songbird_akd::value(&[0; 32], Kind::DeviceList, &sha(b"forged")).0
+    );
+    assert_eq!(h2.epoch, h1.epoch + 1);
+    // The identity key's history: one key, never replaced.
+    let body = format!(
+        r#"{{"account":"{}","kind":"identity"}}"#,
+        p.account.to_hex_unredacted()
+    );
     let (st, b) = other
         .client
-        .send("POST", "/v1/kt/consistency", Some(body.as_bytes()))
+        .send("POST", "/v1/kt/history", Some(body.as_bytes()))
         .await
         .unwrap();
     assert_eq!(st, 200);
-    let proof: Vec<[u8; 32]> = json(&b)["proof"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|x| {
-            hex::decode(x.as_str().unwrap())
-                .unwrap()
-                .try_into()
-                .unwrap()
-        })
-        .collect();
-    assert_eq!(
-        verify_consistency(h1.size, h2.size, &h1.root, &h2.root, &proof),
-        Ok(())
+    let v = json(&b);
+    let h = head(&hex::decode(v["head"].as_str().unwrap()).unwrap());
+    let hist = proofs::decode_history(&hex::decode(v["proof"].as_str().unwrap()).unwrap()).unwrap();
+    let res = akd::client::key_history_verify::<Config>(
+        &vrf,
+        h.root,
+        h.epoch,
+        label(Kind::Identity, p.account.as_bytes()),
+        hist,
+        HistoryVerificationParams::Default {
+            history_params: HistoryParams::MostRecent(songbird_api::kt::HISTORY),
+        },
+    )
+    .unwrap();
+    assert_eq!(res.len(), 1);
+    // The directory only grew between the two heads; a forked root fails.
+    let body = format!(r#"{{"from":{},"to":{}}}"#, h1.epoch, h2.epoch);
+    let (st, b) = other
+        .client
+        .send("POST", "/v1/kt/audit", Some(body.as_bytes()))
+        .await
+        .unwrap();
+    assert_eq!(st, 200);
+    let audit = || {
+        proofs::decode_audit(&hex::decode(json(&b)["proof"].as_str().unwrap()).unwrap()).unwrap()
+    };
+    akd::auditor::audit_verify::<Config>(vec![h1.root, h2.root], audit())
+        .await
+        .unwrap();
+    assert!(
+        akd::auditor::audit_verify::<Config>(vec![[3; 32], h2.root], audit())
+            .await
+            .is_err()
     );
-    // Sizes out of order, or beyond the log, are refused.
-    let bad = format!(r#"{{"from":{},"to":{}}}"#, h2.size, h1.size);
+    // Epochs out of order are refused; an unknown account is 404; a malformed body 400.
+    let bad = format!(r#"{{"from":{},"to":{}}}"#, h2.epoch, h1.epoch);
     assert_eq!(
         other
             .client
-            .send("POST", "/v1/kt/consistency", Some(bad.as_bytes()))
+            .send("POST", "/v1/kt/audit", Some(bad.as_bytes()))
             .await
             .unwrap()
             .0,
         400
     );
-    // An account with nothing logged yet.
-    let fresh = AccountId::random().unwrap();
-    let body = format!(r#"{{"account":"{}"}}"#, fresh.to_hex_unredacted());
     assert_eq!(
-        other
-            .client
-            .send("POST", "/v1/kt/account", Some(body.as_bytes()))
+        kt_lookup(&other.client, AccountId::random().unwrap(), "identity")
             .await
-            .unwrap()
             .0,
         404
     );
-}
-
-async fn kt_head(c: &ApiClient, log_public: &[u8; 32]) -> songbird_kt::TreeHead {
-    let (st, b) = c.send("GET", "/v1/kt/head", None).await.unwrap();
-    assert_eq!(st, 200);
-    let h = songbird_kt::TreeHead::decode(&b).unwrap();
-    assert!(songbird_keys::ed25519_verify(
-        log_public,
-        &h.signed_bytes(),
-        &h.signature
-    ));
-    h
-}
-
-async fn kt_entries(
-    c: &ApiClient,
-    log_public: &[u8; 32],
-    account: AccountId,
-) -> (songbird_kt::TreeHead, Vec<songbird_kt::Leaf>) {
-    use songbird_kt::{Leaf, TreeHead, verify_inclusion};
-    let body = format!(r#"{{"account":"{}"}}"#, account.to_hex_unredacted());
-    let (st, b) = c
-        .send("POST", "/v1/kt/account", Some(body.as_bytes()))
+    let (st, _) = other
+        .client
+        .send(
+            "POST",
+            "/v1/kt/lookup",
+            Some(br#"{"account":"00","kind":"x"}"#),
+        )
         .await
         .unwrap();
+    assert_eq!(st, 400);
+    // The current head, signed.
+    let (st, b) = other.client.send("GET", "/v1/kt/head", None).await.unwrap();
     assert_eq!(st, 200);
-    let v = json(&b);
-    let salt: [u8; 32] = hex::decode(v["salt"].as_str().unwrap())
-        .unwrap()
-        .try_into()
+    assert_eq!(head(&b).epoch, h2.epoch);
+}
+
+async fn kt_lookup(
+    c: &ApiClient,
+    account: AccountId,
+    kind: &str,
+) -> (u16, Option<serde_json::Value>) {
+    let body = format!(
+        r#"{{"account":"{}","kind":"{kind}"}}"#,
+        account.to_hex_unredacted()
+    );
+    let (st, b) = c
+        .send("POST", "/v1/kt/lookup", Some(body.as_bytes()))
+        .await
         .unwrap();
-    let h = TreeHead::decode(&hex::decode(v["head"].as_str().unwrap()).unwrap()).unwrap();
-    assert!(songbird_keys::ed25519_verify(
-        log_public,
-        &h.signed_bytes(),
-        &h.signature
-    ));
-    let subject = songbird_kt::subject(&salt, account.as_bytes());
-    let mut out = Vec::new();
-    for e in v["entries"].as_array().unwrap() {
-        let leaf = Leaf::decode(&hex::decode(e["leaf"].as_str().unwrap()).unwrap()).unwrap();
-        let proof: Vec<[u8; 32]> = e["proof"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|x| {
-                hex::decode(x.as_str().unwrap())
-                    .unwrap()
-                    .try_into()
-                    .unwrap()
-            })
-            .collect();
-        assert_eq!(leaf.subject, subject, "an entry about someone else");
-        assert_eq!(
-            verify_inclusion(
-                &leaf.hash(),
-                e["index"].as_u64().unwrap(),
-                h.size,
-                &proof,
-                &h.root
-            ),
-            Ok(())
-        );
-        out.push(leaf);
-    }
-    (h, out)
+    (st, (st == 200).then(|| json(&b)))
+}
+
+fn sha(b: &[u8]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out.copy_from_slice(aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, b).as_ref());
+    out
 }

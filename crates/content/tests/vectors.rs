@@ -339,13 +339,10 @@ fn vectors() -> Vec<(&'static str, Content)> {
         ),
         (
             "request_accept",
-            Content {
-                profile_key: b(0x11, 32),
-                ..content(Body::RequestResponse(RequestResponse {
-                    action: request_response::Action::Accept.into(),
-                    chat: account(0x22),
-                }))
-            },
+            content(Body::RequestResponse(RequestResponse {
+                action: request_response::Action::Accept.into(),
+                chat: account(0x22),
+            })),
         ),
         (
             "sync_sent",
@@ -456,8 +453,27 @@ fn franked() -> (Vec<u8>, [u8; 32]) {
     let plain = Plaintext {
         content,
         franking_key: b(0x42, 32),
+        profile_key: Vec::new(),
     };
     (songbird_content::pad(&plain.encode_to_vec()), commit)
+}
+
+/// Accepting a request: the accept response, sharing the profile key 32 × `11` beside it.
+fn accept_with_profile_key() -> Vec<u8> {
+    let content = data_less_accept().encode_to_vec();
+    let plain = Plaintext {
+        content,
+        franking_key: Vec::new(),
+        profile_key: b(0x11, 32),
+    };
+    songbird_content::pad(&plain.encode_to_vec())
+}
+
+fn data_less_accept() -> Content {
+    content(Body::RequestResponse(RequestResponse {
+        action: request_response::Action::Accept.into(),
+        chat: account(0x22),
+    }))
 }
 
 fn file() -> std::path::PathBuf {
@@ -472,11 +488,18 @@ fn every_vector_matches_the_rust_types_byte_for_byte() {
     let ours = vectors();
     let write = std::env::var_os("SONGBIRD_WRITE_VECTORS").is_some();
     let list = doc["vectors"].as_array_mut().unwrap();
-    assert_eq!(list.len(), ours.len() + 1, "every vector is in the file");
+    assert_eq!(list.len(), ours.len() + 2, "every vector is in the file");
     for v in list.iter_mut() {
         let name = v["name"].as_str().unwrap().to_owned();
         let bytes = if name == "plaintext_franked" {
             franked().0
+        } else if name == "plaintext_accept" {
+            let p = accept_with_profile_key();
+            assert_eq!(
+                songbird_content::open(&p).unwrap().profile_key,
+                Some([0x11; 32])
+            );
+            p
         } else {
             let c = &ours
                 .iter()

@@ -396,8 +396,11 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
 | Filling the block table | D | Malicious client | 1,000 per owner, enforced by a per-owner counter row written in each change's transaction (concurrent adds conflict) | `blocks_are_keyed_pairs_bounded_per_owner…` (1,020 racing adds) |
 | A broadcast to non-contacts | E | Spammer | Every closed account's key must be in the combined key; accounts without a profile can never be in a broadcast; budget per sender | `broadcasts_need_every_contacts_key…` (unit and live) |
 | Guessing an access key | S | Anyone | 128-bit keys compared in constant time; a wrong key is refused like a missing one | `ct_eq` in the send path; `a_send_to_another_account…` |
-| Bypassing the gate with a shared body or ephemeral frames | E | Spammer | Stated: groups are authorized by Prompt 5; ephemeral frames are encrypted and dropped without a session, and per-connection limited | PROTOCOL §5.10 |
-| A request's timing (stored or not) revealing a block | I | A blocked sender measuring latency | Not hidden: a dropped request skips the durable store (milliseconds faster) | Open risk §6 |
+| Bypassing the gate with a shared body (found by the review, D-0064) | E | Spammer, blocked sender | A shared body reaching a closed account needs its key in the combined key, as a broadcast does, until Prompt 5's membership checks | `groups_and_sealed_sends_are_not_classified_as_strangers`; `contacts_requests_blocks…` (live) |
+| Detecting a block through idempotency-key reuse (found by the review, D-0064) | I | A blocked sender | A dropped send is stored whole, already expired, under its key, so the record and the answers match a delivered send's | `requests_from_a_blocked_sender…` (reuse for other devices and a subset: reason 7) |
+| A linked device opening the account, or blocked senders reaching an open account (found by the review, D-0064) | E | Thief of a linked device, blocked sender | Opening is the primary's (checked in the profile's transaction); the open lane applies blocks | `only_the_primary_opens_an_account_to_anyone`; `an_open_account_takes_anyone_but_its_blocks_still_apply` |
+| Ephemeral frames from strangers | E | Spammer | Encrypted and dropped without a session; per-connection limits | PROTOCOL §5.10 |
+| A request's timing revealing a block | I | A blocked sender measuring latency | A dropped send is stored durably too (expired, D-0064), so both take a durable store; a request to a blocking account adds one registry lookup either way | D-0064 |
 
 ### 3.21 Reporting with message franking (Prompt 4, milestone 5; D-0063)
 
@@ -522,13 +525,15 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
   devices receive anyway); `api` has no read path into it. A device that only holds a WebSocket
   and never calls `api` would not count as use; the apps call `api` at least daily (prekey and
   KeyPackage counts). Inactivity warnings are wake-up pushes: a device without push gets none.
-- Message requests (Prompt 4, D-0062): a dropped request (blocked or refused) skips the durable
-  store, so it is answered a few milliseconds faster than a stored one; a blocked sender
-  measuring latency carefully could guess the block. The answers and budgets are identical. The
+- Message requests (Prompt 4, D-0062, D-0064): a dropped send is stored durably like a delivered
+  one (expired), so answers, budgets and store latency match; the
   recipient budget lets a set of sybil accounts use up an account's requests for an hour
   (contacts are unaffected). Every node's directory snapshot now holds every account's access
   key (memory only), and reloads on profile changes as on device changes (an incremental reload
-  is Prompt 13's). A stranger's MLS Welcome and ephemeral frames are not gated until Prompt 5.
+  is Prompt 13's). Ephemeral frames are not gated. A dropped send waits, expired and
+  unreadable, in the recipient's mailbox until the next sweep (minutes). Until Prompt 5, group
+  members prove they are contacts with their access keys (groups share profile keys); a group
+  report's single stamp lets the first reporter take the message's report slot.
 - Reporting (Prompt 4, D-0063): `api` sees a reported message's content in memory while it
   verifies the report (never decoded, never stored unsealed). A sealed sender cannot be attested,
   only claimed. The moderation key's private half must stay offline: whoever holds it can read

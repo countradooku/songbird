@@ -84,7 +84,7 @@ vec("chat_policy", data("chatPolicy", {"restrictExport": True, "restrictAutoSave
 vec("receipt_read", content(receipt={
     "kind": "KIND_READ", "messageIds": [b(0x33, 16), b(0x44, 16)], "upTo": b(0x55, 16)}))
 vec("typing", content(typing={"started": True, "groupId": b(0x99, 16)}))
-vec("request_accept", content(profileKey=b(0x11, 32), requestResponse={
+vec("request_accept", content(requestResponse={
     "action": "ACTION_ACCEPT", "chat": {"account": b(0x22, 16)}}))
 vec("sync_sent", sync("sent", {
     "chat": {"account": b(0x22, 16)}, "content": "@reaction", "frankingKey": b(0x42, 32),
@@ -105,5 +105,7 @@ vec("sync_request_response", sync("requestResponse", {
     "action": "ACTION_BLOCK", "chat": {"account": b(0x66, 16)}}))
 # A franked plaintext: the "reaction" content under franking key 32 x 0x42, padded.
 vec("plaintext_franked", {"content": "@reaction", "frankingKey": b(0x42, 32)}, ty="PaddedPlaintext")
+# Accepting a request: the profile key travels beside the content, never inside it.
+vec("plaintext_accept", {"content": "@request_accept", "profileKey": b(0x11, 32)}, ty="PaddedPlaintext")
 
 print(json.dumps({"version": 1, "vectors": V}, indent=1, ensure_ascii=False))

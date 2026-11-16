@@ -139,6 +139,7 @@ fn a_newer_writers_new_kind_asks_this_reader_to_update() {
     let plain = songbird_content::Plaintext {
         content: newer.encode_to_vec(),
         franking_key: Vec::new(),
+        profile_key: Vec::new(),
     };
     let padded = songbird_content::pad(&plain.encode_to_vec());
     let o = songbird_content::open(&padded).unwrap();

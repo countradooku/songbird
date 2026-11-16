@@ -188,6 +188,32 @@ impl Registry {
         Ok(matches!(v, Value::Bool(true)))
     }
 
+    /// Pins `value` under `name` the first time, then answers whether it matches (configuration
+    /// fingerprints shared by every node, such as [`GateKeys::fingerprint`]).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn pin_fingerprint(
+        &self,
+        name: &str,
+        value: &[u8; 16],
+    ) -> Result<bool, RegistryError> {
+        let v = self
+            .db
+            .query(
+                "BEGIN TRANSACTION;
+                 IF !record::exists(pin:[$n]) { CREATE pin:[$n] SET v = $v RETURN NONE };
+                 RETURN (SELECT VALUE v FROM ONLY pin:[$n]);
+                 COMMIT TRANSACTION;",
+                vec![var("n", Value::from(name)), var("v", bytes(value))],
+            )
+            .await?;
+        Ok(v.iter()
+            .rev()
+            .find_map(Value::as_bytes)
+            .is_some_and(|b| b.as_ref() == value))
+    }
+
     /// Every account's send settings (accounts being deleted left out): the directory snapshot's
     /// access part.
     ///
@@ -273,15 +299,24 @@ impl GateKeys {
         first16(hmac::sign(&self.owner, blocker.as_bytes()).as_ref())
     }
 
-    /// A keyed tag of `subject` for `kind` (throttle records, report IDs).
+    /// A keyed tag of `subject` for `kind` (throttle records, report IDs). Every part is length
+    /// framed, so no two (kind, subject) lists share a tag.
     #[must_use]
     pub fn tag(&self, kind: &str, subject: &[&[u8]]) -> [u8; 16] {
         let mut ctx = hmac::Context::with_key(&self.throttle);
-        ctx.update(kind.as_bytes());
-        for s in subject {
-            ctx.update(s);
+        for part in std::iter::once(kind.as_bytes()).chain(subject.iter().copied()) {
+            ctx.update(&u32::try_from(part.len()).unwrap_or(u32::MAX).to_be_bytes());
+            ctx.update(part);
         }
         first16(ctx.sign().as_ref())
+    }
+
+    /// A public fingerprint of these keys (a keyed tag of nothing): pinned in the registry so a
+    /// node configured with another requests secret refuses to start, instead of, for a worker,
+    /// silently missing an account's block rows at deletion.
+    #[must_use]
+    pub fn fingerprint(&self) -> [u8; 16] {
+        self.tag("fingerprint", &[])
     }
 
     /// A throttle record name in `valkey-hot`: `q:<kind>:<keyed hash>`.

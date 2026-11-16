@@ -271,7 +271,10 @@ async fn inv3_delete_on_ack_and_expiry() {
     );
 
     // Expiry (the server sweeps hourly with MAX_ENVELOPE_AGE = 30 days).
-    alice.send(key(), vec![to(bob, "old")]).await.unwrap();
+    assert_eq!(
+        alice.send(key(), vec![to(bob, "old")]).await.unwrap(),
+        SendStatus::Accepted
+    );
     assert_eq!(
         s.shared
             .mailbox

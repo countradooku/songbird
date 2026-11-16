@@ -246,7 +246,9 @@ impl Directory {
     pub async fn from_registry(
         registry: &songbird_accounts::Registry,
     ) -> Result<Self, songbird_accounts::RegistryError> {
-        // One snapshot for both, so a device removed in between is never loaded as a recipient.
+        // One query for devices and pending flags, so a device removed in between is never loaded
+        // as a recipient. Access settings are a second query: a profile changed in between is
+        // picked up by the next reload (its version bump).
         let rows = registry.load_directory_full().await?;
         let access = registry.load_access().await?;
         let pending: Vec<DeviceId> = rows.iter().filter(|r| r.3).map(|r| r.0).collect();

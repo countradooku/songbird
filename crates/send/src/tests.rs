@@ -349,11 +349,11 @@ async fn franked_envelopes_for_other_accounts_are_stamped_and_own_devices_are_no
 async fn a_sealed_franked_send_is_stamped_without_a_sender() {
     use songbird_proto::envelope::Stamp;
     let f = two_device_fixture();
-    // No device of the sender is known (the sealed endpoint's sentinel).
+    // The sealed endpoint's sentinel: no device of the sender is known.
     let st = f
         .path()
         .send(
-            &dev(0xEE),
+            &SEALED_SENDER,
             franked(&[dev(2), dev(3)], [7; 32]),
             Instant::now(),
             &mut Vec::new(),
@@ -487,6 +487,11 @@ fn gated(limits: RequestLimits) -> (Fixture, Arc<MemoryGate>) {
     (f, gate)
 }
 
+/// Envelopes `d` can still fetch (a dropped part is stored already expired: never fetchable).
+async fn visible(f: &Fixture, d: u8) -> usize {
+    f.mailbox.fetch_after(&dev(d), 0, 100).await.unwrap().len()
+}
+
 fn status_of(st: &SendStatus) -> Option<RejectReason> {
     match st {
         SendStatus::Rejected { reason, .. } => Some(*reason),
@@ -559,7 +564,7 @@ async fn a_send_to_another_account_needs_its_access_key_or_a_request() {
         SendStatus::Accepted
     );
     // Nothing refused was stored.
-    assert_eq!(f.mailbox.count_pending(&dev(2)).await.unwrap(), 2);
+    assert_eq!(visible(&f, 2).await, 2);
 }
 
 #[tokio::test]
@@ -592,17 +597,38 @@ async fn requests_from_a_blocked_sender_or_to_an_account_refusing_them_are_dropp
         go(&f, 1, request(1, &[2, 3, 4])).await,
         SendStatus::Accepted
     );
-    assert_eq!(f.mailbox.count_pending(&dev(2)).await.unwrap(), 0);
-    assert_eq!(f.mailbox.count_pending(&dev(3)).await.unwrap(), 0);
-    assert_eq!(f.mailbox.count_pending(&dev(4)).await.unwrap(), 1);
+    assert_eq!(visible(&f, 2).await, 0);
+    assert_eq!(visible(&f, 3).await, 0);
+    assert_eq!(visible(&f, 4).await, 1);
     // Carol refuses requests: the same answer, nothing stored.
     assert_eq!(go(&f, 1, request(2, &[5])).await, SendStatus::Accepted);
-    assert_eq!(f.mailbox.count_pending(&dev(5)).await.unwrap(), 0);
+    assert_eq!(visible(&f, 5).await, 0);
     assert_eq!(f.metrics.requests_dropped.get(), 2);
+    // Reusing the request's idempotency key for other devices gets the answer an undropped
+    // request's key gets (reason 7): the block does not show through idempotency.
+    let mut reuse = to(&[dev(6)], "other");
+    reuse.idempotency_key = [1; 16];
+    reuse.hints.access = Some([0x1D; 16]);
+    assert_eq!(
+        status_of(&go(&f, 1, reuse).await),
+        Some(RejectReason::IdempotencyConflict)
+    );
+    // So does reusing it for a subset of the same devices (Bob's only).
+    assert_eq!(
+        status_of(&go(&f, 1, request(1, &[2, 3])).await),
+        Some(RejectReason::IdempotencyConflict)
+    );
+    // A retry of the dropped request itself is answered as a retry is.
+    assert_eq!(
+        go(&f, 1, request(1, &[2, 3, 4])).await,
+        SendStatus::Accepted
+    );
+    assert_eq!(visible(&f, 2).await, 0);
+    assert_eq!(visible(&f, 4).await, 1, "the sync transcript once");
     assert_eq!(f.metrics.requests.get(), 0);
     // Dave has not blocked Alice.
     assert_eq!(go(&f, 1, request(3, &[6])).await, SendStatus::Accepted);
-    assert_eq!(f.mailbox.count_pending(&dev(6)).await.unwrap(), 1);
+    assert_eq!(visible(&f, 6).await, 1);
 }
 
 #[tokio::test]
@@ -650,7 +676,7 @@ async fn request_floods_are_held_to_their_budgets_and_a_block_does_not_show() {
     assert_eq!(go(&f, 1, request(1, &[6])).await, SendStatus::Accepted);
     assert_eq!(go(&f, 1, request(2, &[6])).await, SendStatus::Accepted);
     assert_eq!(status_of(&go(&f, 1, request(3, &[6])).await), limited);
-    assert_eq!(f.mailbox.count_pending(&dev(6)).await.unwrap(), 0);
+    assert_eq!(visible(&f, 6).await, 0);
 }
 
 #[tokio::test]
@@ -713,8 +739,10 @@ async fn broadcasts_need_every_contacts_key_and_respect_their_budget() {
 #[tokio::test]
 async fn groups_and_sealed_sends_are_not_classified_as_strangers() {
     let (f, _) = gated(RequestLimits::default());
-    // A shared body (MLS group): Prompt 5 authorizes membership.
-    let shared = SendFrame {
+    // A shared body (an MLS group) to closed accounts: until Prompt 5, every closed member's
+    // access key, combined, or it is refused, so a shared body is no way around requests and
+    // blocks.
+    let mut shared = SendFrame {
         hints: songbird_proto::frame::SendHints::default(),
         req_id: 1,
         idempotency_key: [1; 16],
@@ -724,8 +752,29 @@ async fn groups_and_sealed_sends_are_not_classified_as_strangers() {
             body: Bytes::from_static(b"group"),
         },
     };
+    assert_eq!(
+        status_of(&go(&f, 1, shared.clone()).await),
+        Some(RejectReason::AccessRequired)
+    );
+    shared.hints.access = Some([0x1B; 16]);
+    assert_eq!(
+        status_of(&go(&f, 1, shared.clone()).await),
+        Some(RejectReason::AccessRequired),
+        "Carol's key is missing"
+    );
+    let mut k = [0x1B; 16];
+    for x in &mut k {
+        *x ^= 0x1C;
+    }
+    shared.hints.access = Some(k);
     assert_eq!(f.path().lane(&dev(1), &shared), Ok(Lane::Group));
     assert_eq!(go(&f, 1, shared).await, SendStatus::Accepted);
+    // A sender not in the snapshot (yet) is never treated as sealed.
+    let s = hinted(&[8], 3, |_| {});
+    assert_eq!(
+        f.path().lane(&dev(0xEE), &s).map_err(|e| status_of(&e)),
+        Err(Some(RejectReason::Unavailable))
+    );
     // A sealed send: the sealed endpoint checked the access keys.
     let s = hinted(&[2, 3], 2, |_| {});
     assert_eq!(f.path().lane(&SEALED_SENDER, &s), Ok(Lane::Sealed));
@@ -735,6 +784,33 @@ async fn groups_and_sealed_sends_are_not_classified_as_strangers() {
             .await,
         SendStatus::Accepted
     );
+}
+
+#[tokio::test]
+async fn an_open_account_takes_anyone_but_its_blocks_still_apply() {
+    let (f, gate) = gated(RequestLimits::default());
+    // Olga (8) is open: no key, no request.
+    assert_eq!(
+        go(&f, 1, hinted(&[8], 1, |_| {})).await,
+        SendStatus::Accepted
+    );
+    assert_eq!(visible(&f, 8).await, 1);
+    // Once she blocks Alice, Alice's sends are accepted and never reach her.
+    gate.block(
+        AccountId::from_bytes([0x0F; 16]),
+        AccountId::from_bytes(ALICE),
+    );
+    assert_eq!(
+        go(&f, 1, hinted(&[8], 2, |_| {})).await,
+        SendStatus::Accepted
+    );
+    assert_eq!(visible(&f, 8).await, 1);
+    // Carol is not blocked.
+    assert_eq!(
+        go(&f, 5, hinted(&[8], 3, |_| {})).await,
+        SendStatus::Accepted
+    );
+    assert_eq!(visible(&f, 8).await, 2);
 }
 
 #[tokio::test]

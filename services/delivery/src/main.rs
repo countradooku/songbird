@@ -355,6 +355,14 @@ impl Service for Delivery {
                 let secret = r.secret.resolve_key32()?;
                 let keys = songbird_send::GateKeys::from_cluster_secret(&secret)
                     .map_err(|_| BoxError::from("gate key derivation failed"))?;
+                if !registry
+                    .pin_fingerprint("requests", &keys.fingerprint())
+                    .await?
+                {
+                    return Err(BoxError::from(
+                        "the requests secret differs from the other nodes' (registry pin)",
+                    ));
+                }
                 let gate: Arc<dyn songbird_send::Gate> =
                     Arc::new(songbird_send::RegistryGate::new(
                         Arc::clone(registry),

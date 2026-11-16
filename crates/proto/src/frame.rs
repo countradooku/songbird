@@ -64,7 +64,7 @@ pub const SEND_FLAG_MLS: u8 = 0x01;
 /// `Send` flag: one shared body for every recipient device.
 pub const SEND_FLAG_SHARED: u8 = 0x02;
 /// `Send` flag: the combined access key of the addressed accounts follows (Prompt 4, M4): a send
-/// from a contact. Not with [`SEND_FLAG_REQUEST`] or [`SEND_FLAG_SHARED`].
+/// from a contact (per device or a group's shared body). Not with [`SEND_FLAG_REQUEST`].
 pub const SEND_FLAG_ACCESS: u8 = 0x04;
 /// `Send` flag: this send is a message request (Prompt 4, M4). Not with [`SEND_FLAG_ACCESS`],
 /// [`SEND_FLAG_SHARED`] or [`SEND_FLAG_MLS`].
@@ -650,11 +650,10 @@ fn decode_send_blocks(
 ) -> Result<(Option<MlsCommitRef>, SendHints), FrameError> {
     let has = |f: u8| flags & f != 0;
     if flags & !SEND_FLAGS != 0
-        // A contact or a request, not both; neither for a group's shared body (Prompt 5
-        // authorizes those); a request is never an MLS commit.
+        // A contact or a request, not both; a request is one 1:1 message, never a shared body
+        // or an MLS commit.
         || (has(SEND_FLAG_ACCESS) && has(SEND_FLAG_REQUEST))
-        || (has(SEND_FLAG_SHARED) && (has(SEND_FLAG_ACCESS) || has(SEND_FLAG_REQUEST)))
-        || (has(SEND_FLAG_REQUEST) && has(SEND_FLAG_MLS))
+        || (has(SEND_FLAG_REQUEST) && (has(SEND_FLAG_SHARED) || has(SEND_FLAG_MLS)))
     {
         return Err(FrameError::Control("send.flags"));
     }
@@ -1111,7 +1110,10 @@ mod tests {
             base(SEND_FLAG_ACCESS | SEND_FLAG_REQUEST, &[0; 16]),
             refused
         );
-        assert_eq!(base(SEND_FLAG_ACCESS | SEND_FLAG_SHARED, &[0; 16]), refused);
+        assert!(
+            base(SEND_FLAG_ACCESS | SEND_FLAG_SHARED, &[0; 16]).is_ok(),
+            "a group's key"
+        );
         assert_eq!(base(SEND_FLAG_REQUEST | SEND_FLAG_SHARED, &[]), refused);
         assert_eq!(base(SEND_FLAG_REQUEST | SEND_FLAG_MLS, &[0; 24]), refused);
         assert_eq!(base(0x40, &[]), refused);

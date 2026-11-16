@@ -465,7 +465,7 @@ impl App {
                 .await
                 .map_err(|_| unavailable())?
                 .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
-            Ok::<_, Refusal>((row.account, !row.pending))
+            Ok::<_, Refusal>((row.account, !row.pending, row.primary))
         };
         let out = match (&method, path.as_str()) {
             (&Method::PUT, "/v1/messages/sealed") => {
@@ -500,8 +500,8 @@ impl App {
             (&Method::GET, "/v1/certificate") => {
                 let (device, _) = self.authenticate_json(req).await?;
                 match listed(device).await? {
-                    (a, true) => p.certificate(&self.registry, &a, &device).await,
-                    (_, false) => return Ok(pending_refusal()),
+                    (a, true, _) => p.certificate(&self.registry, &a, &device).await,
+                    (_, false, _) => return Ok(pending_refusal()),
                 }
             }
             (&Method::PUT, "/v1/profile") => {
@@ -509,13 +509,13 @@ impl App {
                     .authenticate_body(req, songbird_proto::profile::MAX_PROFILE + 64)
                     .await?;
                 match listed(device).await? {
-                    (a, true) => p.put(&self.registry, &a, &body).await,
-                    (_, false) => return Ok(pending_refusal()),
+                    (a, true, primary) => p.put(&self.registry, &a, primary, &body).await,
+                    (_, false, _) => return Ok(pending_refusal()),
                 }
             }
             (&Method::POST, "/v1/profile/fetch") => {
                 let (device, body) = self.authenticate_json(req).await?;
-                let (a, _) = listed(device).await?;
+                let (a, _, _) = listed(device).await?;
                 p.fetch(&self.registry, &self.hot, &a, &body).await
             }
             (&Method::PUT, "/v1/profile/avatar") => {
@@ -523,8 +523,8 @@ impl App {
                     .authenticate_body(req, songbird_proto::profile::MAX_AVATAR)
                     .await?;
                 match listed(device).await? {
-                    (a, true) => p.put_avatar(&self.registry, &self.s3, &a, body).await,
-                    (_, false) => return Ok(pending_refusal()),
+                    (a, true, _) => p.put_avatar(&self.registry, &self.s3, &a, body).await,
+                    (_, false, _) => return Ok(pending_refusal()),
                 }
             }
             (&Method::GET, path) if path.starts_with("/v1/profile/avatar/") => {
@@ -532,7 +532,7 @@ impl App {
                 hex::decode_to_slice(path.trim_start_matches("/v1/profile/avatar/"), &mut id)
                     .map_err(|_| Refusal::Status(StatusCode::NOT_FOUND))?;
                 let (device, _) = self.authenticate_json(req).await?;
-                let (a, _) = listed(device).await?;
+                let (a, _, _) = listed(device).await?;
                 if let Err(o) = p.avatar_allowed(&self.registry, &self.hot, &a, &id).await {
                     return Ok(profile_outcome(o));
                 }
@@ -1479,6 +1479,9 @@ fn profile_outcome(o: profiles::Outcome) -> Response<Body> {
         Outcome::NotFound => empty(StatusCode::NOT_FOUND),
         Outcome::Conflict(what) => {
             json(StatusCode::CONFLICT, &serde_json::json!({ "error": what }))
+        }
+        Outcome::Forbidden(what) => {
+            json(StatusCode::FORBIDDEN, &serde_json::json!({ "error": what }))
         }
         Outcome::Throttled(wait_us) => {
             let mut r = empty(StatusCode::TOO_MANY_REQUESTS);

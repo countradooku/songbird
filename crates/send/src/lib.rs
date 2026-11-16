@@ -94,17 +94,29 @@ impl std::fmt::Debug for Policy {
     }
 }
 
+/// What the gate decided for a send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admitted {
+    /// Store it as it is.
+    Store,
+    /// Drop this account's part silently.
+    Drop(AccountId),
+}
+
 /// What kind of conversation a send belongs to (Prompt 4, D-0062), from what the server can see:
 /// the addressed accounts, the frame's flags and the directory snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lane {
     /// Only the sender's own other devices (sync messages).
     Sync,
-    /// One other account: a contact (its access key is in the send) or an open account.
+    /// One other account, a contact: its access key is in the send.
     Direct,
+    /// One other account that is open (anyone may send): no key needed, but its blocks apply.
+    Open(AccountId),
     /// Several other accounts, each a contact or open: a broadcast list.
     Broadcast(u32),
-    /// A shared body: a group or channel (Prompt 5 authorizes membership).
+    /// A shared body: a group or channel. Until Prompt 5 authorizes membership, every closed
+    /// account it reaches needs its access key in the combined key.
     Group,
     /// A message request to one closed account.
     Request(AccountId),
@@ -265,16 +277,22 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
                 return Err(status);
             }
         };
-        match self.admit(sender, lane, &mut s.payload).await {
-            // Dropped silently and nothing left (no sync transcript): answered as accepted,
-            // nothing stored.
-            Ok(false) if s.payload.is_empty() => {
-                return Ok(StoreOutcome {
-                    seqs: Vec::new(),
-                    replayed: false,
-                });
-            }
-            Ok(_) => {}
+        match self.admit(sender, lane).await {
+            Ok(Admitted::Store) => {}
+            // Dropped silently: answered as accepted (see `drop_part`).
+            Ok(Admitted::Drop(r)) => match self.drop_part(s, r).await {
+                Ok(true) => {
+                    return Ok(StoreOutcome {
+                        seqs: Vec::new(),
+                        replayed: false,
+                    });
+                }
+                Ok(false) => {}
+                Err(status) => {
+                    m.sends_rejected.inc();
+                    return Err(status);
+                }
+            },
             Err(status) => {
                 m.sends_rejected.inc();
                 return Err(status);
@@ -353,32 +371,30 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
     }
 
     /// The send's lane (D-0062), from the directory snapshot alone: no store round trip, and no
-    /// allocation unless the send addresses several other accounts (a broadcast).
+    /// allocation unless the send addresses several other accounts of which one is closed.
     ///
     /// # Errors
     /// Access required (no key, a wrong one, or an account without a profile), an invalid
-    /// request, or too many accounts for a broadcast.
+    /// request, too many accounts for a broadcast, or unavailable when the sender's account is not
+    /// in the snapshot yet (never stamped as sealed).
     pub fn lane(&self, sender: &DeviceId, s: &SendFrame) -> Result<Lane, SendStatus> {
-        if matches!(s.payload, SendPayload::Shared { .. }) {
-            return Ok(Lane::Group);
-        }
         if *sender == SEALED_SENDER {
             return Ok(Lane::Sealed);
         }
         let dir = self.directory.load();
-        let from = dir.account_of(sender);
-        let (mut first, mut several) = (None, false);
+        let Some(from) = dir.account_of(sender) else {
+            return Err(reject(RejectReason::Unavailable, RETRY_MS));
+        };
+        let (mut first, mut several, mut closed) = (None, false, false);
         for d in s.payload.devices() {
-            let a = dir.account_of(d);
+            let Some(a) = dir.account_of(d) else { continue };
             if a == from {
                 continue;
             }
+            closed |= !dir.access(&a).open;
             match first {
-                None => first = a,
-                Some(f) if Some(f) != a => {
-                    several = true;
-                    break;
-                }
+                None => first = Some(a),
+                Some(f) if f != a => several = true,
                 Some(_) => {}
             }
         }
@@ -386,17 +402,19 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
             return Ok(Lane::Sync);
         };
         let h = &s.hints;
-        if !several {
+        let shared = matches!(s.payload, SendPayload::Shared { .. });
+        if !several && !shared {
             let acc = dir.access(&first);
-            if acc.open {
+            if h.access
+                .is_some_and(|k| acc.key.is_some_and(|key| ct_eq(&key, &k)))
+            {
                 return Ok(Lane::Direct);
             }
-            if let Some(k) = h.access {
-                return if acc.key.is_some_and(|key| ct_eq(&key, &k)) {
-                    Ok(Lane::Direct)
-                } else {
-                    Err(reject(RejectReason::AccessRequired, 0))
-                };
+            if acc.open {
+                return Ok(Lane::Open(first));
+            }
+            if h.access.is_some() {
+                return Err(reject(RejectReason::AccessRequired, 0));
             }
             if h.request {
                 if h.commitment.is_none() {
@@ -406,60 +424,68 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
             }
             return Err(reject(RejectReason::AccessRequired, 0));
         }
-        // A broadcast: every other account a contact (one combined key) or open.
+        // Several accounts (a broadcast), or a shared body (a group): every other account a
+        // contact (one combined key) or open. Until Prompt 5 authorizes group membership, a group's
+        // members prove they are contacts the same way (groups share their members' profile keys).
         if h.request {
             return Err(reject(RejectReason::InvalidRequest, 0));
         }
-        let mut accounts: Vec<AccountId> = s
-            .payload
-            .devices()
-            .filter_map(|d| dir.account_of(d))
-            .filter(|a| Some(*a) != from)
-            .collect();
-        accounts.sort_unstable();
-        accounts.dedup();
+        let mut accounts: Vec<AccountId> = Vec::new();
+        if closed || !shared {
+            accounts = s
+                .payload
+                .devices()
+                .filter_map(|d| dir.account_of(d))
+                .filter(|a| *a != from)
+                .collect();
+            accounts.sort_unstable();
+            accounts.dedup();
+        }
         let n = u32::try_from(accounts.len()).unwrap_or(u32::MAX);
-        if n > self.policy.max_broadcast_accounts {
+        if !shared && n > self.policy.max_broadcast_accounts {
             return Err(reject(RejectReason::TooManyRecipients, 0));
         }
-        let mut combined = [0u8; 16];
-        let mut closed = false;
-        for a in &accounts {
-            let acc = dir.access(a);
-            if acc.open {
-                continue;
+        if closed {
+            let mut combined = [0u8; 16];
+            for a in &accounts {
+                let acc = dir.access(a);
+                if acc.open {
+                    continue;
+                }
+                let Some(key) = acc.key else {
+                    return Err(reject(RejectReason::AccessRequired, 0));
+                };
+                combined.iter_mut().zip(key).for_each(|(c, k)| *c ^= k);
             }
-            let Some(key) = acc.key else {
+            if !h.access.is_some_and(|k| ct_eq(&combined, &k)) {
                 return Err(reject(RejectReason::AccessRequired, 0));
-            };
-            closed = true;
-            combined.iter_mut().zip(key).for_each(|(c, k)| *c ^= k);
+            }
         }
-        if closed && !h.access.is_some_and(|k| ct_eq(&combined, &k)) {
-            return Err(reject(RejectReason::AccessRequired, 0));
-        }
-        Ok(Lane::Broadcast(n))
+        Ok(if shared {
+            Lane::Group
+        } else {
+            Lane::Broadcast(n)
+        })
     }
 
-    /// The cluster-wide part of a request or broadcast ([`gate`]). `Ok(true)`: store as is.
-    /// `Ok(false)`: the recipient's devices were removed from `payload` (dropped silently).
-    async fn admit(
-        &self,
-        sender: &DeviceId,
-        lane: Lane,
-        payload: &mut SendPayload,
-    ) -> Result<bool, SendStatus> {
-        let (Lane::Request(_) | Lane::Broadcast(_)) = lane else {
-            return Ok(true);
+    /// The cluster-wide part of a request, a send to an open account or a broadcast ([`gate`]).
+    async fn admit(&self, sender: &DeviceId, lane: Lane) -> Result<Admitted, SendStatus> {
+        let (Lane::Request(_) | Lane::Broadcast(_) | Lane::Open(_)) = lane else {
+            return Ok(Admitted::Store);
         };
         let Some(gate) = &self.policy.gate else {
-            return Err(reject(RejectReason::Unavailable, RETRY_MS));
+            // Without a gate there are no blocks to apply (a static development directory, where
+            // every account is open); requests and broadcasts cannot be held to budgets.
+            return match lane {
+                Lane::Open(_) => Ok(Admitted::Store),
+                _ => Err(reject(RejectReason::Unavailable, RETRY_MS)),
+            };
         };
         let (from, refused) = {
             let dir = self.directory.load();
             let from = dir
                 .account_of(sender)
-                .ok_or(reject(RejectReason::Unavailable, 0))?;
+                .ok_or(reject(RejectReason::Unavailable, RETRY_MS))?;
             let refused = match lane {
                 Lane::Request(r) => dir.access(&r).requests_off,
                 _ => false,
@@ -469,27 +495,76 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
         let admit = match lane {
             Lane::Request(r) => gate.request(&from, &r, refused).await,
             Lane::Broadcast(n) => gate.broadcast(&from, n).await,
+            Lane::Open(r) => gate.blocked(&from, &r).await,
             _ => Admit::Allow,
         };
-        match admit {
-            Admit::Allow => {
-                match lane {
-                    Lane::Request(_) => self.metrics.requests.inc(),
-                    _ => self.metrics.broadcasts.inc(),
-                }
-                Ok(true)
+        match (admit, lane) {
+            (Admit::Allow, Lane::Request(_)) => {
+                self.metrics.requests.inc();
+                Ok(Admitted::Store)
             }
-            Admit::Drop => {
+            (Admit::Allow, Lane::Broadcast(_)) => {
+                self.metrics.broadcasts.inc();
+                Ok(Admitted::Store)
+            }
+            (Admit::Drop, Lane::Request(r) | Lane::Open(r)) => {
                 self.metrics.requests_dropped.inc();
-                if let (Lane::Request(r), SendPayload::PerDevice(rs)) = (lane, payload) {
-                    let dir = self.directory.load();
-                    rs.retain(|x| dir.account_of(&x.device) != Some(r));
-                }
-                Ok(false)
+                Ok(Admitted::Drop(r))
             }
-            Admit::Limited(ms) => Err(reject(RejectReason::RateLimited, ms)),
-            Admit::Unavailable => Err(reject(RejectReason::Unavailable, RETRY_MS)),
+            // A broadcast is never dropped (the gate only drops requests and open accounts).
+            (Admit::Allow | Admit::Drop, _) => Ok(Admitted::Store),
+            (Admit::Limited(ms), _) => Err(reject(RejectReason::RateLimited, ms)),
+            (Admit::Unavailable, _) => Err(reject(RejectReason::Unavailable, RETRY_MS)),
         }
+    }
+
+    /// A dropped send (blocked, or requests refused), so that nothing the sender sees differs from
+    /// a delivered one:
+    ///
+    /// - the whole send, every envelope of it, is stored under its own idempotency key with a
+    ///   deadline that has already passed: never fetched or routed, deleted by the next sweep. The
+    ///   idempotency record therefore names exactly the devices an undropped send's would, and the
+    ///   store's answer (a conflict for a reused key, a replay, unavailable) is the send's answer;
+    /// - the sender's own envelopes (its sync transcript) are then stored live under a key derived
+    ///   from it, so its other devices still see what it sent.
+    ///
+    /// Returns `Ok(true)` if nothing is left to store.
+    async fn drop_part(&self, s: &mut SendFrame, recipient: AccountId) -> Result<bool, SendStatus> {
+        let SendPayload::PerDevice(rs) = &mut s.payload else {
+            return Ok(false);
+        };
+        let all: Vec<NewEnvelope> = rs
+            .iter()
+            .map(|r| NewEnvelope {
+                device: r.device,
+                envelope: r.envelope.clone(),
+            })
+            .collect();
+        {
+            let dir = self.directory.load();
+            rs.retain(|x| dir.account_of(&x.device) != Some(recipient));
+        }
+        let expired = StoreRequest {
+            idempotency_key: Some(s.idempotency_key),
+            mls: None,
+            expires_after: Some(Duration::ZERO),
+            payload: Payload::PerDevice(all),
+        };
+        match self.mailbox.store_send(expired).await {
+            Ok(_) => {}
+            Err(MailboxError::IdempotencyConflict) => {
+                return Err(reject(RejectReason::IdempotencyConflict, 0));
+            }
+            Err(MailboxError::StaleEpoch) => return Err(reject(RejectReason::StaleEpoch, 0)),
+            Err(MailboxError::Full | MailboxError::Unavailable) => {
+                self.metrics.mailbox_errors.inc();
+                return Err(reject(RejectReason::Unavailable, RETRY_MS));
+            }
+        }
+        for (i, b) in s.idempotency_key.iter_mut().enumerate() {
+            *b ^= 0xA5 ^ u8::try_from(i).unwrap_or(0);
+        }
+        Ok(rs.is_empty())
     }
 
     /// Stamps every envelope for another account (a shared body once, for no one in particular);

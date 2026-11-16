@@ -52,6 +52,9 @@ pub trait Gate: Send + Sync + 'static {
 
     /// A broadcast from `sender` to `accounts` other accounts.
     fn broadcast<'a>(&'a self, sender: &'a AccountId, accounts: u32) -> GateFuture<'a>;
+
+    /// A send to an open account: [`Admit::Drop`] if it blocked `sender`, else allowed.
+    fn blocked<'a>(&'a self, sender: &'a AccountId, recipient: &'a AccountId) -> GateFuture<'a>;
 }
 
 /// The budgets (`[…send.requests]`). Defaults: a stranger may start 20 requests an hour (burst
@@ -112,9 +115,10 @@ impl songbird_types::config::Validate for RequestLimits {
             v.check((1..=1_000_000).contains(&n), name, "must be in 1..=1000000");
         }
         v.check(
-            (2..=1_024).contains(&self.max_broadcast_accounts),
+            (2..=1_024).contains(&self.max_broadcast_accounts)
+                && self.max_broadcast_accounts <= self.broadcast_burst,
             "max_broadcast_accounts",
-            "must be in 2..=1024",
+            "must be in 2..=1024 and at most broadcast_burst",
         );
     }
 }
@@ -231,6 +235,20 @@ impl Gate for RegistryGate {
         })
     }
 
+    fn blocked<'a>(&'a self, sender: &'a AccountId, recipient: &'a AccountId) -> GateFuture<'a> {
+        Box::pin(async move {
+            match self
+                .registry
+                .is_blocked(&self.keys.pair(recipient, sender))
+                .await
+            {
+                Ok(true) => Admit::Drop,
+                Ok(false) => Admit::Allow,
+                Err(_) => Admit::Unavailable,
+            }
+        })
+    }
+
     fn broadcast<'a>(&'a self, sender: &'a AccountId, accounts: u32) -> GateFuture<'a> {
         Box::pin(async move {
             let l = &self.limits;
@@ -313,6 +331,15 @@ impl Gate for MemoryGate {
         let out = if over {
             Admit::Limited(1_000)
         } else if refused || st.blocks.contains(&(*recipient, *sender)) {
+            Admit::Drop
+        } else {
+            Admit::Allow
+        };
+        Box::pin(std::future::ready(out))
+    }
+
+    fn blocked<'a>(&'a self, sender: &'a AccountId, recipient: &'a AccountId) -> GateFuture<'a> {
+        let out = if self.lock().blocks.contains(&(*recipient, *sender)) {
             Admit::Drop
         } else {
             Admit::Allow

@@ -7,7 +7,8 @@
 //!   `[api.reports] moderation_key`;
 //! - `list` shows queued reports' IDs and times (their contents stay sealed);
 //! - `open` decrypts them with the private key and prints each as JSON, with the reported
-//!   content decoded (`songbird_content`; this tool is not a service);
+//!   content rendered (its kind and text, decoded with `songbird_content`; this tool is not a
+//!   service), never the raw bytes;
 //! - `delete` removes one once dealt with (needs `--confirm`, audit-logged).
 
 use std::io::Write as _;
@@ -145,6 +146,9 @@ pub(crate) fn run(cmd: ReportsCmd) -> Result<()> {
                         o.insert("id".into(), hex::encode(r.id).into());
                         o.insert("queued_at".into(), r.at.into());
                         o.insert("decoded".into(), render(&content));
+                        // Moderators see the rendered message, not raw bytes (a quote preview or
+                        // anything else inside stays out of the printout).
+                        o.remove("content");
                     }
                     println!("{v}");
                 }

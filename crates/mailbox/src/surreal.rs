@@ -132,7 +132,7 @@ const LOAD: &str =
 const EXPLICIT_MAX: u64 = 4096;
 
 /// Entries past their own deadline (the disappearing hint) are never fetched.
-const FETCH: &str = "SELECT meta::id(id)[1] AS seq, env, body.env AS benv FROM mailbox:[$d, $after]>..[$d, ..] WHERE exp = NONE OR exp > time::now() LIMIT $n;";
+const FETCH: &str = "SELECT meta::id(id)[1] AS seq, env, body.env AS benv FROM mailbox:[$d, $after]>..[$d, ..] WHERE exp = NONE OR exp > $now LIMIT $n;";
 
 /// Forgets deleted devices: their entries (shared bodies by reference count) and counters.
 const FORGET: &str = "
@@ -151,14 +151,14 @@ COMMIT TRANSACTION;
 
 const EXPIRE: &str = "
 BEGIN TRANSACTION;
-LET $cut = time::now() - duration::from_secs($age);
-LET $gone = DELETE mailbox WHERE at < $cut OR (exp != NONE AND exp <= time::now()) RETURN BEFORE;
+LET $cut = $now - duration::from_secs($age);
+LET $gone = DELETE mailbox WHERE at < $cut OR (exp != NONE AND exp <= $now) RETURN BEFORE;
 FOR $b IN array::filter($gone.body, |$v| $v != NONE) {
   LET $r = UPDATE ONLY $b SET refs -= 1 RETURN VALUE refs;
   IF $r <= 0 { DELETE $b RETURN NONE };
 };
 DELETE body WHERE at < $cut RETURN NONE;
-DELETE idem WHERE at < time::now() - duration::from_secs($idem_age) RETURN NONE;
+DELETE idem WHERE at < $now - duration::from_secs($idem_age) RETURN NONE;
 RETURN array::len($gone);
 COMMIT TRANSACTION;
 ";
@@ -370,6 +370,9 @@ impl Mailbox for SurrealMailbox {
         let vars = vec![
             ("d".to_owned(), bytes_value(device.as_bytes())),
             ("after".to_owned(), int(after_seq)),
+            // Every time here is this process's clock, the one that wrote `at` and `exp`: the
+            // database's own clock may be skewed from it.
+            ("now".to_owned(), now_value()),
             (
                 "n".to_owned(),
                 int(u64::try_from(limit).unwrap_or(u64::MAX)),
@@ -427,6 +430,7 @@ impl Mailbox for SurrealMailbox {
         async move {
             let vars = vec![
                 ("age".to_owned(), int(age.as_secs())),
+                ("now".to_owned(), now_value()),
                 ("idem_age".to_owned(), int(IDEMPOTENCY_RETENTION.as_secs())),
             ];
             let r = conn

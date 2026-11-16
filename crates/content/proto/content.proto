@@ -26,6 +26,10 @@ message Plaintext {
   // 32 random bytes per message, or empty when the message is not franked. The commitment the
   // server stamps is HMAC-SHA256(franking_key, "songbird.v1/franking\0" || content).
   bytes franking_key = 2;
+  // 32 bytes or empty: shares (or rotates) the sender's profile key. Outside `content` on purpose:
+  // a report reveals the committed content, never a credential (the profile key derives the
+  // sender's access key).
+  bytes profile_key = 3;
 }
 
 message Content {
@@ -33,7 +37,7 @@ message Content {
   uint32 required_version = 2; // a reader below this shows "update to see this message"
   bytes message_id = 3;        // 16 random bytes; repeats are dropped by (sender, message_id)
   uint64 sent_at_ms = 4;       // the sender's clock
-  bytes profile_key = 5;       // 32 bytes or empty: shares (or rotates) the sender's profile key
+  reserved 5;                  // the profile key moved to Plaintext before any release
   oneof body {
     DataMessage data = 10;
     ReceiptMessage receipt = 11;
@@ -343,7 +347,7 @@ message TypingMessage {
 message RequestResponse {
   enum Action {
     ACTION_UNSPECIFIED = 0;
-    ACTION_ACCEPT = 1;  // sent to the requester, with Content.profile_key
+    ACTION_ACCEPT = 1;  // sent to the requester, with Plaintext.profile_key
     ACTION_DELETE = 2;  // own devices only
     ACTION_BLOCK = 3;   // own devices only
     ACTION_REPORT = 4;  // own devices only

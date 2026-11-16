@@ -146,11 +146,23 @@ fn a_franking_key_of_the_wrong_length_is_refused() {
     let p = Plaintext {
         content: text_content("hi").encode_to_vec(),
         franking_key: vec![1; 31],
+        profile_key: Vec::new(),
     };
     assert_eq!(
         open(&pad(&p.encode_to_vec())).unwrap_err(),
         Error::Invalid("plaintext.franking_key")
     );
+}
+
+#[test]
+fn the_profile_key_travels_beside_the_committed_content() {
+    let c = text_content("accepting your request");
+    let (padded, commit) = seal_with_profile_key(&c, Some([5; 32]), Some([0x77; 32])).unwrap();
+    let o = open(&padded).unwrap();
+    assert_eq!(o.profile_key, Some([0x77; 32]));
+    assert!(o.franking_matches(&commit.unwrap()));
+    // What a report would reveal (the committed bytes) does not hold it.
+    assert!(!o.content_bytes.windows(32).any(|w| w == [0x77; 32]));
 }
 
 #[test]

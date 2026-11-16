@@ -81,10 +81,6 @@ fn some<'a, T>(v: Option<&'a T>, field: &'static str) -> Result<&'a T, Error> {
 pub fn content(c: &Content) -> R {
     check(c.version >= 1, "content.version")?;
     id(&c.message_id, "content.message_id")?;
-    check(
-        c.profile_key.is_empty() || c.profile_key.len() == KEY_LEN,
-        "content.profile_key",
-    )?;
     match &c.body {
         None => Ok(()),
         Some(Body::Data(d)) => data(d),

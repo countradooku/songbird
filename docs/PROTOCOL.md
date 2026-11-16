@@ -39,7 +39,7 @@ above, so every frame has one encoding):
 | --- | --- | --- |
 | `0x01` | MLS commit (§3.1) | |
 | `0x02` | One shared body for every device | |
-| `0x04` | `ACCESS`: the XOR of the access keys of every addressed account that is not open (§5.10) | Not with `0x08` or `0x02` |
+| `0x04` | `ACCESS`: the XOR of the access keys of every addressed account that is not open (§5.10), per device or with a shared body | Not with `0x08` |
 | `0x08` | `REQUEST`: a message request (§5.10) | Not with `0x04`, `0x02` or `0x01` |
 | `0x10` | `FRANKED`: the sender's franking commitment (§5.3), stamped by the server (§5.13) | |
 | `0x20` | `EXPIRES`: the disappearing hint, 1 s to 30 days (§5.13) | Zero or more than 30 days refused |
@@ -834,9 +834,9 @@ Send frame (§1.2): per-device envelopes or one shared body, plus the server's f
   └─ envelope: the session layer's ciphertext (pairwise PQXDH and Double Ratchet, §4.4;
      MLS for groups, Prompt 5; sealed sender wraps it with the sender certificate, §4.8)
        └─ padded plaintext: encode(Plaintext) || 0x80 || 0x00*, to a multiple of 160 bytes
-            └─ Plaintext { content: encode(Content), franking_key }
+            └─ Plaintext { content: encode(Content), franking_key, profile_key }
                  └─ Content { version, required_version, message_id, sent_at_ms,
-                              profile_key, body: data | receipt | typing | sync | request_response }
+                              body: data | receipt | typing | sync | request_response }
 ```
 
 - **Padding.** Exactly `0x80` then zeros up to the next multiple of 160 bytes (1 to 160 bytes of
@@ -1016,7 +1016,8 @@ Decisions D-0058 (the owner's rules) and D-0062 (M4).
 **Contacts are proven by the access key.** An account's access key is derived from its profile key
 (§4.8), and the profile key goes only to contacts:
 
-- when a request is accepted (`RequestResponse{ACCEPT}` with `Content.profile_key`);
+- when a request is accepted (`RequestResponse{ACCEPT}` with `Plaintext.profile_key`: beside
+  the content, never inside what franking commits to, so a report never reveals it);
 - or when users meet by username, link or QR code;
 - or with every message to an existing contact after a rotation.
 
@@ -1029,10 +1030,11 @@ trip:
 | Lane | What the server sees | Rule |
 | --- | --- | --- |
 | Sync | Only the sender's own other devices | Always allowed |
-| Direct | One other account | It is open, or the send carries `ACCESS` with its access key |
+| Direct | One other account, a contact | The send carries `ACCESS` with its access key |
+| Open | One other account that is open ("anyone may send") | No key needed; its blocks apply (dropped silently) |
 | Broadcast | Several other accounts (per-device envelopes) | Every closed one has an access key, and `ACCESS` carries their XOR; at most 256 accounts by default; a budget of accounts per hour |
 | Request | One other closed account, `REQUEST` set | Must be `FRANKED`; budgets per sender, per (sender, recipient) and per recipient; dropped silently if blocked or refused |
-| Group | A shared body | Prompt 5 authorizes membership |
+| Group | A shared body (MLS) | Until Prompt 5 authorizes membership: every closed account it reaches is a contact (`ACCESS` carries their XOR; groups share their members' profile keys) or the body is refused. No budget beyond the group-send rate |
 | Sealed | `PUT /v1/messages/sealed` | The sealed endpoint checks the access keys (§4.8); `ACCESS` and `REQUEST` are refused there |
 
 - A send to a closed account with neither a valid key nor `REQUEST` is refused with reason 10
@@ -1071,6 +1073,20 @@ names, shared by every node and transport):
 Over budget: reason 1 with a retry hint. The budgets are spent **before** the block and policy
 checks, so a blocked sender gets exactly the answers an unblocked one gets.
 
+**A dropped send leaves the same traces as a delivered one** (D-0064):
+
+- the whole send is stored under its idempotency key with a deadline already passed, so it is
+  never fetched or routed and the next sweep deletes it;
+- its idempotency record names the same devices, and a reused key gets the same answers (reason
+  7, a replay);
+- the sender's own envelopes (its sync transcript) are stored live under a key derived from the
+  send's.
+
+**Who may loosen:** opening the account ("anyone may send" in the profile, false to true) is the
+primary's, like unblocking and accepting requests again; a linked device may keep it open or
+close it. A send from a device not yet in the snapshot is refused as unavailable (never treated as
+sealed).
+
 **Rate limits per conversation type** (the prompt's requirement), counted per device unless said:
 
 | Lane | Limit |
@@ -1085,8 +1101,8 @@ What is not gated, stated plainly:
 - **Ephemeral frames** (typing) to a stranger's device are not checked. They are end-to-end
   encrypted, so a client without a session with the sender drops them; per-connection limits
   bound them.
-- **A stranger's MLS Welcome** sent as a shared body passes as a group send until Prompt 5;
-  apps show an invitation from a non-contact as a request.
+- **Group invitations from strangers** go as a message request first (a Welcome to a
+  non-contact needs that member's key, like any shared body).
 
 ### 5.11 Blocking
 
@@ -1097,7 +1113,8 @@ What is not gated, stated plainly:
   1,000). No account ID is stored. The keys derive from the requests secret every node holds,
   so the server (with its key) can test whether one account blocked another; a database or
   backup thief cannot.
-- **What it does:** a request from a blocked account is accepted and stored nowhere. A blocked
+- **What it does:** a request from a blocked account, or any send to an open account that blocked
+  the sender, is accepted and never delivered. A blocked
   contact still holding the access key is cut off by a client rule: **blocking rotates the
   profile key**, sharing the new one with every remaining contact (as Signal does), so the old
   access key fails (reason 10) and only the request lane, where the block applies, is left.
@@ -1331,7 +1348,7 @@ own. `crates/akd/tests/akd_live.rs` checks Songbird's storage with akd's client 
 proofs are accepted, and refused under another label, another root, another VRF key or a
 rewritten history.
 
-Encrypted content (Prompt 4, D-0059): `crates/content/vectors/v1/vectors.json` holds 32 vectors,
+Encrypted content (Prompt 4, D-0059): `crates/content/vectors/v1/vectors.json` holds 33 vectors,
 one or more per kind of content, each as hand-written protobuf JSON and the hex the Rust types
 produce. `tools/content-vectors` checks with an independent compiler (protox) that
 `content.proto` encodes each JSON to exactly that hex. Two of them:

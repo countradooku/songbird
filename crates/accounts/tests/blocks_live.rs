@@ -124,3 +124,42 @@ async fn the_request_policy_and_profiles_reach_the_directory_snapshot() {
     assert_eq!(row.key, Some([7; 16]));
     assert!(row.open && row.requests_off);
 }
+
+#[tokio::test]
+async fn only_the_primary_opens_an_account_to_anyone() {
+    let Some(r) = registry().await else { return };
+    let a = account(&r).await.account;
+    // A linked device may set a closed profile...
+    r.put_profile_as(&a, 1, b"p", &[1; 16], false, false)
+        .await
+        .unwrap();
+    // ...but not open the account (loosening is the primary's, D-0058).
+    assert!(matches!(
+        r.put_profile_as(&a, 2, b"p", &[1; 16], true, false).await,
+        Err(RegistryError::NotPrimary)
+    ));
+    r.put_profile_as(&a, 2, b"p", &[1; 16], true, true)
+        .await
+        .unwrap();
+    // Once open, a linked device may keep it open or close it.
+    r.put_profile_as(&a, 3, b"p", &[1; 16], true, false)
+        .await
+        .unwrap();
+    r.put_profile_as(&a, 4, b"p", &[1; 16], false, false)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_node_with_another_requests_secret_is_detected() {
+    let Some(r) = registry().await else { return };
+    let ours = GateKeys::from_cluster_secret(&[5; 32])
+        .unwrap()
+        .fingerprint();
+    let theirs = GateKeys::from_cluster_secret(&[6; 32])
+        .unwrap()
+        .fingerprint();
+    assert!(r.pin_fingerprint("requests", &ours).await.unwrap());
+    assert!(r.pin_fingerprint("requests", &ours).await.unwrap());
+    assert!(!r.pin_fingerprint("requests", &theirs).await.unwrap());
+}

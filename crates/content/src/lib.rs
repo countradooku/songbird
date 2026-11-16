@@ -73,6 +73,9 @@ pub struct Opened {
     pub content_bytes: Vec<u8>,
     /// The franking key, when the message is franked.
     pub franking_key: Option<[u8; KEY_LEN]>,
+    /// The sender's profile key, when it shares one. Outside the committed content, so a report
+    /// never reveals it.
+    pub profile_key: Option<[u8; KEY_LEN]>,
 }
 
 impl std::fmt::Debug for Opened {
@@ -157,6 +160,19 @@ pub fn seal(
     content: &Content,
     franking_key: Option<[u8; KEY_LEN]>,
 ) -> Result<(Vec<u8>, Option<[u8; KEY_LEN]>), Error> {
+    seal_with_profile_key(content, franking_key, None)
+}
+
+/// [`seal`], also sharing the sender's profile key (accepting a request, or after a rotation):
+/// it travels beside the content, never inside what franking commits to.
+///
+/// # Errors
+/// As [`seal`].
+pub fn seal_with_profile_key(
+    content: &Content,
+    franking_key: Option<[u8; KEY_LEN]>,
+    profile_key: Option<[u8; KEY_LEN]>,
+) -> Result<(Vec<u8>, Option<[u8; KEY_LEN]>), Error> {
     validate::content(content)?;
     let bytes = content.encode_to_vec();
     if bytes.len() > MAX_CONTENT {
@@ -166,6 +182,7 @@ pub fn seal(
     let plain = Plaintext {
         content: bytes,
         franking_key: franking_key.map(|k| k.to_vec()).unwrap_or_default(),
+        profile_key: profile_key.map(|k| k.to_vec()).unwrap_or_default(),
     };
     Ok((pad(&plain.encode_to_vec()), commit))
 }
@@ -181,20 +198,23 @@ pub fn open(padded: &[u8]) -> Result<Opened, Error> {
     if plain.content.len() > MAX_CONTENT {
         return Err(Error::TooLarge);
     }
-    let franking_key = match plain.franking_key.len() {
-        0 => None,
+    let key = |b: &[u8], field| match b.len() {
+        0 => Ok(None),
         KEY_LEN => {
             let mut k = [0; KEY_LEN];
-            k.copy_from_slice(&plain.franking_key);
-            Some(k)
+            k.copy_from_slice(b);
+            Ok(Some(k))
         }
-        _ => return Err(Error::Invalid("plaintext.franking_key")),
+        _ => Err(Error::Invalid(field)),
     };
+    let franking_key = key(&plain.franking_key, "plaintext.franking_key")?;
+    let profile_key = key(&plain.profile_key, "plaintext.profile_key")?;
     let content = decode_content(&plain.content)?;
     Ok(Opened {
         content,
         content_bytes: plain.content,
         franking_key,
+        profile_key,
     })
 }
 

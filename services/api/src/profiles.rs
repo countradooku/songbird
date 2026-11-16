@@ -110,6 +110,8 @@ pub enum Outcome {
     NotFound,
     /// 409 with a reason.
     Conflict(&'static str),
+    /// 403 with a reason.
+    Forbidden(&'static str),
     /// 429 (microseconds).
     Throttled(u64),
     /// 503.
@@ -259,12 +261,27 @@ impl Profiles {
     }
 
     /// `PUT /v1/profile`.
-    pub async fn put(&self, registry: &Registry, account: &AccountId, body: &[u8]) -> Outcome {
+    /// Opening the account ("anyone may send") is the primary's (D-0058): a linked device may
+    /// keep it open or close it, never open it.
+    pub async fn put(
+        &self,
+        registry: &Registry,
+        account: &AccountId,
+        primary: bool,
+        body: &[u8],
+    ) -> Outcome {
         let Ok(u) = ProfileUpload::decode(body) else {
             return Outcome::Malformed("profile");
         };
         match registry
-            .put_profile(account, u.profile_version, &u.blob, &u.access_key, u.open)
+            .put_profile_as(
+                account,
+                u.profile_version,
+                &u.blob,
+                &u.access_key,
+                u.open,
+                primary,
+            )
             .await
         {
             Ok(()) => {
@@ -272,6 +289,7 @@ impl Profiles {
                 Outcome::Done
             }
             Err(RegistryError::Rollback) => Outcome::Conflict("version"),
+            Err(RegistryError::NotPrimary) => Outcome::Forbidden("primary"),
             Err(_) => Outcome::Unavailable,
         }
     }

@@ -22,7 +22,7 @@ impl Registry {
     /// Stores an account's encrypted profile, its access key and whether anyone may send to it
     /// (sealed or identified, without a request); the version must exceed the stored one. Bumps
     /// the directory version: the send path checks access keys from the directory snapshot
-    /// (Prompt 4, D-0062).
+    /// (Prompt 4, D-0062). The primary's call ([`Registry::put_profile_as`]).
     ///
     /// # Errors
     /// [`RegistryError::Rollback`].
@@ -34,12 +34,34 @@ impl Registry {
         access_key: &[u8; 16],
         open: bool,
     ) -> Result<(), RegistryError> {
+        self.put_profile_as(account, version, blob, access_key, open, true)
+            .await
+    }
+
+    /// [`Registry::put_profile`] from a device that may or may not be the primary. Opening the
+    /// account ("anyone may send", false to true) loosens who reaches it, so only the primary may
+    /// (D-0058); a linked device may keep it as it is or close it. Checked in the transaction.
+    ///
+    /// # Errors
+    /// [`RegistryError::Rollback`]; [`RegistryError::NotPrimary`] for a linked device opening the
+    /// account.
+    pub async fn put_profile_as(
+        &self,
+        account: &AccountId,
+        version: u64,
+        blob: &[u8],
+        access_key: &[u8; 16],
+        open: bool,
+        primary: bool,
+    ) -> Result<(), RegistryError> {
         let r = self
             .db
             .query(
                 "BEGIN TRANSACTION;
                  IF account:[$a].deleting != false { THROW 'songbird:rollback' };
                  IF (account:[$a].profile_v ?? -1) >= $v { THROW 'songbird:rollback' };
+                 IF $o AND !$primary AND !(account:[$a].uak_open ?? false) {
+                   THROW 'songbird:primary' };
                  UPDATE account:[$a] SET profile = $p, profile_v = $v, uak = $k, uak_open = $o
                    RETURN NONE;
                  UPDATE directory:v SET version += 1 RETURN NONE;
@@ -50,12 +72,14 @@ impl Registry {
                     var("p", bytes(blob)),
                     var("k", bytes(access_key)),
                     var("o", Value::Bool(open)),
+                    var("primary", Value::Bool(primary)),
                 ],
             )
             .await;
         match r {
             Ok(_) => Ok(()),
             Err(DbError::Statement(k)) if k == "Thrown:rollback" => Err(RegistryError::Rollback),
+            Err(DbError::Statement(k)) if k == "Thrown:primary" => Err(RegistryError::NotPrimary),
             Err(DbError::Statement(k)) if k == crate::db::TRANSACTION_CONFLICT => {
                 Err(RegistryError::Rollback)
             }

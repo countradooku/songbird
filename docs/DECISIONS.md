@@ -106,6 +106,69 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0064 — Prompt 4: the independent security review's findings, fixed
+
+- Date: 2026-11-16
+- Status: accepted; built (report `P04-gate.md`, "Security review"); amends D-0059, D-0061,
+  D-0062 and D-0063; awaiting the owner's approval with the gate
+- Decided by: agent, at the owner's bar
+- Context: the review of `120c7a5..HEAD`, by an independent read-only reviewer, found one high,
+  two medium, one low–medium and two low issues, all confirmed against the code.
+- Decision (the fixes):
+  1. **High: a shared body skipped the contact gate and blocks.** A send with the shared-body
+     flag reached any closed account with no key, no request budget and no block check.
+     - Fix: a shared body is classified like a broadcast. Every closed account it reaches needs
+       its key in the combined `ACCESS` key, which the frame now allows with a shared body; a
+       request is never a shared body.
+     - There is no allocation when every account is open (the development directories and the
+       allocation gate). Prompt 5 replaces this with group membership.
+  2. **Medium: a block could be detected through idempotency.** A dropped request wrote no
+     idempotency record, so reusing its key (for other devices, or a subset) answered
+     differently.
+     - Fix: a dropped send now stores the whole send, under its own key, already expired: never
+       fetched or routed, swept. The record and every answer match a delivered send's.
+     - The sender's own envelopes go on live under a derived key. The expired copy waits for the
+       next sweep (minutes); the risk is listed in threat model §6.
+  3. **Medium: a linked device could open the account,** bypassing the primary-only loosening
+     rule, and blocks never applied to open accounts.
+     - Fix: opening the account (false to true) is refused unless the primary asks, checked in
+       the profile's transaction (`put_profile_as`).
+     - Sends to an open account go through a new `Open` lane, where the gate drops those from
+       senders it blocked. That is one registry lookup, for open accounts only.
+  4. **Low–medium: the profile key was inside the committed content,** so a report would hand
+     moderators the sender's profile key, and with it its access key.
+     - Fix: it moves to `Plaintext.profile_key`, beside the franking key, outside what a report
+       reveals. `Content` field 5 is reserved.
+     - There are now 33 vectors (new: `plaintext_accept`), and the independent compiler agrees.
+     - `songbird-admin reports open` prints the rendered message, not raw bytes.
+  5. **Low: a sender missing from the snapshot was stamped as sealed.** It is now refused as
+     unavailable (retry); only the sealed endpoint's sentinel is sealed.
+  6. **Low: configuration gaps.**
+     - `max_broadcast_accounts` must not exceed `broadcast_burst`.
+     - Every node pins a keyed fingerprint of the requests secret in the registry, and a node
+       with another secret refuses to start. A worker with the wrong secret could otherwise "verify"
+       a deletion that missed the block rows.
+     - A franking key that differs between delivery and `api` stays a deployment check (runbook).
+  7. **Notes:**
+     - keyed tags are now length-framed;
+     - the directory loader's comment is corrected;
+     - group-report dedupe (the first reporter takes a shared body's slot), re-reporting after
+       deletion and replays past a deadline are recorded in the gate report.
+- Evidence:
+  - new unit tests:
+    - shared bodies need every closed member's key;
+    - an unknown sender is refused;
+    - open accounts take anyone, but their blocks apply;
+    - a dropped request's key, reused for other devices or a subset, gets reason 7 as an
+      undropped one does, and a retry is answered as a retry with the sync transcript once;
+    - the profile key never appears in the committed bytes;
+  - `blocks_live`: only the primary opens an account; a node with another secret is detected;
+  - `gate_p04`: a shared body refused without the keys and delivered with them;
+  - `tools/content-vectors` 33 of 33; all suites re-run (`P04-gate.md`).
+- Consequences: groups need their members' profile keys (shared inside the group) until
+  Prompt 5. A dropped send briefly occupies the recipient's mailbox, unreadable, until the next
+  sweep.
+
 ## D-0063 — Prompt 4, milestone 5: reporting with message franking; reports sealed to an offline moderation key
 
 - Date: 2026-11-16
@@ -220,8 +283,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   - Three threat-model §1 rows.
   - `[api.requests]`, `[delivery.requests]` and the worker's `requests_secret` are required in
     staging and production.
-  - The open risks (timing, sybil recipient budget, snapshot reloads, Welcomes and ephemeral
-    frames until Prompt 5) are in threat model §6.
+  - The open risks (timing, sybil recipient budget, snapshot reloads, ephemeral frames) are in
+    threat model §6; shared bodies, idempotency and open accounts were fixed by D-0064.
 
 ## D-0061 — Prompt 4, milestone 3: franking stamps and disappearing envelopes; the `Send` frame's hints
 
@@ -370,10 +433,10 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   - 16 tests in `crates/content`: padding, franking known answer (recomputed with Python's
     `hmac`), bounds, a newer writer's fields at three depths, unknown kinds and enums, the
     manifest check, and property tests;
-  - **32 vectors** in `vectors/v1/vectors.json`. Their protobuf JSON is written by hand
+  - **33 vectors** in `vectors/v1/vectors.json`. Their protobuf JSON is written by hand
     (`make_json.py`) and their hex comes from the Rust types. `tools/content-vectors` (protox
     0.10.0 and prost-reflect 0.16.5, outside the workspace) compiles `content.proto` and
-    encodes each JSON to exactly that hex, with no unknown field on decoding: **32 of 32**. With
+    encodes each JSON to exactly that hex, with no unknown field on decoding: **33 of 33**. With
     one field retyped (`sint32` to `int32`) it fails at once;
   - fuzz `content`, 60 s: 7,892,926 runs, nothing found.
 - Consequences: no new dependency in the workspace (`prost`, `aws-lc-rs`, `thiserror`); the tool

@@ -385,8 +385,17 @@ fn limited(st: &SendStatus) -> bool {
     )
 }
 
+/// Envelopes `d` can fetch (a dropped send is stored already expired: never fetchable).
 async fn pending(s: &Stack, d: &Dev) -> u64 {
-    s.shared.mailbox.count_pending(&d.id).await.unwrap()
+    u64::try_from(
+        s.shared
+            .mailbox
+            .fetch_after(&d.id, 0, 1_000)
+            .await
+            .unwrap()
+            .len(),
+    )
+    .unwrap()
 }
 
 /// Whether a delivery arrives within `ms`.
@@ -638,6 +647,32 @@ async fn contacts_requests_blocks_and_the_request_policy_end_to_end() {
     assert_eq!(
         &delivery_within(&mut b1_ev, 5_000).await.unwrap()[..],
         b"broadcast"
+    );
+    // A shared body (a group's) is no way around the contact gate: without every closed
+    // member's key it is refused.
+    let mut group = SendFrame {
+        hints: SendHints::default(),
+        req_id: 7,
+        idempotency_key: key(),
+        mls: None,
+        payload: songbird_proto::frame::SendPayload::Shared {
+            devices: bob.ids().into_iter().chain(carol.ids()).collect(),
+            body: Bytes::from_static(b"group"),
+        },
+    };
+    let a1_api = alice.devices[0].api(&s);
+    assert_eq!(
+        a1_api.put_message(&group).await.unwrap(),
+        (200, Some((7, refused(RejectReason::AccessRequired))))
+    );
+    group.hints.access = Some(xor(&[bob.access, carol.access]));
+    assert_eq!(
+        a1_api.put_message(&group).await.unwrap(),
+        (200, Some((7, SendStatus::Accepted)))
+    );
+    assert_eq!(
+        &delivery_within(&mut b1_ev, 5_000).await.unwrap()[..],
+        b"group"
     );
     // A request is never a broadcast.
     let mut two = to_all(&bob, b"x");

@@ -3,6 +3,9 @@
 - Date: 2026-11-16
 - Prompt: [04-messaging.md](../prompts/04-messaging.md).
 - Status: **agreed by the owner on 2026-11-16**, with every recommended answer below (D-0058).
+  Built on one branch: M1 (`P04-M1.md`, D-0059), M2 (`P04-M2.md`, D-0060), M3 (`P04-M3.md`,
+  D-0061), M4 (`P04-M4.md`, D-0062), M5 and the final gate (`P04-M5.md`, `P04-gate.md`, D-0063):
+  awaiting the owner's approval.
 - Base: `main` at `120c7a5` (Prompt 3 done, D-0057).
 - Way of working (owner, for speed): every milestone on **one branch and one PR**, each with its
   own commit, tests, report `docs/reports/P04-Mn.md`, decision record (D-0058 onward), PROTOCOL

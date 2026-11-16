@@ -20,6 +20,10 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- **Prompt 5, M1 (`P05-M1.md`, D-0066 to D-0068): waiting for the owner**: the milestone,
+  two threat-model §1 rows (group state; pending fan-outs) and three MPL-2.0 licence exceptions
+  for the test harness.
+
 - Prompt 5 plan (`P05-plan.md`, D-0065): **approved by the owner on 2026-11-16** ("Approve
   all"), every recommendation. Delivered receipts in large groups: primaries only from 33
   members (D-0065 §5).

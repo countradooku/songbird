@@ -809,6 +809,154 @@ Decision D-0056 (M7).
 
 ## 5. Encrypted content schemas (Prompt 4)
 
+Decision D-0059 (M1). Specification: `crates/content/proto/content.proto`; Rust types, padding,
+franking and validation: `crates/content`. **No service links that crate** (a test checks every
+manifest): the server never decodes content. What the server must act on travels in fixed fields
+of the `Send` frame (§1.2), never inside the ciphertext.
+
+### 5.1 Layers
+
+```
+Send frame (§1.2): per-device envelopes or one shared body, plus the server's fields (M3, M4)
+  └─ envelope: the session layer's ciphertext (pairwise PQXDH and Double Ratchet, §4.4;
+     MLS for groups, Prompt 5; sealed sender wraps it with the sender certificate, §4.8)
+       └─ padded plaintext: encode(Plaintext) || 0x80 || 0x00*, to a multiple of 160 bytes
+            └─ Plaintext { content: encode(Content), franking_key }
+                 └─ Content { version, required_version, message_id, sent_at_ms,
+                              profile_key, body: data | receipt | typing | sync | request_response }
+```
+
+- **Padding.** Exactly `0x80` then zeros up to the next multiple of 160 bytes (1 to 160 bytes of
+  padding; one encoding per length). Readers refuse anything else. Padding hides lengths within a
+  bucket from the server, which sees envelope sizes (threat model §1).
+- **Bounds.** A padded plaintext is at most 64 KiB and its `Content` at most 61,440 bytes, both
+  checked before decoding; after decoding every list, string and ID is held to the bound written
+  next to it in `content.proto` (`songbird_content::validate`).
+- **IDs.** Accounts, messages, groups, calls and sticker packs are 16 bytes; keys and digests 32.
+  A message is named by (author account, `message_id`): `message_id` is 16 random bytes chosen
+  by the sender, and a repeat of the same pair is dropped (this is how resends after a restore,
+  §3.6, and retries beyond the 6-hour idempotency window are made harmless).
+- **Text.** UTF-8. Formatting spans and mentions count UTF-8 bytes (not UTF-16 units as Signal
+  does) and must start and end on character boundaries; a mention's span covers the placeholder
+  U+FFFC, and names the account. Styles: bold, italic, strikethrough, monospace, spoiler.
+- **Times** are the sender's clock (`sent_at_ms`), except where §5.3 gives the server's.
+
+### 5.2 Versions
+
+- `version` is the writer's schema version (1). `required_version` is the lowest version that can
+  show the message; an older reader shows "update to see this message".
+- Readers ignore unknown fields, unknown `oneof` members and unknown enum values (a newer writer
+  added them) instead of refusing the message. Field numbers are never reused or retyped.
+- The compatibility suite (`crates/content/tests/compat.rs`) decodes every published version's
+  vectors with the current reader, and a simulated newer writer's fields at three depths.
+
+### 5.3 Franking
+
+A message to another account is franked: the sender draws a 32-byte `franking_key`, puts it in
+the `Plaintext`, and sends the commitment
+
+```
+commitment = HMAC-SHA256(franking_key, "songbird.v1/franking\0" || content)
+```
+
+(`content` = the encoded `Content` bytes, exactly as carried) in the `Send` frame's `FRANKED`
+block (§1.2). The server stamps it (§5.13); the recipient checks that the stamped commitment
+opens to the content it decrypted, and **drops a franked message whose commitment does not
+open**, so every message it shows can be reported (§5.14). Visible messages (`DataMessage`) to
+another account must be franked; receipts, typing and sync messages need not be.
+
+### 5.4 Chat messages (`DataMessage`)
+
+`group_id` (16 bytes) marks a group or channel message; empty is a 1:1 chat. `expire_timer_s` is
+the chat's disappearing timer the sender applied. Exactly one kind:
+
+| Kind | Rules |
+| --- | --- |
+| `Message` | Text with spans; up to 32 attachments (voice notes and video notes are attachments with a flag; voice notes carry a waveform); a quote (`MessageRef`, a 2 KiB preview, a thumbnail); a forward counter; up to 8 contact cards; a location pin (degrees × 10⁷); a sticker reference (pack ID, pack key, sticker ID); a poll; an event; `view_once`; up to 4 link previews. At least one visible part. |
+| `Reaction` | One per reactor and message; add, replace (a new emoji) or remove. The reactor's highest `counter` wins (§5.5). |
+| `Edit` | The sender's own message, within **24 hours** (D-0058); the highest `revision` is shown and every revision is kept as history. |
+| `Delete` | Delete for everyone, the sender's own message, within **24 hours** (D-0058); group admins delete others' (Prompt 5). |
+| `PollVote`, `PollClose`, `Rsvp` | §5.5 |
+| `Pin` | Pin for 24 hours, 7 days or 30 days, or unpin; at most 3 pinned per chat, the newest winning (§5.5). |
+| `TimerChange` | The chat's disappearing timer: off, or 5 s to 4 weeks. |
+| `Nudge` | A nudge (Prompt 9). |
+| `CallEvent` | A call's outcome in the chat (Prompt 7). |
+| `GroupUpdate` | A group or channel system message written by a client from what changed (Prompt 5 orders the changes themselves). |
+| `ChatPolicy` | Restricted chat (§5.9). |
+
+**Forwarding.** Forwarding a message sets `forward_count` to the original's plus one (a message
+first forwarded has 1). From 5 the app shows "forwarded many times" and lets it be forwarded to
+one chat at a time; otherwise to at most 5 chats at once. Apps enforce this; the server sees
+nothing of it.
+
+**Edit and delete windows** use the server's stamp time (§5.13) of both messages when both carry
+one, otherwise the sender's `sent_at_ms`; a reader also ignores an edit or delete that claims a
+time more than 5 minutes ahead of its own clock. A modified app can still ignore the window on
+its own device, as in Signal and WhatsApp.
+
+### 5.5 Order-independent state
+
+Filled in by M2 (D-0060).
+
+### 5.6 Receipts and message status
+
+Filled in by M2 (D-0060).
+
+### 5.7 Typing
+
+`TypingMessage` (started or stopped, optional group) travels only on the ephemeral lane (§3.7):
+never stored, dropped first under pressure. Apps stop showing "typing" 15 seconds after the last
+"started".
+
+### 5.8 Sync messages
+
+Sent only to the sender's own other devices (a send that addresses only the sender's account,
+§5.10):
+
+| Kind | Carries |
+| --- | --- |
+| `sent` | A transcript of what this device sent: the chat (or a broadcast list's accounts), the exact `Content` bytes the recipients got, its franking key, and when the server accepted it. The content must be a `DataMessage` (nesting stops at one level). |
+| `read`, `viewed` | Messages read, or view-once media and voice notes played, with when. |
+| `starred` | Messages starred and unstarred. |
+| `chat_state` | Archived, muted until, pinned, marked unread. |
+| `settings` | Read receipts, typing indicators, link previews, the default disappearing timer (Prompt 9 adds the rest); unset fields are unchanged. |
+| `blocked` | The whole block list (accounts and groups), replacing the previous one. The server keeps only what it must to drop blocked senders (§5.11). |
+| `call_history` | Call log entries (Prompt 7's calls), so every device shows the same history. |
+| `request_response` | What the user did with a message request (§5.10). |
+
+### 5.9 Restricted chat
+
+`ChatPolicy` (in a 1:1 chat, or in a group's settings from Prompt 5) tells every participant's
+app to refuse exporting the chat and saving its media automatically. Apps enforce it; **the
+server only carries it, and a modified app can ignore it.** It is a courtesy between honest apps,
+not a protection against a participant: anyone can photograph a screen.
+
+### 5.10 Message requests and profile keys
+
+Filled in by M4 (D-0062).
+
+### 5.11 Blocking
+
+Filled in by M4 (D-0062).
+
+### 5.12 Client-only features
+
+Lock chat, free up storage, the media and links overview, in-chat search, save to photos, export
+chat and groups in common live entirely on the device: they read the app's own database. Nothing
+in the protocol prevents them, and the server gains nothing for them:
+
+- export and save to photos are refused only by a restricted chat's policy (§5.9);
+- groups in common are computed from groups the device belongs to (Prompt 5), with no server
+  query.
+
+### 5.13 Franking stamps and disappearing envelopes (server)
+
+Filled in by M3 (D-0061).
+
+### 5.14 Reporting
+
+Filled in by M5 (D-0063).
+
 ## 6. Groups, roles and channels (MLS) (Prompt 5)
 
 ## 7. Attachments and packs (Prompt 6)
@@ -822,6 +970,13 @@ Decision D-0056 (M7).
 ## 11. Backup format and vault access (Prompt 10)
 
 ## 12. Versioning and compatibility rules
+
+- **Wire frames** (§1.2): one encoding per frame, unknown flag bits refused; new optional blocks
+  come behind new flag bits, in a fixed order (D-0061). `protocol_versions` changes only for an
+  incompatible frame.
+- **Encrypted content** (§5.2): protobuf, unknown fields, kinds and enum values ignored,
+  `required_version` for what an older app must not misread; every published version's vectors
+  decode with every later reader (`crates/content/tests/compat.rs`).
 
 ## 13. Test vectors
 
@@ -918,3 +1073,20 @@ Key transparency (Prompt 3, D-0057): `akd` 0.13's proofs and their protobuf enco
 own. `crates/akd/tests/akd_live.rs` checks Songbird's storage with akd's client verifiers. The
 proofs are accepted, and refused under another label, another root, another VRF key or a
 rewritten history.
+
+Encrypted content (Prompt 4, D-0059): `crates/content/vectors/v1/vectors.json` holds 32 vectors,
+one or more per kind of content, each as hand-written protobuf JSON and the hex the Rust types
+produce. `tools/content-vectors` checks with an independent compiler (protox) that
+`content.proto` encodes each JSON to exactly that hex. Two of them:
+
+- `reaction` (a 👍 from the author of message 16 × `33` by 16 × `22`, counter 7; message ID 16 ×
+  `01`, sent at 1,800,000,000,000 ms):
+
+  ```
+  0801 1a10 01010101010101010101010101010101 2080a0f1c2b134
+  5230 5a2e 0a24 0a10 22222222222222222222222222222222 1210 33333333333333333333333333333333
+  1204 f09f918d 2007
+  ```
+- `plaintext_franked`: that content under franking key 32 × `42`, padded to 160 bytes; its
+  commitment is `4cc19e38508a8cdbcbac905629cee83e217741cf3cc0878bd00fee0bb9fb2c50`
+  (recomputed with Python's `hmac`).

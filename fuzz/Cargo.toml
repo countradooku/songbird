@@ -17,6 +17,7 @@ songbird-mailbox = { path = "../crates/mailbox" }
 songbird-pow = { path = "../crates/pow" }
 songbird-keys = { path = "../crates/keys" }
 songbird-akd = { path = "../crates/akd" }
+songbird-content = { path = "../crates/content" }
 akd = { version = "=0.13.0", default-features = false, features = ["whatsapp_v1", "serde_serialization", "public_auditing"] }
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
@@ -139,6 +140,13 @@ bench = false
 [[bin]]
 name = "kt"
 path = "fuzz_targets/kt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "content"
+path = "fuzz_targets/content.rs"
 test = false
 doc = false
 bench = false

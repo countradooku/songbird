@@ -1,0 +1,424 @@
+// Songbird encrypted content, version 1 (docs/PROTOCOL.md §5, decision D-0059).
+//
+// This is the plaintext inside every end-to-end encrypted envelope. The server never sees it and
+// never decodes it. Apps generate their types from this file; `crates/content` holds the Rust
+// types, which must encode byte for byte as this file says (checked by the vectors in
+// `crates/content/vectors` and the independent compiler in `tools/content-vectors`).
+//
+// Rules for every version:
+// - Field numbers are never reused and never change type; removed fields are `reserved`.
+// - Readers ignore unknown fields. A message that needs a newer reader sets `required_version`.
+// - Every repeated field, string and bytes field has the bound written next to it; a reader
+//   refuses a message that breaks one (`songbird_content::validate`).
+// - IDs are 16 bytes (accounts, messages, groups, calls, sticker packs); keys and digests 32.
+// - Text offsets count UTF-8 bytes and must fall on character boundaries.
+// - Times are milliseconds since the Unix epoch (`_ms`) or durations in seconds (`_s`).
+
+syntax = "proto3";
+
+package songbird.content.v1;
+
+// What the session layer encrypts, before padding. The padded form is
+// `encode(Plaintext) || 0x80 || 0x00*`, to the next multiple of 160 bytes.
+message Plaintext {
+  // An encoded `Content`, exactly as it is decoded (franking commits to these bytes).
+  bytes content = 1; // at most 61,440 bytes
+  // 32 random bytes per message, or empty when the message is not franked. The commitment the
+  // server stamps is HMAC-SHA256(franking_key, "songbird.v1/franking\0" || content).
+  bytes franking_key = 2;
+}
+
+message Content {
+  uint32 version = 1;          // the writer's schema version (1)
+  uint32 required_version = 2; // a reader below this shows "update to see this message"
+  bytes message_id = 3;        // 16 random bytes; repeats are dropped by (sender, message_id)
+  uint64 sent_at_ms = 4;       // the sender's clock
+  bytes profile_key = 5;       // 32 bytes or empty: shares (or rotates) the sender's profile key
+  oneof body {
+    DataMessage data = 10;
+    ReceiptMessage receipt = 11;
+    TypingMessage typing = 12;
+    SyncMessage sync = 13;
+    RequestResponse request_response = 14;
+  }
+}
+
+// A reference to a message: its author's account and its message ID.
+message MessageRef {
+  bytes author = 1;     // 16 bytes
+  bytes message_id = 2; // 16 bytes
+}
+
+// A conversation: one other account, or a group (exactly one is set).
+message ChatRef {
+  bytes account = 1;  // 16 bytes or empty
+  bytes group_id = 2; // 16 bytes or empty
+}
+
+// ---------------------------------------------------------------------------------------------
+// Chat messages
+
+message DataMessage {
+  bytes group_id = 1;        // 16 bytes for a group or channel, empty for a 1:1 chat
+  uint32 expire_timer_s = 2; // the chat's disappearing timer when sent (0 off)
+  oneof kind {
+    Message message = 10;
+    Reaction reaction = 11;
+    Edit edit = 12;
+    Delete delete = 13;
+    PollVote poll_vote = 14;
+    PollClose poll_close = 15;
+    Rsvp rsvp = 16;
+    Pin pin = 17;
+    TimerChange timer_change = 18;
+    Nudge nudge = 19;
+    CallEvent call_event = 20;
+    GroupUpdate group_update = 21;
+    ChatPolicy chat_policy = 22;
+  }
+}
+
+// A message people see in the chat.
+message Message {
+  Text text = 1;
+  repeated AttachmentPointer attachments = 2; // at most 32
+  Quote quote = 3;
+  uint32 forward_count = 4;                   // 0 not forwarded; see PROTOCOL §5.6
+  repeated ContactCard contacts = 5;          // at most 8
+  LocationPin location = 6;
+  StickerRef sticker = 7;
+  PollCreate poll = 8;
+  EventCreate event = 9;
+  bool view_once = 10;                        // attachments are shown once, then deleted
+  repeated LinkPreview previews = 11;         // at most 4
+}
+
+message Text {
+  string body = 1;          // at most 32,768 bytes
+  repeated Span spans = 2;  // at most 256
+}
+
+message Span {
+  uint32 start = 1;  // UTF-8 byte offset
+  uint32 length = 2; // UTF-8 bytes, at least 1
+  enum Style {
+    STYLE_UNSPECIFIED = 0;
+    STYLE_BOLD = 1;
+    STYLE_ITALIC = 2;
+    STYLE_STRIKETHROUGH = 3;
+    STYLE_MONOSPACE = 4;
+    STYLE_SPOILER = 5;
+  }
+  oneof kind {
+    Style style = 3;
+    bytes mention = 4; // 16 bytes: the mentioned account; the span covers its placeholder
+  }
+}
+
+message Quote {
+  MessageRef target = 1;
+  Text text = 2;                  // a preview, at most 2,048 bytes
+  string attachment_type = 3;     // MIME type of the quoted attachment, at most 128 bytes
+  AttachmentPointer thumbnail = 4;
+}
+
+// Attachments are encrypted and uploaded by the client (Prompt 6 extends this message).
+message AttachmentPointer {
+  bytes object_id = 1;     // 32 bytes (PROTOCOL §3, upload grants)
+  bytes key = 2;           // 64 bytes: AES-256 key || HMAC-SHA256 key
+  bytes digest = 3;        // 32 bytes: SHA-256 of the encrypted object
+  uint64 size = 4;         // plaintext size in bytes
+  string content_type = 5; // at most 128 bytes
+  string file_name = 6;    // at most 256 bytes
+  uint32 width = 7;
+  uint32 height = 8;
+  string blurhash = 9;     // at most 128 bytes
+  uint32 duration_ms = 10;
+  enum Flag {
+    FLAG_UNSPECIFIED = 0;
+    FLAG_VOICE_NOTE = 1;
+    FLAG_BORDERLESS = 2;
+    FLAG_GIF = 4;
+    FLAG_VIDEO_NOTE = 8;
+  }
+  uint32 flags = 11;       // a bit set of Flag
+  bytes waveform = 12;     // voice notes: at most 256 amplitude samples, one byte each
+  string caption = 13;     // at most 4,096 bytes
+  uint64 uploaded_at_ms = 14;
+}
+
+message ContactCard {
+  string name = 1;              // at most 256 bytes
+  bytes account = 2;            // 16 bytes or empty: the contact's Songbird account
+  string username = 3;          // at most 64 bytes
+  repeated string phones = 4;   // at most 8, each at most 64 bytes
+  repeated string emails = 5;   // at most 8, each at most 256 bytes
+  string organization = 6;      // at most 256 bytes
+  AttachmentPointer avatar = 7;
+}
+
+message LocationPin {
+  sint32 latitude_e7 = 1;  // degrees × 10^7, within ±90°
+  sint32 longitude_e7 = 2; // degrees × 10^7, within ±180°
+  string name = 3;         // at most 256 bytes
+  string address = 4;      // at most 1,024 bytes
+}
+
+message StickerRef {
+  bytes pack_id = 1;  // 16 bytes
+  bytes pack_key = 2; // 32 bytes
+  uint32 sticker_id = 3;
+  string emoji = 4;   // at most 32 bytes
+  AttachmentPointer data = 5;
+}
+
+message LinkPreview {
+  string url = 1;          // at most 2,048 bytes
+  string title = 2;        // at most 512 bytes
+  string description = 3;  // at most 2,048 bytes
+  AttachmentPointer image = 4;
+}
+
+// Reactions: one per reactor and message. The reactor's highest `counter` wins (PROTOCOL §5.5).
+message Reaction {
+  MessageRef target = 1;
+  string emoji = 2;    // at most 32 bytes; empty only with `remove`
+  bool remove = 3;
+  uint64 counter = 4;  // the reactor's own counter, strictly increasing
+}
+
+// An edit of the sender's own message (24 hours, D-0058). The highest `revision` is shown; every
+// revision is kept as the message's history.
+message Edit {
+  bytes target_message_id = 1; // 16 bytes, a message of the sender's
+  Text text = 2;
+  uint32 revision = 3;         // 1 for the first edit, strictly increasing
+}
+
+// Delete for everyone (24 hours, D-0058). Admins delete others' messages in groups (Prompt 5).
+message Delete {
+  MessageRef target = 1;
+}
+
+message PollCreate {
+  string question = 1;          // at most 512 bytes
+  repeated string options = 2;  // 2 to 12, each 1 to 256 bytes
+  bool multiple_choice = 3;
+}
+
+// A vote replaces the voter's earlier ones: the highest `counter` wins. No options retracts.
+message PollVote {
+  MessageRef poll = 1;            // the message holding the PollCreate
+  repeated uint32 options = 2;    // distinct option indices; at most one unless multiple choice
+  uint64 counter = 3;
+}
+
+// Closing a poll fixes its result: only each listed voter's vote with exactly `counter` counts.
+message PollClose {
+  MessageRef poll = 1;           // the author's own poll
+  repeated VoteHead heads = 2;   // at most 1,024
+}
+
+message VoteHead {
+  bytes voter = 1;   // 16 bytes
+  uint64 counter = 2;
+}
+
+message EventCreate {
+  string title = 1;        // at most 512 bytes
+  string description = 2;  // at most 4,096 bytes
+  uint64 start_ms = 3;
+  uint64 end_ms = 4;       // 0 or at least start_ms
+  LocationPin location = 5;
+}
+
+message Rsvp {
+  MessageRef event = 1;
+  enum Answer {
+    ANSWER_UNSPECIFIED = 0;
+    ANSWER_GOING = 1;
+    ANSWER_MAYBE = 2;
+    ANSWER_DECLINED = 3;
+  }
+  Answer answer = 2;
+  uint64 counter = 3; // the responder's own counter; the highest wins
+}
+
+message Pin {
+  MessageRef target = 1;
+  bool unpin = 2;
+  uint32 duration_s = 3; // 86,400, 604,800 or 2,592,000 (24 hours, 7 days, 30 days)
+}
+
+message TimerChange {
+  uint32 expire_timer_s = 1; // 0 off, else 5 s to 4 weeks
+}
+
+// A nudge (Prompt 9 gives it behaviour). Rate-limited on the client.
+message Nudge {}
+
+message CallEvent {
+  bytes call_id = 1; // 16 bytes
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_AUDIO = 1;
+    KIND_VIDEO = 2;
+  }
+  Kind kind = 2;
+  enum Outcome {
+    OUTCOME_UNSPECIFIED = 0;
+    OUTCOME_ACCEPTED = 1;
+    OUTCOME_MISSED = 2;
+    OUTCOME_DECLINED = 3;
+    OUTCOME_CANCELLED = 4;
+  }
+  Outcome outcome = 3;
+  bool outgoing = 4;
+  uint64 started_at_ms = 5;
+  uint32 duration_s = 6;
+  bytes peer = 7;     // 16 bytes or empty: the other account of a 1:1 call (call history sync)
+  bytes group_id = 8; // 16 bytes or empty
+}
+
+// Group and channel system messages, written by clients from what changed (Prompt 5 orders the
+// changes themselves through MLS).
+message GroupUpdate {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_CREATED = 1;
+    KIND_MEMBERS_ADDED = 2;
+    KIND_MEMBERS_REMOVED = 3;
+    KIND_MEMBER_LEFT = 4;
+    KIND_MEMBER_JOINED_BY_LINK = 5;
+    KIND_ROLE_CHANGED = 6;
+    KIND_TITLE_CHANGED = 7;
+    KIND_DESCRIPTION_CHANGED = 8;
+    KIND_AVATAR_CHANGED = 9;
+    KIND_SETTINGS_CHANGED = 10;
+    KIND_CHANNEL_CREATED = 11;
+    KIND_CHANNEL_SUBSCRIBERS_CHANGED = 12;
+  }
+  Kind kind = 1;
+  bytes actor = 2;              // 16 bytes
+  repeated bytes subjects = 3;  // at most 1,024 accounts, 16 bytes each
+  string value = 4;             // a new title or description, at most 4,096 bytes
+}
+
+// Restricted chat (WhatsApp's advanced chat privacy). Every participant's app refuses to export
+// the chat and to save its media automatically. Only apps enforce it: a modified app can ignore
+// it (PROTOCOL §5.9).
+message ChatPolicy {
+  bool restrict_export = 1;
+  bool restrict_auto_save = 2;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Receipts and typing
+
+// Delivered, read and played receipts travel through the mailbox to every device of the
+// message's author, never to the whole group.
+message ReceiptMessage {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_DELIVERED = 1;
+    KIND_READ = 2;
+    KIND_PLAYED = 3;
+  }
+  Kind kind = 1;
+  bytes group_id = 2;              // 16 bytes or empty
+  repeated bytes message_ids = 3;  // at most 512, 16 bytes each: the author's messages
+  // 16 bytes or empty: also every earlier message of the author's in this chat ("up to here").
+  bytes up_to = 4;
+}
+
+// Ephemeral lane only (PROTOCOL §3.7): never stored.
+message TypingMessage {
+  bool started = 1;
+  bytes group_id = 2; // 16 bytes or empty
+}
+
+// ---------------------------------------------------------------------------------------------
+// Message requests
+
+message RequestResponse {
+  enum Action {
+    ACTION_UNSPECIFIED = 0;
+    ACTION_ACCEPT = 1;  // sent to the requester, with Content.profile_key
+    ACTION_DELETE = 2;  // own devices only
+    ACTION_BLOCK = 3;   // own devices only
+    ACTION_REPORT = 4;  // own devices only
+  }
+  Action action = 1;
+  ChatRef chat = 2;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Sync messages: only ever sent to the sender's own other devices.
+
+message SyncMessage {
+  oneof kind {
+    SentTranscript sent = 1;
+    ReadSync read = 2;
+    ReadSync viewed = 3;
+    StarredSync starred = 4;
+    ChatStateSync chat_state = 5;
+    SettingsSync settings = 6;
+    BlockListSync blocked = 7;
+    CallHistorySync call_history = 8;
+    RequestResponse request_response = 9;
+  }
+}
+
+// What this device sent, so the others show it too.
+message SentTranscript {
+  ChatRef chat = 1;
+  repeated bytes broadcast_to = 2; // a broadcast list's accounts, at most 256, 16 bytes each
+  bytes content = 3;               // the encoded Content the recipients received
+  bytes franking_key = 4;          // 32 bytes or empty
+  uint64 stored_at_ms = 5;         // when the server accepted it
+}
+
+message ReadSync {
+  repeated ReadMark marks = 1; // at most 512
+}
+
+message ReadMark {
+  MessageRef message = 1;
+  uint64 at_ms = 2;
+}
+
+message StarredSync {
+  repeated MessageRef added = 1;   // at most 512
+  repeated MessageRef removed = 2; // at most 512
+}
+
+message ChatStateSync {
+  repeated ChatState chats = 1; // at most 512
+}
+
+message ChatState {
+  ChatRef chat = 1;
+  bool archived = 2;
+  uint64 muted_until_ms = 3; // 0 not muted; u64::MAX always
+  bool pinned = 4;
+  bool marked_unread = 5;
+}
+
+// Settings that follow the user across devices (Prompt 9 adds the rest). Unset fields are
+// unchanged.
+message SettingsSync {
+  optional bool read_receipts = 1;
+  optional bool typing_indicators = 2;
+  optional bool link_previews = 3;
+  optional uint32 default_expire_timer_s = 4;
+}
+
+// The whole block list, replacing the previous one (the server keeps only keyed hashes of it).
+message BlockListSync {
+  repeated bytes accounts = 1;  // at most 1,024, 16 bytes each
+  repeated bytes group_ids = 2; // at most 1,024, 16 bytes each
+}
+
+message CallHistorySync {
+  repeated CallEvent calls = 1; // at most 256
+}

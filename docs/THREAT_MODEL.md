@@ -333,6 +333,21 @@ the key directory (M3) and key transparency (M6).
 | An active user's account deleted for inactivity | D | Bug, a user who only uses the WebSocket | Any signed `api` request counts as use (apps call `api` at least daily); two wake-up warnings first; the user chooses the period | `inactivity_warns_a_month_and_a_week_before_then_deletes` |
 | Inactivity deletion as an attack (keeping someone's devices from reaching `api`) | D | Network attacker | Months-long periods, two warnings, any single request resets; censorship resistance is the proxy's (Prompt 1) | D-0056 |
 
+### 3.17 Encrypted content (Prompt 4, milestone 1; D-0059)
+
+Content is end-to-end encrypted and never decoded by the server; these threats are the apps'
+and the specification's. Nothing new reaches the server (no §1 row).
+
+| Threat | STRIDE | Attacker | Mitigation | Test or proof |
+| --- | --- | --- | --- | --- |
+| Content reaching the server in plaintext, or a service starting to parse it | I | Developer error, insider | No service or server crate may depend on `songbird-content`; what the server must act on is a fixed `Send` field, never the ciphertext | `no_service_or_server_crate_depends_on_content` |
+| Malformed content crashing or exhausting an app | D | Malicious contact, compromised device | Size checked before decoding; every list, string and ID bounded after; nesting stops at one level (a sent transcript holds a chat message only) | `bounds_are_refused_with_their_field`; `open_never_panics`; fuzz `content` |
+| Message lengths revealing content to the server | I | Server, network | Plaintexts padded to 160-byte buckets, one encoding per length | `padding_is_canonical` |
+| Replayed or resent messages shown twice | T | Faults, restores, malicious server | Recipients drop a repeat of (author, message ID) | PROTOCOL §5.1; M2's state tests |
+| An old app misreading a newer message | T | Version skew | Unknown fields, kinds and enums ignored; `required_version` shows "update to see this" | `a_newer_writers_*`, `this_reader_decodes_every_versions_vectors` |
+| Apps logging message content or keys | I | App bugs, log collection | `Debug` of every content type prints its name only | `debug_prints_no_content` |
+| Two implementations disagreeing on the encoding | T | Interoperability bugs | The `.proto` is the specification; 32 vectors encoded by the Rust types and by an independent compiler from hand-written JSON | `every_vector_matches_the_rust_types_byte_for_byte`; `tools/content-vectors` |
+
 ## 4. Server-enforced settings
 
 ## 5. Compliance notes (GDPR, age of digital consent per EU country)

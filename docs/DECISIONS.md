@@ -102,6 +102,55 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0059 — Prompt 4, milestone 1: the encrypted content schema (`crates/content`), never linked by a service
+
+- Date: 2026-11-16
+- Status: accepted; built (report `P04-M1.md`); awaiting the owner's approval of the gate
+- Decided by: agent, under the owner's plan (D-0058) and standing instruction (Proton-level bar)
+- Context: Prompt 4 asks for the content inside the encrypted payload, "specified so future apps
+  interoperate exactly": protobuf, versioned, tolerant of unknown fields, never decoded by the
+  server, with byte-exact vectors and a compatibility suite.
+- Options considered:
+  - **Types generated at build time** (`prost-build` with `protoc`) was rejected. It needs
+    `protoc` on every build machine and puts generated code out of review. Instead, `prost`
+    types are written by hand, field for field, as `crates/proto` already does. The `.proto` file
+    is the specification, and an independent compiler proves the two agree.
+  - **Signal's single `DataMessage` with every part optional** was rejected in favour of `oneof`
+    kinds: a message is exactly one thing (a message, a reaction, an edit…), which makes
+    validation and app code unambiguous.
+  - **UTF-16 offsets for spans** (Signal) were rejected in favour of UTF-8 bytes:
+    one unambiguous unit, checkable on character boundaries.
+- Decision:
+  - **Layers:**
+    - the session layer's ciphertext;
+    - a padded `Plaintext` (`0x80 0x00*` to a multiple of 160 bytes);
+    - `Plaintext { content bytes, franking key }`;
+    - `Content` (version, required version, message ID, time, profile key, and one body: data,
+      receipt, typing, sync or request response).
+  - **Franking commitment:** `HMAC-SHA256(franking_key, "songbird.v1/franking\0" || content)`
+    over the exact content bytes. The server stamps it (M3); a report submits the bytes and the
+    key (M5).
+  - **Validation after decoding:** every list, string and ID bound written in the `.proto`, with
+    sizes checked before decoding. Unknown fields, kinds and enum values are accepted, so a newer
+    writer is never refused. `required_version` drives "update to see this".
+  - **Message IDs:** 16 random bytes per message; (author, ID) deduplicates resends.
+  - **The server never decodes content:** no service or server crate may depend on
+    `songbird-content`, enforced by a test over every manifest.
+  - **`Debug` prints type names only** (invariant 6 in apps too).
+- Evidence (Apple M5 Pro, macOS 27.2.1):
+  - 16 tests in `crates/content`: padding, franking known answer (recomputed with Python's
+    `hmac`), bounds, a newer writer's fields at three depths, unknown kinds and enums, the
+    manifest check, and property tests;
+  - **32 vectors** in `vectors/v1/vectors.json`. Their protobuf JSON is written by hand
+    (`make_json.py`) and their hex comes from the Rust types. `tools/content-vectors` (protox
+    0.10.0 and prost-reflect 0.16.5, outside the workspace) compiles `content.proto` and
+    encodes each JSON to exactly that hex, with no unknown field on decoding: **32 of 32**. With
+    one field retyped (`sint32` to `int32`) it fails at once;
+  - fuzz `content`, 60 s: 7,892,926 runs, nothing found.
+- Consequences: no new dependency in the workspace (`prost`, `aws-lc-rs`, `thiserror`); the tool
+  brings `protox` and `prost-reflect` outside it. Apps generate their types from
+  `content.proto`, and attachment pointers are extended by Prompt 6.
+
 ## D-0058 — Prompt 4: the plan, and the owner's decisions it needed
 
 - Date: 2026-11-16

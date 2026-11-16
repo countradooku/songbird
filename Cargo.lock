@@ -3541,6 +3541,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "songbird-content"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "hex",
+ "proptest",
+ "prost",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "songbird-delivery"
 version = "0.1.0"
 dependencies = [

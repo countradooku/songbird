@@ -21,7 +21,7 @@ Implemented in `crates/proto` (shared by server and clients); decisions D-0019, 
 
 | Type | Direction | Frame | Body |
 | --- | --- | --- | --- |
-| `0x01` | C→S | `Send` | `req_id u32`, `idempotency_key [16]`, `flags u8`, [if flag `0x01`: `group [16]`, `epoch u64`], [if `0x04`: `access_key [16]`], [if `0x10`: `commitment [32]`], [if `0x20`: `expire_after_s u32`], `count u16` (≥ 1), then per device (no flag `0x02`) `count ×` (`device_id [16]`, `len u32` (≥ 1), `envelope [len]`), or shared (flag `0x02`) `count × device_id [16]`, `len u32` (≥ 1), `body [len]` |
+| `0x01` | C→S | `Send` | `req_id u32`, `idempotency_key [16]`, `flags u8`, [if flag `0x01`: `group [16]`, `epoch u64`], [if `0x04`: `access_key [16]`], [if `0x10`: `commitment [32]`], [if `0x20`: `expire_after_s u32`], [if `0x40`: `group [16]`], `count u16` (≥ 1; 0 with `0x40`), then per device (no flag `0x02`) `count ×` (`device_id [16]`, `len u32` (≥ 1), `envelope [len]`), or shared (flag `0x02`) `count × device_id [16]`, `len u32` (≥ 1), `body [len]` |
 | `0x02` | C→S | `Ack` | `up_to_seq u64` |
 | `0x03` | C→S | `Ephemeral` | `to [16]`, `payload` (≥ 1 byte) |
 | `0x10` | C→S | `Auth` | protobuf `Auth` (§2) |
@@ -37,12 +37,13 @@ above, so every frame has one encoding):
 
 | Flag | Meaning | Rules |
 | --- | --- | --- |
-| `0x01` | MLS commit (§3.1) | |
+| `0x01` | Retired (was D-0026's MLS commit block); never reused | Refused since Prompt 5: commits go to `POST /v1/groups/commit` (§6.3) |
 | `0x02` | One shared body for every device | |
 | `0x04` | `ACCESS`: the XOR of the access keys of every addressed account that is not open (§5.10), per device or with a shared body | Not with `0x08` |
 | `0x08` | `REQUEST`: a message request (§5.10) | Not with `0x04`, `0x02` or `0x01` |
 | `0x10` | `FRANKED`: the sender's franking commitment (§5.3), stamped by the server (§5.13) | |
 | `0x20` | `EXPIRES`: the disappearing hint, 1 s to 30 days (§5.13) | Zero or more than 30 days refused |
+| `0x40` | `GROUP`: a group message; `group [16]` follows every other block, `count` is 0 and the server fans the shared body out to the group's roster (§6.5) | Needs `0x02`; not with `0x01`, `0x04` or `0x08` |
 
 Rejection reasons: 1 rate limited, 2 too large, 3 too many recipients, 4 unknown recipient
 (unused since milestone 2: unknown devices are reported in a device mismatch), 5 duplicate
@@ -53,7 +54,9 @@ MLS epoch (the group moved on; process the winning commit, then retry from the n
 envelope begins with `F5 53 42`, the prefix reserved for what the server writes (system frames
 §3.9, franking stamps §5.13; never retryable), 10 access required (a send to another account with
 neither its access key, nor the right one, nor `REQUEST`: fetch the profile key again or send a
-request, §5.10), 11 an invalid request (not franked, or for more than one other account, §5.10).
+request, §5.10), 11 an invalid request (not franked, or for more than one other account, §5.10),
+12 not a member of the group (or no such group, §6.5), 13 an invalid group message (§6.5), 14 the
+group's roles do not let the sender send ("only admins can send", a channel's subscribers, §6.6).
 1 and 6 are retryable after `retry_after_ms`, with the
 same idempotency key. Unknown reason codes are kept (forward compatibility).
 
@@ -190,11 +193,9 @@ address all of that account's devices except the sending device. Otherwise the a
 not exist), `stale` (devices whose keys changed; filled from Prompt 3). The client updates its view,
 re-encrypts and retries with the same idempotency key.
 
-**MLS commits.** A `Send` with flag `0x01` names the group and the epoch the commit was made
-from. The server stores it only if the group is at that epoch and advances the group to `epoch +
-1` in the same transaction, so of several concurrent commits exactly one is accepted; the others
-are rejected with reason 8 and stored nothing. The group ID is 16 opaque bytes chosen by the
-clients.
+**MLS commits** no longer travel in a `Send` (Prompt 5): `POST /v1/groups/commit` validates a
+commit against the group, orders it by epoch and fans it out (§6.3). The `Send` flag `0x01` that
+carried one (D-0026) is refused.
 
 ### 3.2 Idempotency
 
@@ -501,10 +502,12 @@ server checks each package before publishing it, with its own focused parser (th
 over running OpenMLS on the server), and **binds it to the uploading device**:
 
 - RFC 9420's encoding, strictly (minimal variable-length integers, no trailing bytes, at most
-  2,048 bytes, no duplicate extension types); version mls10; ciphersuite `0x0001` or `0x0003`
-  (X25519 HPKE, Ed25519 signatures);
-- `init_key` and the leaf's `encryption_key` honest X25519 keys, different from each other; the
-  `signature_key` an honest Ed25519 key;
+  4,096 bytes, no duplicate extension types); version mls10; ciphersuite `0x0001` or `0x0003`
+  (X25519 HPKE), or `0x004F`, X-Wing (ML-KEM-768 and X25519 HPKE, the suite of every group,
+  D-0066); Ed25519 signatures throughout;
+- `init_key` and the leaf's `encryption_key` honest keys of the suite's KEM, different from each
+  other: X25519, or X-Wing (an ML-KEM-768 encapsulation key passing the FIPS 203 modulus check,
+  then an honest X25519 key); the `signature_key` an honest Ed25519 key;
 - a **basic credential whose identity is the uploading device's 16-byte ID**;
 - capabilities listing mls10, the package's ciphersuite and basic credentials; leaf source
   `key_package`; a lifetime that has begun (an hour of skew allowed), has not ended and is at most
@@ -798,7 +801,9 @@ Decision D-0056 (M7).
     transparency salt, last use and the inactivity period;
   - username links, passkeys and avatars;
   - every device: keys, flags, prekey and KeyPackage counts, whether a sealed push registration
-    exists, pending uploads.
+    exists, pending uploads;
+  - groups (Prompt 5, D-0073): each group the account's devices are in, its epoch, those
+    devices with their roles and its community; pending requests to join groups.
   Secrets derived from what the user knows (the PIN and username-key verifiers) are reported as
   present, not handed out. What cannot be attributed to the account (mailbox ciphertext, sent
   attachments, keyed throttle records, transparency leaves once the salt is gone, encrypted
@@ -810,7 +815,10 @@ Decision D-0056 (M7).
   - devices, prekeys, KeyPackages and passkeys;
   - username (held 30 days, unlinked) and links;
   - link tokens;
-  - the profile, device list, PIN and transparency salt on the account row.
+  - the profile, device list, PIN and transparency salt on the account row;
+  - pending requests to join groups (Prompt 5). Group messages are no longer stored for the
+    devices. Their leaves, and the account ID if it held a role, stay in each group's MLS state
+    until a member commits the removal (D-0073).
   Encrypted backups keep the data until they expire (at most 93 days); a restore deletes it
   again through the journal (D-0041).
 - **Inactivity** (owner, D-0047): each account chooses 6, 12 or 24 months
@@ -1234,6 +1242,289 @@ Then the server seals a **minimal report** to the moderation key and queues it (
 
 ## 6. Groups, roles and channels (MLS) (Prompt 5)
 
+Decisions D-0065 (the owner's), D-0066 (the delivery-service core) and D-0067 (its integration).
+Milestone 1: groups, commits, Welcomes and group messages. Roles, invite links, communities and
+channels follow in M2–M4.
+
+### 6.1 The model
+
+- **Members are devices.** Each device is one MLS leaf whose basic credential is its 16-byte
+  device ID, and only devices their account's signed list vouches for (§4.6) may be in a group.
+- **Every group uses X-Wing**, `MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519` (`0x004F`):
+  post-quantum key exchange and Ed25519 signatures. KeyPackages for it are published as in
+  §4.5.
+- **Handshakes are `PublicMessage`s** (OpenMLS's pure-plaintext wire policy), so the server can
+  check them. **Application messages are `PrivateMessage`s**; the server reads only their group,
+  epoch and content type.
+- **The server keeps** each group's public state (OpenMLS `PublicGroup`), its epoch, its roster
+  (member devices), the `GroupInfo` of the current epoch, and the hash of the commit that made
+  it. Never a group secret, a name or any content (threat model §1).
+
+### 6.2 Creating a group: `POST /v1/groups`
+
+`version u8 (1) | group [16] | info_len u32 | GroupInfo | tree_len u32 | ratchet tree`, both parts
+`MLSMessage`/TLS as OpenMLS exports them, at most 4 MiB in all.
+
+- The group is at epoch 0, uses `0x004F`, carries no group-context extension (until M2), and its
+  only leaf is the requesting device, which signed the `GroupInfo`.
+- Answers:
+  - 204;
+  - 409 `exists`;
+  - 400 with one of `request`, `malformed`, `kind`, `group`, `ciphersuite`, `sender`,
+    `credential`, `group_info` or `invalid`;
+  - 403 `pending`;
+  - 429 after the per-device commit budget (2 a second, burst 10, shared with commits).
+
+### 6.3 Committing: `POST /v1/groups/commit`
+
+`version u8 (1) | group [16] | bundle`, where the bundle is
+`version u8 (1) | commit_len u32 | commit | welcome_len u32 | Welcome | info_len u32 | GroupInfo`
+(`welcome_len` is 0 when nobody is added).
+
+The server validates the commit fully (RFC 9420, OpenMLS `PublicGroup`), then checks that:
+
+1. a member's commit is signed by the leaf whose credential is the requesting device;
+2. every added KeyPackage names a listed device that is not already in the group;
+3. updates keep their leaf's identity;
+4. the proposals are add, remove, update or self-remove only. Pre-shared keys, re-init,
+   group-context changes and custom proposals are refused until M2 defines them;
+5. an external commit comes from a device whose account already has a device in the group, and
+   removes at most that device's own old leaf. A reinstalled device (a new device ID) joins
+   without removing anything, and a member then removes the dead leaf;
+6. the group stays within 1,024 leaves;
+7. the Welcome holds exactly one secret per added KeyPackage, and nothing else;
+8. the `GroupInfo` is the new epoch's, signed by the committer's leaf.
+
+The new state is written only if the group is still at the commit's epoch, in the same
+transaction as its fan-out. So of several concurrent commits from one epoch exactly one wins.
+
+**Fan-out.** The commit (`MLSMessage` bytes, as uploaded) goes to every device in the group
+before or after it, except the committer and the added devices. Removed devices get it, so they
+learn they were removed. The Welcome goes to the added devices.
+
+The answer comes only once every recipient's mailbox holds it (invariant 1):
+
+- 200 `{"epoch": n}`, the new epoch;
+- 409 `{"error": "stale", "epoch": n}`: another commit won. Process it (it is in your mailbox),
+  then commit again from epoch `n`;
+- 404: no such group, or the device may not read it (neither in it nor a device of an account in
+  it: the same answer, before any work; D-0074);
+- 400 with a reason (as §6.2, plus `proposal`, `external`, `duplicate`, `size`, `welcome`);
+- 403 `pending`; 403 `key_package` if an added KeyPackage is not one its device published to the
+  key directory (a claimed single-use package or its last-resort one; D-0074);
+- 429 or 503: retry the same bundle.
+
+A commit that already won is answered 200 again, with its fan-out finished. Fan-outs a crash
+interrupted are finished by every `api` node within seconds. They are stored under idempotency
+keys only the servers can derive, so a member cannot pre-empt them.
+
+### 6.4 Joining: `POST /v1/groups/state`
+
+Reads (`/state`, `/log`, `/v1/communities/state`) take 5 a second per device, bursting to 20
+(D-0074).
+
+`version u8 (1) | group [16]`. Answers 200 `epoch u64 | info_len u32 | GroupInfo | tree_len u32 |
+ratchet tree` to:
+
+- a device in the group (a device added by a Welcome fetches the tree here);
+- a listed device of an account with a device in the group (it joins by external commit, §6.3,
+  rule 5).
+
+Anyone else gets 404, the same answer as for no group.
+
+### 6.5 Group messages: `Send` with `GROUP` (`0x40`)
+
+Flags `SHARED | GROUP`; the `GROUP` block (`group [16]`) comes after every other block; `count`
+is 0 and no device is listed. The shared body is one `MLSMessage` carrying a `PrivateMessage`.
+The server reads its prefix, never decrypting it, and requires:
+
+- that it is an application message of the frame's group;
+- that the sending device is in the roster;
+- that its epoch is the group's current epoch or the one before (a message sent just as a commit
+  landed).
+
+It stores the body once for the roster minus the sender. `FRANKED` and `EXPIRES` may be set;
+`ACCESS`, `REQUEST` and `MLS` may not. Refusals:
+
+- 12 not a member (also for no such group);
+- 13 an invalid group message;
+- 8 a stale epoch;
+- 6 unavailable.
+
+Delivery nodes cache rosters for at most a second, or less when a message names a newer epoch.
+A removed device can therefore still post at its last epoch for up to a second on a node that
+has not refreshed. Members who processed the removal know it was removed.
+
+The flag `0x01` (the MLS commit in a `Send`, D-0026) is retired: the decoder refuses it, and
+the sealed endpoint refuses `GROUP` (a sealed send hides the device membership is checked
+against). The mailboxes still hold their unused epoch table; it goes with their next storage
+format change.
+
+### 6.6 Roles and permissions (M2, D-0070)
+
+Every group's context carries two extensions from creation:
+
+- **`required_capabilities`**, naming the roles extension and the `SelfRemove` proposal. Every
+  member must support both; OpenMLS refuses to add a KeyPackage that does not.
+- **The roles extension** (`0xF5B0`):
+
+  ```text
+  version u8 (1) | send u8 | add u8 | edit_info u8 | links u8 | call u8 | default_role u8 |
+  flags u8 | n u16 | n × (account [16] | role u8)    accounts strictly ascending
+  ```
+
+  - **Roles:** 0 read-only, 1 member, 2 moderator, 3 admin, 4 owner.
+  - **Flags:** `0x01` channel, `0x02` joining needs approval.
+  - **Unlisted accounts** have `default_role` (1 in a group, 0 in a channel). An entry never
+    names the default role.
+
+  A new group's only entry is its creator's account, as owner.
+
+Roles are per account: every device of an account has its role. The server and every client
+apply the same rule to a commit (`songbird_groups::roles::authorize`):
+
+| Action | Who may |
+| --- | --- |
+| Add a person (an account not in the group) | Role ≥ `add` |
+| Add a device of an account already in it | Member and above (one's own: anyone) |
+| Remove another person's device | An admin or owner who outranks that person |
+| Remove one's own devices, or a device no longer listed | Anyone |
+| Change the policy (send, add, edit info, links, call, default role, flags) | Admin and above |
+| Change someone's role | An admin who outranks both the old and the new role, or an owner (who may make owners) |
+| Lower one's own role | Anyone |
+| Afterwards | At least one owner; entries only for accounts still in the group. When no owner is left (they left, or their devices are gone), the committer may name new owners from the highest role left. Changing the default role is a role change for every member it applies to |
+| Send a message | Role ≥ `send`: the send path refuses others with reason 14 |
+| Edit the group's info | Role ≥ `edit_info`: `POST /v1/groups/meta` |
+| Manage invite links | Role ≥ `links` (§6.8) |
+| See, approve (add) and decline join requests | Role ≥ `add` (§6.8) |
+| Start a group call | Role ≥ `call` (Prompt 7) |
+| Pin a message, delete others' messages | Moderator and above, **enforced by clients only** (inside the ciphertext) |
+
+A commit the rule refuses gets 403 `role`, and clients drop it.
+
+### 6.7 Leaving, metadata and the change log (M2)
+
+- **Leaving:** `POST /v1/groups/propose` with `version u8 (1) | group [16] | MLSMessage`, a
+  `PublicMessage` with the member's own `SelfRemove`. No other proposal is taken standalone.
+  - The server queues it in the group's state and stores it in every other member's mailbox;
+    the answer is 204.
+  - The next committer includes it by reference and needs no role to. Members store it with
+    OpenMLS's `store_pending_proposal`.
+  - 409 `stale` with the epoch if a commit came first: propose again from that epoch.
+- **The group's info:** `POST /v1/groups/meta` with `version u8 (1) | group [16] | expected u64
+  | blob` (1 byte to 16 KiB). The blob is encrypted by the members; the server never reads it.
+  - 200 `{"version": n}`;
+  - 409 `stale` (the current version);
+  - 403 `role` below `edit_info`.
+
+  `POST /v1/groups/state` now ends with `meta_v u64 | meta_len u32 | meta`.
+- **The change log** ("View member changes", for devices that join later):
+  - **Writing:** a commit bundle of version 2 adds `log_len u32 | entry`, where entry is
+    `ciphertext_len u16 | ciphertext (≤ 2 KiB) | signature [64]`. The signature is the
+    committer's leaf key (Ed25519) over `"songbird.v1/change-log\0" | group | from_epoch u64 |
+    ciphertext`.
+  - **Checking:** the server verifies it and refuses the commit otherwise (400 `log`). An entry
+    cannot be forged by the server, or replayed onto another epoch.
+  - **Keeping:** the newest 1,000 entries per group.
+  - **Reading:** `POST /v1/groups/log` with `version u8 (1) | group [16] | after u64`
+    (`u64::MAX` for all) answers `n u16 | n × (epoch u64 | len u16 | entry)`, at most 200, for
+    the same devices as the state.
+
+### 6.8 Invite links and join requests (M3, D-0071)
+
+- **A link** is `handle [16]` (random, chosen by the app) and a 32-byte secret. Both travel
+  only in the link itself (`https://…/g#<handle><secret>`, in the fragment). The app derives
+  two keys from the secret with HKDF-SHA-256 (salt `"songbird.v1/group-link"`):
+  - `auth` (info `"auth"`), shown to the server to open or use the link;
+  - a key for the group's info (info `"info"`), which the server never sees.
+
+  The server keeps `SHA-256(auth)`, the group, whether a join must be approved, a use count,
+  an optional limit and an optional expiry (at most a year).
+- **Managing:** for roles at least the policy's `links` role (admins, by default):
+  - `POST /v1/groups/links` with `version | group | handle | SHA-256(auth) [32] | ttl u64
+    (seconds, 0: none) | max_uses u32 (0: any) | approval u8`. 204; 409 `exists` (draw another
+    handle) or `full` (16 links per group).
+  - `POST /v1/groups/links/revoke` with `version | group | handle`. 204.
+- **Opening:** `POST /v1/groups/links/open` with `version | handle | auth`. Every link that
+  cannot be used (unknown handle, wrong `auth`, used up, expired, revoked) gets one answer: 404.
+  The secret is compared in constant time. Otherwise 200:
+  - `0 | group [16] | state` (as `/v1/groups/state`) if the device may join now;
+  - `1 | meta_v u64 | meta_len u32 | meta` if a join needs approval: the encrypted name and
+    picture only, no members.
+- **Joining:** `POST /v1/groups/join` with `version | handle | auth | bundle`. The bundle is an
+  external commit adding the device (`Sender::NewMemberCommit`), with the group's default role
+  (it cannot change roles: RFC 9420 forbids external commits from changing extensions).
+  - Answers as `/v1/groups/commit`, including a retried join that already won.
+  - 404 for a link that cannot be used; 403 `approval` if joins need approval.
+  - The link's use is counted in the same transaction as the commit, so two joins can never
+    both take the last use.
+- **Asking:** a link needs approval if the link says so or the group's policy has the approval
+  flag (`0x02`).
+  - `POST /v1/groups/requests` with `version | handle | auth`: the device's account asks to
+    join. 204, also when it asked before (the first request's time is kept). 409 `open` (join
+    instead), `member`, or `full` (256 pending per group). Requests lapse after 7 days.
+  - `POST /v1/groups/requests/list` with `version | group`, for roles at least the policy's
+    `add` role: `n u16 | n × (account [16] | age_secs u64)`, oldest first.
+  - **Approving** is adding the account's devices in an ordinary commit. That commit removes
+    the request.
+  - `POST /v1/groups/requests/decline` with `version | group | account [16]`, the same role.
+    204.
+- **Budgets:** opening, joining and asking share a per-account budget of 1 a second, bursting
+  to 5. Managing links and requests uses the commit budget.
+- **What members see:** every join by link is an external commit from a new account, with the
+  default role (OpenMLS refuses an external commit that changes extensions). Apps show it in
+  the chat. Whether the joiner held a valid link is the server's word; see the threat model.
+
+### 6.9 Communities (M4, D-0072)
+
+A community is a container of groups around an **announcement group**: a group whose policy lets
+only admins send. The server keeps opaque links between IDs and an encrypted info blob (name,
+description, picture: ciphertext under a key the members share). The community's admins are the
+announcement group's admins, as its roles extension says, which every member verifies (§6.6).
+
+- `POST /v1/communities` with `version | community [16] | announcement [16]`. For an admin of
+  the announcement group.
+  - 204;
+  - 400 `announcement` if its members may send;
+  - 409 `exists` if the community ID is taken or the group is already in a community.
+- `POST /v1/communities/groups/add` with `version | community | group [16]`. For a device that
+  is an admin of both the announcement group and the group (a community admin cannot claim
+  someone else's group).
+  - 204;
+  - 409 `exists` (the group is in a community) or `full` (100 groups).
+- `POST /v1/communities/groups/remove` with `version | community | group`. For an admin of the
+  announcement group or of the group (a group may leave). 204.
+- `POST /v1/communities/meta` with `version | community | expected u64 | blob` (1 byte to
+  16 KiB), for the announcement group's admins. 200 `{"version": n}`; 409 `stale`.
+- `POST /v1/communities/state` with `version | community`, for the announcement group's members
+  (and their accounts' other devices). It answers `announcement [16] | meta_v u64 | meta_len u32
+  | meta | n u16 | n × group [16]`.
+- `POST /v1/communities/delete` with `version | community`, for the announcement group's owners.
+  204. The groups stay.
+
+Where the device is not in a group it must be in, or the community does not exist, the answer is
+404. Joining a community is joining its announcement group (§6.8); its groups are joined one by
+one, by their own links.
+
+### 6.10 Private channels and group tiers (M4, D-0072)
+
+- **A private channel** is a group whose policy has the channel flag (`0x01`): admins post, add,
+  edit and manage links; subscribers join read-only (`Policy::CHANNEL`).
+  - **Size:** up to 2,048 devices; a group is up to 1,024 (`Limits`). The limit follows the
+    policy a commit leaves.
+  - **Rate class:** a channel takes at most 1 post a second, bursting to 10, on each node,
+    whoever of its admins posts. This is on top of each device's own budget. Over it, reason 1
+    `RateLimited` with the wait.
+  - **Subscribers see each other's devices** in the ratchet tree, as in any MLS group. Channels
+    suit audiences that know each other; public channels are not built (D-0065 §4).
+- **Tiers and receipts** (`songbird_groups::tiers`, the apps' rule; receipts are encrypted):
+
+  | Tier | People | Delivered receipts | Read receipts | Window |
+  | --- | --- | --- | --- | --- |
+  | Small group | up to 32 | every device | if enabled | 1 s |
+  | Large group | 33 and more | the primary device only | if enabled | 10 s |
+  | Channel | any | none | none | — |
+
 ## 7. Attachments and packs (Prompt 6)
 
 ## 8. Calls and the call key schedule (Prompt 7)
@@ -1265,7 +1556,7 @@ Frames (hex; from `crates/proto` tests and the fuzz seeds in `fuzz/corpus/proto_
 | `SendResult{req_id: 7, rejected: rate limited, retry 500 ms}` | `82 00000007 01 0001 000001f4` |
 | `Ephemeral{to: 44…44, "typing"}` | `03 44444444444444444444444444444444 747970696e67` |
 | `Send{req_id 7, key 11…11, [(22…22, "abc"), (33…33, "z")]}` | `01 00000007 11111111111111111111111111111111 00 0002 22222222222222222222222222222222 00000003 616263 33333333333333333333333333333333 00000001 7a` |
-| `Send{req_id 8, key 11…11, MLS commit (group 44…44, epoch 3), shared "grp" to 22…22, 33…33}` | `01 00000008 11111111111111111111111111111111 03 44444444444444444444444444444444 0000000000000003 0002 22222222222222222222222222222222 33333333333333333333333333333333 00000003 677270` |
+| `Send{req_id 8, key 11…11, group message (group 44…44), shared "grp", no devices}` (Prompt 5; replaces D-0026's MLS commit vector, whose bytes are now refused) | `01 00000008 11111111111111111111111111111111 42 44444444444444444444444444444444 0000 00000003 677270` |
 
 Authentication transcript for server name `chat.example`, nonce 32 × `11`, device 16 × `22`,
 version 1, channel binding 32 × `33`:

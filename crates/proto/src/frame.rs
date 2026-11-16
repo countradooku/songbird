@@ -59,7 +59,9 @@ pub mod ty {
 pub const DELIVER_HEADER_LEN: usize = 1 + 8;
 /// Bytes in a `Send` frame before the first recipient (no MLS block).
 pub const SEND_HEADER_LEN: usize = 1 + 4 + IDEMPOTENCY_KEY_LEN + 1 + 2;
-/// `Send` flag: an MLS commit block (`group [16]`, `epoch u64`) follows the flags.
+/// Retired `Send` flag (D-0026's MLS commit block, `group [16]`, `epoch u64`): refused since
+/// Prompt 5. Commits go to `POST /v1/groups/commit`, which validates them against the group
+/// before anything is stored (D-0067). The bit is never reused.
 pub const SEND_FLAG_MLS: u8 = 0x01;
 /// `Send` flag: one shared body for every recipient device.
 pub const SEND_FLAG_SHARED: u8 = 0x02;
@@ -74,13 +76,19 @@ pub const SEND_FLAG_FRANKED: u8 = 0x10;
 /// `Send` flag: the disappearing hint follows, a deadline in seconds from the store (Prompt 4,
 /// M3).
 pub const SEND_FLAG_EXPIRES: u8 = 0x20;
-/// Every `Send` flag this version knows; other bits are refused.
-pub const SEND_FLAGS: u8 = SEND_FLAG_MLS
-    | SEND_FLAG_SHARED
+/// `Send` flag: a group application message (Prompt 5, D-0067): the group ID follows, and the
+/// shared body is one MLS `PrivateMessage` that the server fans out to the group's roster, so
+/// the frame lists no devices. Needs [`SEND_FLAG_SHARED`]; not with [`SEND_FLAG_MLS`],
+/// [`SEND_FLAG_ACCESS`] or [`SEND_FLAG_REQUEST`] (membership is the authorization).
+pub const SEND_FLAG_GROUP: u8 = 0x40;
+/// Every `Send` flag this version takes; other bits (and the retired [`SEND_FLAG_MLS`]) are
+/// refused.
+pub const SEND_FLAGS: u8 = SEND_FLAG_SHARED
     | SEND_FLAG_ACCESS
     | SEND_FLAG_REQUEST
     | SEND_FLAG_FRANKED
-    | SEND_FLAG_EXPIRES;
+    | SEND_FLAG_EXPIRES
+    | SEND_FLAG_GROUP;
 /// Longest disappearing hint: the 30 days an envelope is kept anyway.
 pub const MAX_EXPIRE_AFTER_S: u32 = 30 * 24 * 3600;
 /// Length of an access key.
@@ -239,23 +247,6 @@ impl std::fmt::Debug for SendPayload {
     }
 }
 
-/// The MLS commit a `Send` carries: stored only if the group is at `epoch` (D-0026).
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct MlsCommitRef {
-    /// Group identifier (opaque, chosen by clients).
-    pub group: [u8; 16],
-    /// Epoch the commit was made from.
-    pub epoch: u64,
-}
-
-impl std::fmt::Debug for MlsCommitRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MlsCommitRef")
-            .field("epoch", &self.epoch)
-            .finish_non_exhaustive()
-    }
-}
-
 /// What a `Send` tells the server beyond its recipients (Prompt 4): each set only by its flag.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub struct SendHints {
@@ -269,6 +260,9 @@ pub struct SendHints {
     /// Delete undelivered envelopes this many seconds after the store, and never deliver them
     /// later (`EXPIRES`, 1 to [`MAX_EXPIRE_AFTER_S`]).
     pub expire_after_s: Option<u32>,
+    /// The group of a group application message (`GROUP`, Prompt 5): the server fans the shared
+    /// body out to this group's roster.
+    pub group: Option<[u8; 16]>,
 }
 
 impl std::fmt::Debug for SendHints {
@@ -278,6 +272,7 @@ impl std::fmt::Debug for SendHints {
             .field("request", &self.request)
             .field("franked", &self.commitment.is_some())
             .field("expire_after_s", &self.expire_after_s)
+            .field("group", &self.group.is_some())
             .finish()
     }
 }
@@ -289,9 +284,7 @@ pub struct SendFrame {
     pub req_id: u32,
     /// Random per logical message; a retry reuses it so the server stores it once.
     pub idempotency_key: [u8; IDEMPOTENCY_KEY_LEN],
-    /// Set when this send is an MLS commit.
-    pub mls: Option<MlsCommitRef>,
-    /// Access key, request, franking commitment, disappearing hint.
+    /// Access key, request, franking commitment, disappearing hint, group.
     pub hints: SendHints,
     /// Recipients and ciphertext, at most [`Limits::max_recipients`] devices.
     pub payload: SendPayload,
@@ -308,12 +301,12 @@ impl SendFrame {
         Self {
             req_id,
             idempotency_key,
-            mls: None,
             hints: SendHints {
                 access: None,
                 request: false,
                 commitment: None,
                 expire_after_s: None,
+                group: None,
             },
             payload: SendPayload::PerDevice(recipients),
         }
@@ -324,7 +317,6 @@ impl std::fmt::Debug for SendFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SendFrame")
             .field("req_id", &self.req_id)
-            .field("mls", &self.mls)
             .field("hints", &self.hints)
             .field("payload", &self.payload)
             .finish_non_exhaustive()
@@ -381,6 +373,15 @@ pub enum RejectReason {
     /// A message request that breaks the request rules: not franked, or addressed to more than
     /// one other account (Prompt 4).
     InvalidRequest,
+    /// A group message from a device that is not in the group's roster, or to a group that does
+    /// not exist (Prompt 5; one answer for both).
+    NotMember,
+    /// A group message whose body is not an MLS `PrivateMessage` application message of the
+    /// frame's group (Prompt 5).
+    InvalidGroupMessage,
+    /// A group message from a member whose role may not send ("only admins can send", a
+    /// channel's subscribers; Prompt 5, D-0070).
+    NotAllowed,
     /// A code this version does not know (forward compatibility).
     Other(u16),
 }
@@ -401,6 +402,9 @@ impl RejectReason {
             Self::ReservedEnvelope => 9,
             Self::AccessRequired => 10,
             Self::InvalidRequest => 11,
+            Self::NotMember => 12,
+            Self::InvalidGroupMessage => 13,
+            Self::NotAllowed => 14,
             Self::Other(c) => c,
         }
     }
@@ -420,6 +424,9 @@ impl RejectReason {
             9 => Self::ReservedEnvelope,
             10 => Self::AccessRequired,
             11 => Self::InvalidRequest,
+            12 => Self::NotMember,
+            13 => Self::InvalidGroupMessage,
+            14 => Self::NotAllowed,
             c => Self::Other(c),
         }
     }
@@ -644,27 +651,18 @@ impl ClientFrame {
 }
 
 /// The flag-selected blocks of a `Send`: the MLS commit and the hints, with the flag rules.
-fn decode_send_blocks(
-    c: &mut Cursor<'_>,
-    flags: u8,
-) -> Result<(Option<MlsCommitRef>, SendHints), FrameError> {
+fn decode_send_blocks(c: &mut Cursor<'_>, flags: u8) -> Result<SendHints, FrameError> {
     let has = |f: u8| flags & f != 0;
+    // Unknown bits and the retired MLS flag are refused by the mask.
     if flags & !SEND_FLAGS != 0
-        // A contact or a request, not both; a request is one 1:1 message, never a shared body
-        // or an MLS commit.
+        // A contact or a request, not both; a request is one 1:1 message, never a shared body.
         || (has(SEND_FLAG_ACCESS) && has(SEND_FLAG_REQUEST))
-        || (has(SEND_FLAG_REQUEST) && (has(SEND_FLAG_SHARED) || has(SEND_FLAG_MLS)))
+        || (has(SEND_FLAG_REQUEST) && has(SEND_FLAG_SHARED))
+        // A group message is one shared body for the roster; membership authorizes it.
+        || (has(SEND_FLAG_GROUP) && (!has(SEND_FLAG_SHARED) || has(SEND_FLAG_ACCESS)))
     {
         return Err(FrameError::Control("send.flags"));
     }
-    let mls = if has(SEND_FLAG_MLS) {
-        Some(MlsCommitRef {
-            group: c.array()?,
-            epoch: c.u64()?,
-        })
-    } else {
-        None
-    };
     let access = if has(SEND_FLAG_ACCESS) {
         Some(c.array::<ACCESS_KEY_LEN>()?)
     } else {
@@ -684,13 +682,19 @@ fn decode_send_blocks(
     } else {
         None
     };
+    let group = if has(SEND_FLAG_GROUP) {
+        Some(c.array::<16>()?)
+    } else {
+        None
+    };
     let hints = SendHints {
         access,
         request: has(SEND_FLAG_REQUEST),
         commitment,
         expire_after_s,
+        group,
     };
-    Ok((mls, hints))
+    Ok(hints)
 }
 
 fn decode_send(msg: &Bytes, limits: &Limits) -> Result<SendFrame, FrameError> {
@@ -699,10 +703,16 @@ fn decode_send(msg: &Bytes, limits: &Limits) -> Result<SendFrame, FrameError> {
     let req_id = c.u32()?;
     let idempotency_key = c.array::<IDEMPOTENCY_KEY_LEN>()?;
     let [flags] = c.array::<1>()?;
-    let (mls, hints) = decode_send_blocks(&mut c, flags)?;
+    let hints = decode_send_blocks(&mut c, flags)?;
     let count = usize::from(c.u16()?);
-    if count == 0 {
-        return Err(FrameError::NoRecipients);
+    // A group message lists no devices (the server takes the roster); every other send lists
+    // at least one.
+    if (count == 0) != hints.group.is_some() {
+        return Err(if count == 0 {
+            FrameError::NoRecipients
+        } else {
+            FrameError::Control("send.group")
+        });
     }
     check_len("recipients", count, limits.max_recipients)?;
     let payload = if flags & SEND_FLAG_SHARED == 0 {
@@ -756,7 +766,6 @@ fn decode_send(msg: &Bytes, limits: &Limits) -> Result<SendFrame, FrameError> {
     Ok(SendFrame {
         req_id,
         idempotency_key,
-        mls,
         hints,
         payload,
     })
@@ -772,16 +781,13 @@ fn encode_send(s: &SendFrame, out: &mut BytesMut) {
     };
     out.reserve(
         SEND_HEADER_LEN
-            .saturating_add(24 + 16 + 32 + 4)
+            .saturating_add(24 + 16 + 32 + 4 + 16)
             .saturating_add(body),
     );
     out.put_u8(ty::SEND);
     out.put_u32(s.req_id);
     out.put_slice(&s.idempotency_key);
     let mut flags = 0;
-    if s.mls.is_some() {
-        flags |= SEND_FLAG_MLS;
-    }
     if matches!(s.payload, SendPayload::Shared { .. }) {
         flags |= SEND_FLAG_SHARED;
     }
@@ -798,11 +804,10 @@ fn encode_send(s: &SendFrame, out: &mut BytesMut) {
     if h.expire_after_s.is_some() {
         flags |= SEND_FLAG_EXPIRES;
     }
-    out.put_u8(flags);
-    if let Some(m) = &s.mls {
-        out.put_slice(&m.group);
-        out.put_u64(m.epoch);
+    if h.group.is_some() {
+        flags |= SEND_FLAG_GROUP;
     }
+    out.put_u8(flags);
     if let Some(k) = &h.access {
         out.put_slice(k);
     }
@@ -811,6 +816,9 @@ fn encode_send(s: &SendFrame, out: &mut BytesMut) {
     }
     if let Some(t) = h.expire_after_s {
         out.put_u32(t);
+    }
+    if let Some(g) = &h.group {
+        out.put_slice(g);
     }
     out.put_u16(u16::try_from(s.payload.len()).unwrap_or(u16::MAX));
     match &s.payload {
@@ -1005,6 +1013,7 @@ mod tests {
                             request,
                             commitment,
                             expire_after_s: expire,
+                            group: None,
                         };
                         ClientFrame::Send(s)
                     }
@@ -1012,11 +1021,10 @@ mod tests {
             (
                 any::<u32>(),
                 any::<[u8; 16]>(),
-                proptest::option::of((any::<[u8; 16]>(), any::<u64>())),
                 proptest::collection::vec(arb_device(), 1..8),
                 arb_payload(64)
             )
-                .prop_map(|(req_id, idempotency_key, mls, devices, body)| {
+                .prop_map(|(req_id, idempotency_key, devices, body)| {
                     ClientFrame::Send(SendFrame {
                         hints: SendHints {
                             // A group's body may be franked and disappear too.
@@ -1026,7 +1034,6 @@ mod tests {
                         },
                         req_id,
                         idempotency_key,
-                        mls: mls.map(|(group, epoch)| MlsCommitRef { group, epoch }),
                         payload: SendPayload::Shared { devices, body },
                     })
                 }),
@@ -1086,6 +1093,66 @@ mod tests {
                 }
             )),
         ]
+    }
+
+    #[test]
+    fn group_messages_name_the_group_and_list_no_devices() {
+        let frame = |flags: u8, extra: &[u8], devices: u16| {
+            let mut b = BytesMut::new();
+            b.put_u8(ty::SEND);
+            b.put_u32(1);
+            b.put_slice(&[3; 16]);
+            b.put_u8(flags);
+            b.put_slice(extra);
+            b.put_u16(devices);
+            for _ in 0..devices {
+                b.put_slice(&[2; 16]);
+            }
+            b.put_u32(1);
+            b.put_u8(b'x');
+            ClientFrame::decode(&b.freeze(), &Limits::DEFAULT)
+        };
+        let g = SEND_FLAG_GROUP | SEND_FLAG_SHARED;
+        let Ok(ClientFrame::Send(s)) = frame(g, &[0x5B; 16], 0) else {
+            panic!("a group message")
+        };
+        assert_eq!(s.hints.group, Some([0x5B; 16]));
+        assert!(matches!(&s.payload, SendPayload::Shared { devices, .. } if devices.is_empty()));
+        let mut out = BytesMut::new();
+        encode_send(&s, &mut out);
+        assert_eq!(
+            ClientFrame::decode(&out.freeze(), &Limits::DEFAULT),
+            Ok(ClientFrame::Send(s))
+        );
+        // Franked and disappearing group messages: the blocks come before the group.
+        let mut extra = vec![9; 32];
+        extra.extend_from_slice(&60u32.to_be_bytes());
+        extra.extend_from_slice(&[0x5B; 16]);
+        assert!(frame(g | SEND_FLAG_FRANKED | SEND_FLAG_EXPIRES, &extra, 0).is_ok());
+
+        let refused = Err(FrameError::Control("send.flags"));
+        assert_eq!(
+            frame(SEND_FLAG_GROUP, &[0x5B; 16], 0),
+            refused,
+            "needs a shared body"
+        );
+        assert_eq!(
+            frame(g | SEND_FLAG_ACCESS, &[0; 32], 0),
+            refused,
+            "membership, not keys"
+        );
+        assert_eq!(frame(g | SEND_FLAG_REQUEST, &[0x5B; 16], 0), refused);
+        assert_eq!(frame(g | SEND_FLAG_MLS, &[0; 40], 0), refused);
+        // The roster is the server's: a listed device is refused, and only a group message may
+        // list none.
+        assert_eq!(
+            frame(g, &[0x5B; 16], 1),
+            Err(FrameError::Control("send.group"))
+        );
+        assert_eq!(
+            frame(SEND_FLAG_SHARED, &[], 0),
+            Err(FrameError::NoRecipients)
+        );
     }
 
     #[test]

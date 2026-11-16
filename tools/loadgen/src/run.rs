@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, bail, ensure};
 use bytes::{BufMut as _, Bytes, BytesMut};
 use songbird_client::{Client, ClientConfig, ClientError, DeviceKey, Event, ResumeState, State};
-use songbird_proto::frame::{Recipient, SendPayload, SendStatus};
+use songbird_proto::frame::{Recipient, SendHints, SendPayload, SendStatus};
 use songbird_types::DeviceId;
 use tokio::sync::watch;
 
@@ -500,7 +500,7 @@ async fn run(a: &Args) -> anyhow::Result<bool> {
                 // failed with Disconnected may or may not have been stored; the key makes the
                 // retry safe either way.
                 loop {
-                    match c.send_with(key, None, send.clone()).await {
+                    match c.send_with(key, SendHints::default(), send.clone()).await {
                         Ok(SendStatus::Accepted) => {
                             out.sends += 1;
                             out.accepted.extend(to.iter().map(|&t| (t, (me, counter))));

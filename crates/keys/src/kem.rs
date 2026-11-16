@@ -7,7 +7,12 @@
 //! before use (every 12-bit coefficient of `t` below q = 3329, so the key decodes and re-encodes
 //! to itself), then has aws-lc-rs parse it.
 
-use aws_lc_rs::kem::{EncapsulationKey, ML_KEM_1024};
+//!
+//! X-Wing public keys (Prompt 5, D-0066), the HPKE keys of post-quantum MLS groups, are checked
+//! here too: an ML-KEM-768 encapsulation key (the same modulus check) followed by an honest
+//! X25519 key (draft-connolly-cfrg-xwing-kem-06: `pk = pk_M || pk_X`).
+
+use aws_lc_rs::kem::{EncapsulationKey, ML_KEM_768, ML_KEM_1024};
 
 /// libsignal's type byte for ML-KEM-1024.
 pub const TYPE_ML_KEM_1024: u8 = 0x0A;
@@ -20,16 +25,42 @@ const Q: u16 = 3329;
 /// Bytes of `t` (k = 4 polynomials of 256 coefficients, 12 bits each).
 const T_LEN: usize = 4 * 384;
 
-/// Whether every 12-bit coefficient of the key's `t` is below q (FIPS 203 §7.2, modulus check).
-#[must_use]
-pub fn modulus_check(key: &[u8; KEY_LEN]) -> bool {
-    key.get(..T_LEN).is_some_and(|t| {
+/// ML-KEM-768 encapsulation key length.
+pub const ML_KEM_768_KEY_LEN: usize = 1184;
+/// An X-Wing public key: ML-KEM-768 then X25519.
+pub const XWING_KEY_LEN: usize = ML_KEM_768_KEY_LEN + 32;
+
+/// Whether every 12-bit coefficient of the first `t_len` bytes (`t`) is below q.
+fn coefficients_below_q(key: &[u8], t_len: usize) -> bool {
+    key.get(..t_len).is_some_and(|t| {
         t.as_chunks::<3>().0.iter().all(|[a, b, c]| {
             let lo = u16::from(*a) | (u16::from(*b & 0x0F) << 8);
             let hi = u16::from(*b >> 4) | (u16::from(*c) << 4);
             lo < Q && hi < Q
         })
     })
+}
+
+/// Whether every 12-bit coefficient of the key's `t` is below q (FIPS 203 §7.2, modulus check).
+#[must_use]
+pub fn modulus_check(key: &[u8; KEY_LEN]) -> bool {
+    coefficients_below_q(key, T_LEN)
+}
+
+/// Whether `key` is an X-Wing public key Songbird accepts: a valid ML-KEM-768 encapsulation key
+/// (modulus check, then aws-lc-rs parses it) and an honest X25519 key.
+#[must_use]
+pub fn xwing_public_key_ok(key: &[u8]) -> bool {
+    let Ok(key) = <&[u8; XWING_KEY_LEN]>::try_from(key) else {
+        return false;
+    };
+    let (ml_kem, x25519) = key.split_at(ML_KEM_768_KEY_LEN);
+    let Ok(x25519) = <&[u8; 32]>::try_from(x25519) else {
+        return false;
+    };
+    coefficients_below_q(ml_kem, 3 * 384)
+        && EncapsulationKey::new(&ML_KEM_768, ml_kem).is_ok()
+        && crate::xeddsa::x25519_public_key_ok(x25519)
 }
 
 /// Whether `serialized` is a valid ML-KEM-1024 public key in libsignal's serialization.

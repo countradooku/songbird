@@ -20,11 +20,23 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
-- Prompt 5 (deferred from Prompt 4 by the owner on 2026-11-16, `P04-gate.md`): delivered receipts
-  in groups above 32 members from primaries only (34 % of envelopes instead of 47 % in the busy
-  case of the M2 load test), or from every device (as built). Decide with the group tiers.
+- Prompt 5 gate (`P05-gate.md`, D-0070 to D-0074; PR #59): **approved by the owner on 2026-11-17**
+  ("approve all"): M2–M5, the benchmarks and the caps they set (1,024 devices per group, 2,048
+  per private channel, X-Wing by default), the seven threat-model §1 rows (roles, metadata,
+  change log, invite links, join requests, communities, claimed KeyPackage references), and the
+  three follow-ups as future work: server-proposed removal of deleted devices
+  (`external_senders`, D-0073), a link proof members can check (D-0071), a cluster-wide channel
+  budget (D-0072). Prompt 5 is done once PR #59 merges.
+- Prompt 5, M1 (`P05-M1.md`, D-0066 to D-0068): **approved by the owner on 2026-11-16**
+  ("Approve all three"): the milestone, the two threat-model §1 rows (group state; pending
+  fan-outs) and the three MPL-2.0 licence exceptions for the test harness. M2 (roles,
+  permissions, metadata, change log) is next.
 
-- Public channels: build or not (Prompt 5).
+- Prompt 5 plan (`P05-plan.md`, D-0065): **approved by the owner on 2026-11-16** ("Approve
+  all"), every recommendation. Delivered receipts in large groups: primaries only from 33
+  members (D-0065 §5).
+- Public channels: not in Prompt 5 (D-0065 §4); whether to build them stays the owner's, after
+  legal review.
 - WhatsApp interop legal gate (Prompt 14).
 - Second EU provider (D-0009): Hetzner only for now (D-0042); the Scaleway code stays dormant.
 - Public domains: the owner holds `songbird.chat` (D-0046). Still to decide: which names under it
@@ -106,6 +118,332 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0074 — Prompt 5: the security review's fixes
+
+- Date: 2026-11-17
+- Status: accepted; part of the Prompt 5 PR (report `P05-gate.md`, "Security review")
+- Decided by: agent, on an independent read-only review of the whole Prompt 5 diff
+- Context: the review found:
+  - two high findings: a default-role change bypassed the role checks; an added KeyPackage
+    was not bound to its device;
+  - four medium: a group with no listed owner froze; reads had no budget; a fan-out could stall
+    when the directory changed; outsiders' commits were processed before the membership check;
+  - five low.
+- Decision:
+  - **Default role** (`roles::authorize`): a change to `policy.default_role` is a role change
+    for every member it applies to, checked like any other. An admin can no longer make
+    everyone an owner, or demote unnamed owners.
+  - **Published KeyPackages only** (`ds::Applied::key_packages`,
+    `Registry::key_packages_published`):
+    - a commit may add a KeyPackage only if its device published it, as a single-use package
+      claimed from the key directory (its reference kept in `mlskp_used` until it expires) or as
+      its last-resort package (`device.mlslr_ref`);
+    - otherwise 403 `key_package`, and nothing is stored;
+    - without this, a member could add a leaf under another device's ID with keys of its own
+      and speak as that device.
+  - **Succession** (`roles::authorize`): when no owner is left in the group, whether every
+    owner left or their devices are gone, the committer names new owners, from the highest
+    role left. A vanished owner no longer freezes the group, and a read-only subscriber cannot
+    take a channel while admins remain.
+  - **`required_capabilities`** must be exactly Songbird's (roles extension, `SelfRemove`,
+    basic credentials), at creation and after every commit.
+  - **Outsiders first** (`api`): a commit or proposal from a device that may not read the group
+    gets 404 before the state is decoded. A join by link is the one way in.
+  - **Reads have a budget**: state, change log and community state, 5 a second per device,
+    bursting to 20. Role checks read the roster only, never the state.
+  - **Fan-outs finish** when a recipient left the directory between attempts: an idempotency
+    conflict means a store under that key already completed.
+  - **Docs:** join requests are the `add` role's (PROTOCOL §6.6).
+- Not changed, recorded as risks (threat model §6):
+  - role checks for metadata, links, requests and communities read the roster before the
+    write, so one in-flight action by a just-demoted admin can land;
+  - no per-account cap on creating groups, and groups are not deleted yet;
+  - a client whose directory view differs from the server's may judge a commit differently;
+  - one member can fill the 64-proposal queue until the next commit (which removes them).
+- Evidence:
+  - `roles` unit tests `the_default_role_moves_everyone_it_names`,
+    `a_vanished_owner_has_successors_too`, and the heir in
+    `leaving_is_the_leavers_and_owners_have_successors`;
+  - `gate_p05` live, 10 of 10, with `a_member_cannot_add_a_leaf_it_made_up_for_another_device`
+    and `outsiders_get_the_answer_for_no_group`. Every live add now goes through the key
+    directory, as apps do;
+  - groups, harness and send: 76 tests.
+- Consequences:
+  - Apps add people only with KeyPackages fetched from the key directory, which they did
+    anyway.
+  - One more registry table (`mlskp_used`), swept with expired packages, deleted with the
+    device, counted in remnants.
+
+## D-0073 — Prompt 5, milestone 5: groups in the GDPR export and deletion
+
+- Date: 2026-11-16
+- Status: accepted; built and passing live (report `P05-gate.md`); part of the Prompt 5 PR
+- Decided by: agent, under D-0056 (GDPR, Prompt 3) and the standing instruction
+- Context: every new store must be in the account export and go with the account (constitution;
+  D-0056).
+  - The stores are `grp`, `grp_fanout`, `grp_log`, `grp_link`, `grp_req`, `cmty` and
+    `cmty_grp`.
+  - Unlike the others, a group's MLS state is shared: the members' apps hold the same tree, and
+    a server that edited it would fork the group (every later commit would fail for them).
+- Options considered:
+  - **The server rewriting the group's state** on deletion (dropping the leaves) was rejected:
+    it forks the group for every member.
+  - **The server as an MLS external sender** (RFC 9420 `external_senders`) proposing the
+    removal, for the next committer to include, would remove the leaves within a commit. It was
+    not built now:
+    - it adds a server signing key to every group;
+    - apps must decide which server proposals to trust (only for devices absent from the
+      directory), which is a trust decision for the owner.
+
+    It is offered as a follow-up.
+  - **Scanning every group** for an account's devices on export was rejected (cost grows with
+    the service): `grp` gains an indexed `devs` array, written with every commit.
+- Decision:
+  - **Export** (`Registry::export`):
+    - `groups`: each group the account's devices are in, its epoch, the devices with their
+      roles, and its community;
+    - `group_requests`: pending requests to join, with their time;
+    - the "not attributable" list explains what stays in groups after deletion.
+  - **Deletion** (`delete_account_rows`, checked by `remnants`):
+    - the account's join requests go (`grp_req.acct`, indexed);
+    - group messages are no longer stored for devices the directory does not know (deleted
+      accounts, removed devices). Commit fan-outs already skipped them.
+    - **What stays** until a member commits the removal: the devices' leaves (device ID,
+      public keys) and, for an account that held a role, its account ID in the roles extension.
+      Apps commit the removal of devices that left the directory; anyone may drop a departed
+      account's role entry (D-0070). Once the account's rows are gone, these no longer lead to
+      the person on the server.
+  - **Not attributable:** change-log entries (members' ciphertext, signed by a leaf key) and
+    invite links (hashes; no creator recorded). Communities hold group IDs only.
+  - **Fuzzing:** a `group_records` target for the decoders added since M1 (roles extension,
+    registry roster, change-log entry, stored record), in the nightly run with `mls_wire` and
+    `mls_commit`. The M3 and M4 request bodies are fixed-size splits with no indexing (clippy
+    denies it), checked by their tests.
+- Evidence:
+  - `gate_p05` live: `groups_are_in_the_export_and_requests_go_with_the_account`. The export
+    names the group, the device and its role (owner, member) and the pending request. After
+    deletion, `remnants` is empty and the request list is empty.
+  - Send: `devices_gone_from_the_directory_get_no_group_messages`.
+  - Fuzz: `group_records` (numbers in `P05-gate.md`).
+- Consequences:
+  - A threat-model §6 note: what stays in group state after deletion, and why.
+  - Follow-up for the owner: server-proposed removals (`external_senders`).
+
+## D-0072 — Prompt 5, milestone 4: communities as opaque links run by the announcement group's admins; private channels capped at 2,048 devices with a rate class; receipt tiers
+
+- Date: 2026-11-16
+- Status: accepted; the benchmarks and caps **accepted by the owner on 2026-11-17** (report `P05-M4.md`);
+  part of the Prompt 5 PR
+- Decided by: agent, under D-0065 (owner: tiers §5, public channels §4, X-Wing §3) and the
+  standing instruction (Proton-level bar)
+- Context: Prompt 5 asks for:
+  - communities (shared admins, an announcement group, opaque links, encrypted names);
+  - private channels up to a benchmarked cap;
+  - commit and Welcome costs at 1,024 and 5,000 members;
+  - D-0065 §3 keeps X-Wing unless those numbers say otherwise.
+- Options considered:
+  - **Community admins as their own list on the server** was rejected: it would be a second
+    source of truth that no client verifies. The announcement group's roles extension is
+    already verified by every member (D-0070), so the server reads the community's admins from
+    it.
+  - **A community admin linking any group** was rejected: linking needs an admin of the group
+    too, so nobody can pull a group into a community it did not choose. Unlinking needs either.
+  - **Community state for anyone with the ID** was rejected: only the announcement group's
+    members (as for group state, D-0067).
+  - **The channel cap at 5,000** was rejected on the numbers:
+    - a full-path X-Wing commit of a fresh 5,000-leaf tree is 5.6 MiB, over the 4 MiB bundle
+      limit, and every subscriber would download it;
+    - at 2,048 it is 2.3 MiB.
+  - **Classical ciphersuites for large groups** were not adopted. Welcomes and add commits stay
+    small with X-Wing (1.4 and 2.8 KiB). Its cost is full-path commits on fresh trees, 14 times
+    classical, falling to about 24 KiB as the tree fills. The owner may still choose otherwise
+    at the gate.
+  - **A cluster-wide channel budget in `valkey-hot`** was not built yet: the per-node budget
+    matches how WebSocket budgets already work (threat model §6).
+  - **Server-enforced receipts** are impossible (receipts are encrypted). The rule is one
+    function the apps share.
+- Decision:
+  - **Communities** (`PROTOCOL.md` §6.9):
+    - `cmty:[id]` holds the announcement group and the encrypted info with its version;
+      `cmty_grp:[group]` holds the community, so a group is in at most one;
+    - at most 100 groups;
+    - created by an admin of an announcement-only group (its `send` role at least `Admin`);
+    - linking needs an admin of both; info by the announcement group's admins; deleting by
+      its owners.
+  - **Private channels** (§6.10):
+    - `Limits::max_channel_members` is 2,048 devices; a group stays at 1,024. The limit
+      follows the policy the commit leaves.
+    - The send path's channel rate class is 1 post a second per channel, bursting to 10, per
+      node (`send::groups::ChannelBudget`). Over it, reason 1 with the wait.
+  - **Tiers** (`songbird_groups::tiers`):
+    - up to 32 people: every device sends delivered receipts, with a 1 s window;
+    - larger groups: primaries only, with a 10 s window;
+    - channels: no receipts.
+  - **rayon:** the delivery service never builds an update path, the only place OpenMLS uses
+    rayon, so `api` runs no rayon threads; nothing is configured.
+- Evidence (Windows 11, `rustc 1.99.1`; Ryzen 9 7950X; live: SurrealDB v4.0.1 and Valkey 9.1.3
+  under podman):
+  - `tests/groups/tests/scale.rs`, release: the tables in `P05-M4.md`. At 1,024 X-Wing leaves
+    the server takes 8 to 13 ms per commit, and joining from a Welcome takes 45 ms.
+  - Harness `a_channel_has_its_own_size_limit`.
+  - Send: `channels_have_their_own_rate_class`, `the_channel_budget_refills`. Groups:
+    `tiers::tests`.
+  - `gate_p05` live, 7 of 7, with `communities_are_run_by_the_announcement_groups_admins`
+    (every community cell refused for those who may not, accepted for those who may).
+- Consequences:
+  - One threat-model §1 row (communities) and one §6 risk (the community graph, channel
+    subscribers seeing each other, large commits on fresh trees, the per-node rate class).
+  - Apps should commit a key update soon after joining a large group or channel.
+  - The caps are configuration (`Limits`); raising the channel cap needs a larger bundle
+    limit and a fresh look at what each subscriber downloads.
+
+## D-0071 — Prompt 5, milestone 3: invite links the server cannot read, joins by external commit, and join requests
+
+- Date: 2026-11-16
+- Status: accepted; built and passing live (report `P05-M3.md`); part of the Prompt 5 PR
+- Decided by: agent, under D-0065 and the standing instruction (Proton-level bar)
+- Context: Prompt 5 asks for invite links (with expiry, a use limit and revocation), "admin
+  approval for new members", and joining without the server learning more than it must.
+- Options considered:
+  - **The server holding the link's secret** was rejected. The link carries a secret the app
+    splits with HKDF: `auth` for the server, and a key for the group's encrypted info. The
+    server stores `SHA-256(auth)`, so its database alone opens no link, and it never sees the
+    key to the group's name and picture.
+  - **Joining by a Welcome from an admin's device** (the admin's app is online and adds the
+    joiner) was rejected for open links: the person would wait for an admin to be online. A
+    join is an external commit (RFC 9420 §12.4.3.2) that the server accepts once the link is
+    checked. It joins with the default role: external commits cannot change extensions.
+  - **Counting a link's use before validating the commit** was rejected: a failed commit would
+    spend the use. The use is counted in the transaction that stores the commit, so the last
+    use goes to exactly one join, and a retried join that already won is answered again.
+  - **Approval as an admin's signature over the request** was rejected as more machinery for
+    the same effect: approving someone is adding them in an ordinary commit, which the roles
+    rule already checks (`add` role), and the commit answers the request.
+  - **Distinct answers for wrong, used-up, expired and revoked links** were rejected: one 404
+    for all, and the secret compared in constant time.
+- Decision:
+  - **Endpoints** (`PROTOCOL.md` §6.8): `POST /v1/groups/links` and `/links/revoke` for the
+    `links` role; `/links/open`; `/join`; `/requests`; `/requests/list` and `/requests/decline`
+    for the `add` role.
+  - **Opening** gives the group's state if the device may join now. If a join needs approval
+    (the link's flag, or the group policy's), it gives only the encrypted info, no members.
+  - **Limits:** 16 links per group; 256 pending requests per group, lapsing after 7 days;
+    links live at most a year.
+  - **Budgets:** opening, joining and asking have their own budget per account (1 a second,
+    burst 5); managing links and requests uses the commit budget.
+  - **Retention:** an hourly sweep forgets lapsed requests and expired links. Used-up links go
+    when the group's next link is made.
+  - **Registry:** `grp_link` (by handle, indexed by group and expiry) and `grp_req` (by group
+    and account, indexed by group and time). `grp_log` gains an indexed `grp` field: reading a
+    group's change log no longer scans every group's.
+- Evidence (Windows 11, `rustc 1.99.1`; live: SurrealDB v4.0.1 and Valkey 9.1.3 under podman):
+  - Harness: a stranger's external commit is refused by `apply_commit`, accepted by
+    `apply_join` with the default role, and read by the members afterwards. A member's
+    ordinary commit is refused by `apply_join`.
+  - `gate_p05` live, 6 of 6. `parallel_joins_never_exceed_a_links_uses`: five people race a
+    two-use link, one join per epoch, exactly two get in. `invite_links_and_join_requests`
+    checks:
+    - the `links` role (403 for a member);
+    - a taken handle (409);
+    - wrong and unknown links get one answer (404), also when they carry a join;
+    - opening and joining by external commit (200, epoch 2), and the members reading the joiner;
+    - a lost answer to a join recognised after the link is spent;
+    - the use limit, expiry and the sweep, and revocation (403 for a member, then 404);
+    - approval: info only on opening, 403 `approval` on joining, asking twice, 409 `member` and
+      `open`, the list for members and 404 for outsiders, oldest first, approving by adding
+      (the request is gone), declining;
+    - opening links at speed: 429.
+  - Registry, `api`, send, proto and groups suites: 205; e2e: 45.
+- Consequences:
+  - Two threat-model §1 rows (links; pending requests naming the account that asks) and one §6
+    risk: whether a joiner held a link is the server's word. A malicious server can admit an
+    account, but not hide it: every member sees the join, its account and its default role.
+  - Apps must derive `auth` and the info key from the link's secret as §6.8 says.
+  - A client-checkable link proof (members verifying that a joiner held a link they made) is
+    possible later, if the owner wants it: the link's admins would share a MAC key in the
+    encrypted info.
+
+## D-0070 — Prompt 5, milestone 2: roles in an MLS extension every client verifies, mirrored on the server; leaving by proposal; encrypted metadata and change log
+
+- Date: 2026-11-16
+- Status: accepted; built and passing live (report `P05-M2.md`); part of the Prompt 5 PR
+- Decided by: agent, under D-0065 (owner: the matrix, client-only cells) and the standing
+  instruction (Proton-level bar)
+- Context: Prompt 5 asks for:
+  - roles owner, admin, moderator, member and read-only, in an MLS group-context extension that
+    every client verifies, mirrored on the server;
+  - a permission matrix with a negative test for every cell, on the client harness and on the
+    server;
+  - an encrypted, versioned metadata blob that only permitted roles may replace;
+  - a signed, encrypted change log for newly linked devices.
+- Options considered:
+  - **Roles per device** were rejected: a person is an account, and their devices share a role.
+  - **A role entry for every member** was rejected. Accounts not listed have the policy's
+    default role (`Member` in a group, `ReadOnly` in a channel). That keeps adding someone
+    a plain Add, and lets external commits (which RFC 9420 forbids from changing extensions)
+    keep working.
+  - **The server deciding roles from its own records** was rejected: the extension is in the
+    MLS group context, so a server that lied about roles would be detected by every client. The
+    server only mirrors it (in the roster) for the send path and `api`.
+  - **Leaving by a commit of one's own removal** is impossible in MLS (OpenMLS refuses
+    `CannotRemoveSelf`). A leaver sends a `SelfRemove` proposal; the server queues it and fans
+    it out; the next committer includes it and needs no role to.
+  - **The change log in clear for the server** was rejected: entries are ciphertext under a key
+    the members share. The server checks only the committer's signature, so it cannot forge one.
+- Decision:
+  - **The extension** `0xF5B0` (MLS private use; `crates/groups/src/roles.rs`). It holds the
+    policy, the least role for each of send, add, edit info, links and call, the default role
+    and flags (channel, approval), plus the explicit roles. It has one encoding. A
+    `required_capabilities` extension names it and `SelfRemove`, so every member must support
+    both (OpenMLS enforces it).
+  - **The matrix** is `roles::authorize`, run by the server before merging and by clients
+    before accepting:
+    - add a person: the `add` role;
+    - add a device to an account already present: `Member`;
+    - remove someone else: an admin who outranks them;
+    - one's own devices and dead devices: anyone;
+    - change the policy: `Admin`;
+    - change a role: an admin outranking both the old and the new role, or an owner;
+    - lowering one's own role: always;
+    - at least one owner; when every owner leaves, the committer names a successor;
+    - entries only for accounts still present.
+
+    The cells no commit carries:
+    - send: the send path, reason 14 `NotAllowed`;
+    - edit info: `POST /v1/groups/meta`;
+    - links and approval: M3;
+    - calls: Prompt 7;
+    - pin and delete others' messages: clients only (D-0065 §6).
+  - **The roster** in the registry becomes format 2: `version 2 | policy [7] | n × (device,
+    role)`. The send path reads it.
+  - **Leaving:** `POST /v1/groups/propose` takes only a member's own `SelfRemove`. The group's
+    state is compared and set on epoch and a new revision counter.
+  - **Metadata:** `POST /v1/groups/meta`, up to 16 KiB, compared and set on its version, for
+    roles at least `edit_info`. Returned with the state.
+  - **Change log:** bundle version 2 carries one entry (`ciphertext ≤ 2 KiB | Ed25519
+    signature` over a label, the group, the commit's epoch and the ciphertext). It is verified
+    against the committer's leaf key and stored in `grp_log`, the newest 1,000 per group.
+    `POST /v1/groups/log` serves it.
+- Evidence (Windows 11, `rustc 1.99.1`; live: SurrealDB v4.0.1 and Valkey 9.1.3 under podman):
+  - `crates/groups` `roles` unit tests (8): one encoding; every rule, with leaving and
+    succession.
+  - `tests/groups/tests/matrix.rs` (8): each commit-borne cell refused for the roles that may
+    not, and accepted for one that may, **on the server and on a client**. Also leaving and
+    succession, and that only self-removal is a standalone proposal.
+  - Change-log tests: an entry signed by another member, or replayed from another epoch, is
+    refused.
+  - `crates/send`: `only_roles_that_may_send_send`, and rosters with one encoding.
+  - `gate_p05` live, 4 of 4:
+    - the M1 tests;
+    - a member's removal of another refused (403);
+    - "only admins can send" (reason 14), metadata by role (403, 200, 409), the change log for
+      members, and leaving by proposal.
+  - Everything else in the registry, `api`, send, proto and e2e live suites passes (188).
+- Consequences:
+  - Three threat-model §1 changes: the group row names roles; the metadata ciphertext; the
+    change-log entries.
+  - Apps must support the roles extension and `SelfRemove` (or OpenMLS refuses to add them).
+
 ## D-0069 — The test suite and clippy on Windows (development only)
 
 - Date: 2026-11-16
@@ -158,6 +496,213 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   497/497, 52/52, 12/12 and 7/7.
 - Consequences: no test is skipped or weakened on Linux, and Linux with `docker` takes the same
   path as before.
+## D-0068 — Prompt 5, milestone 1: the supply chain of OpenMLS and the client harness
+
+- Date: 2026-11-16
+- Status: accepted; cargo-deny, cargo-audit and cargo-vet pass (CI's versions); the licence
+  exceptions **approved by the owner on 2026-11-16** with the M1 gate ("Approve all three")
+- Decided by: agent, under D-0065 (owner)
+- Context: D-0065 §1 brought OpenMLS into the workspace, and D-0066 the test harness on OpenMLS's
+  RustCrypto provider. cargo-deny refused three crates' licence and one advisory; cargo-vet
+  wanted 116 crates vetted.
+- Evidence and decision:
+  - **Licences:** `hpke-rs`, `hpke-rs-crypto` and `hpke-rs-rust-crypto` are MPL-2.0. They come
+    only through `openmls_rust_crypto` in `tests/groups`, which no service links (the
+    `crates/groups` manifest guard). MPL-2.0 is file-level copyleft; it binds code that is
+    distributed, which test crates are not. Per-crate exceptions, these three only.
+  - **Advisory RUSTSEC-2026-0387** (`crypto-bigint` 0.5.5: secret-dependent branches in
+    constant-time arithmetic). Ignored with a review date of 2027-02-16:
+    - it reaches the tree only through the harness's RustCrypto provider (its P-256/P-384 code);
+    - Songbird groups use X-Wing and Ed25519, never those curves, and a test run has no
+      observer for a timing side channel;
+    - the fix (0.7.6) needs `elliptic-curve` 0.14, which OpenMLS's providers have not adopted.
+  - **cargo-vet: 116 exemptions,** each with a note. cargo-vet resolves every optional feature,
+    so OpenMLS's optional backends (libcrux, RustCrypto, SQLite storage) count as dependencies
+    of `crates/groups` even though `default-features = false` never builds them. A
+    `safe-to-run` policy for the harness changed nothing for that reason, and was not kept.
+    - **11 are in the server build** (`api` only; delivery, worker and push do not link OpenMLS,
+      shown by `cargo tree -i openmls`): `openmls`, `openmls_traits`,
+      `openmls_serialization_helpers`, `tls_codec`, `tls_codec_derive`, `rayon`, `rayon-core`,
+      `crossbeam-deque`, `crossbeam-epoch`, `postcard`, `cobs`. Noted "audit backlog".
+    - **105 are never built for a server.** Noted as such.
+    - Totals now: 167 fully audited, 26 partially, 374 exempted.
+  - **cargo-audit** (0.22.2) reads every lockfile entry, so it also reports OpenMLS's optional
+    backends, which cargo-deny's feature graph leaves out. Six findings, none on `main`
+    (479 crates, clean), all ignored in a new `.cargo/audit.toml` with their reasons:
+    - RUSTSEC-2026-0387 (`crypto-bigint`, above): built in the test harness only;
+    - RUSTSEC-2026-0329, -0330 and -0331 (`libcrux-hmac-drbg`, `libcrux-kem`: panics on some
+      lengths and short keys), RUSTSEC-2026-0459 (`libsqlite3-sys`: an SQLite CVE) and
+      RUSTSEC-2026-0173 (`proc-macro-error2` unmaintained): never built at all (`cargo tree
+      -i` finds no path, tests included).
+- Consequences: the audit backlog grows by 11 crates that `api` runs, and by 105 that ship
+  nowhere. On Windows, `cargo vet` calls the store "not correctly formatted" until `cargo vet fmt`
+  rewrites its line endings; the content does not change (a cargo-vet quirk; CI runs on Linux).
+
+## D-0067 — Prompt 5, milestone 1 (integration): groups in the registry, commits over `api`, group messages fanned out from the roster
+
+- Date: 2026-11-16
+- Status: accepted; built and passing live; the M1 gate (`P05-M1.md`) and the two
+  threat-model §1 rows **approved by the owner on 2026-11-16**
+- Decided by: agent, under D-0065 (owner) and the standing instruction (Proton-level bar)
+- Context: D-0066's core needed a home for each group's state, an authority for its epoch, a
+  way for commits and Welcomes to reach devices, and a send path for group messages.
+- Options considered:
+  - **Keep the epoch in the mailbox** (D-0026, flag `0x01`). Rejected: a commit must be
+    validated against the group's state before anyone stores it, and that state lives with the
+    registry, not in each mailbox partition. The flag is retired before the gate.
+  - **Fan out from a worker job.** Rejected: the worker has no send path, `api` does (D-0044).
+    `api` fans out itself and re-drives what a crash interrupted.
+  - **Let clients list a group message's recipients,** as a shared body does today. Rejected:
+    the server knows the roster. Fanning out from it means a removed device never receives a
+    byte, and membership replaces D-0064's interim contact-key rule.
+  - **Fan-out keys from the group and epoch alone.** Rejected: a member could send something
+    under the same key to the same devices first, and the real commit would be dropped as a
+    replay. The keys are an HMAC under a key derived from the cluster secret.
+  - **Delivery reads `PrivateMessage`s through `crates/groups`.** Rejected: delivery would link
+    OpenMLS. The allocation-free prefix parser moved to `songbird-proto` (`mls.rs`).
+- Decision:
+  - **Registry** (`crates/accounts/src/groups.rs`): `grp:[group]` holds the epoch, the
+    D-0066 record, the roster (16 bytes per device, sorted) and the hash of the last commit.
+    `commit_group` compares and sets the epoch and writes `grp_fanout:[group, epoch]` in one
+    transaction (the `put_device_list` pattern).
+  - **`api`** (`services/api/src/groups.rs`, PROTOCOL §6.2–6.4): `POST /v1/groups`,
+    `/v1/groups/commit` and `/v1/groups/state`.
+    - A per-device commit budget (2 a second, burst 10, keyed records).
+    - CPU work in `spawn_blocking`.
+    - The answer only after every recipient's mailbox stored the fan-out.
+    - A retried winning commit answered 200 again.
+    - `redrive` every 5 s for fan-outs older than 10 s.
+  - **Send path** (`crates/send/src/groups.rs`, PROTOCOL §6.5): the `GROUP` flag `0x40` and
+    the `Rosters` trait, with a per-node cache (papaya, at most 1 s, refreshed at once for a
+    newer epoch). The message's epoch may be the roster's or the one before. New reasons:
+    12 not a member, 13 invalid group message.
+  - Pending devices count as unknown to groups (`Directory::listed_account`).
+- Evidence (Windows 11, `rustc 1.99.1`):
+  - `crates/send`: `group_messages_go_to_the_roster_and_only_from_members` (roster only, not
+    the sender, previous epoch accepted, seven refusals with nothing stored) and
+    `group_messages_without_rosters_are_unavailable`.
+  - `crates/proto`: `group_messages_name_the_group_and_list_no_devices` (round trip, every flag
+    rule) and the prefix parser's tests.
+  - 219 tests across the changed crates pass; clippy `-D warnings` is clean on them.
+  - `tests/e2e/tests/gate_p05.rs`, live (SurrealDB v4.0.1 and Valkey 9.1.3, the pinned images,
+    under podman; memory mailbox), **3 of 3, ten runs in a row (30 of 30)**:
+    - create, add, Welcome, state, a group message, removal, and a removed device refused
+      after the roster cache's second;
+    - five members committing concurrently over HTTP, one winner per epoch, no fork;
+    - a retried commit answered once; an interrupted fan-out re-driven exactly once.
+  - The existing live suites with the new schema and send path: `crates/accounts`,
+    `services/api`, `crates/send`, and in `tests/e2e`: `invariants`, `send_api`,
+    `registration`, `restore`, `allocations`, `receipts_load`. All pass.
+  - `gate_m5`, `gate_p03` and `gate_p04` need RustFS and `valkey-jobs` and **did not run here**.
+- Consequences:
+  - Threat model §1 gains two rows (below in the M1 report), for the owner.
+  - The second-long window for removed devices is an open risk (§6).
+  - Groups are not yet in the GDPR export and deletion; they get there with M2's roles, since
+    an account's deletion must also remove its leaves.
+
+## D-0066 — Prompt 5, milestone 1 (core): OpenMLS `PublicGroup` behind a verify-only aws-lc-rs provider; X-Wing `0x004F`; group state as postcard; commits over HTTP
+
+- Date: 2026-11-16
+- Status: accepted; built (`crates/groups`, `tests/groups`); integrated by D-0067; the M1 gate
+  **approved by the owner on 2026-11-16**
+- Decided by: agent, under D-0065 (owner) and the standing instruction (Proton-level bar)
+- Context: D-0065 §1 and §3 needed a concrete provider, ciphersuite, state format and transport.
+- Options considered and evidence (Windows 11, `rustc 1.99.1`, release build):
+  - **The server's provider: verify only.** Hashing, Ed25519 verification (with D-0048's
+    honest-key check), HMAC and HKDF on aws-lc-rs; AEAD, HPKE, signing and key generation return
+    errors. The delivery service never holds a group secret, so it cannot be made to use one.
+    - Known answers: RFC 5869 case 1, RFC 8032 test 1.
+    - OpenMLS's RustCrypto provider plays the clients and interoperates byte for byte (every
+      harness test).
+  - **The ciphersuite: X-Wing `0x004F`**
+    (`MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519`, draft-ietf-mls-pq-ciphersuites,
+    provisional code point).
+    - Chosen over `0x004D` (an older X-Wing draft suite that only libcrux implements); RustCrypto
+      implements `0x004F`.
+    - Groups accept only `GROUP_CIPHERSUITES` (one constant). The KeyPackage upload check (D-0051)
+      still allows `0x0001`/`0x0003` until M1's integration extends it.
+    - A provisional code point that changes later means new groups under the new value, since
+      every client is ours.
+  - **Stored state: OpenMLS's public storage format, as postcard, tagged with its storage
+    version.** This replaces the plan's "RFC 9420 wire bytes", because OpenMLS rebuilds a
+    `PublicGroup` from them only through `from_external`. That call checks the lifetimes of
+    never-updated leaves, so a member idle beyond 100 days (D-0051) would make the group
+    unloadable.
+    - postcard 1.1.3 (`cobs`, `serde`; a specified, stable format) instead of JSON: the stored
+      tree is 1.67 KB per member against 6.26 KB (21 X-Wing members: 35,121 bytes against
+      131,461).
+    - Records failing to decode are refused (fuzz target `mls_commit`).
+  - **Commits travel over HTTP to `api`, not in the WebSocket `Send` frame.** X-Wing commits grow
+    about 1.2 KB per unmerged leaf (adding 20 members one at a time: 5,479 to 32,611 bytes), past
+    the 64 KiB envelope and 1 MiB frame limits long before 1,024 members.
+    - Group application messages stay on the WebSocket. There the send path reads only the
+      `PrivateMessage` prefix (group, epoch, content type), allocation-free, and checks the
+      roster.
+    - M4 measures commits and Welcomes at 1,024 and 5,000 members; D-0065 §3 comes back to the
+      owner if they are too large.
+- Decision (Songbird's checks, on top of OpenMLS's RFC 9420 validation, before anything is
+  merged):
+  - a member commit is signed by the leaf whose credential is the authenticated device;
+  - credentials are basic, naming a 16-byte device the directory knows, and are never changed by
+    an update;
+  - only add, remove, update, self-remove, and external init (external commits only) proposals;
+  - an external commit only for an account already in the group, removing at most the joining
+    device's own old leaf (RFC 9420 §12.4.3.2). A reinstalled device is a new device: it joins,
+    then a member commit removes the dead leaf;
+  - at most 1,024 leaves and a 4 MiB bundle;
+  - the Welcome has exactly one secret per added KeyPackage;
+  - the uploaded `GroupInfo` is the new epoch's, signed by the committer;
+  - the group is consumed by `apply_commit` and returned only on success, so half-checked state
+    cannot be used.
+- Evidence:
+  - `tests/groups`:
+    - `lifecycle`, 11 tests: every refusal above, adds and removes and updates, reloads from
+      stored bytes, an application message readable by the others;
+    - `convergence`: six concurrent commits, one winner per epoch, no fork; and a property test,
+      24 random sequences of adds, removals and races, in which every honest client always has
+      the server's epoch and roster and can read every other member.
+  - `crates/groups`: 9 unit tests, among them the wire parsers' malformation and minimality
+    tests and the manifest guard (no service links OpenMLS's client providers or the harness).
+  - Fuzz targets `mls_wire` and `mls_commit`, written and type-checked. **Not yet run:** this
+    machine has no nightly toolchain; they run before the M1 gate.
+- Consequences:
+  - New crates in the server build: `openmls`, `openmls_traits`,
+    `openmls_serialization_helpers`, `tls_codec`, `tls_codec_derive`, `rayon`, `rayon-core`,
+    `crossbeam-deque`, `crossbeam-epoch`, `postcard` and `cobs`. Each needs a cargo-vet entry.
+  - `Cargo.lock` grows from 479 to 600 entries. Most are OpenMLS's optional backends, which
+    Cargo resolves but never builds, plus the harness's test-only RustCrypto.
+  - OpenMLS upgrades must keep stored records loadable (a fixture test with the integration).
+
+## D-0065 — Prompt 5: the plan, and the owner's decisions it needed
+
+- Date: 2026-11-16
+- Status: accepted (owner, 2026-11-16: "Approve all")
+- Decided by: owner (every recommendation below), on the agent's plan `docs/reports/P05-plan.md`
+- Context:
+  - Prompt 5 asks for "OpenMLS for validation", but D-0051 kept OpenMLS off the server
+    (194 crates with its crypto providers).
+  - Server-side authorization needs a roster, which is group metadata.
+  - Issue #24 asks for post-quantum groups.
+  - Public channels and delivered receipts in large groups are open owner decisions.
+- Options considered and evidence: in the plan ("Findings"). In short:
+  - OpenMLS's core needs no crypto backend; aws-lc-rs 1.19.0 has ML-KEM-768 and SHA3-256 for
+    X-Wing.
+  - Two permission cells (pin, delete others' messages) live inside ciphertext the server never
+    sees.
+- Decisions (the agent's recommendations, all accepted by the owner):
+  1. OpenMLS `PublicGroup` on the server with Songbird's own aws-lc-rs provider; D-0051's parser
+     stays the upload check.
+  2. The server keeps the roster (devices, accounts, roles, epoch) and nothing else in the
+     clear; a new threat-model row.
+  3. X-Wing by default for every new group, unless the 1,024-member benchmark says otherwise.
+  4. No public channels in Prompt 5.
+  5. Delivered receipts from every device up to 32 members, primaries only from 33 to 1,024,
+     none in channels.
+  6. Pinning and deleting others' messages are enforced by clients only.
+  7. One branch, one PR, a commit per milestone (M1 to M5).
+- Consequences: OpenMLS (core only) joins the workspace behind a Songbird provider on aws-lc-rs;
+  new groups are post-quantum; a roster row goes to threat model §1 for approval with M1; public
+  channels stay an open owner decision for a later prompt.
 
 ## D-0064 — Prompt 4: the independent security review's findings, fixed
 

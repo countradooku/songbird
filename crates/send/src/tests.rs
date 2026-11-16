@@ -180,7 +180,6 @@ async fn user_envelopes_in_the_system_frame_format_are_refused() {
         hints: songbird_proto::frame::SendHints::default(),
         req_id: 1,
         idempotency_key: [4; 16],
-        mls: None,
         payload: SendPayload::Shared {
             devices: vec![dev(2), dev(3)],
             body: forged,
@@ -746,7 +745,6 @@ async fn groups_and_sealed_sends_are_not_classified_as_strangers() {
         hints: songbird_proto::frame::SendHints::default(),
         req_id: 1,
         idempotency_key: [1; 16],
-        mls: None,
         payload: SendPayload::Shared {
             devices: vec![dev(2), dev(3), dev(5)],
             body: Bytes::from_static(b"group"),
@@ -835,4 +833,293 @@ async fn without_a_gate_requests_and_broadcasts_are_unavailable() {
     )
     .await;
     assert_eq!(st, SendStatus::Accepted);
+}
+
+/// A group application message (`PrivateMessage`) of group `g` at `epoch`.
+fn group_message(g: [u8; 16], epoch: u64, content_type: u8) -> Bytes {
+    let mut m = vec![0, 1, 0, 2, 16];
+    m.extend_from_slice(&g);
+    m.extend_from_slice(&epoch.to_be_bytes());
+    m.push(content_type);
+    m.extend_from_slice(&[0, 1, 0xAA, 3, 1, 2, 3]);
+    Bytes::from(m)
+}
+
+fn group_send(g: [u8; 16], body: Bytes) -> SendFrame {
+    SendFrame {
+        req_id: 9,
+        idempotency_key: [0x77; 16],
+        hints: songbird_proto::frame::SendHints {
+            group: Some(g),
+            ..Default::default()
+        },
+        payload: SendPayload::Shared {
+            devices: Vec::new(),
+            body,
+        },
+    }
+}
+
+fn with_rosters(f: &mut Fixture, g: [u8; 16], epoch: u64, devices: &[DeviceId]) {
+    let r = MemoryRosters::default();
+    r.set(g, epoch, devices.to_vec());
+    f.policy.rosters = Some(Arc::new(r));
+}
+
+#[tokio::test]
+async fn group_messages_go_to_the_roster_and_only_from_members() {
+    const G: [u8; 16] = [0x5B; 16];
+    let mut f = Fixture::new();
+    // Device 3 (Bob's second device) is not in the group: it never receives, and members
+    // need no access keys (membership replaces D-0064's interim rule).
+    with_rosters(&mut f, G, 4, &[dev(1), dev(2)]);
+    let mut scratch = Vec::new();
+    let st = f
+        .path()
+        .send(
+            &dev(1),
+            group_send(G, group_message(G, 4, 1)),
+            Instant::now(),
+            &mut scratch,
+        )
+        .await;
+    assert_eq!(st, SendStatus::Accepted, "{st:?}");
+    assert_eq!(f.mailbox.count_pending(&dev(2)).await.unwrap(), 1);
+    assert_eq!(f.mailbox.count_pending(&dev(3)).await.unwrap(), 0);
+    assert_eq!(
+        f.mailbox.count_pending(&dev(1)).await.unwrap(),
+        0,
+        "not to the sender"
+    );
+
+    // The previous epoch is still accepted (sent just before a commit landed).
+    let mut prev = group_send(G, group_message(G, 3, 1));
+    prev.idempotency_key = [0x78; 16];
+    let st = f
+        .path()
+        .send(&dev(2), prev, Instant::now(), &mut scratch)
+        .await;
+    assert_eq!(st, SendStatus::Accepted, "{st:?}");
+
+    let refused = |reason| SendStatus::Rejected {
+        reason,
+        retry_after_ms: 0,
+    };
+    let cases = [
+        // A device outside the roster.
+        (
+            dev(3),
+            group_send(G, group_message(G, 4, 1)),
+            refused(RejectReason::NotMember),
+        ),
+        // An unknown group: the same answer.
+        (
+            dev(1),
+            group_send([9; 16], group_message([9; 16], 4, 1)),
+            refused(RejectReason::NotMember),
+        ),
+        // Too old, or ahead of the roster.
+        (
+            dev(1),
+            group_send(G, group_message(G, 2, 1)),
+            refused(RejectReason::StaleEpoch),
+        ),
+        (
+            dev(1),
+            group_send(G, group_message(G, 5, 1)),
+            refused(RejectReason::StaleEpoch),
+        ),
+        // Another group's message under this group's flag; a handshake; not MLS at all.
+        (
+            dev(1),
+            group_send(G, group_message([9; 16], 4, 1)),
+            refused(RejectReason::InvalidGroupMessage),
+        ),
+        (
+            dev(1),
+            group_send(G, group_message(G, 4, 3)),
+            refused(RejectReason::InvalidGroupMessage),
+        ),
+        (
+            dev(1),
+            group_send(G, Bytes::from_static(b"hello")),
+            refused(RejectReason::InvalidGroupMessage),
+        ),
+    ];
+    for (i, (sender, frame, want)) in cases.into_iter().enumerate() {
+        let mut frame = frame;
+        frame.idempotency_key = [u8::try_from(i).unwrap(); 16];
+        let st = f
+            .path()
+            .send(&sender, frame, Instant::now(), &mut scratch)
+            .await;
+        assert_eq!(st, want, "case {i}");
+    }
+    assert_eq!(
+        f.mailbox.count_pending(&dev(2)).await.unwrap(),
+        1,
+        "nothing refused was stored"
+    );
+}
+
+#[tokio::test]
+async fn group_messages_without_rosters_are_unavailable() {
+    let f = Fixture::new();
+    let g = [0x5B; 16];
+    let st = f
+        .path()
+        .send(
+            &dev(1),
+            group_send(g, group_message(g, 1, 1)),
+            Instant::now(),
+            &mut Vec::new(),
+        )
+        .await;
+    assert!(matches!(
+        st,
+        SendStatus::Rejected {
+            reason: RejectReason::Unavailable,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn only_roles_that_may_send_send() {
+    // "Only admins can send" (D-0070): the roster's send role is Admin (3); device 1 is a
+    // member, device 2 an admin.
+    const G: [u8; 16] = [0x5C; 16];
+    let mut f = Fixture::new();
+    let r = MemoryRosters::default();
+    r.set_roles(G, 4, [3, 1, 1, 3, 1, 1, 0], vec![(dev(1), 1), (dev(2), 3)]);
+    f.policy.rosters = Some(Arc::new(r));
+    let mut scratch = Vec::new();
+    let st = f
+        .path()
+        .send(
+            &dev(1),
+            group_send(G, group_message(G, 4, 1)),
+            Instant::now(),
+            &mut scratch,
+        )
+        .await;
+    assert_eq!(
+        st,
+        SendStatus::Rejected {
+            reason: RejectReason::NotAllowed,
+            retry_after_ms: 0
+        }
+    );
+    assert_eq!(
+        f.mailbox.count_pending(&dev(2)).await.unwrap(),
+        0,
+        "nothing stored"
+    );
+    let mut admin = group_send(G, group_message(G, 4, 1));
+    admin.idempotency_key = [0x79; 16];
+    let st = f
+        .path()
+        .send(&dev(2), admin, Instant::now(), &mut scratch)
+        .await;
+    assert_eq!(st, SendStatus::Accepted);
+    assert_eq!(f.mailbox.count_pending(&dev(1)).await.unwrap(), 1);
+}
+
+#[test]
+fn rosters_have_one_encoding() {
+    let policy = [1, 1, 1, 3, 1, 1, 0];
+    let members = vec![(dev(1), 1), (dev(2), 3)];
+    let b = Roster::encode(policy, &members);
+    let r = Roster::from_bytes(7, &b).unwrap();
+    assert_eq!(
+        (r.role(&dev(2)), r.role(&dev(9)), r.send_min),
+        (Some(3), None, 1)
+    );
+    // Unsorted, a role above Owner, a short entry, or another version: refused.
+    assert!(Roster::from_bytes(7, &Roster::encode(policy, &[(dev(2), 1), (dev(1), 1)])).is_none());
+    assert!(Roster::from_bytes(7, &Roster::encode(policy, &[(dev(1), 5)])).is_none());
+    assert!(Roster::from_bytes(7, &b[..b.len() - 1]).is_none());
+    let mut v1 = b.clone();
+    v1[0] = 1;
+    assert!(Roster::from_bytes(7, &v1).is_none());
+}
+
+#[tokio::test]
+async fn channels_have_their_own_rate_class() {
+    // A channel (flag 0x01): admins post, subscribers read; two posts at once, then one a second.
+    const C: [u8; 16] = [0x5D; 16];
+    let mut f = Fixture::new();
+    let r = MemoryRosters::default();
+    r.set_roles(C, 4, [3, 3, 3, 3, 3, 0, 1], vec![(dev(1), 0), (dev(2), 3)]);
+    f.policy.rosters = Some(Arc::new(r));
+    f.policy.channels = Arc::new(groups::ChannelBudget::new(1, 2));
+    let mut scratch = Vec::new();
+    let post = |k: u8| {
+        let mut s = group_send(C, group_message(C, 4, 1));
+        s.idempotency_key = [k; 16];
+        s
+    };
+    let now = Instant::now();
+    for k in [1, 2] {
+        let st = f.path().send(&dev(2), post(k), now, &mut scratch).await;
+        assert_eq!(st, SendStatus::Accepted);
+    }
+    let st = f.path().send(&dev(2), post(3), now, &mut scratch).await;
+    let SendStatus::Rejected {
+        reason: RejectReason::RateLimited,
+        retry_after_ms,
+    } = st
+    else {
+        panic!("{st:?}")
+    };
+    assert!((1..=1_000).contains(&retry_after_ms), "{retry_after_ms}");
+    assert_eq!(f.mailbox.count_pending(&dev(1)).await.unwrap(), 2);
+    // A subscriber's post is refused before it costs the channel anything.
+    let st = f.path().send(&dev(1), post(4), now, &mut scratch).await;
+    assert!(
+        matches!(
+            st,
+            SendStatus::Rejected {
+                reason: RejectReason::NotAllowed,
+                ..
+            }
+        ),
+        "{st:?}"
+    );
+}
+
+#[test]
+fn the_channel_budget_refills() {
+    let b = groups::ChannelBudget::new(2, 1);
+    let t = Instant::now();
+    assert!(b.take(&[1; 16], t).is_ok());
+    let wait = b.take(&[1; 16], t).unwrap_err();
+    assert_eq!(wait, Duration::from_millis(500));
+    // Another channel is not affected; the first refills after its interval.
+    assert!(b.take(&[2; 16], t).is_ok());
+    assert!(b.take(&[1; 16], t + Duration::from_millis(500)).is_ok());
+}
+
+#[tokio::test]
+async fn devices_gone_from_the_directory_get_no_group_messages() {
+    // Device 0x77 was deleted (its account is gone) but no member has committed its removal
+    // yet: it stays in the roster and gets nothing (D-0073).
+    const G: [u8; 16] = [0x5E; 16];
+    let mut f = Fixture::new();
+    let r = MemoryRosters::default();
+    r.set(G, 4, vec![dev(1), dev(2), dev(0x77)]);
+    f.policy.rosters = Some(Arc::new(r));
+    let mut scratch = Vec::new();
+    let st = f
+        .path()
+        .send(
+            &dev(1),
+            group_send(G, group_message(G, 4, 1)),
+            Instant::now(),
+            &mut scratch,
+        )
+        .await;
+    assert_eq!(st, SendStatus::Accepted);
+    assert_eq!(f.mailbox.count_pending(&dev(2)).await.unwrap(), 1);
+    assert_eq!(f.mailbox.count_pending(&dev(0x77)).await.unwrap(), 0);
 }

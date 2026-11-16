@@ -29,6 +29,8 @@ fn not_attributable() -> serde_json::Value {
         "Throttle and nonce records in valkey-hot: keyed hashes that cannot be traced back to you; expire within hours.",
         "Key transparency leaves: name your account only through the salt above, deleted with your account.",
         "Encrypted backups: the same registry data as above, kept up to 93 days.",
+        "Groups: each group's end-to-end encrypted state names its members' devices (device IDs and public keys) and the accounts holding a role. After your account is deleted these stay in the groups listed above until a member's app commits your removal (the server cannot change a group without its members); they no longer lead to you on the server, and nothing is delivered to your deleted devices.",
+        "Group change logs and invite links: ciphertext only the members can read, and hashes; not linked to your account.",
     ])
 }
 
@@ -360,6 +362,82 @@ impl Registry {
             list(2)
                 .iter()
                 .filter_map(|x| x.as_bytes().map(hex::encode))
+                .collect::<Vec<_>>()
+                .into(),
+        );
+        self.export_groups(account, out).await
+    }
+
+    /// The groups the account's devices are in, with their roles and communities, and its
+    /// pending requests to join groups (Prompt 5, D-0073).
+    async fn export_groups(
+        &self,
+        account: &AccountId,
+        out: &mut serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), RegistryError> {
+        const ROLES: [&str; 5] = ["read_only", "member", "moderator", "admin", "owner"];
+        let a = vec![var("a", bytes(account.as_bytes()))];
+        let ds = self
+            .db
+            .query1(
+                "SELECT VALUE meta::id(id)[0] FROM device WHERE account = $a;",
+                a.clone(),
+            )
+            .await?;
+        let mine: Vec<[u8; 16]> = rows(ds.clone()).iter().filter_map(id16).collect();
+        let v = self
+            .db
+            .query(
+                "SELECT meta::id(id)[0] AS g, epoch, roster FROM grp WHERE devs CONTAINSANY $ds;
+                 SELECT meta::id(id)[0] AS g, <string> at AS at FROM grp_req WHERE acct = $a;",
+                vec![var("ds", ds), var("a", bytes(account.as_bytes()))],
+            )
+            .await?;
+        let list = |i: usize| v.get(i).cloned().map(rows).unwrap_or_default();
+        let mut groups = Vec::new();
+        for g in list(0) {
+            let Some(id) = g.get("g").and_then(id16) else {
+                return Err(RegistryError::Shape);
+            };
+            let roster = g
+                .get("roster")
+                .and_then(Value::as_bytes)
+                .cloned()
+                .unwrap_or_default();
+            // `version 2 | policy [7] | n × (device [16] | role u8)`.
+            let devices: Vec<serde_json::Value> = roster
+                .get(8..)
+                .unwrap_or_default()
+                .as_chunks::<17>()
+                .0
+                .iter()
+                .filter(|c| mine.iter().any(|d| c[..16] == d[..]))
+                .map(|c| {
+                    serde_json::json!({
+                        "id": hex::encode(&c[..16]),
+                        "role": ROLES.get(usize::from(c[16])).copied(),
+                    })
+                })
+                .collect();
+            let community = self.community_of(&id).await?.map(hex::encode);
+            groups.push(serde_json::json!({
+                "group": hex::encode(id),
+                "epoch": g.get("epoch").and_then(Value::as_i64),
+                "devices": devices,
+                "community": community,
+            }));
+        }
+        out.insert("groups".into(), groups.into());
+        out.insert(
+            "group_requests".into(),
+            list(1)
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "group": r.get("g").and_then(id16).map(hex::encode),
+                        "asked": r.get("at").and_then(Value::as_text),
+                    })
+                })
                 .collect::<Vec<_>>()
                 .into(),
         );

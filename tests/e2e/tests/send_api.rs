@@ -179,6 +179,7 @@ async fn stack(limits: Limits, sends_per_sec: u32, send_burst: u32) -> Option<St
         group_send_burst: send_burst,
         rate_key: songbird_api::messages::rate_key(&random32()).unwrap(),
         metrics: metrics.send.clone(),
+        groups: None,
     };
     let app = Arc::new(App {
         requests: None,

@@ -156,7 +156,6 @@ async fn run(s: &Scenario) -> Counts {
             hints: songbird_proto::frame::SendHints::default(),
             req_id: 1,
             idempotency_key: key,
-            mls: None,
             payload,
         };
         path.store(&sender, &mut frame, Instant::now(), &mut scratch)

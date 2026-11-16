@@ -10,6 +10,7 @@ license.workspace = true
 [dependencies]
 songbird-types.workspace = true
 songbird-proto.workspace = true
+papaya.workspace = true
 songbird-mailbox.workspace = true
 songbird-router.workspace = true
 songbird-jobs.workspace = true

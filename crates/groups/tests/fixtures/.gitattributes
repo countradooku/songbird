@@ -1,0 +1,2 @@
+# Stored-group fixtures are compared byte for byte (record_fixtures.rs): never convert them.
+* -text

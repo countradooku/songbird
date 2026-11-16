@@ -38,6 +38,10 @@ aws-lc-rs.workspace = true
 hex.workspace = true
 redis.workspace = true
 serde_json.workspace = true
+songbird-groups.workspace = true
+songbird-groups-harness = { path = "../groups" }
+postcard.workspace = true
+futures-util.workspace = true
 songbird-alloc-count.workspace = true
 songbird-telemetry.workspace = true
 futures-core.workspace = true

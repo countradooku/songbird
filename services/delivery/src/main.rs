@@ -389,6 +389,17 @@ impl Service for Delivery {
                 |(_, n)| *n,
             ),
             gate: gate.map(|(g, _)| g),
+            // Group rosters (Prompt 5) come from the registry; a static development directory
+            // has no groups, and group messages are refused as unavailable.
+            rosters: follow.as_ref().map(|(registry, ..)| {
+                let r: Arc<dyn songbird_send::Rosters> =
+                    Arc::new(songbird_send::RegistryRosters::new(
+                        Arc::clone(registry),
+                        songbird_send::groups::ROSTER_TTL,
+                    ));
+                r
+            }),
+            channels: Arc::default(),
         });
         let mut pusher_task = None;
         if let Some(jobs) = self.jobs {

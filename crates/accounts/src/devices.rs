@@ -59,7 +59,7 @@ pub struct ListChange {
 }
 
 impl Registry {
-    async fn retry<T>(
+    pub(crate) async fn retry<T>(
         &self,
         sql: &str,
         vars: impl Fn() -> Vec<(String, Value)>,
@@ -483,6 +483,7 @@ impl Registry {
                  DELETE otpk WHERE device INSIDE $gone RETURN NONE;
                  DELETE otkem WHERE device INSIDE $gone RETURN NONE;
                  DELETE mlskp WHERE device INSIDE $gone RETURN NONE;
+                 DELETE mlskp_used WHERE device INSIDE $gone RETURN NONE;
                  FOR $d IN $gone { DELETE device:[$d] RETURN NONE; };
                  UPDATE directory:v SET version += 1 RETURN NONE;
                  COMMIT TRANSACTION;",
@@ -504,7 +505,8 @@ impl Registry {
                 "RETURN count(SELECT id FROM device WHERE meta::id(id)[0] INSIDE $ds)
                    + count(SELECT id FROM otpk WHERE device INSIDE $ds)
                    + count(SELECT id FROM otkem WHERE device INSIDE $ds)
-                   + count(SELECT id FROM mlskp WHERE device INSIDE $ds);",
+                   + count(SELECT id FROM mlskp WHERE device INSIDE $ds)
+                   + count(SELECT id FROM mlskp_used WHERE device INSIDE $ds);",
                 vec![var("ds", Value::Array(ds))],
             )
             .await?;

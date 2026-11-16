@@ -35,8 +35,10 @@
 pub mod admin;
 pub mod auth;
 pub mod client;
+pub mod communities;
 pub mod config;
 pub mod devices;
+pub mod groups;
 pub mod keys;
 pub mod kt;
 pub mod messages;
@@ -426,6 +428,29 @@ impl App {
             ) => self.keys(req).await,
             (_, "/v1/blocks" | "/v1/account/requests", None) => self.requests(req).await,
             (&Method::POST, "/v1/reports", None) => self.report(req).await,
+            (
+                &Method::POST,
+                "/v1/groups"
+                | "/v1/groups/commit"
+                | "/v1/groups/state"
+                | "/v1/groups/propose"
+                | "/v1/groups/meta"
+                | "/v1/groups/log"
+                | "/v1/groups/links"
+                | "/v1/groups/links/revoke"
+                | "/v1/groups/links/open"
+                | "/v1/groups/join"
+                | "/v1/groups/requests"
+                | "/v1/groups/requests/list"
+                | "/v1/groups/requests/decline"
+                | "/v1/communities"
+                | "/v1/communities/groups/add"
+                | "/v1/communities/groups/remove"
+                | "/v1/communities/meta"
+                | "/v1/communities/state"
+                | "/v1/communities/delete",
+                None,
+            ) => self.groups(req).await,
             (_, p, None) if p.starts_with("/v1/account/") => self.factors(req).await,
             (_, p, None) if p.starts_with("/v1/kt/") => self.kt(req).await,
             (_, p, None) if p.starts_with("/v1/provisioning") || p.starts_with("/v1/devices") => {
@@ -632,6 +657,70 @@ impl App {
     }
 
     /// `POST /v1/reports` ([`reports`], Prompt 4).
+    /// `POST /v1/groups`, `/v1/groups/commit`, `/v1/groups/state` (Prompt 5, `groups.rs`).
+    async fn groups(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let m = self.messages.as_ref().ok_or_else(unavailable)?;
+        let g = m.groups.as_ref().ok_or_else(unavailable)?;
+        let path = req.uri().path().to_owned();
+        let (device, body) = self.authenticate_body(req, groups::MAX_BODY).await?;
+        let row = self
+            .registry
+            .device(&device)
+            .await
+            .map_err(|_| unavailable())?
+            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+        if row.pending {
+            return Ok(device_outcome(devices::Outcome::Forbidden("pending")));
+        }
+        let budget = match path.as_str() {
+            // Reads rebuild the tree: their own budget (D-0074).
+            "/v1/groups/state" | "/v1/groups/log" | "/v1/communities/state" => {
+                Some((g.read_record(&device), g.reads_per_sec, g.read_burst))
+            }
+            // Anything a link opens has its own, smaller budget per account (D-0071), shared by
+            // its devices: links are not guessable, but a leaked one should not be tried at speed.
+            "/v1/groups/links/open" | "/v1/groups/join" | "/v1/groups/requests" => {
+                Some((g.link_record(&row.account), g.links_per_sec, g.link_burst))
+            }
+            // Validating a commit costs CPU: a per-device budget, shared by creations,
+            // proposals, metadata writes and link and request management.
+            _ => Some((g.rate_record(&device), g.commits_per_sec, g.commit_burst)),
+        };
+        if let Some((record, per_sec, burst)) = budget {
+            let wait = self
+                .gcra(&record, per_sec, burst)
+                .await
+                .map_err(|()| unavailable())?;
+            if wait > 0 {
+                return Ok(device_outcome(devices::Outcome::Throttled(wait)));
+            }
+        }
+        let r = &self.registry;
+        let outcome = match path.as_str() {
+            "/v1/groups" => g.create(r, m, device, body).await,
+            "/v1/groups/commit" => g.commit(r, m, device, body).await,
+            "/v1/groups/propose" => g.propose(r, m, device, body).await,
+            "/v1/groups/meta" => g.meta(r, device, body).await,
+            "/v1/groups/log" => g.log(r, m, device, body).await,
+            "/v1/groups/links" => g.create_link(r, device, body).await,
+            "/v1/groups/links/revoke" => g.revoke_link(r, device, body).await,
+            "/v1/groups/links/open" => g.open(r, body).await,
+            "/v1/groups/join" => g.join(r, m, device, body).await,
+            "/v1/groups/requests" => g.request(r, m, device, body).await,
+            "/v1/groups/requests/list" => g.requests(r, device, body).await,
+            "/v1/groups/requests/decline" => g.decline(r, device, body).await,
+            "/v1/communities" => g.create_community(r, device, body).await,
+            "/v1/communities/groups/add" => g.add_community_group(r, device, body).await,
+            "/v1/communities/groups/remove" => g.remove_community_group(r, device, body).await,
+            "/v1/communities/meta" => g.community_meta(r, device, body).await,
+            "/v1/communities/state" => g.community_state(r, m, device, body).await,
+            "/v1/communities/delete" => g.delete_community(r, device, body).await,
+            _ => g.state(&self.registry, m, device, body).await,
+        };
+        Ok(device_outcome(outcome))
+    }
+
     async fn report(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
         let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
         let r = self.reports.as_ref().ok_or_else(unavailable)?;
@@ -1547,6 +1636,10 @@ fn device_outcome(o: devices::Outcome) -> Response<Body> {
         Outcome::Conflict(what) => {
             json(StatusCode::CONFLICT, &serde_json::json!({ "error": what }))
         }
+        Outcome::Stale(epoch) => json(
+            StatusCode::CONFLICT,
+            &serde_json::json!({ "error": "stale", "epoch": epoch }),
+        ),
         Outcome::Forbidden(what) => {
             json(StatusCode::FORBIDDEN, &serde_json::json!({ "error": what }))
         }

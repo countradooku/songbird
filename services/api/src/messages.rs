@@ -53,6 +53,18 @@ pub trait Submit: Send + Sync + 'static {
         body: &'a [u8],
         notice_id: [u8; songbird_proto::system::NOTICE_ID_LEN],
     ) -> Pin<Box<dyn Future<Output = Result<(), songbird_send::system::SystemError>> + Send + 'a>>;
+
+    /// One body the server assembled (a group commit's fan-out, a Welcome; Prompt 5) for
+    /// `devices`, stored once under `key`, then routed.
+    fn shared<'a>(
+        &'a self,
+        devices: &'a [DeviceId],
+        body: bytes::Bytes,
+        key: [u8; 16],
+    ) -> Pin<Box<dyn Future<Output = Result<(), SendStatus>> + Send + 'a>>;
+
+    /// The current directory snapshot.
+    fn directory(&self) -> Arc<songbird_send::Directory>;
 }
 
 /// What the send path needs, owned.
@@ -119,6 +131,29 @@ impl<M: StoreSend, R: Router> Submit for SendStack<M, R> {
                 .await
         })
     }
+
+    fn shared<'a>(
+        &'a self,
+        devices: &'a [DeviceId],
+        body: bytes::Bytes,
+        key: [u8; 16],
+    ) -> Pin<Box<dyn Future<Output = Result<(), SendStatus>> + Send + 'a>> {
+        Box::pin(async move {
+            let path = SendPath {
+                directory: &self.directory,
+                mailbox: &self.mailbox,
+                router: &self.router,
+                push: &self.push,
+                metrics: &self.metrics,
+                policy: &self.policy,
+            };
+            path.send_server_shared(devices, body, key).await
+        })
+    }
+
+    fn directory(&self) -> Arc<songbird_send::Directory> {
+        self.directory.snapshot()
+    }
 }
 
 /// `PUT /v1/messages`'s part of the application.
@@ -139,6 +174,9 @@ pub struct Messages {
     pub rate_key: hmac::Key,
     /// Counters.
     pub metrics: SendMetrics,
+    /// MLS groups (Prompt 5): commits fan out through this send path (absent: `/v1/groups`
+    /// answers 503).
+    pub groups: Option<crate::groups::Groups>,
 }
 
 impl std::fmt::Debug for Messages {

@@ -20,6 +20,8 @@ every decoder). The crate is outside the main workspace because it needs nightly
 | `kt` | akd lookup, history and audit proof decoders and verification; signed heads (Prompt 3) | `songbird-akd` |
 | `content` | padded plaintext and encrypted content decoders and validation (Prompt 4) | `songbird-content` |
 | `franking` | franking stamps in front of envelopes; report bodies from M5 (Prompt 4) | `songbird-proto` |
+| `mls_wire` | `PrivateMessage` prefix, commit bundle, `GroupInfo` signer (Prompt 5) | `songbird-groups` |
+| `mls_commit` | commit bundles against a real post-quantum group; stored group records (Prompt 5) | `songbird-groups` |
 
 ```bash
 cargo xtask fuzz --secs 60            # every target, 60 s each (CI fast checks do not fuzz)

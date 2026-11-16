@@ -426,8 +426,9 @@ pub fn decode_bundles(input: &[u8]) -> Result<Vec<Bundle>, KeysError> {
     Ok(out)
 }
 
-/// Longest MLS KeyPackage accepted (`songbird_keys::mls::MAX_LEN`).
-pub const MAX_KEY_PACKAGE_LEN: usize = 2048;
+/// Longest MLS KeyPackage accepted (`songbird_keys::mls::MAX_LEN`; X-Wing packages are about
+/// 2,700 bytes, D-0066).
+pub const MAX_KEY_PACKAGE_LEN: usize = 4096;
 /// Most KeyPackages in one upload.
 pub const MAX_KEY_PACKAGES_PER_UPLOAD: usize = 100;
 /// Longest KeyPackage upload.
@@ -435,7 +436,7 @@ pub const MAX_KEY_PACKAGE_UPLOAD_LEN: usize =
     2 + MAX_KEY_PACKAGES_PER_UPLOAD * (2 + MAX_KEY_PACKAGE_LEN);
 
 /// `PUT /v1/keypackages`: `version u8 (1) | n u8 | n × (len u16 | KeyPackage)`, n <= 100, each
-/// at most 2,048 bytes. A package with the `last_resort` extension replaces the device's
+/// at most 4,096 bytes. A package with the `last_resort` extension replaces the device's
 /// last-resort package; the others are single use.
 ///
 /// # Errors

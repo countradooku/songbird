@@ -33,15 +33,14 @@ pub mod config;
 pub mod directory;
 pub mod franking;
 pub mod gate;
+pub mod groups;
 pub mod push;
 pub mod system;
 
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use songbird_mailbox::{
-    MailboxError, MlsCommit, NewEnvelope, Payload, StoreOutcome, StoreRequest, StoreSend,
-};
+use songbird_mailbox::{MailboxError, NewEnvelope, Payload, StoreOutcome, StoreRequest, StoreSend};
 use songbird_proto::control;
 use songbird_proto::frame::{RejectReason, SendFrame, SendPayload, SendStatus};
 use songbird_router::{Live, Routed, Router};
@@ -54,6 +53,7 @@ pub use config::LimitsConfig;
 pub use directory::{Directory, LiveDirectory, Mismatch};
 pub use franking::{Franker, Frankers};
 pub use gate::{Admit, Gate, GateKeys, MemoryGate, RegistryGate, RequestLimits};
+pub use groups::{MemoryRosters, RegistryRosters, Roster, Rosters};
 pub use push::{PushMetrics, Pusher};
 
 /// The device a sealed send (`PUT /v1/messages/sealed`, D-0054) passes as its sender: no real
@@ -72,6 +72,10 @@ pub struct Policy {
     pub gate: Option<Arc<dyn Gate>>,
     /// Most other accounts one broadcast may address.
     pub max_broadcast_accounts: u32,
+    /// Group rosters (Prompt 5). Without them a group message is refused as unavailable.
+    pub rosters: Option<Arc<dyn Rosters>>,
+    /// The channel rate class (D-0072): posts per channel on this node.
+    pub channels: Arc<groups::ChannelBudget>,
 }
 
 impl Default for Policy {
@@ -80,6 +84,8 @@ impl Default for Policy {
             franking: None,
             gate: None,
             max_broadcast_accounts: RequestLimits::default().max_broadcast_accounts,
+            rosters: None,
+            channels: Arc::default(),
         }
     }
 }
@@ -90,6 +96,8 @@ impl std::fmt::Debug for Policy {
             .field("franking", &self.franking)
             .field("gate", &self.gate.is_some())
             .field("max_broadcast_accounts", &self.max_broadcast_accounts)
+            .field("rosters", &self.rosters.is_some())
+            .field("channels", &self.channels)
             .finish()
     }
 }
@@ -266,15 +274,32 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
         scratch: &mut Vec<DeviceId>,
     ) -> Result<StoreOutcome, SendStatus> {
         let m = self.metrics;
-        if let Err(status) = self.check(sender, &s.payload, scratch) {
-            m.sends_rejected.inc();
-            return Err(status);
-        }
-        let lane = match self.lane(sender, s) {
-            Ok(l) => l,
-            Err(status) => {
+        let lane = if let Some(group) = s.hints.group {
+            // A group message (Prompt 5): membership is the authorization and the roster the
+            // recipients; the device-list and contact checks do not apply.
+            if let Err(status) = self.group_recipients(sender, &group, s).await {
                 m.sends_rejected.inc();
                 return Err(status);
+            }
+            if s.payload.is_empty() {
+                // The sender is the group's only device: nothing to store.
+                return Ok(StoreOutcome {
+                    seqs: Vec::new(),
+                    replayed: false,
+                });
+            }
+            Lane::Group
+        } else {
+            if let Err(status) = self.check(sender, &s.payload, scratch) {
+                m.sends_rejected.inc();
+                return Err(status);
+            }
+            match self.lane(sender, s) {
+                Ok(l) => l,
+                Err(status) => {
+                    m.sends_rejected.inc();
+                    return Err(status);
+                }
             }
         };
         match self.admit(sender, lane).await {
@@ -333,6 +358,65 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
                 .inc_by(u64::try_from(recipients).unwrap_or(u64::MAX));
         }
         Ok(outcome)
+    }
+
+    /// A group message's recipients (D-0067): the body is an application `PrivateMessage` of
+    /// the frame's group at the roster's epoch (or the one before), from a device in the roster;
+    /// the recipients become the roster minus the sender.
+    ///
+    /// # Errors
+    /// Invalid group message, not a member (also for a group that does not exist), stale epoch,
+    /// or unavailable when no roster store is configured or it is unreachable.
+    pub async fn group_recipients(
+        &self,
+        sender: &DeviceId,
+        group: &[u8; 16],
+        s: &mut SendFrame,
+    ) -> Result<(), SendStatus> {
+        let invalid = || reject(RejectReason::InvalidGroupMessage, 0);
+        let SendPayload::Shared { devices, body } = &mut s.payload else {
+            return Err(invalid());
+        };
+        let p = songbird_proto::mls::private_prefix(body).map_err(|_| invalid())?;
+        if p.group != *group || p.content_type != songbird_proto::mls::CONTENT_APPLICATION {
+            return Err(invalid());
+        }
+        let Some(rosters) = &self.policy.rosters else {
+            return Err(reject(RejectReason::Unavailable, RETRY_MS));
+        };
+        let roster = rosters
+            .roster(group, p.epoch)
+            .await
+            .map_err(|()| reject(RejectReason::Unavailable, RETRY_MS))?
+            .ok_or_else(|| reject(RejectReason::NotMember, 0))?;
+        let Some(role) = roster.role(sender) else {
+            return Err(reject(RejectReason::NotMember, 0));
+        };
+        // "Only admins can send", a channel's subscribers (D-0070).
+        if role < roster.send_min {
+            return Err(reject(RejectReason::NotAllowed, 0));
+        }
+        if p.epoch != roster.epoch && p.epoch.checked_add(1) != Some(roster.epoch) {
+            return Err(reject(RejectReason::StaleEpoch, 0));
+        }
+        // The channel rate class (D-0072): a post reaches every subscriber.
+        if roster.is_channel()
+            && let Err(wait) = self.policy.channels.take(group, Instant::now())
+        {
+            let ms = u32::try_from(wait.as_millis()).unwrap_or(u32::MAX).max(1);
+            return Err(reject(RejectReason::RateLimited, ms));
+        }
+        devices.clear();
+        // A deleted account's or removed device stays in the roster until a member commits its
+        // removal; it gets nothing meanwhile (D-0073).
+        let dir = self.directory.load();
+        devices.extend(
+            roster
+                .devices()
+                .filter(|d| *d != sender && dir.contains(d))
+                .copied(),
+        );
+        Ok(())
     }
 
     /// The checks that need no store: no envelope in the reserved system-frame format, no device
@@ -694,10 +778,9 @@ pub fn store_request(s: &SendFrame) -> StoreRequest {
             .expire_after_s
             .map(|t| Duration::from_secs(u64::from(t))),
         idempotency_key: Some(s.idempotency_key),
-        mls: s.mls.map(|c| MlsCommit {
-            group: c.group,
-            epoch: c.epoch,
-        }),
+        // Commits no longer come through the send path (PROTOCOL §6.3; the frame's MLS flag is
+        // retired), so nothing here asks the mailbox to order an epoch.
+        mls: None,
         payload,
     }
 }

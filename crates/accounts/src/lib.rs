@@ -34,8 +34,10 @@ use songbird_surreal::Value;
 use songbird_types::{AccountId, DeviceId, JobId};
 
 pub mod blocks;
+pub mod communities;
 pub mod devices;
 pub mod gdpr;
+pub mod groups;
 pub mod journal;
 pub mod kt;
 pub mod profile;
@@ -84,6 +86,12 @@ DEFINE FIELD IF NOT EXISTS blob ON mlskp TYPE bytes;
 DEFINE FIELD IF NOT EXISTS expires ON mlskp TYPE datetime;
 DEFINE INDEX IF NOT EXISTS mlskp_device ON mlskp FIELDS device;
 DEFINE INDEX IF NOT EXISTS mlskp_expires ON mlskp FIELDS expires;
+DEFINE FIELD IF NOT EXISTS mlslr_ref ON device TYPE option<bytes>;
+DEFINE TABLE IF NOT EXISTS mlskp_used SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS device ON mlskp_used TYPE bytes;
+DEFINE FIELD IF NOT EXISTS expires ON mlskp_used TYPE datetime;
+DEFINE INDEX IF NOT EXISTS mlskp_used_device ON mlskp_used FIELDS device;
+DEFINE INDEX IF NOT EXISTS mlskp_used_expires ON mlskp_used FIELDS expires;
 DEFINE TABLE IF NOT EXISTS ulink SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS account ON ulink TYPE bytes;
 DEFINE FIELD IF NOT EXISTS blob ON ulink TYPE bytes;
@@ -174,6 +182,49 @@ DEFINE TABLE IF NOT EXISTS outbox SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS job ON outbox TYPE bytes;
 DEFINE FIELD IF NOT EXISTS at ON outbox TYPE datetime;
 DEFINE INDEX IF NOT EXISTS outbox_at ON outbox FIELDS at;
+DEFINE TABLE IF NOT EXISTS grp SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS epoch ON grp TYPE int;
+DEFINE FIELD IF NOT EXISTS state ON grp TYPE bytes;
+DEFINE FIELD IF NOT EXISTS roster ON grp TYPE bytes;
+DEFINE FIELD IF NOT EXISTS last ON grp TYPE bytes;
+DEFINE TABLE IF NOT EXISTS grp_fanout SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS body ON grp_fanout TYPE bytes;
+DEFINE FIELD IF NOT EXISTS at ON grp_fanout TYPE datetime;
+DEFINE INDEX IF NOT EXISTS grp_fanout_at ON grp_fanout FIELDS at;
+DEFINE FIELD IF NOT EXISTS rev ON grp TYPE int;
+DEFINE FIELD IF NOT EXISTS meta ON grp TYPE bytes;
+DEFINE FIELD IF NOT EXISTS meta_v ON grp TYPE int;
+DEFINE FIELD IF NOT EXISTS devs ON grp TYPE array<bytes> DEFAULT [];
+DEFINE INDEX IF NOT EXISTS grp_devs ON grp FIELDS devs;
+DEFINE TABLE IF NOT EXISTS grp_log SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS entry ON grp_log TYPE bytes;
+DEFINE FIELD IF NOT EXISTS at ON grp_log TYPE datetime;
+DEFINE FIELD IF NOT EXISTS grp ON grp_log TYPE bytes;
+DEFINE INDEX IF NOT EXISTS grp_log_grp ON grp_log FIELDS grp;
+DEFINE TABLE IF NOT EXISTS grp_link SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS grp ON grp_link TYPE bytes;
+DEFINE FIELD IF NOT EXISTS sha ON grp_link TYPE bytes;
+DEFINE FIELD IF NOT EXISTS max ON grp_link TYPE int;
+DEFINE FIELD IF NOT EXISTS uses ON grp_link TYPE int;
+DEFINE FIELD IF NOT EXISTS approval ON grp_link TYPE bool;
+DEFINE FIELD IF NOT EXISTS expires ON grp_link TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS grp_link_grp ON grp_link FIELDS grp;
+DEFINE TABLE IF NOT EXISTS grp_req SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS at ON grp_req TYPE datetime;
+DEFINE FIELD IF NOT EXISTS grp ON grp_req TYPE bytes;
+DEFINE INDEX IF NOT EXISTS grp_req_grp ON grp_req FIELDS grp;
+DEFINE INDEX IF NOT EXISTS grp_req_at ON grp_req FIELDS at;
+DEFINE FIELD IF NOT EXISTS acct ON grp_req TYPE bytes;
+DEFINE INDEX IF NOT EXISTS grp_req_acct ON grp_req FIELDS acct;
+DEFINE INDEX IF NOT EXISTS grp_link_expires ON grp_link FIELDS expires;
+DEFINE TABLE IF NOT EXISTS cmty SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS ann ON cmty TYPE bytes;
+DEFINE FIELD IF NOT EXISTS meta ON cmty TYPE bytes;
+DEFINE FIELD IF NOT EXISTS meta_v ON cmty TYPE int;
+DEFINE TABLE IF NOT EXISTS cmty_grp SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS cmty ON cmty_grp TYPE bytes;
+DEFINE FIELD IF NOT EXISTS ann ON cmty_grp TYPE bool;
+DEFINE INDEX IF NOT EXISTS cmty_grp_cmty ON cmty_grp FIELDS cmty;
 UPSERT directory:v SET version = version ?? 1 RETURN NONE;
 DEFINE TABLE IF NOT EXISTS store SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS generation ON store TYPE int;
@@ -232,6 +283,16 @@ pub enum RegistryError {
     /// keys, or another primary.
     #[error("device list does not match the account's devices")]
     ListMismatch,
+    /// An MLS commit made from an epoch the group is no longer at (another commit won), or for
+    /// a group that does not exist.
+    #[error("stale group epoch")]
+    StaleEpoch,
+    /// An invite link that is unknown, of another group, used up or expired (one answer).
+    #[error("group link refused")]
+    GroupLink,
+    /// No such community (Prompt 5, M4).
+    #[error("not found")]
+    NotFound,
 }
 
 /// One device's stored keys (opaque stored forms, `songbird_proto::keys`).
@@ -407,6 +468,8 @@ pub struct Remnants {
     pub links: u64,
     /// One-time prekeys (both kinds) and single-use KeyPackages of the devices.
     pub prekeys: u64,
+    /// Pending requests to join groups (Prompt 5, D-0073).
+    pub group_requests: u64,
 }
 
 impl Remnants {
@@ -1178,12 +1241,28 @@ impl Registry {
                 .db
                 .query1(
                     take,
-                    vec![var("d", bytes(device.as_bytes())), var("id", id)],
+                    vec![var("d", bytes(device.as_bytes())), var("id", id.clone())],
                 )
                 .await
             {
                 Ok(v) => {
                     if let Some(blob) = v.get("blob").and_then(|b| b.as_bytes().cloned()) {
+                        // A claimed package's reference is kept until it expires: a commit
+                        // may add only a package its device published (D-0074). If this
+                        // fails, adding the package is refused later (fail closed).
+                        if matches!(pool, Pool::KeyPackage) {
+                            self.db
+                                .exec(
+                                    "UPSERT mlskp_used:[$d, $id] SET device = $d,
+                                       expires = $e RETURN NONE;",
+                                    vec![
+                                        var("d", bytes(device.as_bytes())),
+                                        var("id", id),
+                                        var("e", v.get("expires").cloned().unwrap_or(Value::Null)),
+                                    ],
+                                )
+                                .await?;
+                        }
                         return Ok(Some(blob));
                     }
                     // Someone else claimed it first: try another.
@@ -1289,8 +1368,9 @@ impl Registry {
         if let Some(lr) = last_resort {
             vars.push(var("lr", bytes(&lr.package)));
             vars.push(var("lrexp", int(lr.not_after)));
+            vars.push(var("lrref", bytes(&lr.reference)));
             sql.push_str(
-                "UPDATE device:[$d] SET mlslr = $lr,
+                "UPDATE device:[$d] SET mlslr = $lr, mlslr_ref = $lrref,
                    mlslr_exp = time::from_secs($lrexp) RETURN NONE;\n",
             );
         }
@@ -1405,7 +1485,9 @@ impl Registry {
             .db
             .query1(
                 "DELETE (SELECT VALUE id FROM mlskp WHERE expires <= time::now() LIMIT $n)
-                   RETURN BEFORE;",
+                   RETURN BEFORE;
+                 DELETE (SELECT VALUE id FROM mlskp_used WHERE expires <= time::now() LIMIT $n)
+                   RETURN NONE;",
                 vec![var("n", int(u64::try_from(limit).unwrap_or(u64::MAX)))],
             )
             .await?;
@@ -1705,6 +1787,7 @@ impl Registry {
                  DELETE otpk WHERE device IN $devs RETURN NONE;
                  DELETE otkem WHERE device IN $devs RETURN NONE;
                  DELETE mlskp WHERE device IN $devs RETURN NONE;
+                 DELETE mlskp_used WHERE device IN $devs RETURN NONE;
                  DELETE device WHERE account = $a RETURN NONE;
                  UPDATE username SET account = NONE, held_until = time::now() + duration::from_secs($hold)
                    WHERE account = $a RETURN NONE;
@@ -1712,6 +1795,7 @@ impl Registry {
                  DELETE ltoken WHERE account = $a RETURN NONE;
                  DELETE passkey WHERE account = $a RETURN NONE;
                  DELETE avatar WHERE account = $a RETURN NONE;
+                 DELETE grp_req WHERE acct = $a RETURN NONE;
                  DELETE account:[$a] RETURN NONE;
                  UPDATE directory:v SET version += 1 RETURN NONE;
                  COMMIT TRANSACTION;",
@@ -1750,7 +1834,9 @@ impl Registry {
                    + count(SELECT id FROM avatar WHERE account = $a);
                  RETURN count(SELECT id FROM otpk WHERE device IN $ds)
                    + count(SELECT id FROM otkem WHERE device IN $ds)
-                   + count(SELECT id FROM mlskp WHERE device IN $ds);",
+                   + count(SELECT id FROM mlskp WHERE device IN $ds)
+                   + count(SELECT id FROM mlskp_used WHERE device IN $ds);
+                 RETURN count(SELECT id FROM grp_req WHERE acct = $a);",
                 vec![
                     var("a", bytes(account.as_bytes())),
                     var("ds", Value::Array(ds)),
@@ -1772,6 +1858,7 @@ impl Registry {
             usernames: n(4)?,
             links: n(5)?,
             prekeys: n(6)?,
+            group_requests: n(7)?,
         })
     }
 

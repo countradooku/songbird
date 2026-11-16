@@ -25,7 +25,7 @@ use songbird_client::{ClientConfig, Event, ResumeState};
 use songbird_e2e::{SERVER_NAME, key, next_delivery, next_event, start, start_with, to};
 use songbird_mailbox::memory::MemoryMailbox;
 use songbird_mailbox::{AnyMailbox, Mailbox, MailboxError, StoreOutcome, StoreRequest, Stored};
-use songbird_proto::frame::{MlsCommitRef, RejectReason, SendPayload, SendStatus};
+use songbird_proto::frame::{RejectReason, SendHints, SendPayload, SendStatus};
 use songbird_proto::{ClientFrame, CloseCode, Limits, ServerFrame, control};
 use songbird_types::DeviceId;
 use tokio::net::TcpStream;
@@ -915,14 +915,15 @@ async fn unacked_window_bounds_in_flight() {
     s.stop().await;
 }
 
-/// The send path (master prompt §5, `send`; D-0026): device lists per account, shared group
-/// bodies stored once, and MLS commits ordered by epoch.
+/// The send path (master prompt §5, `send`; D-0026): device lists per account and shared bodies
+/// stored once. MLS commits are ordered by `api` since Prompt 5 (`gate_p05`,
+/// `tests/groups/tests/convergence.rs`); the frame's MLS flag is retired.
 #[tokio::test]
-async fn send_path_device_lists_shared_bodies_and_mls_ordering() {
+async fn send_path_device_lists_and_shared_bodies() {
     // Account A: devices 0, 1. Account B: devices 2, 3, 4.
     let s = songbird_e2e::start_accounts(songbird_e2e::test_mailbox().await, &[2, 3], |_| {}).await;
     let (a0, _a0e) = s.connect(0).await;
-    let (a1, mut a1e) = s.connect(1).await;
+    let (_a1, mut a1e) = s.connect(1).await;
     let (_b2, mut b2e) = s.connect(2).await;
     let (_b3, mut b3e) = s.connect(3).await;
     let (_b4, mut b4e) = s.connect(4).await;
@@ -946,50 +947,15 @@ async fn send_path_device_lists_shared_bodies_and_mls_ordering() {
         body: body.clone(),
     };
     assert_eq!(
-        a0.send_with(key(), None, shared).await.unwrap(),
+        a0.send_with(key(), SendHints::default(), shared)
+            .await
+            .unwrap(),
         SendStatus::Accepted
     );
     for ev in [&mut b2e, &mut b3e, &mut b4e, &mut a1e] {
         let (seq, env) = next_delivery(ev).await;
         assert_eq!((seq, env), (1, body.clone()));
     }
-
-    // MLS: two members commit from epoch 0 at the same time; exactly one wins.
-    let commit = |e| {
-        Some(MlsCommitRef {
-            group: [0x77; 16],
-            epoch: e,
-        })
-    };
-    let payload = || SendPayload::Shared {
-        devices: vec![dev(2), dev(3), dev(4)],
-        body: Bytes::from_static(b"commit"),
-    };
-    let (r0, r1) = tokio::join!(
-        a0.send_with(key(), commit(0), payload()),
-        a1.send_with(
-            key(),
-            commit(0),
-            SendPayload::Shared {
-                devices: vec![dev(2), dev(3), dev(4), dev(0)],
-                body: Bytes::from_static(b"commit"),
-            }
-        ),
-    );
-    let stale = SendStatus::Rejected {
-        reason: RejectReason::StaleEpoch,
-        retry_after_ms: 0,
-    };
-    let (r0, r1) = (r0.unwrap(), r1.unwrap());
-    assert!(
-        (r0 == SendStatus::Accepted && r1 == stale) || (r1 == SendStatus::Accepted && r0 == stale),
-        "{r0:?} / {r1:?}"
-    );
     assert!(!RejectReason::StaleEpoch.is_retryable());
-    // The loser retries from the new epoch.
-    assert_eq!(
-        a0.send_with(key(), commit(1), payload()).await.unwrap(),
-        SendStatus::Accepted
-    );
     s.stop().await;
 }

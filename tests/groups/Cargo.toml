@@ -1,0 +1,25 @@
+[package]
+name = "songbird-groups-harness"
+description = "Prompt 5's client harness (D-0066): simulated OpenMLS clients, on OpenMLS's own RustCrypto provider, driving Songbird's MLS delivery service. Test-only; no service links it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+# A test crate: OpenMLS's RustCrypto provider plays the apps (D-0066); it is never linked by a
+# service (`crates/groups` tests check every service manifest).
+[dependencies]
+songbird-groups = { path = "../../crates/groups" }
+songbird-types.workspace = true
+openmls = { version = "=0.9.2", default-features = false, features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_rust_crypto = { version = "=0.6.0", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_basic_credential = "=0.6.0"
+openmls_traits = { version = "=0.6.0", features = ["draft-ietf-mls-pq-ciphersuites"] }
+
+[dev-dependencies]
+songbird-keys.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true

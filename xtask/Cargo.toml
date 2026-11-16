@@ -10,6 +10,9 @@ license.workspace = true
 [dependencies]
 # Reused so the smoke test audits metrics with the exact rules the services use.
 songbird-telemetry.workspace = true
+# The dev-env secrets from the OS's CSPRNG on every platform (Windows has no /dev/urandom); already
+# in the tree (D-0069).
+getrandom.workspace = true
 
 [lints]
 workspace = true

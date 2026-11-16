@@ -141,10 +141,16 @@ mod tests {
 
     #[test]
     fn an_unwritable_log_stops_the_action() {
+        // The log's directory is a regular file: it cannot be created on any platform (a Unix
+        // path such as `/proc/...` is an ordinary, writable path on Windows).
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, b"").unwrap();
         let g = Guard {
             confirm: Some("a/b".into()),
-            audit_log: PathBuf::from("/proc/no/such/dir/audit.jsonl"),
+            audit_log: file.join("audit.jsonl"),
         };
         assert!(g.begin("bump", "a/b", "").is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"");
     }
 }

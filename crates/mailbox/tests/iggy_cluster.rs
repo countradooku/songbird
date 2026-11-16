@@ -83,6 +83,7 @@ fn env(name: &str) -> Option<Env> {
 fn private_dir(parent: &Path) -> PathBuf {
     std::fs::create_dir_all(parent).unwrap();
     let dir = parent.join(DeviceId::random().unwrap().to_hex_unredacted());
+    #[cfg_attr(not(unix), expect(unused_mut, reason = "only Unix sets a mode"))]
     let mut b = std::fs::DirBuilder::new();
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);

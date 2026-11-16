@@ -106,6 +106,59 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0069 — The test suite and clippy on Windows (development only)
+
+- Date: 2026-11-16
+- Status: accepted
+- Decided by: agent
+- Context: the owner develops on Windows 11, where `cargo nextest run --workspace --profile ci`
+  failed 29 of 600 tests (the same 29 on `main` at `c5a14d1`) and clippy `-D warnings` failed on
+  `unused_mut` in code whose only mutation is `#[cfg(unix)]`. CI and the servers run Linux, where
+  nothing changes.
+- Root causes and fixes:
+  - **A refused loopback connection costs about 2 s on Windows** (it retries a refused SYN twice;
+    Linux answers at once). The push mocks listened on `127.0.0.1` only behind a
+    `https://localhost` URL; Windows resolves `localhost` to `::1` first, so every connection
+    spent the whole 2-second connect timeout on `::1` (20 push-provider tests, and the M5 gate's
+    "no push reached APNs"). The mock now listens on one port of both loopbacks (`127.0.0.1`
+    alone where there is no IPv6 loopback). The dead-first-address fallback stays proved by
+    `net::tests::a_dead_first_address_falls_through_to_the_next`. The link test
+    `a_stopped_server_serves_nothing_more_even_on_open_connections` ends on that same refused
+    reconnection: its bound is 1 s plus `REFUSAL` (2.5 s on Windows, zero elsewhere), still
+    inside the 5-second timeout it proves is not waited for.
+  - **Windows cannot open a directory as a `File`,** so the mailbox key store's directory fsync
+    failed every write (7 `iggy::keys` tests). `sync_dir` is now Unix-only; elsewhere it does
+    nothing (NTFS journals the rename; durability across a power cut is not promised on a
+    development machine). Production (Linux) is unchanged.
+  - **`/proc/no/such/dir` is an ordinary, writable path on Windows** (`C:\proc\...`), so
+    `an_unwritable_log_stops_the_action` found its log writable. The test now places the log
+    under a regular file, which no platform can create a directory in.
+  - **`unused_mut`:** the five `DirBuilder`s that only Unix gives a mode carry
+    `#[cfg_attr(not(unix), expect(unused_mut, reason = ...))]`.
+- Evidence (Windows 11, SurrealDB, valkey-hot, valkey-jobs and RustFS under Podman, CI's
+  environment variables without Iggy and age): clippy `--workspace --all-targets -D warnings`
+  clean; the workspace without `songbird-api`, `songbird-jobs` and `songbird-push` 497/497, then
+  those three one at a time with `-j 1` as CI runs them: 52/52, 12/12, 7/7. In one
+  workspace-wide run, those three crates fight the e2e tests over the shared job streams (on any
+  platform), and the jobs left in persistent valkey-jobs then fail the next run's deletion tests.
+- **`cargo xtask dev-env`** read `/dev/urandom`, which Windows lacks: its secrets now come from
+  `getrandom::fill` (the `getrandom(2)` system call on Linux, `ProcessPrng` on Windows).
+  `getrandom` 0.4.3 was already a workspace dependency, so xtask adds an edge, not a crate. On
+  Windows `.env` takes its directory's ACL (the user's profile) instead of mode 0600.
+- **`cargo xtask compose`** ran `docker compose`, and Podman Desktop on Windows installs no
+  `docker` command: with none, it now runs `podman compose` (which drives Docker Compose through
+  the Podman machine's API) and applies the Podman override. On a failure there, it says how to
+  restore the machine's API (`podman machine stop`, then `start`). On the owner's machine that
+  restart alone did not help: `win-sshproxy` refused to start because a stale
+  `%TEMP%\podman\podman-machine-default-api.sock` from an earlier run could not be bound again.
+  Deleting it, then restarting the machine, restored the API.
+- Verified on Windows: `cargo xtask dev-env --force`, then `cargo xtask compose up` (all seven
+  services healthy, Iggy and LiveKit included), `ps` and `down`. With the whole stack and CI's
+  variables, Iggy's included (`SONGBIRD_REQUIRE_IGGY=1`), the same partitioned run passed again:
+  497/497, 52/52, 12/12 and 7/7.
+- Consequences: no test is skipped or weakened on Linux, and Linux with `docker` takes the same
+  path as before.
+
 ## D-0064 — Prompt 4: the independent security review's findings, fixed
 
 - Date: 2026-11-16

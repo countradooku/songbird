@@ -5,6 +5,10 @@
 //!   one indexed read.
 //! - `batch_set` writes in one transaction, the Azks record last (as akd's storage manager orders
 //!   them), so a reader never sees an epoch whose nodes are not all stored.
+//! - **One writer, enforced**: a batch carrying the Azks record moves `akdhead:h` from epoch
+//!   `E - 1` to `E` in the same transaction (a compare and swap), so a second writer that started
+//!   from the same epoch fails instead of overwriting it (and its changes are published by the
+//!   next pass).
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -31,6 +35,8 @@ DEFINE FIELD IF NOT EXISTS label ON akdval TYPE bytes;
 DEFINE FIELD IF NOT EXISTS epoch ON akdval TYPE int;
 DEFINE FIELD IF NOT EXISTS rec ON akdval TYPE bytes;
 DEFINE INDEX IF NOT EXISTS akdval_label ON akdval FIELDS label;
+DEFINE TABLE IF NOT EXISTS akdhead SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS epoch ON akdhead TYPE int;
 ";
 
 /// akd's storage on SurrealDB.
@@ -160,7 +166,19 @@ impl Database for SurrealStore {
         // The Azks record last: readers see the new epoch only once its nodes are stored.
         records.sort_by_key(|r| u8::from(matches!(r, DbRecord::Azks(_))));
         let mut sql = String::from("BEGIN TRANSACTION;\n");
-        let mut vars = Vec::with_capacity(records.len() * 3);
+        let mut vars = Vec::with_capacity(records.len() * 3 + 2);
+        // The epoch compare-and-swap: only from the epoch before this one.
+        if let Some(DbRecord::Azks(a)) = records.iter().find(|r| matches!(r, DbRecord::Azks(_))) {
+            sql.push_str(
+                "IF (akdhead:h.epoch ?? -1) != $prev_epoch { THROW 'songbird:epoch' };
+                 UPSERT akdhead:h SET epoch = $new_epoch RETURN NONE;\n",
+            );
+            vars.push((
+                "prev_epoch".to_owned(),
+                Value::Int(i64::try_from(a.latest_epoch).unwrap_or(i64::MAX) - 1),
+            ));
+            vars.push(("new_epoch".to_owned(), int(a.latest_epoch)));
+        }
         for (i, r) in records.iter().enumerate() {
             let rec = encode(r)?;
             if let DbRecord::ValueState(s) = r {

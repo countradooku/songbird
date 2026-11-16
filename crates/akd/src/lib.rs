@@ -5,12 +5,16 @@
 //! server. Songbird supplies its storage ([`store::SurrealStore`] on SurrealDB), the VRF key from
 //! the secrets store ([`SecretVrf`]), and its labels:
 //!
-//! - **Label** = `kind u8 || subject [32]`, where `subject = HMAC-SHA256(salt,
-//!   "songbird.v1/kt-subject\0" || account)` ([`subject`]) with a random per-account salt:
-//!   deleting the salt with the account leaves its entries unlinkable, which matters because
-//!   `akd` 0.13 cannot tombstone.
-//! - **Value** = SHA-256 of the identity key or of the signed device list, or the username hash
-//!   (32 zero bytes once released).
+//! - **Label** = `kind u8 || account [16]`: deterministic, so an account has exactly one label per
+//!   kind and akd's one-value-per-label guarantee means everyone is shown the same value (the VRF
+//!   keeps labels out of the tree).
+//! - **Value** = `HMAC-SHA256(salt, "songbird.v1/kt-value\0" || kind || raw)`, where `raw` is
+//!   SHA-256 of the identity key or of the signed device list, or the username hash, and `salt` is
+//!   a random per-account salt given to whoever asks. A server that hands someone another salt
+//!   cannot make the one published value match another key (that would need an HMAC key for a
+//!   given output). Deleting the salt with the account leaves its values unlinkable (`akd` 0.13
+//!   cannot tombstone them); the label keeps the account ID and the epochs of its changes, nothing
+//!   more.
 //!
 //! One writer (the worker) publishes an epoch per batch of changes; `api` nodes read with
 //! [`akd::directory::ReadOnlyDirectory`].
@@ -82,19 +86,25 @@ impl Kind {
     }
 }
 
-/// The label for one kind of an account's entries.
+/// The label for one kind of an account's entries: `kind || account`.
 #[must_use]
-pub fn label(kind: Kind, subject: &[u8; 32]) -> AkdLabel {
-    let mut l = Vec::with_capacity(33);
+pub fn label(kind: Kind, account: &[u8; 16]) -> AkdLabel {
+    let mut l = Vec::with_capacity(17);
     l.push(kind.code());
-    l.extend_from_slice(subject);
+    l.extend_from_slice(account);
     AkdLabel(l)
 }
 
-/// A value: 32 bytes.
+/// The published value: `HMAC-SHA256(salt, "songbird.v1/kt-value\0" || kind || raw)`.
 #[must_use]
-pub fn value(v: &[u8; 32]) -> AkdValue {
-    AkdValue(v.to_vec())
+pub fn value(salt: &[u8; 32], kind: Kind, raw: &[u8; 32]) -> AkdValue {
+    use aws_lc_rs::hmac;
+    let k = hmac::Key::new(hmac::HMAC_SHA256, salt);
+    let mut ctx = hmac::Context::with_key(&k);
+    ctx.update(b"songbird.v1/kt-value\0");
+    ctx.update(&[kind.code()]);
+    ctx.update(raw);
+    AkdValue(ctx.sign().as_ref().to_vec())
 }
 
 /// Opens (or creates) the writer's directory.
@@ -123,19 +133,6 @@ pub async fn reader(store: SurrealStore, vrf: SecretVrf) -> Result<Reader, akd::
     .await
 }
 
-/// The subject naming an account: `HMAC-SHA256(salt, "songbird.v1/kt-subject\0" || account)`.
-#[must_use]
-pub fn subject(salt: &[u8; 32], account: &[u8; 16]) -> [u8; 32] {
-    use aws_lc_rs::hmac;
-    let k = hmac::Key::new(hmac::HMAC_SHA256, salt);
-    let mut ctx = hmac::Context::with_key(&k);
-    ctx.update(b"songbird.v1/kt-subject\0");
-    ctx.update(account);
-    let mut out = [0u8; 32];
-    out.copy_from_slice(ctx.sign().as_ref());
-    out
-}
-
 fn kind_of(k: songbird_accounts::kt::KtKind) -> Kind {
     match k {
         songbird_accounts::kt::KtKind::Identity => Kind::Identity,
@@ -161,10 +158,10 @@ pub async fn publish_pending(
     let updates: Vec<(AkdLabel, AkdValue)> = pending
         .iter()
         .flat_map(|p| {
-            let s = subject(&p.salt, p.account.as_bytes());
-            p.changes
-                .iter()
-                .map(move |(k, v)| (label(kind_of(*k), &s), value(v)))
+            p.changes.iter().map(move |(k, v)| {
+                let kind = kind_of(*k);
+                (label(kind, p.account.as_bytes()), value(&p.salt, kind, v))
+            })
         })
         .collect();
     let n = updates.len();

@@ -1,5 +1,5 @@
 //! What key transparency must log (Prompt 3, M6 and D-0057): the changes waiting to be
-//! published to `akd`, and the per-account salt that names an account in the directory.
+//! published to `akd`, and the per-account salt its published values are keyed with.
 //!
 //! Changes to what the directory records (registration's identity key, a new device list, a
 //! username claimed or released) bump the account's `kt_gen` in their own transaction. The worker
@@ -148,8 +148,8 @@ impl Registry {
         Ok(())
     }
 
-    /// The salt that names an account in the directory (none until something was published,
-    /// none for an account being deleted).
+    /// The salt an account's published values are keyed with (none until something was
+    /// published, none for an account being deleted).
     ///
     /// # Errors
     /// [`RegistryError`].

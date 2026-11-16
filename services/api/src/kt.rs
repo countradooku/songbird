@@ -201,7 +201,7 @@ impl Transparency {
             .await
             .map_err(|_| Outcome::Unavailable)?
             .ok_or(Outcome::NotFound)?;
-        Ok((salt, label(k, &songbird_akd::subject(&salt, &a))))
+        Ok((salt, label(k, &a)))
     }
 
     /// `POST /v1/kt/lookup`.

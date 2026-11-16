@@ -1141,7 +1141,7 @@ async fn clients_verify_the_transparency_log() {
         let h = head(&hex::decode(v["head"].as_str().unwrap()).unwrap());
         let proof =
             proofs::decode_lookup(&hex::decode(v["proof"].as_str().unwrap()).unwrap()).unwrap();
-        let l = label(kind, &songbird_akd::subject(&salt, account.as_bytes()));
+        let l = label(kind, account.as_bytes());
         let r = akd::client::lookup_verify::<Config>(&vrf, h.root, h.epoch, l, proof).unwrap();
         (h, salt, r.value.0)
     };
@@ -1150,19 +1150,16 @@ async fn clients_verify_the_transparency_log() {
     assert_eq!(st, 200);
     let v = v.unwrap();
     let (h1, salt, value) = verify(&v, p.account, Kind::Identity);
-    assert_eq!(value, sha(&pk(&p.account_key)).to_vec());
+    assert_eq!(
+        value,
+        songbird_akd::value(&salt, Kind::Identity, &sha(&pk(&p.account_key))).0
+    );
     // The proof does not hold for another account's label, nor against another root.
     let proof =
         || proofs::decode_lookup(&hex::decode(v["proof"].as_str().unwrap()).unwrap()).unwrap();
-    let wrong = label(
-        Kind::Identity,
-        &songbird_akd::subject(&salt, other.account.as_bytes()),
-    );
+    let wrong = label(Kind::Identity, other.account.as_bytes());
     assert!(akd::client::lookup_verify::<Config>(&vrf, h1.root, h1.epoch, wrong, proof()).is_err());
-    let right = label(
-        Kind::Identity,
-        &songbird_akd::subject(&salt, p.account.as_bytes()),
-    );
+    let right = label(Kind::Identity, p.account.as_bytes());
     assert!(akd::client::lookup_verify::<Config>(&vrf, [9; 32], h1.epoch, right, proof()).is_err());
     // No device list yet: not found.
     assert_eq!(
@@ -1178,7 +1175,15 @@ async fn clients_verify_the_transparency_log() {
     let (st, v) = kt_lookup(&other.client, p.account, "device_list").await;
     assert_eq!(st, 200);
     let (h2, _, value) = verify(v.as_ref().unwrap(), p.account, Kind::DeviceList);
-    assert_eq!(value, sha(&list.encode()).to_vec());
+    assert_eq!(
+        value,
+        songbird_akd::value(&salt, Kind::DeviceList, &sha(&list.encode())).0
+    );
+    // A server handing out another salt cannot make the published value match another list.
+    assert_ne!(
+        value,
+        songbird_akd::value(&[0; 32], Kind::DeviceList, &sha(b"forged")).0
+    );
     assert_eq!(h2.epoch, h1.epoch + 1);
     // The identity key's history: one key, never replaced.
     let body = format!(
@@ -1198,10 +1203,7 @@ async fn clients_verify_the_transparency_log() {
         &vrf,
         h.root,
         h.epoch,
-        label(
-            Kind::Identity,
-            &songbird_akd::subject(&salt, p.account.as_bytes()),
-        ),
+        label(Kind::Identity, p.account.as_bytes()),
         hist,
         HistoryVerificationParams::Default {
             history_params: HistoryParams::MostRecent(songbird_api::kt::HISTORY),

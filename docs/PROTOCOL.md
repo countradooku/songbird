@@ -724,15 +724,20 @@ Decisions D-0055 and D-0057. Key transparency runs on Meta's `akd` 0.13 (the own
 
 What the directory records about each account:
 
-- **Label** = `kind u8 (1 identity, 2 device list, 3 username) || subject [32]`, with
-  `subject = HMAC-SHA256(salt, "songbird.v1/kt-subject\0" || account)` and a random per-account
-  salt. Whoever asks about the account receives the salt; it is deleted with the account, which
-  leaves the account's entries unlinkable (`akd` 0.13 cannot tombstone values).
-- **Value** = SHA-256 of the identity key or of the signed device list, or the username hash (32
-  zero bytes once released).
+- **Label** = `kind u8 (1 identity, 2 device list, 3 username) || account [16]`. Labels are
+  deterministic, so each account has one label per kind. akd shows everyone the one value of a
+  label, and its VRF keeps labels out of the tree.
+- **Value** = `HMAC-SHA256(salt, "songbird.v1/kt-value\0" || kind || raw)`.
+  - `raw` is SHA-256 of the identity key or of the signed device list, or the username hash (32
+    zero bytes once released).
+  - `salt` is a random per-account salt that whoever asks receives. A server that hands someone
+    another salt cannot make the published value match another key.
+  - The salt is deleted with the account, which leaves its values unlinkable (`akd` 0.13 cannot
+    tombstone them). The labels keep the account ID and the epochs of its changes.
 - **Publishing**: a registration, a new device list, or a username claimed or released bumps the
-  account's generation in its own transaction. The worker, the only writer, publishes one epoch
-  per sweep with the values that changed. Nothing is missed, and a crash only delays it.
+  account's generation in its own transaction. The worker publishes one epoch per sweep with the
+  values that changed. There is one writer, enforced by the store: an epoch commits only from the
+  epoch before it (a compare and swap in the same transaction). Nothing is missed, and a crash only delays it.
 - **Signed head**: `version u8 (1) | epoch u64 | root [32] | time_ms u64 | signature [64]`. The
   signature is Ed25519 by the log key over `"songbird.v1/kt-head\0"` followed by the bytes
   before it. Apps pin the log key and the VRF key.
@@ -751,8 +756,8 @@ What the directory records about each account:
 
 - Check every head's signature; keep the newest verified head.
 - Before trusting a contact's identity key or device list, verify a lookup proof for the
-  contact's label against a verified head. The value must equal the hash of the key or list in
-  hand.
+  contact's label (`kind || account`) against a verified head. The proven value must equal
+  `HMAC(salt, context || kind || SHA-256(key or list in hand))`.
 - Verify an audit proof between the last head seen and a newer one. Two signed heads that no audit
   proof joins are evidence of a fork: show it and stop trusting the server.
 - Owners check their own key history regularly. A version they did not publish is the warning.

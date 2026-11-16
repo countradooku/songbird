@@ -124,10 +124,17 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     is one transaction with the Azks record last. The retrieval rules match akd's in-memory store.
   - **Configuration**: WhatsApp v1. The VRF key comes from the secrets store (worker
     `kt_vrf_key`, api `[api.kt] vrf_key`).
-  - **Labels**: `kind || HMAC(salt, account)`, deleted with the salt, because `akd` 0.13 cannot
-    tombstone. Values are SHA-256 of the identity key or list, or the username hash.
+  - **Labels**: `kind || account`, deterministic, so each account has one label per kind and
+    everyone is shown the same value.
+  - **Values**: `HMAC(salt, context || kind || raw)`, with a random per-account salt given to
+    whoever asks and deleted with the account. This keeps deletion unlinkable, because `akd`
+    0.13 cannot tombstone. A different salt cannot match the published value.
+  - From the security review: the first build put the salt in the label. A server could then
+    publish a second label for an account and show contacts a different key than the owner saw.
   - **Writer**: the worker publishes one epoch per sweep from the generation-driven pending list
-    (D-0055's mechanism kept).
+    (D-0055's mechanism kept). **One writer is enforced by the store**: an epoch commits only from
+    the one before it (a compare and swap on `akdhead` in the epoch's transaction). Rollouts run
+    several workers.
   - **Readers**: `api` uses akd's read-only directory, opened lazily. It serves keys, signed
     heads (log key) and lookup, history (newest 64) and audit (at most 1,000 epochs) proofs in
     akd's protobuf.

@@ -11,7 +11,9 @@
 )]
 use songbird_groups::wire::{self, Bundle, LogEntry};
 use songbird_groups::{Group, GroupError, Limits, Record};
-use songbird_groups_harness::{Device, Dir, GID, id_from, server_create, welcome_of, with_log};
+use songbird_groups_harness::{
+    Device, Dir, GID, LinkSecret, id_from, server_create, welcome_of, with_log,
+};
 use songbird_types::{AccountId, DeviceId};
 
 fn account(n: u16) -> AccountId {
@@ -441,20 +443,25 @@ fn a_stranger_joins_by_link_only_through_apply_join() {
         server,
         ..
     } = setup();
+    let limits = Limits::default();
+    // Alice (an admin: the owner) publishes a link's proof key (D-0076).
+    let link = LinkSecret::random();
+    let b = alice.publish_link(&link);
+    let server = apply(server, &alice, &b, &dir).unwrap();
+    alice.merge();
     let info = server.group_info().to_vec();
     let tree = server.ratchet_tree().unwrap();
     let rec = server.record();
-    let limits = Limits::default();
 
     // Without a link, a stranger's external commit is refused (as above); with one, the
     // delivery service lets it in (D-0071), with the group's default role.
     let mut eve = Device::new(5, account(5), &mut dir);
-    let b = eve.rejoin(&info, &tree);
+    let b = eve.join_by_link(&info, &tree, &link);
     let err = apply(Group::load(rec.clone()).unwrap(), &eve, &b, &dir).unwrap_err();
     assert!(matches!(err, GroupError::External), "{err:?}");
     let (server, applied) = Group::load(rec.clone())
         .unwrap()
-        .apply_join(&eve.id, &b, &dir, &limits)
+        .apply_join(&eve.id, &b, &dir, &limits, &link.handle)
         .unwrap();
     assert_eq!(server.roster().len(), 3);
     assert!(
@@ -474,7 +481,7 @@ fn a_stranger_joins_by_link_only_through_apply_join() {
     let b = alice.update();
     let err = Group::load(server.record())
         .unwrap()
-        .apply_join(&alice.id, &b, &dir, &limits)
+        .apply_join(&alice.id, &b, &dir, &limits, &link.handle)
         .unwrap_err();
     assert!(matches!(err, GroupError::Kind), "{err:?}");
 }

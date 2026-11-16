@@ -31,7 +31,7 @@ use songbird_delivery::{DeliveryMetrics, Directory, Shared};
 use songbird_e2e::{settings, test_mailbox};
 use songbird_groups::Limits;
 use songbird_groups::roles::Role;
-use songbird_groups_harness::{Device, GID};
+use songbird_groups_harness::{Device, GID, LinkSecret};
 use songbird_mailbox::{AnyMailbox, Mailbox as _};
 use songbird_proto::frame::{RejectReason, SendFrame, SendHints, SendPayload, SendStatus};
 use songbird_router::LocalRouter;
@@ -747,16 +747,40 @@ async fn post(s: &Stack, who: usize, path: &str, rest: &[u8]) -> (u16, Bytes) {
 struct Link {
     handle: [u8; 16],
     auth: [u8; 32],
+    /// The secret apps derive `auth` and the proof key from (D-0076).
+    secret: LinkSecret,
 }
 
 impl Link {
     fn new() -> Self {
-        let mut handle = [0u8; 16];
-        aws_lc_rs::rand::fill(&mut handle).unwrap();
+        let secret = LinkSecret::random();
         Self {
-            handle,
-            auth: random32(),
+            handle: secret.handle,
+            auth: secret.auth(),
+            secret,
         }
+    }
+
+    /// Person `who` commits the link's proof key into the roles extension (D-0076), and every
+    /// other member in the group follows.
+    async fn publish(&self, s: &mut Stack, who: usize) {
+        let b = s.people[who].mls.publish_link(&self.secret);
+        let (st, reply) = commit(s, who, &b).await;
+        assert_eq!(st, 200, "{reply}");
+        s.people[who].mls.merge();
+        for i in 0..s.people.len() {
+            if i != who && s.people[i].mls.group.is_some() {
+                let c = s.pending(i).await.pop().unwrap();
+                s.people[i].mls.receive(&bundle_of(&c));
+            }
+        }
+    }
+
+    /// A join by this link: `handle | auth | bundle`.
+    fn join(&self, bundle: &[u8]) -> Vec<u8> {
+        let mut req = self.open();
+        req.extend_from_slice(bundle);
+        req
     }
 
     /// `handle | auth`.
@@ -797,11 +821,14 @@ async fn invite_links_and_join_requests() {
         409,
         "the handle is taken"
     );
+    // Alice publishes the link's proof key to the members (D-0076): epoch 2.
+    once.publish(&mut s, alice).await;
 
     // Wrong secret and unknown handle: one answer.
     let wrong = Link {
         handle: once.handle,
         auth: random32(),
+        secret: LinkSecret::random(),
     };
     assert_eq!(
         post(&s, carol, "/v1/groups/links/open", &wrong.open())
@@ -821,35 +848,46 @@ async fn invite_links_and_join_requests() {
     assert_eq!((st, opened[0]), (200, 0));
     assert_eq!(opened[1..17], GID);
     let opened_state = &opened[17..];
-    let join = s.people[carol]
+    let (info, tree) = (info_of(opened_state), tree_of(opened_state));
+    // The link's `auth` alone is not enough: a join without the proof only the link's secret
+    // can make (what a server admitting someone would send), or with a proof under a link the
+    // members never published, is refused, and spends nothing (D-0076).
+    let bare = s.people[carol].mls.rejoin(&info, &tree);
+    let (st, reply) = post(&s, carol, "/v1/groups/join", &once.join(&bare)).await;
+    assert_eq!((st, json(&reply)["error"].as_str()), (403, Some("proof")));
+    let other = s.people[carol]
         .mls
-        .rejoin(&info_of(opened_state), &tree_of(opened_state));
+        .join_by_link(&info, &tree, &LinkSecret::random());
+    let (st, reply) = post(&s, carol, "/v1/groups/join", &once.join(&other)).await;
+    assert_eq!((st, json(&reply)["error"].as_str()), (403, Some("proof")));
+    let join = s.people[carol].mls.join_by_link(&info, &tree, &once.secret);
     // A wrong secret cannot carry a join either.
-    let mut wrong_join = wrong.open();
-    wrong_join.extend_from_slice(&join);
-    assert_eq!(post(&s, carol, "/v1/groups/join", &wrong_join).await.0, 404);
-    let mut req = once.open();
-    req.extend_from_slice(&join);
+    assert_eq!(
+        post(&s, carol, "/v1/groups/join", &wrong.join(&join))
+            .await
+            .0,
+        404
+    );
+    let req = once.join(&join);
     let (st, reply) = post(&s, carol, "/v1/groups/join", &req).await;
-    assert_eq!((st, json(&reply)["epoch"].as_u64()), (200, Some(2)));
+    assert_eq!((st, json(&reply)["epoch"].as_u64()), (200, Some(3)));
     // The same join again (a lost answer) is recognised, though the link is now spent.
     let (st, reply) = post(&s, carol, "/v1/groups/join", &req).await;
-    assert_eq!((st, json(&reply)["epoch"].as_u64()), (200, Some(2)));
-    // The members receive it; Carol reads the group from then on.
-    let c = s.pending(alice).await.pop().unwrap();
-    s.people[alice].mls.receive(
-        &songbird_groups::wire::Bundle {
-            commit: &c,
-            welcome: None,
-            group_info: b"-",
-            log: None,
-        }
-        .encode(),
-    );
+    assert_eq!((st, json(&reply)["epoch"].as_u64()), (200, Some(3)));
+    // The members check Carol's proof themselves and follow; Carol reads the group from then
+    // on.
+    let members = client_dir(&s, &[alice, bob, carol]);
+    for i in [alice, bob] {
+        let c = s.pending(i).await.pop().unwrap();
+        s.people[i]
+            .mls
+            .receive_join_checked(&bundle_of(&c), &members)
+            .unwrap();
+    }
     assert_eq!(
         s.pending(bob).await.len(),
-        2,
-        "the Welcome, then Carol's join"
+        3,
+        "the Welcome, the link's key, then Carol's join"
     );
     let msg = s.people[alice].mls.message(b"hi carol");
     assert_eq!(s.people[carol].mls.read(&msg), b"hi carol");
@@ -1001,6 +1039,7 @@ async fn parallel_joins_never_exceed_a_links_uses() {
     create(&mut s, 0).await;
     let link = Link::new();
     assert_eq!(link.create(&s, 0, 0, 2, false).await, 204);
+    link.publish(&mut s, 0).await;
     let mut pending: Vec<usize> = (1..6).collect();
     let mut joined = Vec::new();
     while !pending.is_empty() {
@@ -1014,7 +1053,11 @@ async fn parallel_joins_never_exceed_a_links_uses() {
             assert_eq!((st, opened[0]), (200, 0));
             let state = &opened[17..];
             let mut req = link.open();
-            req.extend_from_slice(&s.people[i].mls.rejoin(&info_of(state), &tree_of(state)));
+            req.extend_from_slice(&s.people[i].mls.join_by_link(
+                &info_of(state),
+                &tree_of(state),
+                &link.secret,
+            ));
             tries.push((i, req));
         }
         let answers = futures_util::future::join_all(
@@ -1044,7 +1087,7 @@ async fn parallel_joins_never_exceed_a_links_uses() {
     }
     assert_eq!(joined.len(), 2, "exactly the link's two uses: {joined:?}");
     let row = s.registry.group(&GID).await.unwrap().unwrap();
-    assert_eq!(row.epoch, 2);
+    assert_eq!(row.epoch, 3);
     let link_row = s.registry.group_link(&link.handle).await.unwrap().unwrap();
     assert!(!link_row.usable);
 }
@@ -1354,4 +1397,15 @@ async fn departed_devices_are_removed_through_server_proposals() {
     s.registry.delete_account_rows(&account).await.unwrap();
     let left = s.registry.remnants(&account, &devices, &[]).await.unwrap();
     assert!(left.is_empty(), "{left:?}");
+}
+
+/// A fanned-out commit (the `MLSMessage` alone) as a bundle the harness reads.
+fn bundle_of(commit: &[u8]) -> Vec<u8> {
+    songbird_groups::wire::Bundle {
+        commit,
+        welcome: None,
+        group_info: b"-",
+        log: None,
+    }
+    .encode()
 }

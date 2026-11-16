@@ -123,6 +123,8 @@ pub enum GroupError {
     Forbidden(Denied),
     #[error("the change-log entry is not signed by the committer")]
     LogSignature,
+    #[error("the join carries no valid link proof: {0}")]
+    LinkProof(crate::links::ProofError),
     #[error("state: {0}")]
     State(#[from] StateError),
 }
@@ -856,35 +858,31 @@ impl Group {
         dir: &impl Directory,
         limits: &Limits,
     ) -> Result<(Self, Applied), GroupError> {
-        self.apply(sender, bundle, dir, limits, false)
+        self.apply(sender, bundle, dir, limits, None)
     }
 
-    /// A person joining by invite link (M3, D-0071): an external commit from a device whose
-    /// account need not be in the group yet. Call it only once the link is checked; the link's
-    /// use is counted with the commit's store. It joins with the default role.
+    /// A person joining by invite link `link` (its handle; M3, D-0071): an external commit from
+    /// a device whose account need not be in the group yet. Call it only once the link is
+    /// checked; the link's use is counted with the commit's store. It joins with the default
+    /// role, and must carry the link's proof (D-0076, `crate::links`): a signature by the key
+    /// the members published for that link, which the server cannot make.
     pub fn apply_join(
         self,
         sender: &DeviceId,
         bundle: &[u8],
         dir: &impl Directory,
         limits: &Limits,
+        link: &[u8; 16],
     ) -> Result<(Self, Applied), GroupError> {
-        self.apply(sender, bundle, dir, limits, true)
+        self.apply(sender, bundle, dir, limits, Some(link))
     }
 
-    fn apply(
-        mut self,
-        sender: &DeviceId,
-        bundle: &[u8],
-        dir: &impl Directory,
-        limits: &Limits,
-        by_link: bool,
-    ) -> Result<(Self, Applied), GroupError> {
-        let b = Bundle::parse(bundle, limits.max_bundle)?;
-        if wire::wire_format(b.commit)? != wire::WIRE_PUBLIC {
+    /// A commit's `PublicMessage`, for this group at its current epoch.
+    fn commit_message(&self, commit: &[u8]) -> Result<PublicMessageIn, GroupError> {
+        if wire::wire_format(commit)? != wire::WIRE_PUBLIC {
             return Err(GroupError::Kind);
         }
-        let MlsMessageBodyIn::PublicMessage(pm) = mls_message(b.commit)? else {
+        let MlsMessageBodyIn::PublicMessage(pm) = mls_message(commit)? else {
             return Err(GroupError::Kind);
         };
         if pm.content_type() != ContentType::Commit {
@@ -893,12 +891,49 @@ impl Group {
         if pm.group_id().as_slice() != self.id {
             return Err(GroupError::OtherGroup);
         }
-        let from_epoch = self.epoch();
-        if pm.epoch().as_u64() != from_epoch {
-            return Err(GroupError::StaleEpoch {
-                current: from_epoch,
-            });
+        let current = self.epoch();
+        if pm.epoch().as_u64() != current {
+            return Err(GroupError::StaleEpoch { current });
         }
+        Ok(pm)
+    }
+
+    /// A join by link proves the joiner held the link (D-0076): a signature by the key the
+    /// members published for `handle` (the link the join is counted against), over this group,
+    /// the current epoch, the joining device and its new leaf's key.
+    fn check_link_proof(
+        &self,
+        staged: &StagedCommit,
+        sender: &DeviceId,
+        aad: &[u8],
+        handle: &[u8; 16],
+    ) -> Result<(), GroupError> {
+        let leaf = staged.update_path_leaf_node().ok_or(GroupError::External)?;
+        crate::links::verify(
+            &roles_of(self.public.group_context())?,
+            &self.id,
+            self.epoch(),
+            aad,
+            sender,
+            leaf.signature_key().as_slice(),
+            Some(handle),
+        )
+        .map(|_| ())
+        .map_err(GroupError::LinkProof)
+    }
+
+    fn apply(
+        mut self,
+        sender: &DeviceId,
+        bundle: &[u8],
+        dir: &impl Directory,
+        limits: &Limits,
+        link: Option<&[u8; 16]>,
+    ) -> Result<(Self, Applied), GroupError> {
+        let by_link = link.is_some();
+        let b = Bundle::parse(bundle, limits.max_bundle)?;
+        let pm = self.commit_message(b.commit)?;
+        let from_epoch = self.epoch();
         let sender_account = dir.account_of(sender).ok_or(GroupError::Sender)?;
         let external = match pm.sender() {
             // A join by link is an external commit.
@@ -917,12 +952,16 @@ impl Group {
             .public
             .process_message(&CRYPTO, pm)
             .map_err(|_| GroupError::Invalid)?;
+        let aad = processed.aad().to_vec();
         let ProcessedMessageContent::StagedCommitMessage(staged) = processed.into_content() else {
             return Err(GroupError::Kind);
         };
 
         let removed_leaves =
             self.check_leaves(&staged, sender, sender_account, external, by_link, dir)?;
+        if let Some(handle) = link {
+            self.check_link_proof(&staged, sender, &aad, handle)?;
+        }
         let key_packages = self.check_adds(&staged, b.welcome, &removed_leaves, dir)?;
         let added: Vec<DeviceId> = key_packages.iter().map(|(d, _)| *d).collect();
 

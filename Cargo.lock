@@ -4925,6 +4925,7 @@ dependencies = [
 name = "songbird-groups-harness"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "openmls",
  "openmls_basic_credential",
  "openmls_rust_crypto",

@@ -30,6 +30,7 @@ server in plaintext. Adding to this list requires the owner's approval.
 | Per MLS group, its invite links (`grp_link`): a random handle, `SHA-256(auth)` (never the link's secret, nor the key to the group's info), whether joins need approval, a use count, a limit and an expiry; at most 16 | Let a person holding a link open and join the group, while the link is usable (D-0071) | Until revoked or expired (swept hourly); used-up ones until the group's next link is made; or with the group | Prompt 5 (M3), D-0071; approved by the owner on 2026-11-17 (the Prompt 5 gate) |
 | Per MLS group, its pending join requests (`grp_req`): **the account asking to join**, and when it asked; at most 256 | Let members with the `add` role approve (add) or decline | Until approved, declined, or 7 days | Prompt 5 (M3), D-0071; approved by the owner on 2026-11-17 (the Prompt 5 gate) |
 | Per MLS group, in its context (part of the group state): the delivery service's external-sender public key (one key for every group) with its credential `songbird.v1/ds`; and, until the next commit, the service's queued `Remove` proposals, each naming the leaf of a device that left the directory | Propose removing departed devices' leaves, so they do not outlive the account or the device in group state (D-0075) | As the group state; a proposal until the next commit | Prompt 5 follow-up 1, D-0075; **awaiting the owner's approval** |
+| Per MLS group, in its roles extension (part of the group state): each published invite link's handle and its proof public key (Ed25519; the private key comes from the link's secret, which the server never sees); in a join's commit, the proof (the handle and a signature) | Let members check that a joiner held a link they made, and the server apply the same rule (D-0076) | Until the links role withdraws the key, or with the group; the proof with the commit (fan-out) | Prompt 5 follow-up 2, D-0076; the handles were already in `grp_link`; **awaiting the owner's approval** |
 | Prune marks (`grp_prune`): per group holding a device that left the directory, the group ID, **the IDs of its devices that left**, a counter and the time | Let any `api` node propose their removal within seconds (D-0075) | Until proposed (seconds); the device IDs are stripped at the account's or device's final deletion | Prompt 5 follow-up 1, D-0075; **awaiting the owner's approval** |
 | Per community (`cmty`, `cmty_grp`): its ID, **which group is its announcement group and which groups belong to it** (opaque IDs; at most 100), and its encrypted info (name, description, picture: ciphertext under a key the members share) with its version | Let the announcement group's admins run the community; show its members the community's groups | Until a group is unlinked or the community deleted | Prompt 5 (M4), D-0072; approved by the owner on 2026-11-17 (the Prompt 5 gate) |
 | Push registration (APNs, FCM or Web Push token / endpoint), **sealed to the push service's X25519 key** and stored under a keyed hash (HMAC-SHA256, push-index secret) of the device ID; `api` and `worker` hold only the public key | Wake an offline device | Until replaced, reported unregistered by the provider, or the device is deleted | Prompt 2 (M5), D-0036; **approved by the owner 2026-11-12** |
@@ -435,6 +436,9 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
 | The server admitting someone, or reshaping a group, by external proposal | E | Compromised server | Apps and the server take only `Remove` from the external sender; `NewMemberProposal` is refused | `the_service_may_only_propose_removals` |
 | A member dropping the service (to keep departed leaves) or adding an external sender of its own (to propose) | T, E | Malicious member | The context must name exactly the service's key, at creation and after every commit | `groups_name_exactly_the_service` |
 | Theft of the external-sender key | S | Insider, host compromise | It can only propose removals of departed devices (apps refuse the rest); it is derived from the cluster secret, which is not rotated while groups exist until key rotation is built (`docs/RUNBOOKS/secrets-rotation.md`) | the trust-rule tests above |
+| The server admitting someone who never held a link | S, E | Compromised server or operator | Members follow an external commit from a new account only with a proof signed by a link key the links role published; the server cannot sign (it holds `SHA-256(auth)` only) and applies the same rule (403 `proof`) | `joins_without_a_valid_proof_are_refused_by_the_server_and_members`; live `invite_links_and_join_requests` |
+| A link holder proving for links it never held, or reusing a proof | S | Holder of another link, a past joiner | One key per link, from its own secret; the proof binds group, epoch, handle, device and leaf key | `proofs_bind_the_link_group_epoch_device_and_leaf` |
+| A member publishing a link key to let someone in | E | Malicious member below the links role | Publishing or withdrawing keys is the links role's (`roles::authorize`) | `only_the_links_role_publishes_link_keys`; `link_keys_have_one_encoding_and_are_the_links_roles` |
 | Departed devices' leaves outliving the account | I | Anyone reading group state later | Marks in the transactions that disable devices; proposals within seconds; again after each commit; the IDs stripped from marks at deletion | `departing_devices_mark_the_groups_that_hold_them`; live `departed_devices_are_removed_through_server_proposals` |
 
 ## 4. Server-enforced settings
@@ -579,12 +583,15 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
 
   A member whose view of a device list is stale refuses a valid server removal until it
   refreshes (apps refresh before refusing).
-- Invite links (Prompt 5, M3; D-0071): the server alone decides whether a joiner held a usable
-  link. A malicious server can admit an account to a group by external commit. It cannot hide
-  the join from the members: every member sees the new leaf, its account and its default role,
-  and can remove it. A link leaked from a chat is usable by whoever holds it until it is
-  revoked, used up or expired; opening it shows the members' devices (the ratchet tree an
-  external commit needs) before any join, unless joins need approval.
+- Invite links (Prompt 5, M3; D-0071): the server decides whether a joiner may use a link.
+  Since D-0076 members check for themselves that a joiner held a link they made (a proof under
+  the key the links role published); a malicious server can no longer admit an account apps
+  accept without one. A server that admits one anyway forks itself from the members, who refuse
+  the join. It cannot hide a join from the members: every member sees the new leaf, its account
+  and its default role, and can remove it. A link leaked from a chat is usable by whoever holds
+  it until it is revoked, used up or expired (the proof shows a link was held, not by whom);
+  opening it shows the members' devices (the ratchet tree an external commit needs) before any
+  join, unless joins need approval.
   A join request tells the server which account wants which group before it is a member.
 - Communities and channels (Prompt 5, M4; D-0072): the server knows which groups form a
   community, so with the rosters it knows who shares a community. A private channel is an MLS

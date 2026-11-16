@@ -543,6 +543,64 @@ impl Device {
             .map_err(|e| e.to_string())
     }
 
+    /// Processes an external commit (a join) as apps do (D-0076): from an account already in
+    /// the group it is a rejoin; from a new account it must carry a proof under a link key the
+    /// group's roles extension publishes (`songbird_groups::links::verify`). Refused joins are
+    /// not merged.
+    pub fn receive_join_checked(&mut self, bundle: &[u8], dir: &Dir) -> Result<(), String> {
+        let b = Bundle::parse(bundle, usize::MAX).map_err(|e| e.to_string())?;
+        let msg = MlsMessageIn::tls_deserialize_exact(b.commit).map_err(|e| e.to_string())?;
+        let p = &self.provider;
+        let g = self.group.as_mut().unwrap();
+        let roles = songbird_groups::ds::roles_in(g.extensions()).map_err(|e| e.to_string())?;
+        let from_epoch = g.epoch().as_u64();
+        let processed = g
+            .process_message(
+                p,
+                msg.try_into_protocol_message().map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+        if !matches!(processed.sender(), Sender::NewMemberCommit) {
+            return Err("not a join".into());
+        }
+        let aad = processed.aad().to_vec();
+        let ProcessedMessageContent::StagedCommitMessage(staged) = processed.into_content() else {
+            return Err("expected a commit".into());
+        };
+        let leaf = staged.update_path_leaf_node().ok_or("no joiner's leaf")?;
+        let device = DeviceId::from_slice(leaf.credential().serialized_content())
+            .map_err(|e| e.to_string())?;
+        let account = dir.account_of(&device).ok_or("an unknown joiner")?;
+        let present = g.members().any(|m| {
+            DeviceId::from_slice(m.credential.serialized_content())
+                .ok()
+                .and_then(|d| dir.account_of(&d))
+                == Some(account)
+        });
+        if !present {
+            let group: [u8; 16] = g.group_id().as_slice().try_into().unwrap();
+            songbird_groups::links::verify(
+                &roles,
+                &group,
+                from_epoch,
+                &aad,
+                &device,
+                leaf.signature_key().as_slice(),
+                None,
+            )
+            .map_err(|e| format!("a join from a new account without a valid link proof: {e}"))?;
+        }
+        g.merge_staged_commit(p, *staged).map_err(|e| e.to_string())
+    }
+
+    /// A commit publishing `link`'s proof key in the group's roles extension (pending), as the
+    /// link's creator commits it before sharing the link (D-0076).
+    pub fn publish_link(&mut self, link: &LinkSecret) -> Vec<u8> {
+        let mut roles = self.roles();
+        roles.links.insert(link.handle, link.public_key());
+        self.set_roles(&roles)
+    }
+
     /// Processes another member's commit (from the bundle the server fanned out).
     pub fn receive(&mut self, bundle: &[u8]) {
         let b = Bundle::parse(bundle, usize::MAX).unwrap();
@@ -611,14 +669,39 @@ impl Device {
     /// Joins by external commit from the server's `GroupInfo` and tree. OpenMLS removes this
     /// device's old leaf itself when its signature key is still in the tree (a resync).
     pub fn rejoin(&mut self, group_info: &[u8], tree: &[u8]) -> Vec<u8> {
+        self.rejoin_with_aad(group_info, tree, |_, _| Vec::new())
+    }
+
+    /// Joins by invite link (D-0076): an external commit carrying `link`'s proof for this
+    /// group, the `GroupInfo`'s epoch, this device and its leaf key.
+    pub fn join_by_link(&mut self, group_info: &[u8], tree: &[u8], link: &LinkSecret) -> Vec<u8> {
+        let (id, key) = (self.id, self.signer.public().to_vec());
+        self.rejoin_with_aad(group_info, tree, |group, epoch| {
+            link.prove(group, epoch, &id, &key)
+        })
+    }
+
+    /// An external commit whose authenticated data is `aad(group, epoch)` (tests of what the
+    /// server and members refuse).
+    pub fn rejoin_with_aad(
+        &mut self,
+        group_info: &[u8],
+        tree: &[u8],
+        aad: impl FnOnce(&[u8; 16], u64) -> Vec<u8>,
+    ) -> Vec<u8> {
         let MlsMessageBodyIn::GroupInfo(gi) = MlsMessageIn::tls_deserialize_exact(group_info)
             .unwrap()
             .extract()
         else {
             panic!("not a GroupInfo")
         };
+        let aad = aad(
+            gi.group_id().as_slice().try_into().unwrap(),
+            gi.epoch().as_u64(),
+        );
         let tree = RatchetTreeIn::tls_deserialize_exact(tree).unwrap();
         let (group, bundle) = MlsGroup::external_commit_builder()
+            .with_aad(aad)
             .with_ratchet_tree(tree)
             .with_config(config().join_config().clone())
             .build_group(&self.provider, gi, self.cred.clone())
@@ -735,6 +818,71 @@ pub fn server_create(creator: &mut Device, dir: &Dir) -> Group {
 pub fn server_create_with(creator: &mut Device, dir: &Dir, limits: &Limits) -> Group {
     let (gi, tree) = creator.create();
     Group::create(GID, &creator.id, &gi, &tree, dir, limits).unwrap()
+}
+
+/// An invite link as apps hold it (PROTOCOL §6.8): a random handle and a 32-byte secret, from
+/// which HKDF-SHA-256 (salt `songbird.v1/group-link`) derives `auth` (for the server), `info`
+/// (the group's info key) and `proof` (the seed of the link's Ed25519 key, D-0076).
+#[derive(Debug, Clone)]
+pub struct LinkSecret {
+    pub handle: [u8; 16],
+    pub secret: [u8; 32],
+}
+
+impl LinkSecret {
+    /// A fresh link.
+    #[must_use]
+    pub fn random() -> Self {
+        let mut handle = [0u8; 16];
+        let mut secret = [0u8; 32];
+        aws_lc_rs::rand::fill(&mut handle).unwrap();
+        aws_lc_rs::rand::fill(&mut secret).unwrap();
+        Self { handle, secret }
+    }
+
+    fn derive(&self, info: &[u8]) -> [u8; 32] {
+        use aws_lc_rs::hkdf;
+        let mut out = [0u8; 32];
+        hkdf::Salt::new(hkdf::HKDF_SHA256, b"songbird.v1/group-link")
+            .extract(&self.secret)
+            .expand(&[info], hkdf::HKDF_SHA256)
+            .unwrap()
+            .fill(&mut out)
+            .unwrap();
+        out
+    }
+
+    /// What the server is shown (it keeps `SHA-256(auth)`).
+    #[must_use]
+    pub fn auth(&self) -> [u8; 32] {
+        self.derive(b"auth")
+    }
+
+    fn key(&self) -> aws_lc_rs::signature::Ed25519KeyPair {
+        aws_lc_rs::signature::Ed25519KeyPair::from_seed_unchecked(&self.derive(b"proof")).unwrap()
+    }
+
+    /// The link's proof key, which members publish in the roles extension.
+    #[must_use]
+    pub fn public_key(&self) -> [u8; 32] {
+        use aws_lc_rs::signature::KeyPair as _;
+        self.key().public_key().as_ref().try_into().unwrap()
+    }
+
+    /// A joiner's proof (the external commit's authenticated data).
+    #[must_use]
+    pub fn prove(
+        &self,
+        group: &[u8; 16],
+        epoch: u64,
+        device: &DeviceId,
+        leaf_key: &[u8],
+    ) -> Vec<u8> {
+        let content =
+            songbird_groups::links::proof_content(group, epoch, &self.handle, device, leaf_key);
+        let sig: [u8; 64] = self.key().sign(&content).as_ref().try_into().unwrap();
+        songbird_groups::links::LinkProof::encode(&self.handle, &sig)
+    }
 }
 
 /// The delivery service's signer as an OpenMLS client signer, for building proposals a

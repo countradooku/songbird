@@ -187,6 +187,7 @@ fn reason(e: &GroupError) -> &'static str {
         GroupError::Forbidden(Denied::Listed) => "listed",
         GroupError::Forbidden(_) => "role",
         GroupError::LogSignature => "log",
+        GroupError::LinkProof(_) => "proof",
         GroupError::Wire(_) | GroupError::Malformed => "malformed",
         GroupError::Kind => "kind",
         GroupError::OtherGroup => "group",
@@ -345,6 +346,8 @@ impl Groups {
             }
             // The roles rule refused it (D-0070).
             Ok(Err(GroupError::Forbidden(_))) => return Outcome::Forbidden("role"),
+            // A join without a valid proof that its device held the link (D-0076).
+            Ok(Err(GroupError::LinkProof(_))) => return Outcome::Forbidden("proof"),
             Ok(Err(e)) => return Outcome::Malformed(reason(&e)),
             Err(_) => return Outcome::Unavailable,
         };
@@ -735,10 +738,9 @@ fn validate(
     link: Option<[u8; 16]>,
 ) -> Result<Validated, GroupError> {
     let g = Group::load(record)?;
-    let (g, applied) = if link.is_some() {
-        g.apply_join(device, bundle, dir, limits)?
-    } else {
-        g.apply_commit(device, bundle, dir, limits)?
+    let (g, applied) = match link {
+        Some(handle) => g.apply_join(device, bundle, dir, limits, &handle)?,
+        None => g.apply_commit(device, bundle, dir, limits)?,
     };
     let roster: Vec<DeviceId> = g.roster().devices().collect();
     let dead = roster

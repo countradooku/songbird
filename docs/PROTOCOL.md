@@ -1375,6 +1375,11 @@ Every group's context carries two extensions from creation:
   flags u8 | n u16 | n × (account [16] | role u8)    accounts strictly ascending
   ```
 
+  Version 2 (D-0076) is the same followed by the invite links' proof keys (§6.8): `m u8 | m ×
+  (handle [16] | Ed25519 public key [32])`, 1 ≤ m ≤ 16, handles strictly ascending. A group
+  with no link keys uses version 1, so each value has one encoding. Publishing or withdrawing a
+  key needs the `links` role.
+
   - **Roles:** 0 read-only, 1 member, 2 moderator, 3 admin, 4 owner.
   - **Flags:** `0x01` channel, `0x02` joining needs approval.
   - **Unlisted accounts** have `default_role` (1 in a group, 0 in a channel). An entry never
@@ -1437,9 +1442,12 @@ A commit the rule refuses gets 403 `role`, and clients drop it.
 
 - **A link** is `handle [16]` (random, chosen by the app) and a 32-byte secret. Both travel
   only in the link itself (`https://…/g#<handle><secret>`, in the fragment). The app derives
-  two keys from the secret with HKDF-SHA-256 (salt `"songbird.v1/group-link"`):
+  three keys from the secret with HKDF-SHA-256 (salt `"songbird.v1/group-link"`):
   - `auth` (info `"auth"`), shown to the server to open or use the link;
-  - a key for the group's info (info `"info"`), which the server never sees.
+  - a key for the group's info (info `"info"`), which the server never sees;
+  - `proof` (info `"proof"`), the seed of the link's Ed25519 key pair (D-0076). Before sharing
+    the link, its creator commits the public key under the handle into the roles extension
+    (§6.6, version 2); revoking the link also withdraws it.
 
   The server keeps `SHA-256(auth)`, the group, whether a join must be approved, a use count,
   an optional limit and an optional expiry (at most a year).
@@ -1457,8 +1465,14 @@ A commit the rule refuses gets 403 `role`, and clients drop it.
 - **Joining:** `POST /v1/groups/join` with `version | handle | auth | bundle`. The bundle is an
   external commit adding the device (`Sender::NewMemberCommit`), with the group's default role
   (it cannot change roles: RFC 9420 forbids external commits from changing extensions).
+  - **The link proof** (D-0076): the external commit's authenticated data is `version u8 (1) |
+    handle [16] | signature [64]`. The signature is the link's `proof` key over
+    `"songbird.v1/link-proof\0" | group [16] | epoch u64 (the GroupInfo's) | handle | device
+    [16] | key_len u16 | the new leaf's signature key`. The server requires it to name this
+    link and to verify under the key the roles extension publishes for it.
   - Answers as `/v1/groups/commit`, including a retried join that already won.
-  - 404 for a link that cannot be used; 403 `approval` if joins need approval.
+  - 404 for a link that cannot be used; 403 `approval` if joins need approval; 403 `proof`
+    without a valid proof (nothing is spent).
   - The link's use is counted in the same transaction as the commit, so two joins can never
     both take the last use.
 - **Asking:** a link needs approval if the link says so or the group's policy has the approval
@@ -1476,7 +1490,10 @@ A commit the rule refuses gets 403 `role`, and clients drop it.
   to 5. Managing links and requests uses the commit budget.
 - **What members see:** every join by link is an external commit from a new account, with the
   default role (OpenMLS refuses an external commit that changes extensions). Apps show it in
-  the chat. Whether the joiner held a valid link is the server's word; see the threat model.
+  the chat. Before following an external commit from an account not yet in the group, an app
+  checks its link proof against the keys its own roles extension publishes
+  (`songbird_groups::links::verify`) and refuses one without a valid proof: a server cannot
+  admit someone who never held a link the members made.
 
 ### 6.9 Communities (M4, D-0072)
 

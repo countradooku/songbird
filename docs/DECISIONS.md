@@ -118,6 +118,85 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0076 — Prompt 5 follow-up 2: invite-link proofs members check, under a key the link's creator publishes in the roles extension
+
+- Date: 2026-11-17
+- Status: proposed; built and passing live (report `P05-followups.md`); **the threat-model row
+  awaits the owner's approval**
+- Decided by: agent, on the owner's approval of the follow-up at the Prompt 5 gate (2026-11-17)
+- Context: D-0071 left whether a joiner held a usable invite link to the server's word. A
+  malicious server could admit any account to a group by external commit. Members would see
+  the join, but could not tell it from an honest one.
+- Options considered:
+  - **A MAC key shared in the encrypted group info** (the owner's sketch) was weighed and not
+    taken, for three reasons:
+    - the encrypted info is served to anyone who opens any of the group's links (they need
+      the name and picture), so every link holder would learn every link's MAC key and could
+      prove for links they never held;
+    - the server cannot check a MAC whose key it never sees, so it would accept joins its
+      honest members then refuse (a fork);
+    - the info is replaced by any role with `edit_info`, not only the links role.
+  - **A signature instead (the "equivalent" the owner allowed).** The link's secret also yields
+    an Ed25519 key pair. Its public key goes in the roles extension, which:
+    - every member verifies in the MLS context;
+    - the server can read, so it applies the same rule and an honest server never accepts a
+      join members refuse;
+    - only the `links` role changes.
+
+    Knowing the public key forges nothing. The server keeps only `SHA-256(auth)` from the
+    same secret, so it cannot sign.
+  - **A separate context extension for the keys** was rejected: OpenMLS accepts a change to a
+    custom extension only if `required_capabilities` names it, and every member's leaf would
+    need a new capability. The keys are a section of the roles extension (version 2), which is
+    already required. A group without link keys keeps version 1 byte for byte.
+  - **The proof in a new bundle part** was rejected: members receive the commit message alone,
+    not the bundle. It travels in the external commit's authenticated data, which the joiner
+    signs as part of the commit and every member receives.
+- Decision:
+  - **Keys.** `proof` = HKDF-SHA-256(salt `songbird.v1/group-link`, the link's secret, info
+    `proof`), an Ed25519 seed. The link's creator commits `handle → public key` into the roles
+    extension before sharing the link: at most 16, ascending by handle. Publishing or
+    withdrawing a key needs the `links` role (`roles::authorize`).
+  - **The proof:**
+    - the external commit's authenticated data, `1 | handle [16] | signature [64]`;
+    - signed by the link's key over `"songbird.v1/link-proof\0" | group | epoch | handle |
+      device | len u16 | leaf signature key`, so it cannot be moved to another group, epoch,
+      device or leaf.
+  - **One rule** (`links::verify`):
+    - the server runs it on every join by link, requiring the proof to name the link the join
+      is counted against (403 `proof`, nothing spent);
+    - apps run it on every external commit from an account not yet in the group
+      (`receive_join_checked` in the harness), and refuse to follow one without it;
+    - rejoins of an account's own devices need no proof.
+  - **The server keeps working as before:** handles, `SHA-256(auth)`, uses, expiry and
+    revocation. Revoking a link is now also a commit withdrawing its key, so members refuse
+    later joins by it even from a server that ignores the revocation.
+- Evidence (Windows 11, `rustc 1.99.1`; live: SurrealDB v4.0.1 and Valkey 9.1.3 under podman):
+  - `crates/groups`:
+    - `links` unit test: a proof moved to another group, epoch, device or leaf fails, as do
+      another handle, an unpublished link, another key, a truncated proof and another version;
+    - `roles` unit test `link_keys_have_one_encoding_and_are_the_links_roles`.
+  - `tests/groups/tests/link_proofs.rs`, 4 tests:
+    - a join by link with its proof is accepted by the server and by members;
+    - refused by the server (`LinkProof`) and by members: no proof, an unpublished link,
+      the published handle signed with another secret, a valid proof made out to another
+      device;
+    - a rejoin needs no proof;
+    - only the links role publishes or withdraws keys, and a withdrawn key stops joins by
+      its link.
+  - Live `gate_p05`:
+    - in `invite_links_and_join_requests`, a join without a proof and one under an
+      unpublished link get 403 `proof` and spend nothing, then the valid join succeeds and
+      both members check Carol's proof themselves;
+    - `parallel_joins_never_exceed_a_links_uses` joins with proofs.
+- Consequences:
+  - Apps derive three keys from a link's secret (`auth`, `info`, `proof`). They commit the
+    proof key before sharing a link, and withdraw it when revoking.
+  - One threat-model §1 row: link handles and proof public keys in the group context. The §6
+    risk "whether a joiner held a link is the server's word" closes for apps that check.
+  - A joiner whose link leaked is still admitted: the proof shows the link was held, not by
+    whom (as before).
+
 ## D-0075 — Prompt 5 follow-up 1: the delivery service as every group's MLS external sender, proposing to remove devices that left the directory
 
 - Date: 2026-11-17

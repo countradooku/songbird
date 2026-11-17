@@ -20,6 +20,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- App UI and A1 design (D-0092, `apps/ui`, `docs/design/`): the four-tab IA without Status, the brand
+  (feather mark, Dusk violet palette, system fonts), and the mock-first plan; usability tests still to run.
 - Prompt 7 gate (`P07-gate.md`, D-0086 to D-0091; PR #62): **approved by the owner on 2026-11-17**
   ("all green you can merge"): M1 to M5 and the
   security review's fixes; nine threat-model §1 rows (a live 1:1 call with its two accounts for at
@@ -142,6 +144,51 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0092 — The app UI (A1–A15) on NSH in Rust, over a mocked app-core, with a first real-backend slice
+
+- Date: 2026-11-17
+- Status: proposed (waiting for the owner, with the A1 design gate)
+- Decided by: agent (owner's request: "build the whole NSH app in one shot … what is not implemented just mock it")
+- Context: the app prompt set (A0–A15) needs a UI before app-core (A2) exists. The owner asked for every
+  screen now, mocked where needed, premium in look, and connected to the backend where it already can be.
+- Options considered: NSH TSX vs NSH Rust (A0: "NSH for all UI, written as Rust components"); one shared
+  checkout for parallel agents vs isolated APFS clones merged by the lead; wiring the backend through a
+  copied `songbird-api` client vs the backend's own small crates.
+- Evidence: `apps/ui` builds with `cargo check --all-targets` and no warnings; `cargo test --lib` 93 tests;
+  `nsh test Screens.test.tsx --target macos` (and the per-area `Polish_*`/`Screens_*` tests) produce the
+  screenshots in `apps/ui/shots/`; `docs/design/tools/contrast.py` reports 0 failing colour pairs in light,
+  dark and both high-contrast themes. A cross-check (scratch crate linking `songbird-api`) confirmed the
+  server's own code parses the app's request signatures and verifies its registration request
+  (PoW, challenge tag, both key signatures).
+- Decision:
+  1. **NSH 0.5 Rust mode**, `apps/ui` as its own Cargo workspace (`nsh-app-songbird`), NSH crates at the CLI's
+     version. Design system in `theme.json` (one token source; light, dark; high contrast and forced
+     light/dark built from it at run time, `src/theming.rs`) and an app `ui` layer (`src/ui`) every feature
+     composes; Lucide icons (ISC) inline; mock profile photos generated per contact (`ui/portrait.rs`).
+     Palette: **Dusk violet** (owner's choice over Ink & Gold, Robin and the first green-teal), so the app keeps
+     WhatsApp's familiar structure without its look (green, mint/teal bubbles, beige wallpaper, blue ticks).
+  2. **IA**: Chats · Calls · Communities · You (WhatsApp's without Status); phones a native stack over a
+     tab bar, wide windows a rail + list pane + detail stack (`src/shell.rs`). Pending owner approval (A1).
+  3. **app-core is mocked** in `src/store` (seeded data, timers for ticks, typing and calls). Each mock is
+     marked `// mock:` with the real app-core call. No UI copy claims a property the mock lacks.
+  4. **Real backend now** (`src/backend`, opt-in under You → Server connection): registration (challenge,
+     Argon2id PoW on a blocking thread, Ed25519 identity and device keys, invite), username claim (hash and
+     proof only), devices, invites, GIF search, account deletion, and the delivery WebSocket
+     (`crates/client`) with live status. Envelopes are counted and **never acknowledged**, so nothing is lost
+     before app-core can decrypt them. New dependencies: the backend's own `songbird-types/-proto/-pow/-keys/
+     -client` by path (wire formats cannot drift), `aws-lc-rs` (as the workspace), `serde_json` (theme
+     variants, JSON answers). Not `songbird-api` (a service crate with database clients).
+  5. **Invite codes and usernames follow the server**: 24 Crockford symbols; usernames 3–32, case kept as
+     typed, unique case-insensitively (PROTOCOL.md §3).
+- Consequences: device keys live in NSH app storage in development (marked mock); they move to the Secure
+  Enclave / Android Keystore with app-core. Message content, profiles, groups (MLS), attachments, calls
+  media, backups and settings sync stay mocked until A2 and Prompts 8–11. `scripts/dev-app-backend.sh`
+  runs api and delivery against the compose stores for the app; on the agent's macOS host Podman's port
+  forwarding was too slow for SurrealDB (13 s per WebSocket upgrade), so registration was verified against
+  the server's code rather than a running server. Revisit: the A1 gate (design, IA, brand, usability
+  tests), the native modules NSH lacks (`apps/ui/DESKTOP_GAPS.md`), and libsignal's licence for app-core
+  (D-0047).
 
 ## D-0091 — Prompt 7: the security review's fixes
 

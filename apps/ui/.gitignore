@@ -1,0 +1,6 @@
+.nsh/
+target/
+shots/
+preview/target/
+preview/.nsh/
+preview/shots/

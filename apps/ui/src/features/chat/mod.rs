@@ -1,0 +1,563 @@
+//! A5: the conversation — bubbles of every type, ticks, replies,
+//! reactions, composer, voice notes, message info, chat info.
+//!
+//! - `header`: back, avatar, title and subtitle, calls, the More menu,
+//!   search in chat.
+//! - `list`: the virtualized messages (date separators, sender runs,
+//!   swipe to reply, typing dots, jump to latest).
+//! - `bubbles`: one look per `Body` variant.
+//! - `voice`: voice-note playback and the recorder's clock.
+//! - `composer`: the input, attachments, recording and the bars that
+//!   replace it (requests, blocked, admins only, selection).
+//! - `actions`: the reaction bar and message menu.
+//! - `sheets`: emoji, attachments, poll and event creators, contacts,
+//!   stickers, forward, delete, disappearing messages.
+//! - `info` and `message_info`: the pushed pages.
+
+mod actions;
+mod bubbles;
+mod composer;
+mod header;
+mod info;
+mod list;
+pub(crate) mod logic;
+mod message_info;
+mod sheets;
+mod voice;
+
+use std::time::Duration;
+
+use nsh_core::{keymap::When, prelude::*};
+
+use crate::{
+    nav,
+    store::{Body, ChatId, ChatKind, MsgId, Store, store},
+    ui::*,
+};
+
+pub use info::chat_info;
+pub use message_info::message_info;
+
+/// Opens a chat: the detail pane on desktop, a pushed page on phones.
+pub fn open(chat: ChatId) {
+    store().mark_read(chat);
+    if wide() {
+        nav::pop_to_root();
+        nav::open_chat().set(nav::OpenChat(Some(chat)));
+    } else {
+        nav::push(format!("chat:{chat}"), move || {
+            nsh_base::nav_page()
+                .key(format!("chat:{chat}"))
+                .header_visible(false)
+                .child(conversation(chat))
+        });
+    }
+}
+
+/// Something asked of a conversation from outside it (the media viewer's
+/// Reply, contact info's Search): the conversation takes it when it is
+/// (or becomes) the one showing `chat`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ask {
+    Reply(MsgId),
+    Search,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct Pending(Option<(ChatId, Ask)>);
+
+/// Opens `chat` with the reply bar set to `msg` and the input focused
+/// (the media viewer's Reply). Phones: back to the chat's page when it is
+/// in the stack (pages above it close), else it is pushed. Desktops: the
+/// chat in the detail pane, as [`open`].
+pub fn reply_to(chat: ChatId, msg: MsgId) {
+    ask(chat, Ask::Reply(msg));
+}
+
+/// Opens `chat` with search in chat started (contact info's Search).
+pub fn search_in(chat: ChatId) {
+    ask(chat, Ask::Search);
+}
+
+fn ask(chat: ChatId, what: Ask) {
+    global::<Pending>().set(Pending(Some((chat, what))));
+    if !wide() {
+        let key = format!("chat:{chat}");
+        let at = nav::routes().with_untracked(|r| r.0.iter().position(|x| x.key == key.as_str()));
+        if let Some(i) = at {
+            store().mark_read(chat);
+            nav::truncate(i + 1);
+            return;
+        }
+    }
+    open(chat);
+}
+
+/// Takes what was asked of this conversation (see [`Pending`]), once the
+/// conversation is on screen.
+fn take_pending(cv: Conv) {
+    let pending = global::<Pending>();
+    effect(move || {
+        let Some((chat, what)) = pending.get().0 else { return };
+        if chat != cv.chat {
+            return;
+        }
+        // Next turn: the input exists and can take focus; the signal is
+        // not written while this effect is reading it.
+        set_timeout(Duration::from_millis(0), move || {
+            if pending.get_untracked().0 != Some((chat, what)) {
+                return;
+            }
+            pending.set(Pending(None));
+            match what {
+                Ask::Reply(id) => cv.start_reply(id),
+                Ask::Search => batch(|| {
+                    cv.query.set(String::new());
+                    cv.hit.set(0);
+                    cv.searching.set(true);
+                }),
+            }
+        });
+    });
+}
+
+/// The message a menu was asked for (a right click, a held finger, the
+/// actions button): its bubble's frame in window points, measured as the
+/// menu opens, and where it sits in its run (the lifted copy draws the
+/// same corners).
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct MenuAt {
+    pub id: MsgId,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub place: logic::Place,
+}
+
+/// Keyframe timing from the motion tokens.
+pub(crate) fn timing(ms: f32, easing: Easing) -> KeyframeTiming {
+    let mut t = KeyframeTiming::default();
+    t.duration_ms = ms;
+    t.easing = easing;
+    t
+}
+
+/// A looping timing (typing dots, the recording dot), `delay` before.
+pub(crate) fn looping(ms: f32, delay: f32) -> KeyframeTiming {
+    let mut t = timing(ms, Easing::EASE);
+    t.iterations = None;
+    t.delay_ms = delay;
+    t
+}
+
+/// A screen-reader label that follows the state.
+pub(crate) fn say<S: Into<SharedString>>(f: impl Fn() -> S + 'static) -> impl Fn() -> Option<SharedString> + 'static {
+    move || Some(f().into())
+}
+
+/// A voice note being recorded: held (released sends) or locked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Rec {
+    Held,
+    Locked,
+}
+
+/// The conversation's state: what the user is doing in it. `Copy`, so
+/// rows and listeners capture it; per-message state lives here keyed by
+/// id, never in a recycled cell.
+#[derive(Clone, Copy)]
+pub(crate) struct Conv {
+    pub chat: ChatId,
+    pub s: Store,
+    /// The desktop layout (decided when the conversation is made).
+    pub wide: bool,
+    pub draft: Signal<String>,
+    pub reply: Signal<Option<MsgId>>,
+    pub editing: Signal<Option<MsgId>>,
+    pub menu: Signal<Option<MenuAt>>,
+    pub selecting: Signal<bool>,
+    pub selected: Signal<Vec<MsgId>>,
+    /// Messages a forward or delete sheet acts on.
+    pub acting_on: Signal<Vec<MsgId>>,
+    pub forward_open: Signal<bool>,
+    pub delete_open: Signal<bool>,
+    pub attach_open: Signal<bool>,
+    /// Desktops: the paperclip's frame (x, y, w, h) when the attach
+    /// popover opened, which it is anchored to.
+    pub attach_at: Signal<Option<(f32, f32, f32, f32)>>,
+    pub emoji_open: Signal<bool>,
+    pub reactions_open: Signal<bool>,
+    pub poll_open: Signal<bool>,
+    pub event_open: Signal<bool>,
+    pub contact_open: Signal<bool>,
+    pub sticker_open: Signal<bool>,
+    pub timer_open: Signal<bool>,
+    pub searching: Signal<bool>,
+    pub query: Signal<String>,
+    /// Which match (from the newest) search shows.
+    pub hit: Signal<usize>,
+    /// A message flashed after a jump (reply quote, search).
+    pub highlight: Signal<Option<MsgId>>,
+    /// The message just sent: it rises in.
+    pub fresh: Signal<Option<MsgId>>,
+    /// The message whose reaction just changed: its chip pops.
+    pub popped: Signal<Option<MsgId>>,
+    /// The list rests at its end.
+    pub following: Signal<bool>,
+    /// Messages that arrived while scrolled up.
+    pub unseen: Signal<u32>,
+    pub list: ElementRef,
+    pub input: ElementRef,
+    pub rec: Signal<Option<Rec>>,
+    pub rec_secs: Signal<u32>,
+    /// The mic's press ended a hold (its press must not start again).
+    pub held_press: Signal<bool>,
+    pub voice: voice::Player,
+    pub shake: Motion,
+}
+
+impl Conv {
+    fn new(chat: ChatId, s: Store) -> Self {
+        let draft = s.chat(chat).map(|c| c.draft).unwrap_or_default();
+        Conv {
+            chat,
+            s,
+            wide: wide(),
+            draft: signal(draft),
+            reply: signal(None),
+            editing: signal(None),
+            menu: signal(None),
+            selecting: signal(false),
+            selected: signal(Vec::new()),
+            acting_on: signal(Vec::new()),
+            forward_open: signal(false),
+            delete_open: signal(false),
+            attach_open: signal(false),
+            attach_at: signal(None),
+            emoji_open: signal(false),
+            reactions_open: signal(false),
+            poll_open: signal(false),
+            event_open: signal(false),
+            contact_open: signal(false),
+            sticker_open: signal(false),
+            timer_open: signal(false),
+            searching: signal(false),
+            query: signal(String::new()),
+            hit: signal(0),
+            highlight: signal(None),
+            fresh: signal(None),
+            popped: signal(None),
+            following: signal(true),
+            unseen: signal(0),
+            list: element_ref(),
+            input: element_ref(),
+            rec: signal(None),
+            rec_secs: signal(0),
+            held_press: signal(false),
+            voice: voice::Player::new(),
+            shake: motion(),
+        }
+    }
+
+    /// A group, community or channel (sender names, receipts per member).
+    pub fn is_group(self) -> bool {
+        self.s.chat(self.chat).is_some_and(|c| {
+            matches!(c.kind, ChatKind::Group | ChatKind::Community | ChatKind::Channel { .. })
+        })
+    }
+
+    /// Scrolls to message `id` and flashes it.
+    pub fn jump_to(self, id: MsgId) {
+        let Some(index) = self.s.index_of(self.chat, id) else {
+            toast("That message is no longer in this chat");
+            return;
+        };
+        self.list.scroll_to_index(index as u32, percentage(0.5), px(0.0), true);
+        self.highlight.set(Some(id));
+        let highlight = self.highlight;
+        set_timeout(Duration::from_millis(1400), move || {
+            if highlight.get_untracked() == Some(id) {
+                highlight.set(None);
+            }
+        });
+    }
+
+    /// Back to the newest message.
+    pub fn to_latest(self) {
+        self.list.scroll_to_end(true);
+        self.unseen.set(0);
+        self.following.set(true);
+    }
+
+    /// The user's reaction: added, changed or taken back; its chip pops.
+    pub fn react(self, id: MsgId, emoji: &str) {
+        self.menu.set(None);
+        self.s.react(self.chat, id, emoji);
+        self.popped.set(Some(id));
+        let popped = self.popped;
+        set_timeout(Duration::from_millis(700), move || {
+            if popped.get_untracked() == Some(id) {
+                popped.set(None);
+            }
+        });
+    }
+
+    pub fn start_reply(self, id: MsgId) {
+        batch(|| {
+            self.menu.set(None);
+            self.editing.set(None);
+            self.reply.set(Some(id));
+        });
+        self.input.focus();
+    }
+
+    pub fn start_edit(self, id: MsgId) {
+        let Some(m) = self.s.message(self.chat, id).filter(logic::editable) else { return };
+        batch(|| {
+            self.menu.set(None);
+            self.reply.set(None);
+            self.editing.set(Some(id));
+            self.draft.set(logic::copy_text(&m));
+        });
+        self.input.focus();
+    }
+
+    pub fn cancel_edit(self) {
+        batch(|| {
+            self.editing.set(None);
+            self.draft.set(self.s.chat(self.chat).map(|c| c.draft).unwrap_or_default());
+        });
+    }
+
+    /// Sends the draft (or saves the edit).
+    pub fn send_draft(self) {
+        let text = self.draft.get_untracked().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        if let Some(id) = self.editing.get_untracked() {
+            self.s.edit_message_text(self.chat, id, text);
+            batch(|| {
+                self.editing.set(None);
+                self.draft.set(self.s.chat(self.chat).map(|c| c.draft).unwrap_or_default());
+            });
+            return;
+        }
+        let reply = self.reply.get_untracked();
+        let id = self.s.send_text(self.chat, text, reply);
+        self.sent(id);
+    }
+
+    /// After anything the user sends: it rises in, the reply bar goes,
+    /// the list follows.
+    pub fn sent(self, id: MsgId) {
+        batch(|| {
+            self.fresh.set(Some(id));
+            self.reply.set(None);
+            self.draft.set(String::new());
+        });
+        self.to_latest();
+    }
+
+    /// Sends a body from the attachment sheet or a picker.
+    pub fn send_body(self, body: Body) {
+        let reply = self.reply.get_untracked();
+        let draft = self.draft.get_untracked();
+        let id = self.s.send(self.chat, body, reply);
+        self.sent(id);
+        // An attachment leaves the typed text where it was.
+        self.draft.set(draft.clone());
+        self.s.set_draft(self.chat, draft);
+    }
+
+    pub fn toggle_selected(self, id: MsgId) {
+        self.selected.update(|v| {
+            if let Some(i) = v.iter().position(|x| *x == id) {
+                v.remove(i);
+            } else {
+                v.push(id);
+            }
+        });
+    }
+
+    pub fn start_select(self, id: MsgId) {
+        batch(|| {
+            self.menu.set(None);
+            self.selected.set(vec![id]);
+            self.selecting.set(true);
+        });
+    }
+
+    pub fn end_select(self) {
+        batch(|| {
+            self.selecting.set(false);
+            self.selected.set(Vec::new());
+        });
+    }
+
+    pub fn ask_forward(self, ids: Vec<MsgId>) {
+        batch(|| {
+            self.menu.set(None);
+            self.acting_on.set(ids);
+            self.forward_open.set(true);
+        });
+    }
+
+    pub fn ask_delete(self, ids: Vec<MsgId>) {
+        batch(|| {
+            self.menu.set(None);
+            self.acting_on.set(ids);
+            self.delete_open.set(true);
+        });
+    }
+
+    /// Copies the messages' text, oldest first.
+    pub fn copy(self, ids: &[MsgId]) {
+        let chat = self.chat;
+        let text = self.s.messages.with_untracked(|m| {
+            m.get(&chat)
+                .map(|v| {
+                    v.iter().filter(|x| ids.contains(&x.id)).map(logic::copy_text).collect::<Vec<_>>().join("\n")
+                })
+                .unwrap_or_default()
+        });
+        set_clipboard(text);
+        self.menu.set(None);
+        toast(if ids.len() > 1 { "Messages copied" } else { "Message copied" });
+    }
+
+    /// Closes the topmost thing open (Escape).
+    fn dismiss(self) {
+        if self.menu.with_untracked(Option::is_some) {
+            self.menu.set(None);
+        } else if self.wide && self.attach_open.get_untracked() {
+            // The desktop attach popover (sheets close themselves).
+            self.attach_open.set(false);
+        } else if self.selecting.get_untracked() {
+            self.end_select();
+        } else if self.searching.get_untracked() {
+            self.searching.set(false);
+            self.query.set(String::new());
+        } else if self.editing.get_untracked().is_some() {
+            self.cancel_edit();
+        } else if self.reply.get_untracked().is_some() {
+            self.reply.set(None);
+        } else if self.rec.get_untracked().is_some() {
+            self.rec.set(None);
+        }
+    }
+}
+
+/// Watches the chat while it is open: counts what arrives while the
+/// reader is scrolled up, marks the chat read, shakes on a nudge.
+fn watch(cv: Conv) {
+    let s = cv.s;
+    let chat = cv.chat;
+    let seen = stored((s.message_count(chat), s.last_message(chat).map(|m| m.id)));
+    effect(move || {
+        let count = s.message_count(chat);
+        let last = s.last_message(chat);
+        let (was_count, was_last) = seen.with(|x| *x);
+        let last_id = last.as_ref().map(|m| m.id);
+        if last_id == was_last && count == was_count {
+            return;
+        }
+        seen.replace((count, last_id));
+        let Some(last) = last else { return };
+        if last_id != was_last && matches!(last.body, Body::Nudge) {
+            let nudges = s.settings.with_untracked(|x| x.nudges);
+            if nudges || last.mine() {
+                shake(cv);
+            }
+        }
+        if count > was_count && !last.mine() {
+            if cv.following.get_untracked() {
+                s.mark_read(chat);
+            } else {
+                cv.unseen.update(|n| *n += (count - was_count) as u32);
+            }
+        }
+    });
+}
+
+/// The nudge: the conversation shakes once (no motion when reduced).
+fn shake(cv: Conv) {
+    let spec = MotionSpec::new(timing(420.0, Easing::EaseOut))
+        .values(MotionChannel::TranslateX, [0.0, -9.0, 9.0, -7.0, 7.0, -4.0, 4.0, 0.0]);
+    let _ = cv.shake.play(spec);
+}
+
+/// Desktop keys: Escape closes the topmost layer, Up edits the last
+/// message when the draft is empty.
+fn keys(cv: Conv) {
+    if !is_desktop() {
+        return;
+    }
+    on_key("escape", move |_| cv.dismiss());
+    let options = KeyOptions { when: When::Always, pass_through: true, ..KeyOptions::default() };
+    on_key_with("up", options, move |_| {
+        if cv.draft.with_untracked(String::is_empty)
+            && cv.editing.get_untracked().is_none()
+            && let Some((id, _)) = cv.s.last_own_text(cv.chat)
+        {
+            cv.start_edit(id);
+        }
+    });
+}
+
+/// The conversation with its own header, composer and overlays.
+pub fn conversation(chat: ChatId) -> AnyElement {
+    let s = store();
+    if s.chat(chat).is_none() {
+        return view()
+            .flex_1()
+            .bg(move || c::chat_bg())
+            .child(empty_state(Icon::Chats, "Chat not found", "This chat was deleted.", None))
+            .into_element();
+    }
+    let cv = Conv::new(chat, s);
+    watch(cv);
+    take_pending(cv);
+    keys(cv);
+    voice::install(cv);
+    composer::install_recorder(cv);
+    let title = s.chat(chat).map(|c| c.title).unwrap_or_default();
+    let root = view()
+        .flex_1()
+        .bg(move || c::chat_bg())
+        .pb_keyboard()
+        .child(
+            view()
+                .flex_1()
+                .bind_motion(&cv.shake)
+                .child(header::header(cv))
+                .child(
+                    view()
+                        .flex_1()
+                        .child(list::message_list(cv))
+                        .child(list::jump_button(cv)),
+                )
+                .child(composer::bottom(cv)),
+        )
+        .child(sheets::all(cv))
+        .child(actions::overlay_menu(cv));
+    // Desktops: files dropped on the conversation are sent to it (A13).
+    // Wrapped last, so the drop overlay sits above everything.
+    let root = if is_desktop() {
+        crate::features::desktop::on_file_drop(root, format!("Drop to send to {title}"), move |files| {
+            for f in files {
+                // mock: app-core encrypts and uploads the file (A7 attachments).
+                s.send(
+                    chat,
+                    crate::store::Body::File { name: f.name.clone(), size: "—".into(), kind: f.mime.clone() },
+                    None,
+                );
+            }
+        })
+    } else {
+        root
+    };
+    root
+        .into_element()
+}

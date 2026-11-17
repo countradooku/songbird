@@ -62,6 +62,9 @@ pub const AUTH_KEY_LEN: usize = 32;
 
 /// Attachments live at most this long (invariant 3).
 pub const ATTACHMENT_MAX_AGE: Duration = Duration::from_hours(30 * 24);
+/// A resumable upload grant lives at most this long, however often its parts keep it alive
+/// (Prompt 6, M2, D-0081).
+pub const GRANT_MAX_AGE: Duration = Duration::from_hours(24);
 
 const SCHEMA: &str = "
 DEFINE TABLE IF NOT EXISTS account SCHEMAFULL;
@@ -184,6 +187,8 @@ DEFINE FIELD IF NOT EXISTS device ON upload_grant TYPE bytes;
 DEFINE FIELD IF NOT EXISTS size ON upload_grant TYPE int;
 DEFINE FIELD IF NOT EXISTS fetches ON upload_grant TYPE int;
 DEFINE FIELD IF NOT EXISTS expires ON upload_grant TYPE datetime;
+DEFINE FIELD IF NOT EXISTS deadline ON upload_grant TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS upload ON upload_grant TYPE option<string>;
 DEFINE INDEX IF NOT EXISTS upload_grant_device ON upload_grant FIELDS device;
 DEFINE INDEX IF NOT EXISTS upload_grant_expires ON upload_grant FIELDS expires;
 DEFINE TABLE IF NOT EXISTS attachment SCHEMAFULL;
@@ -458,6 +463,24 @@ pub struct Grant {
     pub size: u64,
     /// Recipient fetches due once uploaded.
     pub fetches: u32,
+}
+
+/// A pending upload with its resumable state (Prompt 6, M2, D-0081). `Debug` hides the upload ID.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PendingUpload {
+    /// The grant.
+    pub grant: Grant,
+    /// The object store's multipart upload ID, once the first part arrived.
+    pub upload: Option<String>,
+}
+
+impl std::fmt::Debug for PendingUpload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingUpload")
+            .field("grant", &self.grant)
+            .field("resumable", &self.upload.is_some())
+            .finish()
+    }
 }
 
 /// An uploaded attachment.
@@ -1959,14 +1982,96 @@ impl Registry {
         self.db
             .query(
                 "CREATE upload_grant:[$o] SET device = $d, size = $n, fetches = $f,
-                   expires = time::now() + duration::from_secs($ttl) RETURN NONE;",
+                   expires = time::now() + duration::from_secs($ttl),
+                   deadline = time::now() + duration::from_secs($max) RETURN NONE;",
                 vec![
                     var("o", bytes(&object.0)),
                     var("d", bytes(grant.device.as_bytes())),
                     var("n", int(grant.size)),
                     var("f", int(u64::from(grant.fetches))),
                     var("ttl", int(ttl.as_secs())),
+                    var("max", int(GRANT_MAX_AGE.as_secs().max(ttl.as_secs()))),
                 ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// An unexpired grant with its resumable state (Prompt 6, M2).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn pending_upload(
+        &self,
+        object: &ObjectKey,
+    ) -> Result<Option<PendingUpload>, RegistryError> {
+        let Some(grant) = self.grant(object).await? else {
+            return Ok(None);
+        };
+        let v = self
+            .db
+            .query1(
+                "SELECT VALUE upload FROM ONLY upload_grant:[$o] WHERE expires > time::now();",
+                vec![var("o", bytes(&object.0))],
+            )
+            .await?;
+        let upload = match v {
+            Value::Array(a) => a
+                .into_iter()
+                .next()
+                .and_then(|u| u.as_text().map(str::to_owned)),
+            other => other.as_text().map(str::to_owned),
+        };
+        Ok(Some(PendingUpload { grant, upload }))
+    }
+
+    /// Records the multipart upload of an unexpired grant, if it has none yet (two first parts
+    /// racing: one wins). Returns the upload ID the grant now holds, or `None` if the grant is
+    /// gone.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn set_grant_upload(
+        &self,
+        object: &ObjectKey,
+        upload: &str,
+    ) -> Result<Option<String>, RegistryError> {
+        let v = self
+            .db
+            .query(
+                "UPDATE upload_grant:[$o] SET upload = $u
+                   WHERE upload = NONE AND expires > time::now() RETURN NONE;
+                 SELECT VALUE upload FROM ONLY upload_grant:[$o] WHERE expires > time::now();",
+                vec![var("o", bytes(&object.0)), var("u", Value::from(upload))],
+            )
+            .await?;
+        Ok(match v.into_iter().nth(1).unwrap_or(Value::Null) {
+            Value::Array(a) => a
+                .into_iter()
+                .next()
+                .and_then(|u| u.as_text().map(str::to_owned)),
+            other => other.as_text().map(str::to_owned),
+        })
+    }
+
+    /// Keeps an unexpired grant alive for `idle` more, never past its deadline
+    /// ([`GRANT_MAX_AGE`] after it was issued): a resumable upload that keeps sending parts
+    /// keeps its grant.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn touch_grant(
+        &self,
+        object: &ObjectKey,
+        idle: Duration,
+    ) -> Result<(), RegistryError> {
+        self.db
+            .query(
+                "UPDATE upload_grant:[$o]
+                   SET expires = IF deadline != NONE AND deadline < time::now() + duration::from_secs($t)
+                       { deadline } ELSE { time::now() + duration::from_secs($t) }
+                   WHERE expires > time::now() RETURN NONE;",
+                vec![var("o", bytes(&object.0)), var("t", int(idle.as_secs()))],
             )
             .await?;
         Ok(())

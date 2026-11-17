@@ -127,6 +127,81 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0081 — Prompt 6, milestone 2: grants held to the format and to per-account budgets; resumable uploads in parallel S3 parts (tus measured and removed)
+
+- Date: 2026-11-17
+- Status: accepted by the agent under the plan (D-0079); report `P06-M2.md`. The two
+  threat-model §1 rows (resumable grants up to 24 h; budget records) **await the owner's
+  approval**.
+- Decided by: agent (the protocol and the part size by measurement, as D-0079 §5 delegates)
+- Context:
+  - The prompt asks for upload grants bound to an exact padded size and a per-plan limit,
+    resumable chunked uploads to RustFS (S3 multipart or tus, benchmark both), and per-account
+    upload rate and storage quotas.
+  - RustFS is reachable only from Songbird services (D-0035), so every byte passes through
+    `api`.
+- Options considered:
+  - **Quotas.** A storage quota on the bytes held would need a link from objects to accounts,
+    which the approved attachment row rules out. A **rolling volume budget** bounds storage
+    just as well: at most budget × 30 days per account. Chosen, together with a grant-rate
+    budget. Both are GCRA records, keyed, in `valkey-hot`.
+  - **Resumable protocol.** Two options behind the same S3 multipart machinery:
+    - fixed parts: `PUT …/parts/<n>`, `GET …/parts`, `POST …/complete`;
+    - tus 1.0 core: `HEAD` and `PATCH`, the body split into consecutive parts, with
+      `Upload-Offset` moving in whole parts.
+
+    Neither buffers: each part streams straight into an `UploadPart` with its exact length.
+  - **Part size:** 5, 16 or 64 MiB.
+- Evidence:
+  - `media_live::upload_protocols`: release build, Ryzen 9 7950X, Windows 11 Pro 10.0.26300.
+    RustFS 1.0.5, SurrealDB v4.0.1 and Valkey 9.1.3 ran under podman 5 (WSL 2 VM: 4 vCPU,
+    6 GiB), over loopback port forwarding.
+  - One 256 MiB attachment per run; MB/s, median of 5:
+
+    | Part size | Single `PUT` | Parts, 1 at a time | Parts, 4 at a time | tus, one `PATCH` | tus, one `PATCH` per part |
+    | --- | --- | --- | --- | --- | --- |
+    | 5 MiB | 255 | 79 | 288 | 83 | 58 |
+    | 16 MiB | 376 | 157 | 508 | 144 | 156 |
+    | 64 MiB | 297 | 228 | 731 | 223 | 192 |
+
+  - tus is never faster than parts one at a time: it is the same sequence of `UploadPart`s.
+    Parallel parts are 2 to 3.5 times faster, and only the parts protocol can run them.
+  - The cost per part (RustFS commits each part) dominates small parts.
+  - Live tests (`services/api/tests/media_live.rs`, `crates/s3/tests/rustfs_live.rs`,
+    `crates/accounts/tests/registry_live.rs`):
+    - interruptions mid-part and parts out of order;
+    - racing first parts (one upload kept, the other aborted);
+    - early completion refused (409);
+    - another device, a wrong length or a part past the last refused;
+    - reuse after completion refused;
+    - the byte-exact result;
+    - the budgets;
+    - lengths outside the format refused.
+- Decision:
+  - Grants accept only lengths the attachment format produces, up to `max_bytes`, which now
+    defaults to 2 GiB (D-0079).
+  - Budgets per account: 300 grants per hour (burst 60) and 10 GiB per 24 hours, under
+    `[api.media]`. Without that section (development only), there are no budgets.
+  - **Resumable uploads use the parts protocol**, with **16 MiB parts** by default
+    (configurable from 5 to 512 MiB, at most 10,000 parts). This is the best balance between
+    throughput and how much a dropped mobile connection loses.
+  - tus is removed: it never beats parts, adds a second protocol to audit, and needs a
+    body-splitting stream with a lock.
+  - A resumable grant renews for 1 h with each part and lasts at most 24 h
+    (`GRANT_MAX_AGE`). Clients get no longer than that.
+  - The registry records the multipart upload ID on the grant with compare-and-set.
+  - The worker aborts every multipart upload whose grant is gone (`abort_abandoned_uploads`).
+    This covers expiry, completion, device and account deletion, and crashes in one rule, so
+    deletion paths need not track upload IDs.
+- Consequences:
+  - `crates/s3` gains create, upload part, list parts, complete, abort and list uploads, with a
+    bounded parser and a fuzz target (`s3_multipart_xml`).
+  - The grant decoder becomes `songbird_api::media::GrantRequest`, fuzzed as `upload_grant`.
+  - Prompt 2's attachment test now uses a legal length: 4,096 bytes is not one.
+  - Clients that want tus libraries map their chunks to parts.
+  - To revisit with the apps: the part size on real mobile links, and whether more than four
+    parallel parts helps.
+
 ## D-0080 — Prompt 6, milestone 1: the attachment format (STREAM, key-committing, Padmé), AES-256-GCM by default
 
 - Date: 2026-11-17

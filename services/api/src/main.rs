@@ -217,6 +217,17 @@ async fn transparency(s: &ApiSettings) -> Result<Option<songbird_api::kt::Transp
     )?))
 }
 
+/// `[api.media]` (Prompt 6), if configured.
+fn media(s: &ApiSettings) -> Result<Option<songbird_api::media::Media>, BoxError> {
+    let Some(m) = &s.media else {
+        return Ok(None);
+    };
+    Ok(Some(songbird_api::media::Media::new(
+        m.budgets,
+        &*m.secret.resolve_key32()?,
+    )))
+}
+
 /// `[api.profiles]` (Prompt 3, M5), if configured.
 fn profiles(
     s: &ApiSettings,
@@ -410,6 +421,7 @@ async fn build(
         push_public,
         push_index_secret: *s.push_index_secret.resolve_key32()?,
         limits: s.attachments,
+        media: media(s)?,
         metrics,
         messages,
         registration,

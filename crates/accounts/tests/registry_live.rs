@@ -987,3 +987,49 @@ async fn no_key_package_is_ever_served_twice_under_parallel_claims() {
         {}
     }
 }
+
+/// Resumable grants (Prompt 6, M2, D-0081): two racing first parts record one multipart upload;
+/// parts keep the grant alive, but never past its deadline; completion still uses it once.
+#[tokio::test]
+async fn resumable_grants_record_one_upload_and_slide_to_a_deadline() {
+    let Some(r) = registry().await else { return };
+    let obj = ObjectKey::random().unwrap();
+    let g = Grant {
+        device: DeviceId::random().unwrap(),
+        size: 20 << 20,
+        fetches: 1,
+    };
+    r.create_grant(&obj, &g, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let p = r.pending_upload(&obj).await.unwrap().unwrap();
+    assert_eq!((p.grant, p.upload.clone()), (g, None));
+    assert!(!format!("{p:?}").contains("upload-"));
+    let (a, b) = tokio::join!(
+        r.set_grant_upload(&obj, "upload-a"),
+        r.set_grant_upload(&obj, "upload-b")
+    );
+    let (a, b) = (a.unwrap().unwrap(), b.unwrap().unwrap());
+    assert_eq!(a, b, "one upload wins and both see it");
+    assert_eq!(
+        r.pending_upload(&obj)
+            .await
+            .unwrap()
+            .unwrap()
+            .upload
+            .as_deref(),
+        Some(a.as_str())
+    );
+    // Sliding: touched past its first expiry, the grant lives on.
+    r.touch_grant(&obj, Duration::from_secs(60)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(r.grant(&obj).await.unwrap().is_some());
+    // An expired grant cannot be touched back to life or given an upload.
+    let gone = ObjectKey::random().unwrap();
+    r.create_grant(&gone, &g, Duration::ZERO).await.unwrap();
+    r.touch_grant(&gone, Duration::from_secs(60)).await.unwrap();
+    assert!(r.grant(&gone).await.unwrap().is_none());
+    assert_eq!(r.set_grant_upload(&gone, "x").await.unwrap(), None);
+    assert!(r.complete_upload(&obj).await.unwrap());
+    assert!(r.pending_upload(&obj).await.unwrap().is_none());
+}

@@ -118,6 +118,8 @@ pub struct WorkerMetrics {
     pub objects_deleted: Counter,
     /// Expired upload grants removed.
     pub grants_expired: Counter,
+    /// Multipart uploads aborted because their grant is gone (Prompt 6, M2).
+    pub uploads_aborted: Counter,
     /// Removed devices deleted and verified gone (one per job).
     pub devices_deleted: Counter,
     /// Accounts whose deletion started for inactivity.
@@ -163,6 +165,11 @@ impl WorkerMetrics {
                 "worker_grants_expired",
                 "Expired upload grants removed",
                 &self.grants_expired,
+            ),
+            (
+                "worker_uploads_aborted",
+                "Multipart uploads aborted after their grant was gone",
+                &self.uploads_aborted,
             ),
         ] {
             m.register(name, help, c.clone())?;
@@ -547,7 +554,41 @@ impl Worker {
         Ok(())
     }
 
-    /// One sweep: attachments past 30 days or fully fetched, expired grants, expired invite
+    /// Aborts multipart uploads whose grant is gone: expired, completed, or its device or
+    /// account deleted (Prompt 6, M2, D-0081). No part outlives its grant by more than a sweep.
+    ///
+    /// An upload whose grant still exists without a recorded upload is left alone: `api` may be
+    /// between creating it and recording it. Once the grant expires, the next sweep aborts it.
+    pub async fn abort_abandoned_uploads(&self) {
+        let uploads = match self.s3.list_multipart_uploads("a/").await {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::warn!(error = %e, "multipart sweep failed");
+                return;
+            }
+        };
+        for u in uploads {
+            let Some(object) = u.key.strip_prefix("a/").and_then(ObjectKey::parse_hex) else {
+                continue;
+            };
+            let keep = match self.registry.pending_upload(&object).await {
+                Ok(Some(p)) => p.upload.as_deref().is_none_or(|id| id == u.upload_id),
+                Ok(None) => false,
+                Err(_) => true,
+            };
+            if !keep
+                && self
+                    .s3
+                    .abort_multipart_upload(&u.key, &u.upload_id)
+                    .await
+                    .is_ok()
+            {
+                self.metrics.uploads_aborted.inc();
+            }
+        }
+    }
+
+    /// One sweep:attachments past 30 days or fully fetched, expired grants, expired invite
     /// codes, expired KeyPackages, expired link tokens, released usernames whose hold ended, the outbox.
     pub async fn sweep(&self) {
         // Queued reports past their retention (Prompt 4, D-0063).
@@ -576,6 +617,7 @@ impl Worker {
             }
             Err(e) => tracing::warn!(error = %e, "grant sweep failed"),
         }
+        self.abort_abandoned_uploads().await;
         // Expired codes are refused already; this only stops them taking space.
         if let Err(e) = self.registry.delete_expired_invites(SWEEP_BATCH).await {
             tracing::warn!(error = %e, "invite sweep failed");

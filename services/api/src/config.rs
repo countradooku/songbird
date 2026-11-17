@@ -108,6 +108,10 @@ pub struct ApiSettings {
     /// Attachment limits.
     #[serde(default)]
     pub attachments: AttachmentLimits,
+    /// `[api.media]` (Prompt 6): upload budgets. Absent only in development: uploads then have
+    /// no per-account budget.
+    #[serde(default)]
+    pub media: Option<MediaSettings>,
     /// Account creation for operators and tests (Prompt 3 replaces it with registration).
     #[serde(default)]
     pub admin: Option<AdminSettings>,
@@ -359,6 +363,9 @@ impl Validate for ApiSettings {
         v.section("jobs", &self.jobs);
         v.section("s3", &self.s3);
         v.section("attachments", &self.attachments);
+        if let Some(m) = &self.media {
+            v.section("media", m);
+        }
         if let Some(r) = &self.requests {
             v.section("requests.limits", &r.limits);
         }
@@ -476,16 +483,22 @@ pub struct AttachmentLimits {
     pub max_bytes: u64,
     /// Most recipient fetches one attachment may be granted.
     pub max_fetches: u32,
-    /// How long an upload grant stays valid, seconds.
+    /// How long an upload grant stays valid without activity, seconds (each part of a resumable
+    /// upload renews it, at most 24 hours after it was issued).
     pub grant_ttl_secs: u64,
+    /// Resumable uploads go in parts of this many bytes (the last part is shorter).
+    pub part_size: u64,
 }
 
 impl Default for AttachmentLimits {
     fn default() -> Self {
         Self {
-            max_bytes: 100 << 20,
+            // D-0079: 2 GiB, for WhatsApp parity, until Prompt 11's plans set it.
+            max_bytes: 2 << 30,
             max_fetches: 1024,
             grant_ttl_secs: 3600,
+            // D-0081: 16 MiB, measured against 5 and 64.
+            part_size: 16 << 20,
         }
     }
 }
@@ -506,6 +519,75 @@ impl Validate for AttachmentLimits {
             (60..=86_400).contains(&self.grant_ttl_secs),
             "grant_ttl_secs",
             "must be in 60..=86400",
+        );
+        // S3: every part but the last at least 5 MiB, at most 10,000 parts.
+        v.check(
+            ((5 << 20)..=(512 << 20)).contains(&self.part_size)
+                && self.max_bytes.div_ceil(self.part_size) <= 10_000,
+            "part_size",
+            "must be in 5 MiB..=512 MiB, with max_bytes in at most 10,000 parts",
+        );
+    }
+}
+
+/// `[api.media]` (Prompt 6, D-0079): the budgets of uploads, and the key of their records.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaSettings {
+    /// 32 bytes (64 hex characters), the same on every `api` node: keys the budget records
+    /// (and, in later milestones, signed download URLs and GIF tokens).
+    pub secret: SecretRef,
+    /// Per-account budgets.
+    #[serde(default)]
+    pub budgets: MediaBudgets,
+}
+
+impl Validate for MediaSettings {
+    fn validate(&self, v: &mut Validator) {
+        v.section("budgets", &self.budgets);
+    }
+}
+
+/// `[api.media.budgets]`: per account, in keyed `valkey-hot` records (no object is ever linked
+/// to an account). Prompt 11's plans will set them per plan.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MediaBudgets {
+    /// Upload grants per hour.
+    pub grants_per_hour: u32,
+    /// Their burst.
+    pub grant_burst: u32,
+    /// Bytes granted per 24 hours (all may be spent at once).
+    pub bytes_per_day: u64,
+}
+
+impl Default for MediaBudgets {
+    fn default() -> Self {
+        // D-0079.
+        Self {
+            grants_per_hour: 300,
+            grant_burst: 60,
+            bytes_per_day: 10 << 30,
+        }
+    }
+}
+
+impl Validate for MediaBudgets {
+    fn validate(&self, v: &mut Validator) {
+        v.check(
+            (1..=100_000).contains(&self.grants_per_hour),
+            "grants_per_hour",
+            "must be in 1..=100000",
+        );
+        v.check(
+            (1..=10_000).contains(&self.grant_burst),
+            "grant_burst",
+            "must be in 1..=10000",
+        );
+        v.check(
+            ((1 << 20)..=(1 << 40)).contains(&self.bytes_per_day),
+            "bytes_per_day",
+            "must be in 1 MiB..=1 TiB",
         );
     }
 }

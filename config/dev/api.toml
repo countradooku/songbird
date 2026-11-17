@@ -90,3 +90,13 @@ filter = "info"
 # link_token_ttl_secs = 600
 # channel_ttl_secs = 600
 # long_poll_secs = 25
+#
+# [api.attachments]                                              # defaults (D-0079, D-0081)
+# max_bytes = 2147483648                                          # 2 GiB, a length the format produces
+# part_size = 16777216                                            # resumable parts of 16 MiB
+# [api.media]                                                     # Prompt 6; absent: no upload budgets (development only)
+# secret = { file = "/path/to/media-secret.hex" }                 # 64 hex; same on every api node
+# [api.media.budgets]                                             # per account; defaults
+# grants_per_hour = 300
+# grant_burst = 60
+# bytes_per_day = 10737418240                                     # 10 GiB

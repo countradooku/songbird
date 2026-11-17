@@ -1645,6 +1645,36 @@ Test vectors (§13) are in `crates/content/vectors/attachment/v1.txt`:
 `tools/attachment-vectors/check.mjs` reproduces every line with Node.js's OpenSSL, from this
 section rather than the Rust code.
 
+### 7.2 Upload grants and uploads (M2, D-0081)
+
+Every request is signed by the device (§3). Upload bodies are the client's own ciphertext: they
+are not signed, only held to their exact length.
+
+| Request | Body | Answer |
+| --- | --- | --- |
+| `POST /v1/attachments` | `{"size": <ciphertext length>, "fetches": <recipient devices>}` | 201 `{"id": <64 hex>, "part_size": <bytes>, "parts": <count>}`; 400 for a length the format (§7.1) never produces, past the limit (2 GiB by default), or 0 or more than 1,024 fetches; 429 with `Retry-After` past a budget |
+| `PUT /v1/attachments/<id>` | the whole ciphertext, `Content-Length` = `size` | 201; 400 for another length; 404 not this device's grant, or used |
+| `PUT /v1/attachments/<id>/parts/<n>` | part `n` (1 to `parts`): `part_size` bytes, the last one `size − (parts − 1) × part_size` | 204; 400 for another length; 404 no such part, or not this device's grant |
+| `GET /v1/attachments/<id>/parts` | — | 200 `{"part_size", "parts": [n, …]}`: the parts stored with exactly their length, in order |
+| `POST /v1/attachments/<id>/complete` | — | 201: the parts become the object and the grant becomes the attachment; 409 while a part is missing |
+
+- **Budgets** (per account, `[api.media.budgets]`):
+  - 300 grants per hour, bursting to 60;
+  - 10 GiB granted per 24 hours, all of which may be spent at once.
+
+  These numbers stay until Prompt 11's plans set them per plan. The records are keyed and name
+  no object.
+- **Resuming:** after any interruption, a client asks `GET …/parts` and sends only the parts
+  that are missing. Parts may go in any order and in parallel; four at a time is what D-0081
+  measured.
+  - A broken part stores nothing; the client sends it again.
+  - Each stored part renews the grant for its idle time (1 hour). A grant never lasts more than
+    24 hours after it was issued.
+  - Parts of an upload whose grant is gone are aborted by the next sweep.
+- **Small attachments** (one part or less) use the single `PUT`.
+- **tus 1.0** was built and measured over the same parts, then removed (D-0081). Clients that
+  want a library can map tus's `PATCH` to consecutive parts themselves.
+
 ## 8. Calls and the call key schedule (Prompt 7)
 
 ## 9. Push (Prompt 8)

@@ -18,6 +18,8 @@ songbird-pow = { path = "../crates/pow" }
 songbird-keys = { path = "../crates/keys" }
 songbird-akd = { path = "../crates/akd" }
 songbird-content = { path = "../crates/content" }
+songbird-api = { path = "../services/api" }
+songbird-s3 = { path = "../crates/s3" }
 songbird-groups = { path = "../crates/groups" }
 songbird-groups-harness = { path = "../tests/groups" }
 songbird-send = { path = "../crates/send" }
@@ -150,6 +152,20 @@ bench = false
 [[bin]]
 name = "content"
 path = "fuzz_targets/content.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "upload_grant"
+path = "fuzz_targets/upload_grant.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "s3_multipart_xml"
+path = "fuzz_targets/s3_multipart_xml.rs"
 test = false
 doc = false
 bench = false

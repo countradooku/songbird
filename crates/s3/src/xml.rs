@@ -3,6 +3,7 @@
 //! document size before reading, the scanner only looks for fixed, attribute-free element names,
 //! never recurses and never allocates more than the input it was given.
 
+use crate::multipart::{Part, Upload};
 use crate::{Error, ErrorCode, ListEntry, ListPage, MAX_KEY_BYTES, VersionEntry, VersionPage};
 
 /// The text between the first `<name>` and the following `</name>`, and the rest after it.
@@ -352,6 +353,188 @@ mod tests {
             let doc = format!("<ListBucketResult><Contents><Key>{esc}</Key><Size>7</Size></Contents></ListBucketResult>");
             let p = list_objects(doc.as_bytes(), 1).unwrap();
             proptest::prop_assert_eq!(&p.objects[0].key, &k);
+        }
+    }
+}
+
+// ----- multipart uploads (Prompt 6, M2, D-0081) -----
+
+/// Writes `s` with `&`, `<`, `>` and `"` escaped.
+pub(crate) fn escape_into(s: &str, out: &mut String) {
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            c => out.push(c),
+        }
+    }
+}
+
+fn token(doc: &str, name: &'static str, what: &'static str) -> Result<String, Error> {
+    let (v, _) = element(doc, name).ok_or(Error::Protocol(what))?;
+    let t = unescape(v.trim())?;
+    if crate::multipart::valid_token(&t) {
+        Ok(t)
+    } else {
+        Err(Error::Protocol(what))
+    }
+}
+
+/// `InitiateMultipartUploadResult`: the upload ID.
+pub(crate) fn upload_id(body: &[u8]) -> Result<String, Error> {
+    let doc = std::str::from_utf8(body).map_err(|_| Error::Protocol("result is not UTF-8"))?;
+    if !doc.contains("<InitiateMultipartUploadResult") {
+        return Err(Error::Protocol("not an InitiateMultipartUploadResult"));
+    }
+    token(doc, "UploadId", "bad UploadId")
+}
+
+/// `ListPartsResult`: at most `max_entries` parts, strictly increasing, and never truncated
+/// (Songbird asks for more parts than any of its uploads has).
+pub(crate) fn list_parts(body: &[u8], max_entries: usize) -> Result<Vec<Part>, Error> {
+    let doc = std::str::from_utf8(body).map_err(|_| Error::Protocol("result is not UTF-8"))?;
+    if !doc.contains("<ListPartsResult") {
+        return Err(Error::Protocol("not a ListPartsResult"));
+    }
+    let head = doc
+        .get(..doc.find("<Part>").unwrap_or(doc.len()))
+        .unwrap_or(doc);
+    if bool_element(head, "IsTruncated")? == Some(true) {
+        return Err(Error::Protocol("truncated part list"));
+    }
+    let mut parts: Vec<Part> = Vec::new();
+    let mut rest = doc;
+    while let Some((p, after)) = element(rest, "Part") {
+        if parts.len() >= max_entries {
+            return Err(Error::Protocol("more parts than requested"));
+        }
+        let (n, _) = element(p, "PartNumber").ok_or(Error::Protocol("part without number"))?;
+        let number = n
+            .trim()
+            .parse::<u16>()
+            .ok()
+            .filter(|n| (1..=crate::multipart::MAX_PARTS).contains(n))
+            .ok_or(Error::Protocol("bad PartNumber"))?;
+        if parts.last().is_some_and(|l| l.number >= number) {
+            return Err(Error::Protocol("parts out of order"));
+        }
+        let (s, _) = element(p, "Size").ok_or(Error::Protocol("part without Size"))?;
+        let size = s
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| Error::Protocol("bad Size"))?;
+        let etag = token(p, "ETag", "bad ETag")?;
+        parts.push(Part { number, size, etag });
+        rest = after;
+    }
+    Ok(parts)
+}
+
+/// `ListMultipartUploadsResult`: at most `max_entries` uploads.
+pub(crate) fn list_uploads(body: &[u8], max_entries: usize) -> Result<Vec<Upload>, Error> {
+    let doc = std::str::from_utf8(body).map_err(|_| Error::Protocol("result is not UTF-8"))?;
+    if !doc.contains("<ListMultipartUploadsResult") {
+        return Err(Error::Protocol("not a ListMultipartUploadsResult"));
+    }
+    let mut uploads = Vec::new();
+    let mut rest = doc;
+    while let Some((u, after)) = element(rest, "Upload") {
+        if uploads.len() >= max_entries {
+            return Err(Error::Protocol("more uploads than requested"));
+        }
+        let (key, _) = element(u, "Key").ok_or(Error::Protocol("upload without Key"))?;
+        let key = unescape(key)?;
+        if key.is_empty() || key.len() > MAX_KEY_BYTES {
+            return Err(Error::Protocol("bad Key"));
+        }
+        let upload_id = token(u, "UploadId", "bad UploadId")?;
+        let initiated = match element(u, "Initiated") {
+            Some((t, _)) if t.len() <= 64 && t.bytes().all(|b| b.is_ascii_graphic()) => {
+                t.to_owned()
+            }
+            _ => return Err(Error::Protocol("bad Initiated")),
+        };
+        uploads.push(Upload {
+            key,
+            upload_id,
+            initiated,
+        });
+        rest = after;
+    }
+    Ok(uploads)
+}
+
+/// `CompleteMultipartUpload`'s 200 answer: S3 may still report a failure in the body.
+pub(crate) fn complete_result(body: &[u8]) -> Result<(), Error> {
+    let doc = std::str::from_utf8(body).map_err(|_| Error::Protocol("result is not UTF-8"))?;
+    if doc.contains("<CompleteMultipartUploadResult") {
+        Ok(())
+    } else {
+        Err(Error::Status {
+            status: 200,
+            code: error_code(body),
+        })
+    }
+}
+
+#[cfg(test)]
+mod multipart_tests {
+    use super::*;
+
+    #[test]
+    fn multipart_documents() {
+        let init = br#"<?xml version="1.0"?><InitiateMultipartUploadResult><Bucket>b</Bucket><Key>a/x</Key><UploadId>abc-123_=</UploadId></InitiateMultipartUploadResult>"#;
+        assert_eq!(upload_id(init).unwrap(), "abc-123_=");
+        assert!(upload_id(b"<InitiateMultipartUploadResult><UploadId></UploadId></InitiateMultipartUploadResult>").is_err());
+        assert!(upload_id(b"<InitiateMultipartUploadResult><UploadId>a b</UploadId></InitiateMultipartUploadResult>").is_err());
+        let parts = br#"<ListPartsResult><IsTruncated>false</IsTruncated><Part><PartNumber>1</PartNumber><ETag>&quot;e1&quot;</ETag><Size>5242880</Size></Part><Part><PartNumber>3</PartNumber><ETag>"e3"</ETag><Size>7</Size></Part></ListPartsResult>"#;
+        let p = list_parts(parts, 10).unwrap();
+        assert_eq!(p.len(), 2);
+        assert_eq!(
+            (p[0].number, p[0].size, p[0].etag.as_str()),
+            (1, 5_242_880, "\"e1\"")
+        );
+        assert_eq!((p[1].number, p[1].etag.as_str()), (3, "\"e3\""));
+        assert!(!format!("{p:?}").contains("e1"));
+        assert!(list_parts(parts, 1).is_err());
+        for bad in [
+            &br"<ListPartsResult><IsTruncated>true</IsTruncated></ListPartsResult>"[..],
+            br"<ListPartsResult><Part><PartNumber>0</PartNumber><ETag>e</ETag><Size>1</Size></Part></ListPartsResult>",
+            br"<ListPartsResult><Part><PartNumber>2</PartNumber><ETag>e</ETag><Size>1</Size></Part><Part><PartNumber>2</PartNumber><ETag>e</ETag><Size>1</Size></Part></ListPartsResult>",
+            br"<ListPartsResult><Part><PartNumber>1</PartNumber><Size>1</Size></Part></ListPartsResult>",
+            br"<ListPartsResult><Part><PartNumber>1</PartNumber><ETag>e</ETag><Size>-1</Size></Part></ListPartsResult>",
+            b"<ListBucketResult/>",
+        ] {
+            assert!(list_parts(bad, 10).is_err());
+        }
+        let ups = br"<ListMultipartUploadsResult><Upload><Key>a/k&amp;</Key><UploadId>u1</UploadId><Initiated>2026-11-17T10:00:00.000Z</Initiated></Upload></ListMultipartUploadsResult>";
+        let u = list_uploads(ups, 5).unwrap();
+        assert_eq!((u[0].key.as_str(), u[0].upload_id.as_str()), ("a/k&", "u1"));
+        assert!(!format!("{u:?}").contains("u1"));
+        assert!(
+            complete_result(
+                b"<CompleteMultipartUploadResult><ETag>x</ETag></CompleteMultipartUploadResult>"
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            complete_result(b"<Error><Code>InvalidPart</Code></Error>"),
+            Err(Error::Status { status: 200, .. })
+        ));
+        let mut s = String::new();
+        escape_into("\"a&<b>", &mut s);
+        assert_eq!(s, "&quot;a&amp;&lt;b&gt;");
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn multipart_parsers_never_panic(s in ".{0,512}") {
+            let _ = upload_id(s.as_bytes());
+            let _ = list_parts(s.as_bytes(), 5);
+            let _ = list_uploads(s.as_bytes(), 5);
+            let _ = complete_result(s.as_bytes());
         }
     }
 }

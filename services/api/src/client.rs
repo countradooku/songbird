@@ -109,6 +109,37 @@ impl ApiClient {
         self.exchange(b, body).await
     }
 
+    /// A request whose body is not signed (uploads, parts, tus), with extra headers; returns the
+    /// status, the response headers and the body. A `GET` or `HEAD` sends no body.
+    ///
+    /// # Errors
+    /// Connection or protocol failure.
+    pub async fn upload_with(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, String)],
+        body: Bytes,
+    ) -> Result<(u16, hyper::HeaderMap, Bytes), hyper::Error> {
+        let (authz, _) = auth::sign(
+            &self.key,
+            &self.device,
+            &self.server_name,
+            method,
+            path,
+            None,
+        );
+        let mut b = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", &self.server_name)
+            .header(auth::AUTHORIZATION, authz);
+        for (n, v) in headers {
+            b = b.header(*n, v.as_str());
+        }
+        exchange_full(self.addr, b, body).await
+    }
+
     /// Sends a prepared request as it is (tests replay or tamper with headers).
     ///
     /// # Errors
@@ -162,6 +193,27 @@ pub async fn unsigned(
         .header("host", server_name)
         .header("content-length", body.len());
     exchange(addr, b, body).await
+}
+
+/// As [`exchange`], with the response headers.
+async fn exchange_full(
+    addr: SocketAddr,
+    b: hyper::http::request::Builder,
+    body: Bytes,
+) -> Result<(u16, hyper::HeaderMap, Bytes), hyper::Error> {
+    let Ok(tcp) = tokio::net::TcpStream::connect(addr).await else {
+        return Ok((0, hyper::HeaderMap::new(), Bytes::new()));
+    };
+    let (mut send, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await?;
+    tokio::spawn(conn);
+    let Ok(req) = b.body(Full::new(body)) else {
+        return Ok((0, hyper::HeaderMap::new(), Bytes::new()));
+    };
+    let resp = send.send_request(req).await?;
+    let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
+    let bytes = resp.into_body().collect().await?.to_bytes();
+    Ok((status, headers, bytes))
 }
 
 async fn exchange(

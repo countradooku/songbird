@@ -226,6 +226,7 @@ async fn stack(people: usize) -> Option<Stack> {
         push_public: [0; 32],
         push_index_secret: [9; 32],
         limits: songbird_api::config::AttachmentLimits::default(),
+        media: None,
         metrics,
         messages: Some(messages),
         registration: None,

@@ -91,6 +91,7 @@ async fn stack() -> Option<Stack> {
         push_public,
         push_index_secret: [9; 32],
         limits: songbird_api::config::AttachmentLimits::default(),
+        media: None,
         metrics: ApiMetrics::default(),
         messages: None,
         registration: None,
@@ -214,7 +215,7 @@ async fn attachments_upload_exactly_and_go_after_the_last_fetch() {
         .send(
             "POST",
             "/v1/attachments",
-            Some(br#"{"size":4096,"fetches":2}"#),
+            Some(br#"{"size":4145,"fetches":2}"#),
         )
         .await
         .unwrap();
@@ -225,28 +226,28 @@ async fn attachments_upload_exactly_and_go_after_the_last_fetch() {
     let object = ObjectKey::parse_hex(&id).unwrap();
     // Only the granted device, only the granted size.
     assert_eq!(
-        down.upload(&path, Bytes::from(vec![1; 4096]))
+        down.upload(&path, Bytes::from(vec![1; 4145]))
             .await
             .unwrap()
             .0,
         404
     );
     assert_eq!(
-        up.upload(&path, Bytes::from(vec![1; 4095]))
+        up.upload(&path, Bytes::from(vec![1; 4144]))
             .await
             .unwrap()
             .0,
         400
     );
     assert_eq!(
-        up.upload(&path, Bytes::from(vec![7; 4096]))
+        up.upload(&path, Bytes::from(vec![7; 4145]))
             .await
             .unwrap()
             .0,
         201
     );
     assert_eq!(
-        up.upload(&path, Bytes::from(vec![7; 4096]))
+        up.upload(&path, Bytes::from(vec![7; 4145]))
             .await
             .unwrap()
             .0,
@@ -259,7 +260,7 @@ async fn attachments_upload_exactly_and_go_after_the_last_fetch() {
     for left in [1u32, 0] {
         let (st, body) = down.send("GET", &path, None).await.unwrap();
         assert_eq!(st, 200);
-        assert_eq!(body.len(), 4096);
+        assert_eq!(body.len(), 4145);
         assert!(body.iter().all(|b| *b == 7));
         // Counted after the download completes.
         for _ in 0..100 {
@@ -288,7 +289,7 @@ async fn attachments_upload_exactly_and_go_after_the_last_fetch() {
     // Bounds.
     for bad in [
         &br#"{"size":0,"fetches":1}"#[..],
-        br#"{"size":4096,"fetches":0}"#,
+        br#"{"size":4145,"fetches":0}"#,
         br#"{"size":999999999999,"fetches":1}"#,
         br#"{"size":1,"fetches":1,"x":1}"#,
     ] {

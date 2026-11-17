@@ -4513,6 +4513,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "songbird-api"
+version = "0.1.0"
+dependencies = [
+ "akd",
+ "argon2",
+ "aws-lc-rs",
+ "bytes",
+ "futures-core",
+ "getrandom 0.4.3",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "mimalloc",
+ "postcard",
+ "redis",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "songbird-accounts",
+ "songbird-akd",
+ "songbird-groups",
+ "songbird-jobs",
+ "songbird-keys",
+ "songbird-link",
+ "songbird-mailbox",
+ "songbird-pow",
+ "songbird-proto",
+ "songbird-router",
+ "songbird-s3",
+ "songbird-send",
+ "songbird-service",
+ "songbird-types",
+ "songbird-valkey",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "songbird-content"
 version = "0.1.0"
 dependencies = [
@@ -4532,6 +4574,7 @@ dependencies = [
  "libfuzzer-sys",
  "serde",
  "songbird-akd",
+ "songbird-api",
  "songbird-content",
  "songbird-groups",
  "songbird-groups-harness",
@@ -4540,6 +4583,7 @@ dependencies = [
  "songbird-pow",
  "songbird-proto",
  "songbird-proxy",
+ "songbird-s3",
  "songbird-send",
  "songbird-surreal",
  "songbird-types",
@@ -4683,6 +4727,25 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "songbird-s3"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "bytes",
+ "futures-core",
+ "hex",
+ "hyper",
+ "hyper-util",
+ "rustls",
+ "rustls-pki-types",
+ "songbird-types",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "zeroize",
 ]
 
 [[package]]

@@ -1,7 +1,9 @@
 # P05 follow-ups — server-proposed removals, link proofs, a cluster-wide channel class
 
 - Date: 2026-11-17
-- Status: **awaiting the owner**
+- Status: **approved by the owner on 2026-11-17** ("approve all"): the milestones, the
+  review's fixes, the four threat-model §1 rows, D-0077's fallback and the `cluster_secret`
+  rule. PR #60.
 - What: the three follow-ups the owner approved as future work at the Prompt 5 gate
   (2026-11-17, `P05-gate.md`, "The owner's decisions" 4).
 - Shape: one branch and one PR, a commit per milestone (owner: "full milestones in one PR"),
@@ -176,11 +178,11 @@ From the threat model §6, in short:
 - **The channel class falls back to per-node budgets** while `valkey-hot` is unreachable or
   slow.
 
-## The owner's decisions
+## The owner's decisions (all approved on 2026-11-17)
 
 1. **Approve the three milestones** (D-0075, D-0076, D-0077) and the review's fixes (D-0078).
-2. **Approve four threat-model §1 rows** (`docs/THREAT_MODEL.md`, marked "awaiting the owner's
-   approval"):
+2. **Approve four threat-model §1 rows** (`docs/THREAT_MODEL.md`, now marked "approved by
+   the owner on 2026-11-17"):
    - the service's external-sender key in every group's context, and its queued removals
      (which leaf, until the next commit);
    - prune marks: the group, and for seconds the IDs of its devices that left;

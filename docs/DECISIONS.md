@@ -20,17 +20,13 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
-- Prompt 5 follow-ups (`P05-followups.md`, D-0075 to D-0078; one PR, owner 2026-11-17: "full
-  milestones in one PR"): **awaiting the owner**. To approve:
-  - the three milestones;
-  - four threat-model §1 rows:
-    - the service's external-sender key and its queued removals in group state;
-    - the prune marks;
-    - link proof keys in the roles extension;
-    - the keyed channel record in `valkey-hot`;
-  - D-0077's fallback to the per-node budget while `valkey-hot` is down;
-  - not rotating the router's `cluster_secret` while groups exist, until key rotation is built
-    (D-0075).
+- Prompt 5 follow-ups (`P05-followups.md`, D-0075 to D-0078; PR #60): **approved by the owner
+  on 2026-11-17** ("approve all"): the three milestones and the review's fixes; the four
+  threat-model §1 rows (the service key and its queued removals in group state, the prune
+  marks, link proof keys in the roles extension, the keyed channel record in `valkey-hot`);
+  D-0077's fallback to the per-node budget while `valkey-hot` is down; and not rotating the
+  router's `cluster_secret` while groups exist, until key rotation is built (D-0075). Done
+  once PR #60 merges.
 - Prompt 5 gate (`P05-gate.md`, D-0070 to D-0074; PR #59): **approved by the owner on 2026-11-17**
   ("approve all"): M2–M5, the benchmarks and the caps they set (1,024 devices per group, 2,048
   per private channel, X-Wing by default), the seven threat-model §1 rows (roles, metadata,
@@ -196,8 +192,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0077 — Prompt 5 follow-up 3: the channel rate class across the cluster, in `valkey-hot`, with the per-node budget in front and as the fallback
 
 - Date: 2026-11-17
-- Status: proposed; built and passing live (report `P05-followups.md`); **the threat-model row
-  and the fallback await the owner's approval**
+- Status: accepted; built and passing live (report `P05-followups.md`); the threat-model row
+  and the fallback **approved by the owner on 2026-11-17** ("approve all")
 - Decided by: agent, on the owner's approval of the follow-up at the Prompt 5 gate (2026-11-17)
 - Context: D-0072's channel rate class (1 post a second per channel, burst 10) was per node. A
   channel's admins posting through several delivery nodes and `api` got each one's budget,
@@ -247,16 +243,16 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     own `valkey-hot` connection. 10 to 12 are admitted in all (each node alone would have
     admitted 10), nothing falls back, and the `q:c:` records hold no group ID.
 - Consequences:
-  - One threat-model §1 row (the keyed channel record in `valkey-hot`), awaiting the owner's
-    approval. The §6 risk "the channel rate class is per node" holds only while `valkey-hot`
+  - One threat-model §1 row (the keyed channel record in `valkey-hot`), approved by the owner
+    on 2026-11-17. The §6 risk "the channel rate class is per node" holds only while `valkey-hot`
     is down.
   - Runbook: `docs/RUNBOOKS/delivery.md`, "`valkey-hot` unreachable".
 
 ## D-0076 — Prompt 5 follow-up 2: invite-link proofs members check, under a key the link's creator publishes in the roles extension
 
 - Date: 2026-11-17
-- Status: proposed; built and passing live (report `P05-followups.md`); **the threat-model row
-  awaits the owner's approval**
+- Status: accepted; built and passing live (report `P05-followups.md`); the threat-model row
+  **approved by the owner on 2026-11-17** ("approve all")
 - Decided by: agent, on the owner's approval of the follow-up at the Prompt 5 gate (2026-11-17)
 - Context: D-0071 left whether a joiner held a usable invite link to the server's word. A
   malicious server could admit any account to a group by external commit. Members would see
@@ -334,8 +330,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0075 — Prompt 5 follow-up 1: the delivery service as every group's MLS external sender, proposing to remove devices that left the directory
 
 - Date: 2026-11-17
-- Status: proposed; built and passing live (report `P05-followups.md`); **the threat-model rows
-  await the owner's approval**
+- Status: accepted; built and passing live (report `P05-followups.md`); the threat-model rows
+  **approved by the owner on 2026-11-17** ("approve all")
 - Decided by: agent, on the owner's approval of the follow-up at the Prompt 5 gate (2026-11-17)
 - Context: D-0073 left a gap. When an account is deleted or a device removed, its leaves (device
   ID, public keys, and for an account that held a role, its account ID in the roles extension)
@@ -415,7 +411,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
       snapshot follows, then 200 with Carol's leaf gone, and nothing naming her after deletion.
 - Consequences:
   - Threat-model §1 gains two rows (the service key in every group's context and its queued
-    removals; the prune marks). They await the owner's approval.
+    removals; the prune marks). Approved by the owner on 2026-11-17.
   - The GDPR gap of D-0073 closes once a member is online: a departed device's leaf goes with
     the next commit. A group none of whose members comes back keeps the leaves (threat model
     §6).

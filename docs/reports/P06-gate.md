@@ -2,7 +2,9 @@
 
 - Date: 2026-11-17
 - Prompt: [06-media.md](../prompts/06-media.md).
-- Status: **waiting for the owner.**
+- Status: **approved by the owner on 2026-11-17** ("i approve"): the gate with M1–M5 and the
+  security review's fixes, the benchmarks and the choices they drove, and the five threat-model §1
+  rows. PR #61.
 - Reports: `P06-plan.md` (agreed, D-0079), `P06-M1.md` to `P06-M4.md`, and this report.
 - Decisions: D-0079 to D-0084 (D-0084: the security review's fixes).
 - Branch: `claude/p06-media` (PR #61), one PR at the owner's request (2026-11-17: "all the milestones in the

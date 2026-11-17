@@ -20,11 +20,11 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
-- Prompt 6 gate (`P06-gate.md`, D-0079 to D-0084; PR #61): **waiting for the owner**: M1 to M5
+- Prompt 6 gate (`P06-gate.md`, D-0079 to D-0084; PR #61): **approved by the owner on 2026-11-17** ("i approve"): M1 to M5
   and the security review's fixes; the benchmarks and the choices they drove (AES-256-GCM, parallel
   16 MiB parts with tus removed, no caching proxy); five threat-model §1 rows (resumable grants up
   to 24 h, upload budgets, downloads by capability, packs, GIF queries). Before production: the
-  GIPHY key and terms, and `[api.media]` on every `api` node.
+  GIPHY key and terms, and `[api.media]` on every `api` node. Prompt 6 is done once PR #61 merges.
 - Prompt 6 plan (`P06-plan.md`, D-0079): **approved by the owner on 2026-11-17**, every recommendation: downloads without
   device authentication, size limit and budgets, pack lifetime, GIF provider and design.
 - Prompt 5 follow-ups (`P05-followups.md`, D-0075 to D-0078; PR #60): **approved by the owner
@@ -193,7 +193,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 - Date: 2026-11-17
 - Status: accepted by the agent under the plan (D-0079 §3 and §4); report `P06-M4.md`. Two
-  threat-model §1 rows (pack records; GIF queries) **await the owner's approval**.
+  threat-model §1 rows (pack records; GIF queries): **approved by the owner on 2026-11-17** (the gate).
 - Decided by:
   - owner: packs without an account link, deleted by token or after a year unused; GIPHY behind
     `api`;
@@ -255,8 +255,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 - Date: 2026-11-17
 - Status: accepted by the agent under the plan (D-0079 §1 and §5); report `P06-M3.md`. The
-  threat-model §1 row (downloads by capability, IP-range throttle records) **awaits the owner's
-  approval**.
+  threat-model §1 row (downloads by capability, IP-range throttle records): **approved by the owner
+  on 2026-11-17** (the gate).
 - Decided by: owner (no device authentication on downloads, D-0079 §1); agent (the URL design,
   the confirmation, and the proxy by measurement)
 - Context: the prompt asks for:
@@ -326,8 +326,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 - Date: 2026-11-17
 - Status: accepted by the agent under the plan (D-0079); report `P06-M2.md`. The two
-  threat-model §1 rows (resumable grants up to 24 h; budget records) **await the owner's
-  approval**.
+  threat-model §1 rows (resumable grants up to 24 h; budget records): **approved by the owner
+  on 2026-11-17** (the gate).
 - Decided by: agent (the protocol and the part size by measurement, as D-0079 §5 delegates)
 - Context:
   - The prompt asks for upload grants bound to an exact padded size and a per-plan limit,

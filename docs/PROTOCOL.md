@@ -1779,6 +1779,274 @@ emoticon packs. The kind exists only inside the encrypted manifest (`PackManifes
 
 ## 8. Calls and the call key schedule (Prompt 7)
 
+Decisions D-0085 (the owner's) and D-0086 (M1). Calls run on self-hosted LiveKit, always through
+its SFU: there is no peer-to-peer path, so participants never learn each other's IP addresses.
+Every audio and video frame and every data packet is encrypted end to end by LiveKit's frame
+cryptor under keys only the participants hold. **No server component ever receives a media
+key.** The reference implementation of everything in §8.1 to §8.5 is
+`songbird_content::call`; nothing in it is linked by a service.
+
+### 8.1 Calls, rooms and participant identities
+
+- A call has a random 16-byte **call ID**. Its LiveKit room is named by the call ID in lowercase
+  hex. The server chooses it (§8.6), so two calls never share a room.
+- A device in a room appears under a **participant identity** the server chooses: an HMAC of the
+  room and the device under a server key (§8.6), 32 lowercase hex characters. It is stable within
+  one room, so a device that reconnects keeps its keys, and unlinkable across rooms. LiveKit and
+  everyone in the room see only this identity; who it is travels inside encrypted content.
+- Keys go to LiveKit's key provider per identity and **key index** (`0` to `15`, the size of
+  LiveKit's key ring), never as one shared key.
+
+### 8.2 The key schedule
+
+Each key epoch has a 32-byte **epoch secret**; each sender's key in that epoch is derived from it
+and the sender's identity:
+
+```text
+sender key = HKDF-Expand(PRK = epoch secret,
+                         info = "songbird.v1/call-sender\0" ‖ u8(len(identity)) ‖ identity, 32)
+key index  = epoch mod 16
+```
+
+The sender key is what apps hand to LiveKit's key provider (`set_key(identity, key_index, key)`);
+LiveKit then derives its frame key from it as on every platform. Because each sender's key is
+bound to its identity, no two senders encrypt under one key, so LiveKit's per-frame IVs (SSRC,
+timestamp, counter) cannot collide across senders.
+
+- **1:1 calls.** The caller draws a random 32-byte `call_secret` and sends it in the encrypted
+  offer (§8.5) over the Signal session. There is one epoch, `0`:
+
+  ```text
+  epoch secret = HKDF-SHA256(salt = call ID, ikm = call_secret, info = "songbird.v1/call-1to1\0", 32)
+  ```
+
+- **Group calls.** The epoch secret is the group's MLS exporter at its current epoch `e`:
+
+  ```text
+  epoch secret = MLS-Exporter("songbird.v1/call", call ID, 32)      key index = e mod 16
+  ```
+
+  Every commit (an add, a removal, an update) starts a new MLS epoch and so a new secret that a
+  removed device cannot compute. On processing a commit, a participant installs the new keys for
+  every identity at the new index at once and **switches its own sending to the new index 1
+  second later**, so others have installed it before frames arrive; it keeps the old keys in the
+  ring for late frames. The server also disconnects removed devices from the SFU (§8.6).
+- **Call links** are §8.4.
+
+### 8.3 Rules for apps
+
+- Never reuse a `call_secret` or a call ID; never send a sender key or secret outside a Signal
+  session or MLS.
+- Encrypt data packets as well as media (LiveKit's E2EE covers both); a participant whose frames
+  do not decrypt is shown as "can't decrypt", never played in the clear.
+- A group's call ID changes only when a new call starts; the MLS exporter already gives a fresh
+  secret per epoch.
+
+### 8.4 Call links
+
+A call link is `https://<web domain>/call#<root, base64url>`: a random 32-byte **root** in the
+fragment, which never reaches a server.
+
+```text
+link ID   = HKDF-SHA256(salt = "", ikm = root, info = "songbird.v1/call-link-id\0", 32)   sent to the server
+link key  = HKDF-SHA256(salt = "", ikm = root, info = "songbird.v1/call-link-key\0", 32)  never sent
+stored    = SHA-256("songbird.v1/call-link-hash\0" ‖ link ID)                         what the server keeps
+```
+
+- **Cards.** Each participant seals a `CallLinkCard` (its account, its device, its participant
+  identity and an optional display name; `proto/content.proto`) under the link key:
+
+  ```text
+  version u8 (1) | nonce [12] | ChaCha20-Poly1305(key = link key, nonce, card, aad = "songbird.v1/call-link-card\0")
+  ```
+
+  at most 512 bytes. Cards go on LiveKit's data channel and, while someone waits in a lobby,
+  through the server (§8.7), which cannot open them.
+- **Keys** (the owner's choice, D-0085 §2: Signal's design). Every participant draws its own
+  random 32-byte sender key and sends it to each other participant's device over a Signal
+  session, as `CallMessage.sender_key` (identity, key index, key). On every join and every leave,
+  each participant draws a new key at the next index and sends it to those still present, so a
+  newcomer cannot decrypt what came before and a leaver cannot decrypt what follows. Joining
+  needs a Songbird account (sessions need one).
+
+### 8.5 Signalling
+
+Ringing, accepting, declining, busy and hanging up are encrypted content (`Content.call`,
+`CallMessage`; §5):
+
+| Kind | Sent to | Meaning |
+| --- | --- | --- |
+| `offer` | the callee's devices (1:1), or the group (MLS) | `media` (audio or video); `call_secret` (32 bytes) in a 1:1 call, `group_id` (16 bytes) in a group call, exactly one; `ring_until_ms` |
+| `answer` | the caller, and the callee's own devices | accepted on this device; the others stop ringing |
+| `decline`, `busy` | the caller | |
+| `hangup` | everyone in the call | with a reason (normal, answered/declined/busy elsewhere, failed) |
+| `sender_key` | one device, over a Signal session | a link call's key (§8.4) |
+
+- **Live ringing** uses the ephemeral lane (§3.7). An offer to a device that is offline is also
+  sent stored, with `EXPIRES` of 60 seconds, and the server wakes the device (§8.6). An app rings
+  until `ring_until_ms`, never more than 2 minutes after the offer's `sent_at_ms`, and not at all
+  once that has passed (`call::ring_left_ms`).
+- **Non-contacts never ring.** An offer that arrives by the request lane (§5.10) is shown as a
+  request, silently; the server queues no wake-up without the contact proof (§8.6).
+- A missed, declined or finished call is recorded as `CallEvent` in the chat and synced to the
+  user's devices as `call_history`.
+
+### 8.6 Rooms, tokens and who may join (M2, D-0087)
+
+Every request is signed by the device (§2, like every `api` request). A pending device (linked,
+not yet in its signed list) gets 403 `pending`. Answers are small JSON.
+
+**A ticket** is what a device needs to join:
+
+```json
+{"call": "<call ID, 32 hex>", "url": "wss://calls.<domain>", "token": "<JWT>", "identity": "<32 hex>"}
+```
+
+- The **token** is LiveKit's (HS256, signed with the LiveKit API secret), valid **2 minutes**: the
+  time to connect. LiveKit refreshes a connected participant's token itself.
+- It admits one identity to one room with the least grants: join, subscribe, and for those who
+  may speak, publish data and only the sources the call allows (microphone, camera, screen share;
+  the microphone only in a group's audio call); a read-only member publishes nothing, data
+  included. No admin, recording, ingress,
+  SIP or agent grant; no name, metadata or attributes, and no right to set them.
+- The **identity** is `hex(HMAC-SHA256(k_identity, room ‖ device)[..16])` (§8.1): the key
+  schedule binds sender keys to it.
+
+**`POST /v1/calls`** `{"callee": hex, "media": "audio" | "video", "access_key": hex?, "ring": bool}`:
+a 1:1 call.
+
+- The callee must be another account whose devices exist and that is **open**, or whose access
+  key the caller presents (a contact, §5.10). Otherwise 404, the same answer as for an account
+  that does not exist.
+- The server creates the room (random ID; 32 participants for video, 128 for audio; it closes 20
+  seconds after the last participant leaves, or after 3 minutes if nobody joins) and keeps the
+  call's record (§8.8) until the room closes, at most 24 hours.
+- `ring: true` queues a wake-up for each of the callee's listed devices (`VoIP` on iOS,
+  high-priority FCM on Android, Prompt 8) **only when the caller presented the access key**: a
+  `VoIP` push rings, so a stranger's call to an open account rings nobody, and its offer arrives as
+  a message (D-0091). Wake-ups count against the callee's budget and the (caller, callee) pair's.
+  The ringing itself is the encrypted offer (§8.5).
+- 200 with the caller's ticket.
+
+**`POST /v1/calls/group`** `{"group": hex, "media": …, "ring": bool}`: the group's call.
+
+- The requesting device must be in the group's roster (404 otherwise, as for no group).
+- If the group has a live call, the device gets a ticket for it, whatever `media` says.
+- Otherwise starting one needs the role the group's policy sets for `call` (§6.6; 403 `role`).
+  Two members starting at once get the same room.
+- `ring: true` wakes every other member account's devices, if the group has at most 32 accounts.
+- Read-only members (a channel's subscribers) get tickets that publish nothing.
+
+**`POST /v1/calls/join`** `{"call": hex, "group": hex?}`: a ticket for a live call.
+
+- A 1:1 call admits only listed devices of its two accounts.
+- A group call needs `group` (the call's record holds only a keyed tag of it) and admits only
+  devices in the group's **current** roster.
+- Anything else, and a call that does not exist or has ended, is 404.
+
+**Removal mid-call.** When `api` accepts a commit to a group with a live call, it asks LiveKit for
+the room's participants, records every identity that is not one of the roster's devices' in the
+room's deny set (§8.8), and disconnects them (three attempts). A removed device is therefore cut
+off at once; its next ticket is refused; if it reconnects with a token it still holds (LiveKit does
+not revoke tokens), the `calls` service disconnects it again on that join's webhook; and the new
+MLS epoch's keys (§8.2) are ones it cannot compute anyway (D-0091).
+
+A group's call pointer younger than 15 seconds is trusted without asking LiveKit (its starter may
+still be creating the room); an older one is checked with `ListRooms`. Each join keeps a live
+call's records for another 24 hours.
+
+**Budgets** (`[api.calls.limits]`, keyed records in `valkey-hot`):
+
+| Budget | Default |
+| --- | --- |
+| Calls started per account | 60 an hour, burst 20 |
+| Wake-ups received per account | 60 an hour, burst 20 (over it: no wake-up; the stored offer still arrives) |
+| Wake-ups one caller causes one account | 20 an hour, burst 6 |
+| Tickets per device (every ticket, group joins and link tickets included) | 600 an hour, burst 60 |
+
+Answers: 200 ticket; 400 `request`, `callee`, `group`, `call`, `access_key`; 403 `role`,
+`pending`; 404; 429 with a wait; 503 (LiveKit or `valkey-hot` unavailable: retry).
+
+### 8.7 Call links (M3, D-0088)
+
+The link and its keys are §8.4. The server stores a link under `SHA-256("songbird.v1/call-link-hash\0"
+‖ link ID)` with its room, `SHA-256("songbird.v1/call-link-admin\0" ‖ admin token)`, audio or
+video, whether a lobby is on, and an expiry. **No account**: the creator keeps the random 32-byte
+admin token (and may share it with co-admins inside encrypted messages).
+
+- **`POST /v1/calls/links`** `{"link": hex32, "admin": hex32, "media": "audio" | "video",
+  "lobby": bool, "ttl_secs": n}`: creates it. `ttl_secs` defaults to a day, at most 30 days
+  (400 `ttl_secs`). 204; 409 `exists`. Counts against the call budget.
+- **`POST /v1/calls/links/join`** `{"link": hex32, "admin": hex32?, "lobby": hex16?, "card": hex?}`:
+  - with the right admin token, or on a link without a lobby: 200 ticket;
+  - otherwise with a `card` (a sealed card, §8.4, 29 to 512 bytes): 202 `{"lobby": handle}`, a
+    random 16-byte place in the lobby;
+  - polling with that handle, from the same device: 202 while waiting, 200 ticket once admitted
+    (once), 404 once declined;
+  - a wrong admin token, another device's handle, an unknown, expired or revoked link: 404.
+- **`POST /v1/calls/links/lobby`** `{"link", "admin"}`: 200 `{"waiting": [{"handle": hex,
+  "card": hex}]}`. Admins open the cards with the link key and decide.
+- **`POST /v1/calls/links/admit`** `{"link", "admin", "handle", "admit": bool}`: 204; 404 for no
+  such handle.
+- **`POST /v1/calls/links/revoke`** `{"link", "admin"}`: deletes the link and its lobby and ends
+  its call for everyone (LiveKit `DeleteRoom`). 204.
+
+A lobby holds at most 64 people (409 `full`) for 10 minutes, **one place per device** (asking
+again returns the same handle); each entry holds a keyed tag of the waiting device (so only it can
+redeem the place) and the sealed card. A declined entry is deleted at once, freeing its place.
+Every link request spends a per-device budget (1,800 an hour, burst 120) and every ticket the
+ticket budget. A link revoked while its room was being opened gets the room closed again. The
+worker deletes expired links.
+
+Cards are not signed: anyone holding the link can write any name in one. Apps show a joiner as
+unverified until the Signal session with its device is established and, for strangers, until the
+users compare safety numbers; media keys go only over those sessions (§8.4).
+
+### 8.8 Call records and LiveKit webhooks (M2, M3, D-0087, D-0088)
+
+Live calls are records in `valkey-hot` under keyed names, never in SurrealDB:
+
+```text
+cl:r:<tag(room)>   version (1) | kind | media | created_ms | caller [16] callee [16]   (1:1)
+                                                         | group tag [16]            (group)
+                                                         | link tag [16]             (link)
+cl:g:<tag(group)>  version (1) | room [16] | media | created_ms      the group's live call
+cl:q:<tag(link)>   lobby: handle → version | state | device tag [16] | sealed card
+cl:w:<tag(event)>  a webhook event already handled
+cl:x:<tag(room)>   identities removed from the room mid-call (its deny set)
+```
+
+They expire after the call's longest life (24 hours), the lobby after 10 minutes, the webhook
+marks after an hour. LiveKit sends its webhooks to the `calls` service on the same host, over
+loopback. A webhook is handled only if its token verifies with the LiveKit API secret, its
+`sha256` claim is the body's hash, its time is within 5 minutes of ours, and its ID is new;
+retries and replays are answered 200 and do nothing; an event whose cleanup failed is unmarked
+and answered 503, so LiveKit's retry runs it. `room_finished` deletes the call's record and the
+group's pointer (compare-and-delete, so a newer call's pointer survives); `participant_joined` of
+an identity in the room's deny set disconnects it. Room, participant and track events feed aggregate counters
+(`songbird_calls_*`), never a label naming a room. Webhook bodies are not stored or logged (they
+carry LiveKit's per-room TURN credential).
+
+LiveKit runs with `auto_create: false`, so a token for a room that does not exist admits nobody: a
+finished 1:1 call cannot be rejoined. If a webhook is lost, the next group start finds the room
+gone (`ListRooms`) and starts a new call.
+
+### 8.9 Low-data mode and the SFU (M4, M5, D-0089, D-0090)
+
+"Use less data for calls" is the app's choice; the server only has to allow it:
+
+- **Publishing:** in low-data mode an app publishes video at most 320×180 (one simulcast layer,
+  about 150 kbit/s) and Opus at 16–24 kbit/s with DTX on; in normal mode up to 1280×720 with three
+  simulcast layers. Screen sharing is never sent in low-data mode unless the user asks.
+- **Subscribing:** in low-data mode an app subscribes to the lowest simulcast layer of every video
+  (`setVideoQuality(LOW)`) and pauses video it does not show; LiveKit's dynacast then stops layers
+  nobody receives.
+- **The SFU** (`deploy/ansible/roles/calls/templates/livekit.yaml.j2`): simulcast and dynacast are
+  allowed (they are client options), Opus RED and DTX are allowed, congestion control is on with
+  pausing allowed, and the codecs are Opus, RED, VP8, H.264, VP9 and AV1.
+
+The bandwidth each mode uses is measured in M5 (`P07-gate.md`).
+
 ## 9. Push (Prompt 8)
 
 ## 10. Settings sync and presence (Prompt 9)
@@ -1932,3 +2200,11 @@ Packs (Prompt 6, D-0083): for pack key 32 × `33`, object 0's key is
 and object 1's is
 `259a6b7cb7cf7d091b07cae12cf177127ebb19396d61a4b6bf3f2993f5f7a23f498f371981a38260ef70a53d15521470114e39017c42b3c995a8fa6a5aa788e7`
 (`crates/content/src/pack.rs`; reproduced by `tools/attachment-vectors/check.mjs`).
+
+Calls (Prompt 7, D-0086): `crates/content/vectors/call/v1.txt` (§8.2, §8.4), checked by
+`crates/content/tests/call.rs` and independently by `tools/call-vectors/check.mjs` (Node.js and
+OpenSSL). For call ID `00 01 … 0f` and `call_secret` `40 41 … 5f`, the sender key of identity
+`0123456789abcdef0123456789abcdef` is
+`9abfb1f35fa88b5c072d6410879d17a86fff15a196b82fe917a2bb113e490aeb`. For link root `00 01 … 1f`,
+the link ID is `5f88f381e38c44f13807d6c1ca1268a94fdd7437f745cca65ac91b8a29b5480d` and the server
+stores `19a4a59124d6c69329890a7fe6be812afda73dbf92737d7873f18d4c85af3853`.

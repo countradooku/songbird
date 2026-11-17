@@ -36,7 +36,7 @@ members = [
     "xtask",
 ]
 # Fuzz targets need nightly and libFuzzer; they live outside the workspace (see fuzz/README.md).
-exclude = ["fuzz", "tools/libsignal-vectors", "tools/openmls-vectors"]
+exclude = ["fuzz", "tools/libsignal-vectors", "tools/openmls-vectors", "tools/calls-harness"]
 
 [workspace.package]
 version = "0.1.0"
@@ -71,6 +71,7 @@ songbird-akd = { path = "crates/akd" }
 songbird-keys = { path = "crates/keys" }
 songbird-content = { path = "crates/content" }
 songbird-groups = { path = "crates/groups" }
+songbird-calls = { path = "services/calls" }
 
 anyhow = "1.0.104"
 aws-lc-rs = { version = "1.19.0", default-features = false, features = ["aws-lc-sys"] }

@@ -1,4 +1,6 @@
 # LiveKit, single node, development and CI only. API key and secret come from LIVEKIT_KEYS.
+# As deployed (deploy/ansible/roles/calls/templates/livekit.yaml.j2) rooms exist only as `api`
+# creates them (D-0088); webhooks need a `calls` service, which compose does not run.
 port: 7880
 bind_addresses: ["0.0.0.0"]
 rtc:
@@ -9,4 +11,6 @@ logging:
   json: true
   level: info
 room:
-  empty_timeout: 60
+  auto_create: false
+  empty_timeout: 180
+  departure_timeout: 20

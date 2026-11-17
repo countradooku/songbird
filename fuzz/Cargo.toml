@@ -21,10 +21,12 @@ songbird-content = { path = "../crates/content" }
 songbird-api = { path = "../services/api" }
 songbird-s3 = { path = "../crates/s3" }
 songbird-groups = { path = "../crates/groups" }
+songbird-calls = { path = "../services/calls" }
 songbird-groups-harness = { path = "../tests/groups" }
 songbird-send = { path = "../crates/send" }
 akd = { version = "=0.13.0", default-features = false, features = ["whatsapp_v1", "serde_serialization", "public_auditing"] }
 bytes = "1"
+prost = "0.14"
 serde = { version = "1", features = ["derive"] }
 
 # Not part of the main workspace: fuzzing needs nightly and libFuzzer.
@@ -222,6 +224,20 @@ bench = false
 [[bin]]
 name = "group_records"
 path = "fuzz_targets/group_records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "call_message"
+path = "fuzz_targets/call_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "call_records"
+path = "fuzz_targets/call_records.rs"
 test = false
 doc = false
 bench = false

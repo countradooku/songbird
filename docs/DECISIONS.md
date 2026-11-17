@@ -20,6 +20,17 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 7 gate (`P07-gate.md`, D-0086 to D-0091; PR #62): **approved by the owner on 2026-11-17**
+  ("all green you can merge"): M1 to M5 and the
+  security review's fixes; nine threat-model §1 rows (a live 1:1 call with its two accounts for at
+  most 24 h, a live group call, LiveKit's state, call budgets, the LiveKit secret, call links,
+  lobbies, webhook marks, the deny set). Before production: the `calls.` and `turn.` names, their
+  certificates and DNS, `[api.calls]` and `[calls]` with their secrets, load tests on the
+  production host class, a fuzz run of the two new targets.
+- Prompt 7 plan (`P07-plan.md`, D-0085): **approved by the owner on 2026-11-17**, every
+  recommendation: 1:1 calls name the callee for the call's life only, Signal-style keys for call
+  links, 32 video / 128 audio-only participants, a dedicated Valkey for LiveKit and a second IPv4
+  per calls host for TURN/TLS on 443.
 - Prompt 6 gate (`P06-gate.md`, D-0079 to D-0084; PR #61): **approved by the owner on 2026-11-17** ("i approve"): M1 to M5
   and the security review's fixes; the benchmarks and the choices they drove (AES-256-GCM, parallel
   16 MiB parts with tus removed, no caching proxy); five threat-model §1 rows (resumable grants up
@@ -131,6 +142,212 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0091 — Prompt 7: the security review's fixes
+
+- Date: 2026-11-17
+- Status: accepted; part of the Prompt 7 PR (report `P07-gate.md`, "Security review"); approved by the owner with the gate on 2026-11-17
+- Decided by: agent, on an independent read-only review of the whole Prompt 7 diff (a separate
+  agent given the code and documents, not the reports' conclusions)
+- Context: the review found one high, four medium and seven low findings, and three for
+  information.
+- Decision:
+  1. **A removed member could rejoin with a token it still held** (high). LiveKit does not revoke
+     tokens on `RemoveParticipant`, and refreshes connected participants' tokens itself. The
+     reconcile now writes the removed identities to the room's **deny set** (`cl:x:`, pseudonyms
+     only, the call's life) before disconnecting them; the `calls` service disconnects any denied
+     identity again on its `participant_joined` webhook. Test: the group gate test reconnects Bob
+     with his old token and shows him cut off. The MLS keys already denied him the media.
+  2. **The group-call claim could split a group across two rooms** (medium). The call's record is
+     written before the pointer is claimed; a pointer younger than 15 s is trusted without asking
+     LiveKit; pointers are released by compare-and-delete (Lua); each join refreshes a live call's
+     records, so a call longer than a day keeps its pointer.
+  3. **A stranger's call to an open account sent a `VoIP` push** (medium), which rings on iOS.
+     Only a caller presenting the access key causes wake-ups now, and a (caller, callee) budget
+     (20 an hour, burst 6) stops one caller spending a callee's whole wake budget. The block check
+     for open accounts became unnecessary and was removed.
+  4. **One device could fill a link's lobby, and declines kept their places** (medium). One place
+     per device (asking again returns it), declines delete at once, and the add and decide steps
+     are single Lua scripts (no lobby recreated without a TTL after a revoke).
+  5. **Missing budgets** (medium): group joins and every link ticket now spend the ticket budget;
+     every link request spends the poll budget first, whatever it claims to be.
+  6. Low: read-only listeners no longer get `can_publish_data`; ringing is capped at 2 minutes
+     from now even if the sender's clock claims the future; a webhook whose cleanup failed is
+     unmarked so LiveKit's retry runs it; a link revoked while its room was being opened gets the
+     room closed again; the reconcile tries three times and counts failures
+     (`api_call_reconcile_failed`, runbook).
+  7. Deployment: the room-service tunnel admits only the edge hosts' `api.<fqdn>` certificates;
+     the firewall opens 7880 to edge hosts and LiveKit's Valkey to calls hosts only; LiveKit runs
+     with every capability dropped but `NET_BIND_SERVICE`; TURN refuses to relay to private,
+     loopback, link-local and CGNAT ranges (`deny_peer_cidrs`).
+- Not changed, recorded:
+  - The public signalling front also forwards LiveKit's room-service API. Every call to it needs
+    a token signed with the LiveKit secret (LiveKit's design; its cloud exposes the same); the
+    private tunnel is defence in depth for `api`'s path, not the only guard.
+  - Valkey's password is on its command line, as for `valkey-hot` and `valkey-jobs` (D-0034);
+    containers on the host see it, nobody else. Revisit for every Valkey together.
+  - Lobby cards are not signed: apps show a joiner as unverified until the Signal session and,
+    for strangers, the safety numbers (PROTOCOL §8.7).
+  - 1:1 audio calls may turn the camera on (WhatsApp does); only group audio calls are
+    microphone-only, for their larger cap.
+- Consequences: one more threat-model §1 row (the deny set); PROTOCOL §8.6–§8.8 updated.
+
+## D-0090 — Prompt 7, milestone 5: per-host capacity, bandwidth per mode, and the caps kept
+
+- Date: 2026-11-17
+- Status: accepted by the agent; part of the Prompt 7 PR, approved by the owner with the gate on 2026-11-17
+- Decided by: agent, within the plan the owner approved (D-0085 §3: the caps may move with the
+  numbers)
+- Context: the prompt asks for LiveKit's load tester over rooms × participants, CPU and bandwidth
+  per participant, behaviour under loss and latency, bandwidth per low-data mode, and a sizing
+  table.
+- Evidence: P07-M5 (eight runs on a LiveKit container capped at 4 CPUs; `lk` v2.19.2).
+- Decision:
+  1. **The caps stay at 32 (video) and 128 (audio-only).** A full 32-person video room used 0.29
+     cores and 71 Mbit/s; a 128-person audio room 1.07 cores and 356 MiB: both fit a 4-vCPU host
+     several times over. Larger caps would be bandwidth for people, not for the SFU; the owner's
+     WhatsApp-parity choice holds.
+  2. **Low-data mode** (PROTOCOL §8.9) costs a receiver about 0.15 Mbit/s per camera instead of
+     0.6–0.9 Mbit/s, about 4× less, and halves the SFU's CPU.
+  3. **Sizing:** about 170 concurrent 1:1 video calls, 350 low-data, 900 audio, 9 full video rooms
+     or 2 full audio rooms per 4-vCPU host, at 70 % CPU and 700 Mbit/s; two calls hosts for the
+     beta.
+- Consequences: re-run the load tests from a separate host against the production `calls` class
+  before launch, and replace the table with those numbers.
+
+## D-0089 — Prompt 7, milestone 4: LiveKit on its own Valkey, TURN/TLS on a second address, an E2EE harness outside the workspace
+
+- Date: 2026-11-17
+- Status: accepted by the agent; part of the Prompt 7 PR, approved by the owner with the gate on 2026-11-17
+- Decided by: agent, within the plan the owner approved (D-0085 §4)
+- Context: the prompt asks for a multi-node LiveKit through its Redis-protocol store (Valkey
+  compatibility verified), TURN over TLS on 443, recording and egress disabled, and a harness on
+  LiveKit's Rust SDK with E2EE that proves calls connect, wrong keys fail and keys rotate.
+- Evidence: P07-M4 (two nodes on Valkey 9.1.3; the harness output); LiveKit `v1.13.11` source
+  for `turn.bind_addresses`, `redis.tls` and `webhook.filter_params`.
+- Decision:
+  1. LiveKit listens on loopback; apps reach signalling through a TLS front on the public address
+     (443, or 8443 beside the edge role), `api` reaches the room service through a mutual-TLS
+     tunnel on the private address.
+  2. A dedicated Valkey on the first calls host, mutual TLS, no persistence (routing only).
+  3. TURN/TLS on 443 and TURN/UDP on 3478 of a floating IPv4 per calls host; 5349 on the public
+     address where there is no second one.
+  4. `auto_create: false`; webhooks to the local `calls` for six events only.
+  5. `tools/calls-harness` outside the workspace (`+crt-static`, its own lock file), run before
+     releases.
+- Consequences: two new secrets (`livekit_valkey_password`, `calls_secret`), one new certificate
+  component (`valkey-livekit`), a floating IP per calls host; public certificates and DNS for
+  `calls_domain` and `turn_domain` wait for the owner's domain choice.
+
+## D-0088 — Prompt 7, milestone 3: call links with no account, lobbies bound to a device, webhooks once
+
+- Date: 2026-11-17
+- Status: accepted by the agent; part of the Prompt 7 PR, approved by the owner with the gate on 2026-11-17
+- Decided by: agent, within the plan the owner approved (D-0085)
+- Context: the prompt asks for call links as random secrets stored as hashes, with expiry and an
+  optional lobby where an admin admits people, and for signature-verified LiveKit webhooks used
+  only for cleanup and capacity metrics.
+- Options considered:
+  - **Link storage**: `valkey-hot` (no persistence: links would vanish on restart) or SurrealDB.
+    Chosen: SurrealDB for links (days), `valkey-hot` for lobbies (minutes).
+  - **Who is admin**: the creating account (the server learns who made which link) or a token
+    (anonymous, like packs, D-0079 §3). Chosen: a token; account deletion cannot find links, which
+    expire within 30 days.
+  - **Lobby redemption**: by handle alone (an admin who sees handles could redeem one for another
+    device) or bound to the waiting device's keyed tag. Chosen: bound.
+  - **Webhook metrics**: gauges (go negative after a restart) or counters. Chosen: counters.
+  - **Room creation on join**: LiveKit's default `auto_create: true` lets a token for a finished
+    room recreate it without our caps. Chosen: `auto_create: false`; liveness by `ListRooms`.
+- Evidence: P07-M3 (live tests, a real LiveKit webhook replayed through the receiver).
+- Decision: PROTOCOL §8.7, §8.8; links default to a day, at most 30 days; lobbies 64 people, 10
+  minutes; webhooks within 5 minutes, once per event ID (an hour).
+- Consequences: three threat-model §1 rows for approval (call links, lobbies, webhook marks);
+  every LiveKit configuration gets `auto_create: false` and a webhook to its local `calls` (M4).
+
+## D-0087 — Prompt 7, milestone 2: tickets with the least grants, pseudonyms per room, removal by reconcile
+
+- Date: 2026-11-17
+- Status: accepted by the agent; part of the Prompt 7 PR, approved by the owner with the gate on 2026-11-17
+- Decided by: agent, within the plan the owner approved (D-0085)
+- Context: `api` must admit only the caller and the callee's devices to a 1:1 call, only the
+  current roster to a group call, and drop a removed member mid-call; LiveKit's state should
+  reveal as little as possible.
+- Options considered:
+  - **Where calls are authorized**: in `api` (it holds the registry, the directory snapshot and
+    device authentication) through the `songbird-calls` library, or in the `calls` service
+    behind an internal RPC. Chosen: `api`, in process; the LiveKit secret lives in both. A second
+    hop would add latency to ringing and a new internal protocol for no separation that matters:
+    `api` already holds every other user-facing secret.
+  - **Participant identity**: the device ID (links everything), a random per-join ID (needs a
+    table to remove a device later), or `HMAC(k, room ‖ device)` (stable in a room, unlinkable
+    across rooms, recomputable). Chosen: the HMAC, 16 bytes in hex.
+  - **Removal mid-call**: a table of who joined (more metadata), or reconcile the room against the
+    roster after each commit. Chosen: reconcile.
+  - **Dependencies**: `livekit-api` with `access-token` and `webhooks` only (`livekit-token`,
+    `jsonwebtoken` with an HMAC-only provider, `livekit-protocol`, `pbjson-types`); the
+    `services` feature would bring `reqwest` and rustls on `ring`. About 110 crates in its tree,
+    almost all already in the workspace; recorded for `cargo vet`.
+- Evidence: P07-M2 (live tests against LiveKit `v1.13.11`; unit tests).
+- Decision: PROTOCOL §8.6; `[api.calls]` required when deployed; tokens 2 minutes; budgets 60
+  calls an hour per account, 60 wake-ups an hour per receiving account, 600 tickets an hour per
+  device.
+- Consequences: five threat-model §1 rows for approval (live 1:1 call, live group call,
+  LiveKit's state, call budgets, the LiveKit secret). M3 deletes records when LiveKit reports a
+  room finished.
+
+## D-0086 — Prompt 7, milestone 1: per-sender call keys from Signal and MLS; Signal-style link keys
+
+- Date: 2026-11-17
+- Status: accepted by the agent; part of the Prompt 7 PR, approved by the owner with the gate on 2026-11-17
+- Decided by: agent, within the plan the owner approved (D-0085)
+- Context: LiveKit's E2EE takes a key per participant identity and key index (a ring of 16) and
+  derives its frame keys from it; the prompt asks for 1:1 keys from the Signal session and group
+  keys from the MLS exporter per epoch, rotated on every membership change, with test vectors.
+- Options considered:
+  - **one shared key per epoch** (LiveKit's "shared key" mode) versus **a key per sender derived
+    from the epoch secret and the identity**. The frame cryptor's IV is SSRC, timestamp and a
+    counter; with one key for everyone, two senders whose SSRCs collide reuse IVs under AES-GCM.
+    Per-sender keys cost one HKDF per participant per epoch and remove the risk. Chosen.
+  - **when to switch sending after a commit**: at once (receivers may not have the key yet, so
+    frames drop) or after a delay (a removed device decrypts a little longer). Chosen: install at
+    once, send with the new index 1 second later; the server's removal from the SFU (M2) closes
+    that second.
+  - **link calls**: Signal's design (the owner's choice); cards with account, device, identity
+    and an optional name, sealed under a key from the link's root with ChaCha20-Poly1305 (the
+    cipher already used for content-adjacent sealing in this crate's attachment suite 1), 512 bytes
+    at most.
+- Evidence: P07-M1 (tests, vectors, independent Node.js check, protox check, OpenMLS test).
+- Decision: PROTOCOL §8.1 to §8.5 as written; `songbird_content::call` is the reference.
+- Consequences: apps hand LiveKit sender keys, never a shared key; a group call's keys follow the
+  MLS epoch; the server stores only `SHA-256` of a link ID (M3). Revisit if LiveKit adds SFrame
+  with its own key schedule.
+
+## D-0085 — Prompt 7: the plan, and the owner's decisions it needs
+
+- Date: 2026-11-17
+- Status: accepted (owner, 2026-11-17, every recommendation)
+- Decided by: owner, on the agent's plan `docs/reports/P07-plan.md`
+- Context: `services/calls` is empty; LiveKit `v1.13.11` runs in compose and Ansible with no
+  store, TURN/TLS 443 or webhooks. Prompt 5's roster and `call` role exist; Prompt 3's access key
+  proves contacts; the `VoIP` push path exists but nothing uses it.
+- Options considered and evidence: in the plan ("Findings").
+- Decisions (the agent's recommendations, all accepted by the owner):
+  1. A 1:1 call names the callee and carries the contact proof (or the callee is open); the two
+     accounts stay in `valkey-hot` for the call's life only (at most 24 h), never in SurrealDB or
+     logs; the server may queue `VoIP` and high-priority wake-ups for it.
+  2. Call links use Signal's design: identities exchanged over the link's encrypted channel,
+     per-sender keys over Signal sessions, rotated on every join and leave; joining needs an
+     account.
+  3. Caps: 32 participants in a video call, 128 audio-only; configurable.
+  4. LiveKit gets a dedicated Valkey on the calls hosts, and each calls host a second public IPv4
+     for TURN/TLS on 443.
+  5. Agent decisions, not objected to: `livekit-api` for tokens and webhooks only, with Songbird's
+     own Twirp client on aws-lc-rs; the E2EE harness outside the workspace; LiveKit's `lk` CLI as
+     the load tester; tokens valid 2 minutes.
+  6. One branch and one PR for every milestone (the owner, 2026-11-17).
+- Consequences: who calls whom becomes server-visible for the call's life (a threat-model row for
+  approval with M2); the `turn.` name under `songbird.chat` and the second IPv4 are the owner's
+  before deployment; M1 starts.
 
 ## D-0084 — Prompt 6: the security review's fixes
 

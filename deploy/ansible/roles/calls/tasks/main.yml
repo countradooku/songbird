@@ -1,9 +1,66 @@
 ---
+# Calls hosts (Prompt 7, D-0085, D-0089): LiveKit, its dedicated Valkey (on the first calls host),
+# a public TLS front for signalling, a mutual-TLS tunnel for `api`'s room-service calls, and the
+# second IPv4 that TURN/TLS listens on.
+
+- name: The TURN address on the public interface (hcloud floating IP)
+  ansible.builtin.copy:
+    dest: /etc/netplan/60-songbird-turn.yaml
+    mode: "0600"
+    content: |
+      network:
+        version: 2
+        ethernets:
+          eth0:
+            addresses: ["{{ turn_ip }}/32"]
+  when: turn_ip | default("", true)
+  notify: Apply netplan
+
+# LiveKit binds TURN to that address below: apply it now, not at the end of the play.
+- name: Apply the TURN address before LiveKit starts
+  ansible.builtin.meta: flush_handlers
+
+- name: LiveKit's Valkey directory
+  ansible.builtin.file:
+    path: /var/lib/songbird/valkey-livekit
+    state: directory
+    owner: "999"
+    group: "999"
+    mode: "0700"
+  when: inventory_hostname == groups['calls'][0]
+
+- name: LiveKit's Valkey (first calls host; private address, mutual TLS, no persistence)
+  community.docker.docker_container:
+    name: songbird-valkey-livekit
+    image: "{{ images.valkey }}"
+    network_mode: host
+    restart_policy: unless-stopped
+    entrypoint: [sh, -c]
+    command:
+      - >-
+        exec valkey-server --port 0 --tls-port {{ livekit_valkey_port }} --bind {{ private_ip }}
+        --tls-cert-file /tls/tls.crt --tls-key-file /tls/tls.key --tls-ca-cert-file /tls/ca.crt
+        --tls-auth-clients yes --tls-protocols TLSv1.3
+        --maxmemory {{ livekit_valkey_maxmemory }} --maxmemory-policy noeviction
+        --save "" --appendonly no
+        --requirepass "$VALKEY_PASSWORD" --dir /data
+    env:
+      VALKEY_PASSWORD: "{{ secrets.livekit_valkey_password }}"
+    volumes:
+      - /var/lib/songbird/valkey-livekit:/data
+      - "{{ songbird_pki_dir }}/valkey-livekit:/tls:ro"
+    user: "999:999"
+    security_opts: [no-new-privileges]
+    cap_drop: [ALL]
+  no_log: true
+  when: inventory_hostname == groups['calls'][0]
+
 - name: LiveKit configuration
   ansible.builtin.template:
     src: livekit.yaml.j2
     dest: /etc/songbird/livekit.yaml
-    mode: "0644"
+    mode: "0600"
+  no_log: true
 
 - name: LiveKit SFU
   community.docker.docker_container:
@@ -14,6 +71,50 @@
     command: [--config, /etc/livekit.yaml]
     env:
       LIVEKIT_KEYS: "{{ secrets.livekit_api_key }}: {{ secrets.livekit_api_secret }}"
-    volumes: [/etc/songbird/livekit.yaml:/etc/livekit.yaml:ro]
+    volumes:
+      - /etc/songbird/livekit.yaml:/etc/livekit.yaml:ro
+      - "{{ songbird_pki_dir }}/livekit:/tls:ro"
+      - /etc/songbird/public-tls/turn:/public-tls/turn:ro
     security_opts: [no-new-privileges]
+    # TURN/TLS binds 443: the one capability it needs (D-0091).
+    cap_drop: [ALL]
+    capabilities: [NET_BIND_SERVICE]
   no_log: true
+
+# Signalling (WSS) for apps: TLS on the public address, no client authentication. Beside the edge
+# role (one host in beta), 443 is taken by delivery and api: signalling moves to 8443.
+- name: Public TLS front for LiveKit signalling
+  community.docker.docker_container:
+    name: songbird-livekit-wss
+    image: "{{ images.ghostunnel }}"
+    network_mode: host
+    restart_policy: unless-stopped
+    user: "65532:65532"
+    command:
+      - server
+      - --listen={{ public_ip }}:{{ 8443 if 'edge' in group_names else 443 }}
+      - --target=127.0.0.1:7880
+      - --cert=/tls/tls.crt
+      - --key=/tls/tls.key
+      - --disable-authentication
+      - --timed-reload=1h
+    volumes: [/etc/songbird/public-tls/calls:/tls:ro]
+    security_opts: [no-new-privileges]
+    cap_drop: [ALL]
+
+# `api` calls LiveKit's room service through this tunnel (internal CA, D-0012): only the edge
+# hosts' `api` certificates are accepted (D-0091).
+- name: Mutual-TLS tunnel to LiveKit's room service
+  community.docker.docker_container:
+    name: songbird-livekit-api
+    image: "{{ images.ghostunnel }}"
+    network_mode: host
+    restart_policy: unless-stopped
+    user: "65532:65532"
+    command: >-
+      {{ ['server', '--listen=' ~ private_ip ~ ':7880', '--target=127.0.0.1:7880',
+          '--cert=/tls/tls.crt', '--key=/tls/tls.key', '--cacert=/tls/ca.crt', '--timed-reload=1h']
+         + (groups['edge'] | map('extract', hostvars, 'fqdn') | map('regex_replace', '^', '--allow-dns=api.') | list) }}
+    volumes: ["{{ songbird_pki_dir }}/livekit:/tls:ro"]
+    security_opts: [no-new-privileges]
+    cap_drop: [ALL]

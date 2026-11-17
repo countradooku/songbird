@@ -103,6 +103,10 @@ jobs:
           export SONGBIRD_TEST_RUSTFS_ACCESS_KEY="$RUSTFS_ACCESS_KEY"
           export SONGBIRD_TEST_RUSTFS_SECRET_KEY="$RUSTFS_SECRET_KEY"
           export SONGBIRD_REQUIRE_RUSTFS=1
+          # Calls (Prompt 7): the compose LiveKit and its development key.
+          export SONGBIRD_TEST_LIVEKIT="http://127.0.0.1:${SB_PORT_LIVEKIT:-47880}"
+          export SONGBIRD_TEST_LIVEKIT_KEY="$LIVEKIT_API_KEY"
+          export SONGBIRD_TEST_LIVEKIT_SECRET="$LIVEKIT_API_SECRET"
           # Jobs (M5) on valkey-jobs (persistent); the whole stack for api and the M5 gate.
           export SONGBIRD_TEST_VALKEY_JOBS="redis://:${VALKEY_JOBS_PASSWORD}@127.0.0.1:${SB_PORT_VALKEY_JOBS:-47380}/"
           export SONGBIRD_REQUIRE_STACK=1

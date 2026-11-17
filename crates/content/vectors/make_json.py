@@ -103,6 +103,17 @@ vec("sync_call_history", sync("callHistory", {"calls": [{
     "startedAtMs": "1800000000000", "durationS": 61, "peer": b(0x22, 16)}]}))
 vec("sync_request_response", sync("requestResponse", {
     "action": "ACTION_BLOCK", "chat": {"account": b(0x66, 16)}}))
+def call(**kind):
+    return content(call=dict(callId=b(0x07, 16), **kind))
+
+vec("call_offer_1to1", call(offer={
+    "media": "KIND_VIDEO", "callSecret": b(0x42, 32), "ringUntilMs": "1800000060000"}))
+vec("call_offer_group", call(offer={
+    "media": "KIND_AUDIO", "groupId": b(0x99, 16), "ringUntilMs": "1800000060000"}))
+vec("call_answer", call(answer={}))
+vec("call_hangup", call(hangup={"reason": "REASON_ANSWERED_ELSEWHERE"}))
+vec("call_sender_key", call(senderKey={
+    "identity": "0123456789abcdef0123456789abcdef", "keyIndex": 3, "key": b(0x55, 32)}))
 # A franked plaintext: the "reaction" content under franking key 32 x 0x42, padded.
 vec("plaintext_franked", {"content": "@reaction", "frankingKey": b(0x42, 32)}, ty="PaddedPlaintext")
 # Accepting a request: the profile key travels beside the content, never inside it.

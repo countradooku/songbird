@@ -92,10 +92,15 @@ locals {
     edge = [
       { protocol = "tcp", port = "443", sources = ["0.0.0.0/0", "::/0"], description = "delivery (WSS) and api (HTTPS)" },
     ]
+    # Prompt 7 (D-0085 §4, D-0089): signalling (WSS) on 443 (8443 beside edge), TURN/TLS on 443 of
+    # the host's second IPv4, TURN/UDP 3478 and its relays, ICE/TCP, media.
     calls = [
+      { protocol = "tcp", port = "443", sources = ["0.0.0.0/0", "::/0"], description = "LiveKit signalling (WSS) and TURN/TLS" },
+      { protocol = "tcp", port = "8443", sources = ["0.0.0.0/0", "::/0"], description = "LiveKit signalling beside edge" },
+      { protocol = "tcp", port = "5349", sources = ["0.0.0.0/0", "::/0"], description = "LiveKit TURN/TLS without a second address" },
       { protocol = "tcp", port = "7881", sources = ["0.0.0.0/0", "::/0"], description = "LiveKit ICE/TCP" },
       { protocol = "udp", port = "3478", sources = ["0.0.0.0/0", "::/0"], description = "LiveKit TURN/UDP" },
-      { protocol = "tcp", port = "5349", sources = ["0.0.0.0/0", "::/0"], description = "LiveKit TURN/TLS" },
+      { protocol = "udp", port = "30000-40000", sources = ["0.0.0.0/0", "::/0"], description = "LiveKit TURN relays" },
       { protocol = "udp", port = "50000-60000", sources = ["0.0.0.0/0", "::/0"], description = "LiveKit media" },
     ]
     data   = []

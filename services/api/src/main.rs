@@ -217,6 +217,21 @@ async fn transparency(s: &ApiSettings) -> Result<Option<songbird_api::kt::Transp
     )?))
 }
 
+/// `[api.calls]` (Prompt 7), if configured.
+fn calls(
+    s: &ApiSettings,
+    metrics: &ApiMetrics,
+) -> Result<Option<songbird_api::calls::CallsApi>, BoxError> {
+    let Some(c) = &s.calls else {
+        return Ok(None);
+    };
+    let calls = songbird_calls::Calls::from_settings(c)?;
+    Ok(Some(songbird_api::calls::CallsApi {
+        calls: Arc::new(calls),
+        metrics: metrics.calls.clone(),
+    }))
+}
+
 /// `[api.media]` (Prompt 6), if configured.
 fn media(s: &ApiSettings) -> Result<Option<songbird_api::media::Media>, BoxError> {
     let Some(m) = &s.media else {
@@ -423,6 +438,7 @@ async fn build(
     let profiles = profiles(s, &metrics)?;
     let kt = transparency(s).await?;
     let reports = reports(s, &metrics)?;
+    let calls = calls(s, &metrics)?;
     let app = Arc::new(App {
         reports,
         requests,
@@ -443,6 +459,7 @@ async fn build(
         devices,
         profiles,
         kt,
+        calls,
     });
     Ok((app, tasks))
 }

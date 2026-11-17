@@ -29,6 +29,10 @@ def main() -> None:
         else:
             hv["ansible_host"] = h["private_ip"]
             hv["ansible_ssh_common_args"] = f"-o ProxyJump=root@{bastion_ip}"
+        if "calls" in h["roles"]:
+            # LiveKit advertises the public address; TURN/TLS takes 443 on the second (D-0089).
+            hv["public_ip"] = h["public_ipv4"]
+            hv["turn_ip"] = h.get("turn_ipv4")
         for r in h["roles"]:
             groups[r]["hosts"][name] = hv
     doc = {

@@ -184,6 +184,7 @@ async fn stack(limits: Limits, sends_per_sec: u32, send_burst: u32) -> Option<St
     let app = Arc::new(App {
         requests: None,
         reports: None,
+        calls: None,
         server_name: API.into(),
         registry,
         // Unused by these tests (attachments and deletion are M5's).

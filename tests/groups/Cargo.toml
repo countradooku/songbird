@@ -21,6 +21,8 @@ openmls_traits = { version = "=0.6.0", features = ["draft-ietf-mls-pq-ciphersuit
 
 [dev-dependencies]
 songbird-keys.workspace = true
+# Group calls derive their media keys from the MLS exporter (Prompt 7, D-0086).
+songbird-content.workspace = true
 proptest.workspace = true
 
 [lints]

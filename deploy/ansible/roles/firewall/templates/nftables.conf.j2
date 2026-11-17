@@ -29,8 +29,18 @@ table inet songbird {
     tcp dport 443 accept comment "delivery (WSS), api (HTTPS)"
 {% endif %}
 {% if 'calls' in roles %}
-    tcp dport { 7881, 5349 } accept comment "LiveKit ICE/TCP, TURN/TLS"
-    udp dport { 3478, 50000-60000 } accept comment "LiveKit TURN/UDP, media"
+    # Prompt 7 (D-0089): signalling (443, or 8443 beside edge), TURN/TLS on the second IPv4, ICE/TCP.
+    tcp dport { 443, 5349, 8443, 7881 } accept comment "LiveKit signalling (WSS), TURN/TLS, ICE/TCP"
+    udp dport { 3478, {{ livekit_turn_relay_range[0] }}-{{ livekit_turn_relay_range[1] }}, 50000-60000 } accept comment "LiveKit TURN/UDP, relays, media"
+    # LiveKit's room-service tunnel: api (edge) hosts only. LiveKit's Valkey: calls hosts only.
+{% for h in groups['edge'] %}
+    ip saddr {{ hostvars[h].private_ip }} tcp dport 7880 accept
+{% endfor %}
+{% if inventory_hostname == groups['calls'][0] %}
+{% for h in groups['calls'] %}
+    ip saddr {{ hostvars[h].private_ip }} tcp dport {{ livekit_valkey_port }} accept
+{% endfor %}
+{% endif %}
 {% endif %}
 
 {% if internal | length > 0 %}

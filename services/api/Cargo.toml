@@ -30,6 +30,7 @@ songbird-pow.workspace = true
 songbird-keys.workspace = true
 songbird-akd.workspace = true
 songbird-groups.workspace = true
+songbird-calls.workspace = true
 postcard.workspace = true
 akd.workspace = true
 getrandom.workspace = true

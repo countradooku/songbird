@@ -302,6 +302,20 @@ impl Directory {
         self.account_of(device)
     }
 
+    /// The devices of `account` its signed list vouches for (pending ones left out): who a call
+    /// to the account may wake (Prompt 7).
+    pub fn listed_devices<'a>(
+        &'a self,
+        account: &AccountId,
+    ) -> impl Iterator<Item = DeviceId> + 'a {
+        self.accounts
+            .get(account)
+            .into_iter()
+            .flatten()
+            .filter(|d| !self.pending.contains(*d))
+            .copied()
+    }
+
     /// Whether `signature` over `msg` verifies under `device`'s key. An unknown device and a bad
     /// signature are indistinguishable to the caller (no device-existence oracle).
     #[must_use]

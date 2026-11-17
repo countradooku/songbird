@@ -1,0 +1,25 @@
+[package]
+name = "calls-harness"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Prompt 7's E2EE harness: LiveKit's Rust SDK with E2EE on, keys from Songbird's key schedule and real MLS groups (D-0089). Not part of the workspace: it links libwebrtc."
+
+[dependencies]
+# LiveKit's client SDK (libwebrtc, prebuilt; downloaded at build time).
+livekit = { version = "=0.11.0" }
+livekit-api = { version = "=0.10.2", default-features = false, features = ["access-token"] }
+# The key schedule (PROTOCOL §8.2) and real MLS groups for the rotation test.
+songbird-content = { path = "../../crates/content" }
+songbird-groups-harness = { path = "../../tests/groups" }
+songbird-types = { path = "../../crates/types" }
+songbird-calls = { path = "../../services/calls" }
+songbird-groups = { path = "../../crates/groups" }
+getrandom = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+hex = "0.4"
+anyhow = "1"
+
+# Not part of the main workspace (it links libwebrtc).
+[workspace]

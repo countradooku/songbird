@@ -70,6 +70,11 @@ impl Validate for ApiConfig {
                 "api.media",
                 "is required in staging and production (upload budgets, downloads, D-0084)",
             );
+            v.check(
+                api.calls.is_some(),
+                "api.calls",
+                "is required in staging and production (calls, D-0085)",
+            );
             if let Some(s) = &api.send {
                 v.check(
                     s.franking_key.is_some(),
@@ -155,6 +160,10 @@ pub struct ApiSettings {
     /// 503.
     #[serde(default)]
     pub reports: Option<ReportSettings>,
+    /// `[api.calls]` (Prompt 7, D-0085): LiveKit rooms and tokens. Absent: `/v1/calls…` answers
+    /// 503.
+    #[serde(default)]
+    pub calls: Option<songbird_calls::CallSettings>,
 }
 
 /// `[api.reports]` (Prompt 4, D-0063).
@@ -382,6 +391,9 @@ impl Validate for ApiSettings {
                 "reports",
                 "needs [api.requests] and [api.send] franking_key",
             );
+        }
+        if let Some(c) = &self.calls {
+            v.section("calls", c);
         }
         let mut k = [0u8; 32];
         v.check(

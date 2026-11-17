@@ -25,7 +25,9 @@ fn main() {
         .expect("vectors")
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| p.is_dir())
+        // Only protobuf vector sets; the attachment and call vectors (`attachment/`, `call/`) are
+        // checked by their own independent implementations under `tools/`.
+        .filter(|p| p.join("vectors.json").is_file())
         .collect();
     dirs.sort();
     for dir in dirs {

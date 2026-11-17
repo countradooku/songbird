@@ -44,6 +44,7 @@ message Content {
     TypingMessage typing = 12;
     SyncMessage sync = 13;
     RequestResponse request_response = 14;
+    CallMessage call = 15;       // call signalling (Prompt 7, PROTOCOL §8)
   }
 }
 
@@ -456,4 +457,58 @@ message PackItem {
   uint32 width = 7;
   uint32 height = 8;
   uint32 duration_ms = 9;
+}
+
+// Call signalling (Prompt 7, PROTOCOL §8). Live ringing goes as an ephemeral frame; an offer to a
+// device that is offline is also stored with a short EXPIRES. Apps ring only for offers from a
+// contact (the direct or group lane), never from the request lane.
+message CallMessage {
+  bytes call_id = 1; // 16 bytes: the call, and (hex) its LiveKit room
+  oneof kind {
+    CallOffer offer = 10;
+    CallAnswer answer = 11;          // to the caller and the callee's own devices: stop ringing
+    CallDecline decline = 12;
+    CallBusy busy = 13;
+    CallHangup hangup = 14;
+    CallSenderKey sender_key = 15;   // call links: a participant's own media key (§8.4)
+  }
+}
+
+message CallOffer {
+  CallEvent.Kind media = 1;  // audio or video; refused if unspecified
+  bytes call_secret = 2;     // 32 bytes in a 1:1 call (§8.2); empty in a group call
+  bytes group_id = 3;        // 16 bytes in a group call (keys from MLS, §8.3); empty in a 1:1 call
+  uint64 ring_until_ms = 4;  // the sender's clock; apps ring at most 2 minutes past sent_at_ms
+}
+
+message CallAnswer {}
+message CallDecline {}
+message CallBusy {}
+
+message CallHangup {
+  enum Reason {
+    REASON_UNSPECIFIED = 0; // refused
+    REASON_NORMAL = 1;
+    REASON_ANSWERED_ELSEWHERE = 2; // to the callee's other devices
+    REASON_DECLINED_ELSEWHERE = 3;
+    REASON_BUSY_ELSEWHERE = 4;
+    REASON_FAILED = 5;
+  }
+  Reason reason = 1;
+}
+
+// A link call's per-sender key (§8.4): sent over a Signal session to one device in the call.
+message CallSenderKey {
+  string identity = 1;   // the sender's participant identity in the room, 1 to 64 bytes
+  uint32 key_index = 2;  // 0 to 15 (LiveKit's key ring)
+  bytes key = 3;         // 32 bytes
+}
+
+// A call link participant's card (§8.4): sealed under the link key, never inside Content. It goes
+// on LiveKit's data channel and, while waiting in a lobby, through the server, which cannot open it.
+message CallLinkCard {
+  bytes account = 1;   // 16 bytes
+  bytes device = 2;    // 16 bytes
+  string identity = 3; // the participant identity LiveKit shows for this device, 1 to 64 bytes
+  string name = 4;     // a display name, at most 128 bytes, may be empty
 }

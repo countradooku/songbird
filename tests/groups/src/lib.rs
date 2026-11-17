@@ -717,6 +717,16 @@ impl Device {
         v
     }
 
+    /// The MLS exporter at this device's current epoch (a group call's key schedule, Prompt 7).
+    #[must_use]
+    pub fn export(&self, label: &str, context: &[u8], len: usize) -> Vec<u8> {
+        self.group
+            .as_ref()
+            .unwrap()
+            .export_secret(self.provider.crypto(), label, context, len)
+            .unwrap()
+    }
+
     /// This device's leaf index.
     #[must_use]
     pub fn leaf(&self) -> u32 {

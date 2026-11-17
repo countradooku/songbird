@@ -1,0 +1,4 @@
+# libwebrtc's prebuilt Windows libraries use the static C runtime (/MT); link everything the same
+# way, as LiveKit's own SDK repository does.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

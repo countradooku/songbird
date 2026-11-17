@@ -112,3 +112,13 @@ filter = "info"
 # searches_per_hour = 300                                         # per account
 # search_burst = 60
 # provider_per_sec = 50                                           # across the cluster
+# [api.calls]                                                     # Prompt 7 (D-0085); absent: /v1/calls… 503
+# secret = { file = "/path/to/calls-secret.hex" }                 # 64 hex; same on every api and calls node
+# livekit_url = "ws://127.0.0.1:47880"                            # what apps connect to (wss:// when deployed)
+# api_url = "http://127.0.0.1:47880"                              # LiveKit's Twirp API (https:// + [api.calls.tls] when deployed)
+# api_key = "devXXXXXXXX"                                         # LIVEKIT_API_KEY from .env
+# api_secret = { env = "LIVEKIT_API_SECRET" }
+# [api.calls.limits]                                              # defaults (D-0085 §3)
+# video_participants = 32
+# audio_participants = 128
+# token_ttl_secs = 120

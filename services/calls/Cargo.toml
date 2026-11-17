@@ -1,11 +1,14 @@
 [package]
 name = "songbird-calls"
-description = "Songbird calls service."
+description = "Songbird calls: LiveKit rooms, least-privilege tokens with pseudonymous identities, live call records (Prompt 7)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
+
+[lib]
+path = "src/lib.rs"
 
 [[bin]]
 name = "songbird-calls"
@@ -13,8 +16,31 @@ path = "src/main.rs"
 
 [dependencies]
 songbird-service.workspace = true
+songbird-types.workspace = true
+songbird-valkey.workspace = true
+aws-lc-rs.workspace = true
+bytes.workspace = true
+hex.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client", "server", "http1"] }
+hyper-util = { workspace = true, features = ["server", "http1", "tokio"] }
+# LiveKit tokens and webhook verification only (D-0085 §5): the `services` feature would bring
+# reqwest and rustls on ring. HS256 through its own HMAC-only jsonwebtoken provider.
+livekit-api = { version = "=0.10.2", default-features = false, features = ["access-token", "webhooks"] }
+# The room service's protobuf messages, as livekit-api pins them.
+livekit-protocol = "=0.8.3"
 mimalloc.workspace = true
+prost.workspace = true
+redis.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "macros", "time", "sync"] }
+tokio-rustls.workspace = true
 tracing.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

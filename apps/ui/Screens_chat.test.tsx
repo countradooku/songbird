@@ -65,6 +65,9 @@ test("desktop: group, failed, 10k, dark", async () => {
   await app.press("Familia 🏡");
   await pause(700);
   await app.screenshot("shots/chat-desktop-group.png");
+  // Ioana's 10k-message chat is archived in the seed.
+  await app.press("Archived");
+  await pause(500);
   await app.press("Ioana Ștefănescu");
   await pause(900);
   await app.screenshot("shots/chat-desktop-10k.png");

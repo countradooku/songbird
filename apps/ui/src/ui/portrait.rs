@@ -30,8 +30,8 @@ const SHIRT: [&str; 8] = [
     "#2F5D57", "#3F4A6B", "#8A5A44", "#5B6B3A", "#6B3F5E", "#2E4F6E", "#7A6A4A", "#44474F",
 ];
 
-fn mix(seed: u64, salt: u64) -> u64 {
-    let mut x = seed.wrapping_add(salt).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+fn mix(seed: u64, lane: u64) -> u64 {
+    let mut x = seed.wrapping_add(lane).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     x ^= x >> 31;
     x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
     x ^ (x >> 29)
@@ -49,7 +49,7 @@ pub const ME_SEED: u64 = 42;
 
 /// The portrait's SVG markup in a 64 × 64 box.
 fn markup(seed: u64) -> String {
-    let pick = |salt: u64, n: usize| (mix(seed, salt) % n as u64) as usize;
+    let pick = |lane: u64, n: usize| (mix(seed, lane) % n as u64) as usize;
     let (top, bottom) = BACKDROPS[pick(1, BACKDROPS.len())];
     let skin = SKIN[pick(2, SKIN.len())];
     let me = seed == ME_SEED;
@@ -95,7 +95,7 @@ fn markup(seed: u64) -> String {
 /// A group's mock photo: a calm landscape (sky, sun, two hills) whose
 /// palette comes from the seed.
 fn scene(seed: u64) -> String {
-    let pick = |salt: u64, n: usize| (mix(seed, salt) % n as u64) as usize;
+    let pick = |lane: u64, n: usize| (mix(seed, lane) % n as u64) as usize;
     let (top, bottom) = BACKDROPS[pick(11, BACKDROPS.len())];
     let hills = [("#5E8F7E", "#3F6E60"), ("#8C7A5B", "#6B5A3E"), ("#6C7FA8", "#4C5E86"), ("#A06F68", "#7D4F49"), ("#6E8A55", "#4F6A3A")];
     let (far, near) = hills[pick(12, hills.len())];
@@ -156,7 +156,7 @@ pub fn photo(alt: &str, seed: u64, w: u32, h: u32) -> ImageSrc {
 
 fn photo_markup(alt: &str, seed: u64, w: u32, h: u32) -> String {
     let (vw, vh) = (w as f32 * 60.0, h as f32 * 60.0);
-    let pick = |salt: u64, n: usize| (mix(seed, salt) % n as u64) as usize;
+    let pick = |lane: u64, n: usize| (mix(seed, lane) % n as u64) as usize;
     let has = |words: &[&str]| words.iter().any(|k| alt.contains(k));
     let id = format!("p{seed}{w}{h}");
     let body = if has(&["room", "shelves", "library", "reading", "interior"]) {

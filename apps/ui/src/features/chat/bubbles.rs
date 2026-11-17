@@ -1145,8 +1145,8 @@ fn contact_body(cv: Conv, item: ItemMemo) -> AnyElement {
 /// points, different per `seed`: stands in for the map tile the sender's
 /// device renders (picture content, so its colours are its own).
 fn map_markup(seed: u64, w: f32, h: f32) -> String {
-    let r = |salt: u64, n: u64| {
-        let mut x = seed.wrapping_add(salt).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let r = |lane: u64, n: u64| {
+        let mut x = seed.wrapping_add(lane).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         x ^= x >> 29;
         (x % n) as f32
     };

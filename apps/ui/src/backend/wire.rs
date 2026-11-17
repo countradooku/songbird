@@ -4,7 +4,7 @@
 
 use aws_lc_rs::{
     digest,
-    rand::{SecureRandom, SystemRandom},
+    rand::SystemRandom,
     signature::{Ed25519KeyPair, KeyPair},
 };
 use songbird_proto::registration::{self, DEVICE_CONTEXT, IDENTITY_CONTEXT, RegisterRequest};
@@ -37,11 +37,10 @@ pub fn unhex(s: &str) -> Option<Vec<u8>> {
 /// `N` random bytes from the system's source. Without one nothing is safe
 /// to sign, so this stops rather than return predictable bytes.
 pub fn random<const N: usize>() -> [u8; N] {
-    let mut out = [0u8; N];
-    if SystemRandom::new().fill(&mut out).is_err() {
-        std::process::abort();
+    match aws_lc_rs::rand::generate::<[u8; N]>(&SystemRandom::new()) {
+        Ok(bytes) => bytes.expose(),
+        Err(_) => std::process::abort(),
     }
-    out
 }
 
 /// An Ed25519 key from its 32-byte seed.
@@ -170,7 +169,7 @@ mod tests {
 
     #[test]
     fn transcript_matches_the_api_layout() {
-        let t = api_transcript("api.localhost", "GET", "/v1/devices", 7, &[1; 16], &[2; 16], &[0; 32]);
+        let t = api_transcript("api.localhost", "GET", "/v1/devices", 7, &random(), &random(), &[0; 32]);
         assert!(t.starts_with(b"songbird-api-v1\0api.localhost\0GET\0/v1/devices\0"));
         assert_eq!(t.len(), 16 + 13 + 1 + 3 + 1 + 11 + 1 + 8 + 16 + 16 + 32);
         assert_eq!(&t[t.len() - 72..t.len() - 64], &7u64.to_be_bytes());
@@ -178,15 +177,15 @@ mod tests {
 
     #[test]
     fn signatures_verify_with_the_public_key() {
-        let seed = [9u8; 32];
-        let key = ed25519(&seed).unwrap();
-        let (auth, digest) = sign_request(&key, &[3; 16], "api.localhost", "PUT", "/v1/x", 1, Some(b"{}"));
-        assert!(auth.starts_with("Songbird 03030303"));
+        let key = ed25519(&random()).unwrap();
+        let device: [u8; 16] = random();
+        let (auth, digest) = sign_request(&key, &device, "api.localhost", "PUT", "/v1/x", 1, Some(b"{}"));
+        assert!(auth.starts_with(&format!("Songbird {}.", hex(&device))));
         assert_eq!(digest.unwrap().len(), 64);
         let parts: Vec<&str> = auth.trim_start_matches("Songbird ").split('.').collect();
         assert_eq!(parts.len(), 4);
         let nonce: [u8; 16] = unhex(parts[2]).unwrap().try_into().unwrap();
-        let t = api_transcript("api.localhost", "PUT", "/v1/x", 1, &nonce, &[3; 16], &sha256(b"{}"));
+        let t = api_transcript("api.localhost", "PUT", "/v1/x", 1, &nonce, &device, &sha256(b"{}"));
         let sig = unhex(parts[3]).unwrap();
         aws_lc_rs::signature::UnparsedPublicKey::new(&aws_lc_rs::signature::ED25519, public(&key))
             .verify(&t, &sig)

@@ -512,7 +512,7 @@ pub struct Remnants {
     pub devices: u64,
     /// Push tokens of the devices.
     pub push_tokens: u64,
-    /// Upload grants of the devices.
+    /// Upload grants and unfinished packs of the devices (Prompt 6).
     pub grants: u64,
     /// Usernames still naming the account.
     pub usernames: u64,
@@ -1890,7 +1890,8 @@ impl Registry {
                 "RETURN count(SELECT id FROM account:[$a]);
                  RETURN count(SELECT id FROM device WHERE account = $a OR meta::id(id)[0] IN $ds);
                  RETURN count(SELECT id FROM push_token WHERE meta::id(id)[0] IN $ps);
-                 RETURN count(SELECT id FROM upload_grant WHERE device IN $ds);
+                 RETURN count(SELECT id FROM upload_grant WHERE device IN $ds)
+                   + count(SELECT id FROM pack WHERE device IN $ds);
                  RETURN count(SELECT id FROM username WHERE account = $a);
                  RETURN count(SELECT id FROM ulink WHERE account = $a)
                    + count(SELECT id FROM ltoken WHERE account = $a)

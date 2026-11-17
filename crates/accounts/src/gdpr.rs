@@ -31,6 +31,10 @@ fn not_attributable() -> serde_json::Value {
         "Encrypted backups: the same registry data as above, kept up to 93 days.",
         "Groups: each group's end-to-end encrypted state names its members' devices (device IDs and public keys) and the accounts holding a role. After your account is deleted these stay in the groups listed above until a member's app commits your removal (the server cannot change a group without its members); they no longer lead to you on the server, and nothing is delivered to your deleted devices.",
         "Group change logs and invite links: ciphertext only the members can read, and hashes; not linked to your account.",
+        "Attachments you received: fetched without naming your account or device (the object ID inside the message is enough); the server sees only the address a download came from, and keeps no record of it.",
+        "Packs you made (stickers, scenes, sounds, emoticons): once complete, not linked to your account; your devices keep the token that deletes them, and a pack nobody fetches for a year is deleted. Packs still being uploaded are listed with your devices.",
+        "Upload budgets: two keyed records per account in valkey-hot (counts, no files), expiring within 24 hours.",
+        "GIF searches: held in memory for minutes to answer and cache them, never stored or logged, and sent to the GIF provider without anything identifying you.",
     ])
 }
 
@@ -300,6 +304,7 @@ impl Registry {
                 .push_token(&crate::push_index(push_index_secret, &id))
                 .await?;
             let grants = self.grants_of(&[id]).await?;
+            let packs = self.packs_of(&[id]).await?;
             devices.push(serde_json::json!({
                 "id": id.to_hex_unredacted(),
                 "auth_key": hex(d.get("key")),
@@ -312,6 +317,7 @@ impl Registry {
                 "key_packages": {"single_use": kp, "last_resort": lr},
                 "push_registration": push.map(|_| "present, sealed to the push service"),
                 "pending_uploads": grants.iter().map(songbird_jobs::ObjectKey::to_hex_unredacted).collect::<Vec<_>>(),
+                "packs_being_uploaded": packs.iter().map(|(p, _)| hex::encode(p)).collect::<Vec<_>>(),
             }));
         }
         Ok(devices)

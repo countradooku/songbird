@@ -153,8 +153,17 @@ async fn stack() -> Option<Stack> {
         registry,
         s3,
         queue: queue("p06-worker").await,
-        // The media lifecycle never reaches delivery.
-        delivery: DeliveryLink::Direct(Arc::new(|_| Box::pin(async { Bytes::new() }))),
+        // A stand-in for delivery: forgetting succeeds, and no device is known.
+        delivery: DeliveryLink::Direct(Arc::new(|b: Bytes| {
+            Box::pin(async move {
+                use songbird_link::devices::{DeviceRequest, encode_response};
+                let r = match DeviceRequest::decode(&b) {
+                    Some(DeviceRequest::Known(ds)) => Ok(vec![false; ds.len()]),
+                    _ => Ok(Vec::new()),
+                };
+                Bytes::from(encode_response(&r))
+            })
+        })),
         push_index_secret: [9; 32],
         journal: None,
         propagation: Duration::from_millis(10),
@@ -910,6 +919,125 @@ async fn a_pack_opens_from_its_link_and_expires_when_unused() {
             .await
             .unwrap()
             .is_none()
+    );
+    let _ = s.stop.send(true);
+}
+
+/// GDPR for Prompt 6 (M5): the export lists what the server can attribute to the account (an
+/// upload in progress, a pack being uploaded); deleting the account leaves nothing of either,
+/// in the registry or the store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_export_lists_uploads_and_packs_in_progress_and_deletion_removes_them() {
+    let Some(s) = stack().await else { return };
+    let mut seed = [0u8; 32];
+    aws_lc_rs::rand::fill(&mut seed).unwrap();
+    let kp = Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
+    let mut pk = [0u8; 32];
+    pk.copy_from_slice(kp.public_key().as_ref());
+    let (account, dev) = (AccountId::random().unwrap(), DeviceId::random().unwrap());
+    s.app
+        .registry
+        .create_account(&account, &[(dev, pk)])
+        .await
+        .unwrap();
+    let c = ApiClient::new(s.addr, SERVER, dev, kp);
+    let size = songbird_proto::media::ciphertext_len(30 << 20).unwrap();
+    let upload = grant(&c, size, 1).await;
+    // One part in, so the store holds part of it.
+    let (st, _, _) = c
+        .upload_with(
+            "PUT",
+            &format!("/v1/attachments/{upload}/parts/1"),
+            &[("content-length", PART.to_string())],
+            Bytes::from(vec![3u8; usize::try_from(PART).unwrap()]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(st, 204);
+    let one = songbird_proto::media::ciphertext_len(10).unwrap();
+    let hash = "cd".repeat(32);
+    let (st, b) = c
+        .send(
+            "POST",
+            "/v1/packs",
+            Some(format!(r#"{{"sizes":[{one},{one}],"token":"{hash}"}}"#).as_bytes()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(st, 201);
+    let pack = serde_json::from_slice::<serde_json::Value>(&b).unwrap()["pack"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (st, _, _) = c
+        .upload_with(
+            "PUT",
+            &format!("/v1/packs/{pack}/0"),
+            &[("content-length", one.to_string())],
+            Bytes::from(vec![4u8; usize::try_from(one).unwrap()]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(st, 201);
+    let pack_id: [u8; 16] = hex::decode(&pack).unwrap().try_into().unwrap();
+    let pack_object = s
+        .app
+        .registry
+        .pack(&pack_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .objects[0];
+
+    let export = s
+        .app
+        .registry
+        .export(&account, &[9; 32])
+        .await
+        .unwrap()
+        .to_string();
+    assert!(
+        export.contains(&upload),
+        "the upload in progress is exported"
+    );
+    assert!(
+        export.contains(&pack),
+        "the pack being uploaded is exported"
+    );
+    assert!(export.contains("GIF searches") && export.contains("Packs you made"));
+
+    s.worker.delete_account(&account).await.unwrap();
+    let remnants = s
+        .app
+        .registry
+        .remnants(
+            &account,
+            &[dev],
+            &[songbird_accounts::push_index(&[9; 32], &dev)],
+        )
+        .await
+        .unwrap();
+    assert!(remnants.is_empty(), "{remnants:?}");
+    assert!(s.app.registry.pack(&pack_id).await.unwrap().is_none());
+    assert!(
+        s.app
+            .s3
+            .head_object(&object_name(&pack_object))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // The upload's parts go with the next sweep (its grant is gone).
+    s.worker.abort_abandoned_uploads().await;
+    let name = object_name(&ObjectKey::parse_hex(&upload).unwrap());
+    assert!(
+        !s.app
+            .s3
+            .list_multipart_uploads("a/")
+            .await
+            .unwrap()
+            .iter()
+            .any(|u| u.key == name)
     );
     let _ = s.stop.send(true);
 }

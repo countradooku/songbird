@@ -174,10 +174,15 @@ fn to_usize(v: u64) -> Result<usize, Error> {
 /// # Errors
 /// [`Error::Crypto`] if the generator fails.
 pub fn fresh() -> Result<(Zeroizing<[u8; KEY_LEN]>, [u8; SALT_LEN]), Error> {
-    let mut key = Zeroizing::new([0u8; KEY_LEN]);
-    let mut salt = [0u8; SALT_LEN];
-    aws_lc_rs::rand::fill(&mut key[..]).map_err(|_| Error::Crypto)?;
-    aws_lc_rs::rand::fill(&mut salt).map_err(|_| Error::Crypto)?;
+    let rng = aws_lc_rs::rand::SystemRandom::new();
+    let key = Zeroizing::new(
+        aws_lc_rs::rand::generate::<[u8; KEY_LEN]>(&rng)
+            .map_err(|_| Error::Crypto)?
+            .expose(),
+    );
+    let salt = aws_lc_rs::rand::generate::<[u8; SALT_LEN]>(&rng)
+        .map_err(|_| Error::Crypto)?
+        .expose();
     Ok((key, salt))
 }
 

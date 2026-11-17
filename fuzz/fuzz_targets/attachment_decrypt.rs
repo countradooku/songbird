@@ -2,12 +2,12 @@
 //! pointer or length, and anything it accepts after tampering is exactly the original plaintext.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use songbird_content::attachment::{Decryptor, Suite, decrypt, encrypt};
-
-const KEY: [u8; 64] = [0x11; 64];
-const SALT: [u8; 32] = [0x22; 32];
+use songbird_content::attachment::{Decryptor, Suite, decrypt, encrypt, fresh};
 
 fuzz_target!(|data: &[u8]| {
+    // Fresh random key and salt per run: the properties hold for every key.
+    let (key, salt) = fresh().unwrap();
+    let key = *key;
     let Some((&sel, rest)) = data.split_first() else {
         return;
     };
@@ -17,7 +17,7 @@ fuzz_target!(|data: &[u8]| {
     let (plain, edits) = rest.split_at(cut);
     let mut ct = Vec::new();
     let n = plain.len() as u64;
-    let Ok(digest) = encrypt(suite, &KEY, &SALT, n, &mut &plain[..], &mut ct) else {
+    let Ok(digest) = encrypt(suite, &key, &salt, n, &mut &plain[..], &mut ct) else {
         return;
     };
     for e in edits.chunks_exact(3) {
@@ -26,7 +26,7 @@ fuzz_target!(|data: &[u8]| {
     }
     let claimed = if sel & 2 == 0 { n } else { n ^ u64::from(sel >> 2) };
     let mut out = Vec::new();
-    if decrypt(&KEY, &digest, claimed, &mut &ct[..], &mut out).is_ok() {
+    if decrypt(&key, &digest, claimed, &mut &ct[..], &mut out).is_ok() {
         // Authentic bytes only: the plaintext, or (for a longer length claimed in the same padding
         // bucket) the plaintext followed by the authenticated zero padding (PROTOCOL §7.1).
         let common = plain.len().min(out.len());
@@ -40,7 +40,7 @@ fuzz_target!(|data: &[u8]| {
         assert!(plain[common..].iter().all(|b| *b == 0));
     }
     // Raw bytes as a header and a chunk.
-    if let Ok(d) = Decryptor::new(&KEY, &digest, claimed, rest.get(..33).unwrap_or(rest)) {
+    if let Ok(d) = Decryptor::new(&key, &digest, claimed, rest.get(..33).unwrap_or(rest)) {
         let mut chunk = rest.to_vec();
         let _ = d.open_chunk(u64::from(sel), &mut chunk);
     }

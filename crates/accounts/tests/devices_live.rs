@@ -610,4 +610,27 @@ async fn departing_devices_mark_the_groups_that_hold_them() {
         g2_mark[0].gone.is_empty(),
         "the mark keeps the group, not the device"
     );
+    // A commit that leaves the deleted device in g2 marks the group again, but never brings
+    // the deleted ID back (review finding, D-0078); a device whose row exists is named.
+    r.commit_group(
+        &g2,
+        0,
+        &songbird_accounts::groups::GroupCommit {
+            state: b"state 1",
+            roster: &roster(&[d3, other.device]),
+            last: &[1; 32],
+            fanout: b"plan",
+            log: None,
+            link: None,
+            joined: &[],
+            prune: &[*d3.as_bytes(), *other.device.as_bytes()],
+        },
+    )
+    .await
+    .unwrap();
+    let marks = r.groups_to_prune(10).await.unwrap();
+    assert_eq!(marks.len(), 1);
+    assert_eq!(marks[0].gone, vec![other.device]);
+    let left = r.remnants(&a, &[n.device, d2, d3], &[]).await.unwrap();
+    assert!(left.is_empty(), "{left:?}");
 }

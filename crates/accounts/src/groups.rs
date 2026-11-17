@@ -34,7 +34,10 @@ pub struct GroupCommit<'a> {
     /// Accounts the commit added: their pending join requests are settled.
     pub joined: &'a [[u8; 16]],
     /// Devices still in the group that left the directory (D-0075): the group is marked so
-    /// `api` proposes their removal again at the new epoch (proposals do not outlive one).
+    /// `api` proposes their removal again at the new epoch (proposals do not outlive one). The
+    /// mark names only those whose device rows still exist: a deleted device's ID never comes
+    /// back into a mark after its deletion stripped it (D-0078); the prune pass finds those
+    /// through the directory.
     pub prune: &'a [[u8; 16]],
 }
 
@@ -226,8 +229,13 @@ impl Registry {
              };
              FOR $a IN $joined { DELETE grp_req:[$g, $a] };
              IF array::len($prune) > 0 {
-               UPSERT grp_prune:[$g] SET n = (n ?? 0) + 1, at = time::now(),
-                 gone = array::union(gone ?? [], $prune) RETURN NONE;
+               UPSERT grp_prune:[$g] SET n = (n ?? 0) + 1, at = time::now(), gone = gone ?? []
+                 RETURN NONE;
+               FOR $pd IN $prune {
+                 IF record::exists(device:[$pd]) {
+                   UPDATE grp_prune:[$g] SET gone = array::union(gone, [$pd]) RETURN NONE;
+                 };
+               };
              };
              COMMIT TRANSACTION;";
         self.retry(
@@ -473,6 +481,21 @@ impl Registry {
                 Ok(PruneMark { group, n, gone })
             })
             .collect()
+    }
+
+    /// Moves a mark that could not be handled to the back of the queue (unless a later mark
+    /// came), so a group that keeps failing never holds up the others (D-0078).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn group_prune_later(&self, group: &[u8; 16], n: u64) -> Result<(), RegistryError> {
+        self.db
+            .exec(
+                "UPDATE grp_prune:[$g] SET at = time::now() WHERE n = $n RETURN NONE;",
+                vec![var("g", bytes(group)), var("n", int(n))],
+            )
+            .await?;
+        Ok(())
     }
 
     /// Forgets a group's prune mark, unless a later mark came since it was read (`n` moved).

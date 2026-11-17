@@ -7,6 +7,7 @@
     clippy::unwrap_used,
     clippy::indexing_slicing,
     clippy::panic,
+    clippy::assert_is_empty,
     reason = "tests: failing loudly is the point"
 )]
 
@@ -129,6 +130,26 @@ fn departed_devices_are_proposed_for_removal_and_go_with_the_next_commit() {
     }
     let (_, none) = server.propose_removals(&after, &ds()).unwrap();
     assert!(none.messages.is_empty(), "nothing left to remove");
+}
+
+#[test]
+fn a_commit_that_leaves_a_proposal_out_still_names_the_departed_device() {
+    // A member commits before fetching the service's proposal: the commit is valid, the queue
+    // is cleared and the departed device is still in the group. `pending_server_removals`,
+    // read before the commit, tells `api` to propose again at the new epoch (D-0075).
+    let Fixture { dir, mut d, server } = setup();
+    let after = without(&dir, &d[DAVE]);
+    let (server, _) = server.propose_removals(&after, &ds()).unwrap();
+    assert_eq!(server.pending_server_removals().unwrap(), vec![d[DAVE].id]);
+    let b = d[ALICE].update();
+    let (server, applied) = server
+        .apply_commit(&d[ALICE].id, &b, &after, &limits())
+        .unwrap();
+    assert!(applied.removed.is_empty());
+    assert!(server.roster().leaf(&d[DAVE].id).is_some());
+    assert!(server.pending_server_removals().unwrap().is_empty());
+    let (_, again) = server.propose_removals(&after, &ds()).unwrap();
+    assert_eq!(again.queued, 1, "proposed again at the new epoch");
 }
 
 #[test]
@@ -261,4 +282,46 @@ fn groups_name_exactly_the_service() {
         .propose_removals(&dead, &DsSigner::from_seed(&[1; 32]).unwrap())
         .unwrap();
     assert_eq!(msgs, songbird_groups::ds::ServerProposals::default());
+}
+
+#[test]
+fn a_member_with_a_stale_view_catches_up_on_a_held_proposal() {
+    // Review finding (D-0078): Carol still sees Dave listed when the service's proposal comes,
+    // so she refuses it but keeps it aside. Bob commits it; once Carol refreshes, she judges it
+    // again and can follow Bob's commit.
+    let Fixture { dir, mut d, server } = setup();
+    let after = without(&dir, &d[DAVE]);
+    let (server, p) = server.propose_removals(&after, &ds()).unwrap();
+    let msg = &p.messages[0];
+    assert!(d[CAROL].receive_server_proposal(msg, &dir).is_err());
+    assert_eq!(d[CAROL].held.len(), 1, "kept aside, not stored");
+    d[BOB].receive_server_proposal(msg, &after).unwrap();
+    let b = d[BOB].update();
+    let (_server, _) = server
+        .apply_commit(&d[BOB].id, &b, &after, &limits())
+        .unwrap();
+    d[BOB].merge();
+    // Still stale: still held. Refreshed: kept, and Bob's commit follows.
+    assert_eq!(d[CAROL].recheck_held(&dir), 0);
+    assert_eq!(d[CAROL].recheck_held(&after), 1);
+    assert!(d[CAROL].held.is_empty());
+    d[CAROL].receive_checked(&b, &after).unwrap();
+    assert_eq!(d[CAROL].roster(), d[BOB].roster());
+}
+
+#[test]
+fn apps_refuse_a_server_removal_of_an_empty_leaf_and_a_context_without_the_service() {
+    let Fixture { dir, mut d, server } = setup();
+    // Leaf 9 does not exist.
+    let empty = songbird_groups::external::remove_proposal(&GID, server.epoch(), 9, &ds());
+    // Refused (by OpenMLS or the apps' rule) and never kept.
+    assert!(d[ALICE].receive_server_proposal(&empty, &dir).is_err());
+    assert!(d[ALICE].held.is_empty());
+    // A commit dropping the service (which an honest server refuses) is refused by apps too,
+    // checking against the key they pin.
+    let roles = d[ALICE].roles();
+    let dropped = d[ALICE].commit_ext(Vec::new(), &[], false, Some(roles_extensions(&roles)));
+    let e = d[BOB].verify_commit(&dropped, &dir).unwrap_err();
+    assert!(e.contains("pinned service"), "{e}");
+    d[ALICE].discard();
 }

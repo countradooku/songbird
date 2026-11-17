@@ -1490,10 +1490,14 @@ A commit the rule refuses gets 403 `role`, and clients drop it.
   to 5. Managing links and requests uses the commit budget.
 - **What members see:** every join by link is an external commit from a new account, with the
   default role (OpenMLS refuses an external commit that changes extensions). Apps show it in
-  the chat. Before following an external commit from an account not yet in the group, an app
-  checks its link proof against the keys its own roles extension publishes
-  (`songbird_groups::links::verify`) and refuses one without a valid proof: a server cannot
-  admit someone who never held a link the members made.
+  the chat. Before following any external commit, an app applies the rule the server applies
+  (`songbird_groups::ds::check_external_commit`, D-0078): only the joiner's own `ExternalInit`
+  and `Remove`, inline; the joiner's leaf is its device; the only leaf removed is that
+  device's own old one. From an account not yet in the group, it also checks the link proof
+  against the keys its own roles extension publishes (`songbird_groups::links::verify`), and
+  refuses one without a valid proof: a server cannot admit someone who never held a link the
+  members made. Link keys are honest Ed25519 points (no small order, canonical), and apps
+  verify proofs strictly (RFC 8032), so every implementation agrees.
 
 ### 6.9 Communities (M4, D-0072)
 
@@ -1569,12 +1573,17 @@ delivery service proposes that removal itself, as the group's MLS external sende
   epoch).
 - **What apps do** (the trust rule, `songbird_groups::roles::authorize`):
   1. On receiving a proposal from `external(0)`: keep it (`store_pending_proposal`) only if it
-     is a `Remove` whose leaf's device is no longer in its account's signed device list (after
-     refreshing that list). Drop anything else: the service may propose nothing but removals.
+     is a `Remove` of a leaf that exists and whose device is no longer in its account's signed
+     device list (after refreshing that list). Drop anything else: the service may propose
+     nothing but removals. A removal of a device the app still sees listed is not stored, but
+     kept aside: before processing a commit that references a proposal it lacks, the app
+     refreshes the device lists and judges the kept proposals again (D-0078).
   2. Commit kept proposals soon (after a random delay of a few seconds, so members do not race;
      another member's commit may include them first). Committing them needs no role.
   3. Refuse a commit that includes a server removal of a still-listed device, whoever commits
      it, and any external proposal that is not a `Remove`.
+  4. Refuse a commit whose context does not name exactly the service key the app pins
+     (`songbird_groups::ds::extensions_allowed`).
 - **The server applies the same rule** to commits. A commit removing a device the node's
   directory still lists is answered 503 (retry): the service proposes only removals the
   registry confirmed, and devices never come back, so that node's directory is seconds behind.

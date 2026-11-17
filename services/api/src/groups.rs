@@ -738,6 +738,8 @@ fn validate(
     link: Option<[u8; 16]>,
 ) -> Result<Validated, GroupError> {
     let g = Group::load(record)?;
+    // Devices a queued server removal targets: confirmed gone in the registry when proposed.
+    let proposed = g.pending_server_removals()?;
     let (g, applied) = match link {
         Some(handle) => g.apply_join(device, bundle, dir, limits, &handle)?,
         None => g.apply_commit(device, bundle, dir, limits)?,
@@ -745,7 +747,9 @@ fn validate(
     let roster: Vec<DeviceId> = g.roster().devices().collect();
     let dead = roster
         .iter()
-        .filter(|d| songbird_groups::Directory::account_of(dir, d).is_none())
+        .filter(|d| {
+            songbird_groups::Directory::account_of(dir, d).is_none() || proposed.contains(d)
+        })
         .map(|d| *d.as_bytes())
         .collect();
     Ok(Validated {
@@ -792,6 +796,8 @@ impl Groups {
                 done += 1;
             } else {
                 tracing::warn!("a group's departed devices could not be proposed for removal yet");
+                // To the back of the queue: a group that keeps failing holds up no other.
+                let _ = registry.group_prune_later(&mark.group, mark.n).await;
             }
         }
         done

@@ -214,3 +214,33 @@ fn only_the_links_role_publishes_link_keys() {
         "{e:?}"
     );
 }
+
+#[test]
+fn a_join_may_remove_no_one_else_on_the_server_or_in_apps() {
+    // Review finding (D-0078): a link holder whose external commit also removes the owner's
+    // leaf. Its proof is valid; the server refuses it, and so do members, so a server that let
+    // it through could not remove a listed member.
+    let mut f = setup();
+    let (info, tree) = (
+        f.server.group_info().to_vec(),
+        f.server.ratchet_tree().unwrap(),
+    );
+    // A device holding Alice's signature key: OpenMLS's external commit removes her leaf.
+    let mut mallory = Device::sharing_key(7, account(7), &f.alice, &mut f.dir);
+    let b = mallory.join_by_link(&info, &tree, &f.link);
+    let e = join(&f, &mallory, &b, &f.link.handle).unwrap_err();
+    assert!(matches!(e, GroupError::External), "{e:?}");
+    let refused = f.bob.receive_join_checked(&b, &f.dir).unwrap_err();
+    assert!(refused.contains("the rule refuses"), "{refused}");
+    // The same from an account already in the group (a "rejoin" needing no proof): Bob's
+    // second device removing Alice.
+    let mut bob2 = Device::sharing_key(8, account(2), &f.alice, &mut f.dir);
+    let b = bob2.rejoin(&info, &tree);
+    let e = Group::load(f.server.record())
+        .unwrap()
+        .apply_commit(&bob2.id, &b, &f.dir, &Limits::default())
+        .unwrap_err();
+    assert!(matches!(e, GroupError::External), "{e:?}");
+    let refused = f.bob.receive_join_checked(&b, &f.dir).unwrap_err();
+    assert!(refused.contains("the rule refuses"), "{refused}");
+}

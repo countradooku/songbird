@@ -314,6 +314,11 @@ fn decode_links(b: &[u8]) -> Result<BTreeMap<[u8; 16], [u8; 32]>, Denied> {
         let (handle, key) = k.split_at(16);
         let handle: [u8; 16] = handle.try_into().map_err(|_| Denied::Malformed)?;
         let key: [u8; 32] = key.try_into().map_err(|_| Denied::Malformed)?;
+        // An honest point only (D-0048's check): no small-order or non-canonical key, on which
+        // Ed25519 implementations could disagree about a proof (D-0078).
+        if !songbird_keys::ed25519_public_key_ok(&key) {
+            return Err(Denied::Malformed);
+        }
         if previous.is_some_and(|p| p >= handle) {
             return Err(Denied::Malformed);
         }
@@ -791,13 +796,24 @@ mod tests {
         assert_eq!(authorize(&acc(9), &r, &n, &c), Err(Denied::NotMember));
     }
 
+    /// A real Ed25519 public key (link keys must be honest points, D-0078).
+    fn link_key(seed: u8) -> [u8; 32] {
+        use aws_lc_rs::signature::KeyPair as _;
+        aws_lc_rs::signature::Ed25519KeyPair::from_seed_unchecked(&[seed; 32])
+            .unwrap()
+            .public_key()
+            .as_ref()
+            .try_into()
+            .unwrap()
+    }
+
     #[test]
     fn link_keys_have_one_encoding_and_are_the_links_roles() {
         // D-0076: version 2 carries the link keys; without any it is version 1, byte for byte.
         let r = roles();
         let mut l = r.clone();
-        l.links.insert([2; 16], [7; 32]);
-        l.links.insert([1; 16], [8; 32]);
+        l.links.insert([2; 16], link_key(7));
+        l.links.insert([1; 16], link_key(8));
         let b = l.encode();
         assert_eq!(b.first(), Some(&ROLES_V2));
         assert_eq!(Roles::decode(&b), Ok(l.clone()));
@@ -820,9 +836,20 @@ mod tests {
         assert_eq!(Roles::decode(&swapped), Err(Denied::Malformed));
         let mut many = r.clone();
         for i in 0..17u8 {
-            many.links.insert([i; 16], [i; 32]);
+            many.links.insert([i; 16], link_key(i));
         }
         assert_eq!(Roles::decode(&many.encode()), Err(Denied::Malformed));
+        // A key that is not an honest point (small order, not canonical) is refused (D-0078):
+        // every platform's Ed25519 then agrees on every proof.
+        for weak in [[0u8; 32], {
+            let mut identity = [0u8; 32];
+            identity[0] = 1;
+            identity
+        }] {
+            let mut w = r.clone();
+            w.links.insert([3; 16], weak);
+            assert_eq!(Roles::decode(&w.encode()), Err(Denied::Malformed));
+        }
 
         // Publishing or withdrawing a key needs the `links` role (admins, by default).
         assert_eq!(authorize(&acc(4), &r, &l, &change()), Err(Denied::Role));

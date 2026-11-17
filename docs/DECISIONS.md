@@ -20,6 +20,17 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 5 follow-ups (`P05-followups.md`, D-0075 to D-0078; one PR, owner 2026-11-17: "full
+  milestones in one PR"): **awaiting the owner**. To approve:
+  - the three milestones;
+  - four threat-model §1 rows:
+    - the service's external-sender key and its queued removals in group state;
+    - the prune marks;
+    - link proof keys in the roles extension;
+    - the keyed channel record in `valkey-hot`;
+  - D-0077's fallback to the per-node budget while `valkey-hot` is down;
+  - not rotating the router's `cluster_secret` while groups exist, until key rotation is built
+    (D-0075).
 - Prompt 5 gate (`P05-gate.md`, D-0070 to D-0074; PR #59): **approved by the owner on 2026-11-17**
   ("approve all"): M2–M5, the benchmarks and the caps they set (1,024 devices per group, 2,048
   per private channel, X-Wing by default), the seven threat-model §1 rows (roles, metadata,
@@ -117,6 +128,70 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0078 — Prompt 5 follow-ups: the security review's fixes
+
+- Date: 2026-11-17
+- Status: accepted; part of the follow-ups PR (report `P05-followups.md`, "Security review")
+- Decided by: agent, on an independent read-only review of the follow-ups diff (a separate
+  agent, given the code and documents, not the report's conclusions)
+- Context: the review found two medium and four low findings, and four for information. It
+  found no way for a server, member or outsider to forge a link proof or get a listed member
+  removed past an honest server. Most findings were gaps in the apps' rule (the harness)
+  against a malicious server.
+- Decision:
+  - **One external-commit rule** (`ds::check_external_commit`, medium). Apps checked only the
+    link proof, so a malicious server could have them follow an external commit that also
+    removed another member's leaf. The structural rule now lives in `crates/groups`, and
+    the server and apps both run it:
+    - only the joiner's own `ExternalInit` and `Remove`, inline;
+    - the joiner's leaf is the authenticated device's;
+    - the only leaf removed is the joiner's own old one;
+    - no device twice.
+
+    Apps also check that a commit's context names exactly the service key they pin
+    (`extensions_allowed`), as the server does (low).
+  - **Refused server proposals are kept aside** (medium). A member whose view of a device list
+    is stale refused a valid server removal and dropped it. A later commit referencing it
+    then could not be processed. Apps now keep it outside the OpenMLS pending store (their own
+    commits never include it), and judge it again after refreshing the device lists, before
+    processing a commit that references one they lack (`held`, `recheck_held`).
+  - **A server removal of an empty leaf** is refused by apps (low).
+  - **Commits no longer bring deleted IDs back into prune marks** (low–medium, GDPR). A commit
+    names in a mark only devices whose rows still exist; deleted ones are found through the
+    directory. Before, a commit after the final deletion could re-add the IDs and hold the
+    deletion job's `remnants` check.
+  - **A failing mark goes to the back of the queue** (`group_prune_later`, low), so one group
+    that keeps failing cannot hold up the others.
+  - **Link keys must be honest points** (D-0048's check, on decode; info). Implementations
+    then cannot disagree about a proof under a small-order or non-canonical key. PROTOCOL
+    asks apps for strict RFC 8032 verification.
+  - **A commit that leaves the service's proposal out** (found while fixing): its devices are
+    marked again from the queued proposals (`pending_server_removals`), whatever this node's
+    snapshot says.
+- Not changed, recorded (threat model §6):
+  - **Channel accounting.** The class is spent before later failures (a mailbox outage, an
+    idempotent replay). A refused post still costs its per-node token. This is stricter than
+    configured, never looser.
+  - **Prune passes.** No per-mark lease: every `api` node may handle the same mark. The work
+    is idempotent, and candidates are looked up one by one.
+  - **Groups made before D-0075** would need a context change naming the service. None exist
+    in production.
+  - **Key material.** The external-sender seed shares the cluster secret with the fan-out
+    keys. HKDF outputs are not zeroized.
+- Evidence (Windows 11, `rustc 1.99.1`; live: SurrealDB v4.0.1 and Valkey 9.1.3 under podman):
+  - harness:
+    - `a_join_may_remove_no_one_else_on_the_server_or_in_apps`: a link holder's and a
+      member's second device's external commits removing Alice are refused by the server and
+      by Bob's app;
+    - `a_member_with_a_stale_view_catches_up_on_a_held_proposal`;
+    - `apps_refuse_a_server_removal_of_an_empty_leaf_and_a_context_without_the_service`;
+    - `a_commit_that_leaves_a_proposal_out_still_names_the_departed_device`;
+  - `roles` unit test: small-order link keys refused;
+  - live `devices_live::departing_devices_mark_the_groups_that_hold_them`: a commit naming a
+    deleted device marks the group without its ID.
+- Consequences: apps implement the external-commit rule, the pinned-key check and the held
+  proposals as the harness does (PROTOCOL §6.8, §6.11).
 
 ## D-0077 — Prompt 5 follow-up 3: the channel rate class across the cluster, in `valkey-hot`, with the per-node budget in front and as the fallback
 

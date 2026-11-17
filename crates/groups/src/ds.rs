@@ -172,7 +172,8 @@ pub fn ds_external_senders(key: &[u8; 32]) -> ExternalSendersExtension {
 
 /// Only the roles extension, `required_capabilities` and (exactly as `ds`, when set) the
 /// delivery service's `external_senders` may be in a group's context.
-fn extensions_allowed(ctx: &GroupContext, ds: Option<&[u8; 32]>) -> bool {
+#[must_use]
+pub fn extensions_allowed(ctx: &GroupContext, ds: Option<&[u8; 32]>) -> bool {
     let mut required = false;
     let mut external = false;
     ctx.extensions().iter().all(|e| match e {
@@ -194,6 +195,53 @@ fn extensions_allowed(ctx: &GroupContext, ds: Option<&[u8; 32]>) -> bool {
         _ => false,
     }) && required
         && external == ds.is_some()
+}
+
+/// The structural rule for an external commit (a join or a rejoin), which the server and every
+/// app run alike (D-0078):
+///
+/// - its proposals are its own (`NewMemberCommit`), inline, and only `ExternalInit` and
+///   `Remove`: nothing by reference, no pre-shared key, nothing custom;
+/// - its new leaf is the joining device's;
+/// - the only leaf it may remove is that device's own old one (a resync, RFC 9420 §12.4.3.2);
+///   another member's leaf, even another device of the same account, is removed by a
+///   member's commit;
+/// - a device that still holds a leaf must remove it (no device twice).
+///
+/// `leaf_device` names the device of a leaf index in the group before the commit; `joiner_leaf`
+/// is the joining device's leaf there, if any. Who may join at all (an account already present,
+/// or a link and its proof) is decided on top of this. Returns the removed leaves.
+///
+/// # Errors
+/// [`GroupError::Proposal`], [`GroupError::Sender`], [`GroupError::External`] or
+/// [`GroupError::Duplicate`].
+pub fn check_external_commit(
+    staged: &StagedCommit,
+    joiner: &DeviceId,
+    leaf_device: impl Fn(u32) -> Option<DeviceId>,
+    joiner_leaf: Option<u32>,
+) -> Result<BTreeSet<u32>, GroupError> {
+    for q in staged.queued_proposals() {
+        match (q.sender(), q.proposal()) {
+            (Sender::NewMemberCommit, Proposal::ExternalInit(_) | Proposal::Remove(_)) => {}
+            _ => return Err(GroupError::Proposal),
+        }
+    }
+    let leaf = staged.update_path_leaf_node().ok_or(GroupError::External)?;
+    if device_of(leaf.credential())? != *joiner {
+        return Err(GroupError::Sender);
+    }
+    let removed: BTreeSet<u32> = staged
+        .remove_proposals()
+        .map(|r| r.remove_proposal().removed().u32())
+        .collect();
+    if removed.iter().any(|i| leaf_device(*i) != Some(*joiner)) {
+        return Err(GroupError::External);
+    }
+    if joiner_leaf.is_some_and(|i| !removed.contains(&i)) {
+        return Err(GroupError::Duplicate);
+    }
+    Ok(removed)
 }
 
 /// One leaf of the roster.
@@ -570,6 +618,28 @@ impl Group {
         by_link: bool,
         dir: &impl Directory,
     ) -> Result<BTreeSet<u32>, GroupError> {
+        if external {
+            let removed = check_external_commit(
+                staged,
+                sender,
+                |i| {
+                    self.public
+                        .leaf(LeafNodeIndex::new(i))
+                        .and_then(|l| device_of(l.credential()).ok())
+                },
+                self.roster.leaf(sender),
+            )?;
+            // A rejoin: the account already has a device here (or a join by link).
+            let account_present = self
+                .roster
+                .devices()
+                .any(|d| d != *sender && dir.account_of(&d) == Some(sender_account))
+                || self.roster.leaf(sender).is_some();
+            if !account_present && !by_link {
+                return Err(GroupError::External);
+            }
+            return Ok(removed);
+        }
         for q in staged.queued_proposals() {
             // Who proposed it: the committer (inline) or a member (by reference), or the
             // delivery service (by reference, D-0075), which may only propose removals. No
@@ -623,35 +693,6 @@ impl Group {
         for q in staged.queued_proposals() {
             if let (Proposal::SelfRemove, Sender::Member(idx)) = (q.proposal(), q.sender()) {
                 removed.insert(idx.u32());
-            }
-        }
-        if external {
-            // A rejoin: the account already has a device here. The only leaf it may remove is
-            // the joining device's own old one (a resync, RFC 9420 §12.4.3.2); another lost
-            // device of the account is removed by a member's commit.
-            let account_present = self
-                .roster
-                .devices()
-                .any(|d| d != *sender && dir.account_of(&d) == Some(sender_account))
-                || self.roster.leaf(sender).is_some();
-            if !account_present && !by_link {
-                return Err(GroupError::External);
-            }
-            for idx in &removed {
-                let leaf = self
-                    .public
-                    .leaf(LeafNodeIndex::new(*idx))
-                    .ok_or(GroupError::External)?;
-                if device_of(leaf.credential())? != *sender {
-                    return Err(GroupError::External);
-                }
-            }
-            if self
-                .roster
-                .leaf(sender)
-                .is_some_and(|i| !removed.contains(&i))
-            {
-                return Err(GroupError::Duplicate);
             }
         }
         Ok(removed)
@@ -765,6 +806,21 @@ impl Group {
             .add_proposal(&self.state, *q)
             .map_err(GroupError::State)?;
         Ok((self, sha256(msg)))
+    }
+
+    /// The devices queued server removals target (D-0075). A commit clears the queue whether it
+    /// includes them or not, so the caller proposes again for those still in the group: they
+    /// were confirmed gone in the registry, whatever a cached directory says.
+    pub fn pending_server_removals(&self) -> Result<Vec<DeviceId>, GroupError> {
+        let mut out = Vec::new();
+        for (_, q) in self.public.queued_proposals(&self.state)? {
+            if let (Proposal::Remove(r), Sender::External(_)) = (q.proposal(), q.sender())
+                && let Some(leaf) = self.public.leaf(r.removed())
+            {
+                out.push(device_of(leaf.credential())?);
+            }
+        }
+        Ok(out)
     }
 
     /// The delivery service proposes removing every leaf whose device left the directory

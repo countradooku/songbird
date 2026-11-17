@@ -438,6 +438,7 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
 | A member dropping the service (to keep departed leaves) or adding an external sender of its own (to propose) | T, E | Malicious member | The context must name exactly the service's key, at creation and after every commit | `groups_name_exactly_the_service` |
 | Theft of the external-sender key | S | Insider, host compromise | It can only propose removals of departed devices (apps refuse the rest); it is derived from the cluster secret, which is not rotated while groups exist until key rotation is built (`docs/RUNBOOKS/secrets-rotation.md`) | the trust-rule tests above |
 | The server admitting someone who never held a link | S, E | Compromised server or operator | Members follow an external commit from a new account only with a proof signed by a link key the links role published; the server cannot sign (it holds `SHA-256(auth)` only) and applies the same rule (403 `proof`) | `joins_without_a_valid_proof_are_refused_by_the_server_and_members`; live `invite_links_and_join_requests` |
+| An external commit (a join or rejoin) that also removes another member, accepted by a malicious server | T, E | Compromised server with a link holder or a member | Apps run the server's external-commit rule (`check_external_commit`, D-0078): only the joiner's own old leaf may go | `a_join_may_remove_no_one_else_on_the_server_or_in_apps` |
 | A link holder proving for links it never held, or reusing a proof | S | Holder of another link, a past joiner | One key per link, from its own secret; the proof binds group, epoch, handle, device and leaf key | `proofs_bind_the_link_group_epoch_device_and_leaf` |
 | A member publishing a link key to let someone in | E | Malicious member below the links role | Publishing or withdrawing keys is the links role's (`roles::authorize`) | `only_the_links_role_publishes_link_keys`; `link_keys_have_one_encoding_and_are_the_links_roles` |
 | A channel's admins multiplying its post budget by posting through several nodes, or both transports | D | Malicious or careless channel admin | One GCRA record per channel in `valkey-hot`, shared by every node and transport; the per-node budget in front and as the fallback | `the_channel_class_is_shared_by_every_send_path`; live `a_channels_rate_class_is_shared_by_the_websocket_and_http` |
@@ -584,8 +585,8 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
   - rotating the service's key needs a context change in every group, which is not built
     (it follows the cluster secret).
 
-  A member whose view of a device list is stale refuses a valid server removal until it
-  refreshes (apps refresh before refusing).
+  A member whose view of a device list is stale refuses a valid server removal: it keeps the
+  proposal aside and judges it again after refreshing (D-0078).
 - Invite links (Prompt 5, M3; D-0071): the server decides whether a joiner may use a link.
   Since D-0076 members check for themselves that a joiner held a link they made (a proof under
   the key the links role published); a malicious server can no longer admit an account apps
@@ -609,3 +610,14 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
   of the directory differs from the server's may judge a commit differently and stay behind
   until it refreshes. A member can fill the 64-proposal queue until the next commit, which
   removes them.
+- Follow-ups' review leftovers (D-0078):
+  - a channel post is charged to the class before a later failure (a mailbox outage, an
+    idempotent replay), and a refused post still costs its per-node token: stricter than
+    configured, never looser;
+  - anyone who can make `valkey-hot` slower than 250 ms puts channels on per-node budgets;
+  - every `api` node may handle the same prune mark (no lease; the work is idempotent);
+  - the external-sender key shares the cluster secret with the fan-out keys, and HKDF outputs
+    are not zeroized;
+  - apps that verify Ed25519 less strictly than RFC 8032 could disagree with the server on a
+    crafted proof (link keys are checked as honest points; the same holds for every MLS
+    signature).

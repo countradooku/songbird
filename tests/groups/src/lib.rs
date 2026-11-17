@@ -63,6 +63,9 @@ pub struct Device {
     pub group: Option<MlsGroup>,
     /// The delivery service's external-sender key new groups name (D-0075), if any.
     pub ds_key: Option<[u8; 32]>,
+    /// Server proposals this app refused because the device still looked listed: kept aside,
+    /// outside the OpenMLS pending store, and judged again after a refresh (D-0078).
+    pub held: Vec<Vec<u8>>,
     raw_key: (Vec<u8>, Vec<u8>),
 }
 
@@ -107,6 +110,23 @@ impl Device {
         d
     }
 
+    /// A new device `n` of `account` holding `other`'s signature key: OpenMLS's external commit
+    /// then removes `other`'s leaf, which no honest app does (tests of the external-commit
+    /// rule, D-0078).
+    #[must_use]
+    pub fn sharing_key(n: u16, account: AccountId, other: &Self, dir: &mut Dir) -> Self {
+        let id = DeviceId::from_bytes(id_from(n, 0xD0));
+        dir.0.insert(id, account);
+        let mut d = Self::with_key(
+            id,
+            account,
+            OpenMlsRustCrypto::default(),
+            other.raw_key.clone(),
+        );
+        d.ds_key = other.ds_key;
+        d
+    }
+
     /// A device the directory does not know.
     #[must_use]
     pub fn unregistered(id: DeviceId, account: AccountId) -> Self {
@@ -137,6 +157,7 @@ impl Device {
             cred,
             group: None,
             ds_key: None,
+            held: Vec::new(),
             raw_key,
         }
     }
@@ -362,6 +383,7 @@ impl Device {
     fn judge(&mut self, bundle: &[u8], dir: &Dir, merge: bool) -> Result<(), String> {
         let b = Bundle::parse(bundle, usize::MAX).map_err(|e| e.to_string())?;
         let msg = MlsMessageIn::tls_deserialize_exact(b.commit).map_err(|e| e.to_string())?;
+        let ds = self.ds_key;
         let p = &self.provider;
         let g = self.group.as_mut().unwrap();
         let old_roles = songbird_groups::ds::roles_in(g.extensions()).map_err(|e| e.to_string())?;
@@ -382,6 +404,10 @@ impl Device {
         let ProcessedMessageContent::StagedCommitMessage(staged) = processed.into_content() else {
             return Err("expected a commit".into());
         };
+        // The context names exactly the pinned service, as the server checks (D-0078).
+        if !songbird_groups::ds::extensions_allowed(staged.group_context(), ds.as_ref()) {
+            return Err("a context that does not name exactly the pinned service".into());
+        }
         let new_roles =
             songbird_groups::ds::roles_of(staged.group_context()).map_err(|e| e.to_string())?;
         let account = |c: &Credential| {
@@ -511,9 +537,12 @@ impl Device {
     /// A proposal from the delivery service (D-0075), checked as apps check it before storing
     /// it for their next commit: a `Remove` from the group's external sender, of a device that
     /// is no longer in its account's signed device list (`dir`, this client's view). Anything
-    /// else is dropped (not stored) and reported.
-    pub fn receive_server_proposal(&mut self, msg: &[u8], dir: &Dir) -> Result<(), String> {
-        let msg = MlsMessageIn::tls_deserialize_exact(msg).map_err(|e| e.to_string())?;
+    /// else is dropped (not stored) and reported. A removal of a device this app still sees
+    /// listed is also refused, but kept aside (`held`): its view may be stale, and another
+    /// member's commit may reference it. [`Device::recheck_held`] judges it again after a
+    /// refresh (D-0078).
+    pub fn receive_server_proposal(&mut self, bytes: &[u8], dir: &Dir) -> Result<(), String> {
+        let msg = MlsMessageIn::tls_deserialize_exact(bytes).map_err(|e| e.to_string())?;
         let p = &self.provider;
         let g = self.group.as_mut().unwrap();
         let processed = g
@@ -531,16 +560,28 @@ impl Device {
         let Proposal::Remove(r) = q.proposal() else {
             return Err("the delivery service may only propose removals".into());
         };
-        let listed = g
+        let Some(device) = g
             .member(r.removed())
             .and_then(|c| DeviceId::from_slice(c.serialized_content()).ok())
-            .and_then(|d| dir.account_of(&d))
-            .is_some();
-        if listed {
+        else {
+            return Err("a server removal of an empty leaf".into());
+        };
+        if dir.account_of(&device).is_some() {
+            self.held.push(bytes.to_vec());
             return Err("a server removal of a device that is still listed".into());
         }
         g.store_pending_proposal(p.storage(), *q)
             .map_err(|e| e.to_string())
+    }
+
+    /// Judges the server proposals kept aside again, with a refreshed view `dir` (as an app
+    /// does after refreshing the device lists, and before processing a commit that references
+    /// one it does not hold). Returns how many it now keeps for its next commit.
+    pub fn recheck_held(&mut self, dir: &Dir) -> usize {
+        let held = std::mem::take(&mut self.held);
+        held.iter()
+            .filter(|m| self.receive_server_proposal(m, dir).is_ok())
+            .count()
     }
 
     /// Processes an external commit (a join) as apps do (D-0076): from an account already in
@@ -550,6 +591,7 @@ impl Device {
     pub fn receive_join_checked(&mut self, bundle: &[u8], dir: &Dir) -> Result<(), String> {
         let b = Bundle::parse(bundle, usize::MAX).map_err(|e| e.to_string())?;
         let msg = MlsMessageIn::tls_deserialize_exact(b.commit).map_err(|e| e.to_string())?;
+        let ds = self.ds_key;
         let p = &self.provider;
         let g = self.group.as_mut().unwrap();
         let roles = songbird_groups::ds::roles_in(g.extensions()).map_err(|e| e.to_string())?;
@@ -570,6 +612,21 @@ impl Device {
         let leaf = staged.update_path_leaf_node().ok_or("no joiner's leaf")?;
         let device = DeviceId::from_slice(leaf.credential().serialized_content())
             .map_err(|e| e.to_string())?;
+        // The structural rule the server runs too (D-0078): only the joiner's own old leaf
+        // may go, nothing by reference, nothing but ExternalInit and Remove.
+        let device_at = |i: u32| {
+            g.member(LeafNodeIndex::new(i))
+                .and_then(|c| DeviceId::from_slice(c.serialized_content()).ok())
+        };
+        let joiner_leaf = g
+            .members()
+            .find(|m| m.credential.serialized_content() == device.as_bytes())
+            .map(|m| m.index.u32());
+        songbird_groups::ds::check_external_commit(&staged, &device, device_at, joiner_leaf)
+            .map_err(|e| format!("an external commit the rule refuses: {e}"))?;
+        if !songbird_groups::ds::extensions_allowed(staged.group_context(), ds.as_ref()) {
+            return Err("a context that does not name exactly the pinned service".into());
+        }
         let account = dir.account_of(&device).ok_or("an unknown joiner")?;
         let present = g.members().any(|m| {
             DeviceId::from_slice(m.credential.serialized_content())

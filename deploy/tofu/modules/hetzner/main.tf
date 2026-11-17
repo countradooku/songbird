@@ -153,7 +153,7 @@ resource "hcloud_floating_ip" "turn" {
   type          = "ipv4"
   name          = "songbird-${local.env}-${each.key}-turn"
   home_location = var.location
-  server_id     = tonumber(hcloud_server.host[each.key].id)
+  server_id     = hcloud_server.host[each.key].id
   labels        = local.labels
 }
 

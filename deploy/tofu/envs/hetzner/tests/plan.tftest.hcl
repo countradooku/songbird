@@ -15,6 +15,10 @@ mock_provider "hcloud" {
   mock_resource "hcloud_firewall" {
     defaults = { id = "104" }
   }
+  # The TURN floating IP (Prompt 7) names its server by ID.
+  mock_resource "hcloud_server" {
+    defaults = { id = "105" }
+  }
 }
 
 variables {

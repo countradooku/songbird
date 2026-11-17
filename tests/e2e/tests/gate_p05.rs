@@ -129,6 +129,22 @@ async fn stack(people: usize) -> Option<Stack> {
             songbird_send::groups::ROSTER_TTL,
         )))
     };
+    // The gate (the channel rate class in `valkey-hot`, D-0077): one per transport, each on its
+    // own connection, with the same keys, as two nodes have.
+    let gate_keys = songbird_send::GateKeys::from_cluster_secret(&random32()).unwrap();
+    let gate = |conn: songbird_valkey::ValkeyConn| -> Option<Arc<dyn songbird_send::Gate>> {
+        Some(Arc::new(songbird_send::RegistryGate::new(
+            Arc::clone(&registry),
+            conn,
+            gate_keys.clone(),
+            songbird_send::RequestLimits::default(),
+        )))
+    };
+    let hot_conn = || async {
+        songbird_valkey::ValkeyConn::connect(redis::Client::open(hot.as_str()).unwrap())
+            .await
+            .unwrap()
+    };
     let mut cfg = settings();
     cfg.listen = "127.0.0.1:0".parse().unwrap();
     let shared = Arc::new(
@@ -141,6 +157,7 @@ async fn stack(people: usize) -> Option<Stack> {
         )
         .with_policy(songbird_delivery::Policy {
             rosters: rosters(),
+            gate: gate(hot_conn().await),
             ..Default::default()
         }),
     );
@@ -158,6 +175,7 @@ async fn stack(people: usize) -> Option<Stack> {
             metrics: metrics.send.clone(),
             policy: songbird_send::Policy {
                 rosters: rosters(),
+                gate: gate(hot_conn().await),
                 ..Default::default()
             },
         }),
@@ -1408,4 +1426,83 @@ fn bundle_of(commit: &[u8]) -> Vec<u8> {
         log: None,
     }
     .encode()
+}
+
+#[tokio::test]
+async fn a_channels_rate_class_is_shared_by_the_websocket_and_http() {
+    // D-0077: Alice posts to her channel through a delivery node's WebSocket path and through
+    // `api`'s HTTP path, alternately, at once. Each node's own budget would admit 10 + 10; the
+    // class in `valkey-hot` (1 a second, burst 10) admits about 10 in all, and Valkey never
+    // sees the group ID.
+    let Some(mut s) = stack(2).await else { return };
+    let (alice, bob) = (0, 1);
+    let (info, tree) = s.people[alice]
+        .mls
+        .create_with(songbird_groups::roles::Policy::CHANNEL);
+    let (st, _) = s.people[alice]
+        .api
+        .send("POST", "/v1/groups", Some(&body(&parts(&info, &tree))))
+        .await
+        .unwrap();
+    assert_eq!(st, 204);
+    add(&mut s, &[bob]).await;
+
+    let mut accepted = 0;
+    let mut limited = 0;
+    for k in 0..24u8 {
+        let frame = group_frame(100 + k, s.people[alice].mls.message(&[k]));
+        let st = if k % 2 == 0 {
+            s.shared
+                .send_path()
+                .send(
+                    &s.people[alice].mls.id,
+                    frame,
+                    std::time::Instant::now(),
+                    &mut Vec::new(),
+                )
+                .await
+        } else {
+            s.people[alice]
+                .api
+                .put_message(&frame)
+                .await
+                .unwrap()
+                .1
+                .unwrap()
+                .1
+        };
+        match st {
+            SendStatus::Accepted => accepted += 1,
+            SendStatus::Rejected {
+                reason: RejectReason::RateLimited,
+                retry_after_ms,
+            } => {
+                assert!((1..=1_000).contains(&retry_after_ms), "{retry_after_ms}");
+                limited += 1;
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    // A post or two may refill while the loop runs (1 a second).
+    assert!((10..=12).contains(&accepted), "accepted {accepted}");
+    assert_eq!(accepted + limited, 24);
+    assert_eq!(
+        s.messages().metrics.channel_local_only.get()
+            + s.shared.send_metrics.channel_local_only.get(),
+        0
+    );
+    // The record is a keyed hash: no group ID in `valkey-hot`.
+    let mut hot = redis::Client::open(std::env::var("SONGBIRD_TEST_VALKEY").unwrap())
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+    let keys: Vec<String> = redis::cmd("KEYS")
+        .arg("q:c:*")
+        .query_async(&mut hot)
+        .await
+        .unwrap();
+    assert!(!keys.is_empty());
+    let gid = hex::encode(GID);
+    assert!(keys.iter().all(|k| !k.contains(&gid)), "{keys:?}");
 }

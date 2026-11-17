@@ -135,6 +135,10 @@ pub enum Lane {
 /// Retry hint (milliseconds) for a send refused because the store is unavailable.
 pub const RETRY_MS: u32 = 1_000;
 
+/// Longest a channel post waits for the cluster-wide rate class in `valkey-hot` before the
+/// per-node budget decides alone (D-0077).
+pub const CHANNEL_GATE_WAIT: Duration = Duration::from_millis(250);
+
 /// Counters of the send path. Clones share their counts: `delivery` hands in its own counters
 /// (metric names unchanged), `api` registers a set under its own prefix.
 #[derive(Debug, Clone, Default)]
@@ -159,6 +163,9 @@ pub struct SendMetrics {
     pub requests_dropped: Counter,
     /// Broadcast sends stored.
     pub broadcasts: Counter,
+    /// Channel posts the per-node budget alone admitted, `valkey-hot` being unreachable or slow
+    /// (D-0077's degraded mode).
+    pub channel_local_only: Counter,
     /// From the request read to the send durably stored, group commit included.
     pub store_seconds: ShardedHistogram,
 }
@@ -204,6 +211,11 @@ impl SendMetrics {
                 &self.requests_dropped,
             ),
             ("broadcasts", "Broadcast sends stored", &self.broadcasts),
+            (
+                "channel_rate_local_only",
+                "Channel posts admitted by the per-node budget alone (valkey-hot unreachable)",
+                &self.channel_local_only,
+            ),
         ] {
             m.register(&format!("{prefix}_{name}"), help, c.clone())?;
         }
@@ -399,12 +411,9 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
         if p.epoch != roster.epoch && p.epoch.checked_add(1) != Some(roster.epoch) {
             return Err(reject(RejectReason::StaleEpoch, 0));
         }
-        // The channel rate class (D-0072): a post reaches every subscriber.
-        if roster.is_channel()
-            && let Err(wait) = self.policy.channels.take(group, Instant::now())
-        {
-            let ms = u32::try_from(wait.as_millis()).unwrap_or(u32::MAX).max(1);
-            return Err(reject(RejectReason::RateLimited, ms));
+        // The channel rate class (D-0072, D-0077): a post reaches every subscriber.
+        if roster.is_channel() {
+            self.channel_class(group).await?;
         }
         devices.clear();
         // A deleted account's or removed device stays in the roster until a member commits its
@@ -417,6 +426,39 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
                 .copied(),
         );
         Ok(())
+    }
+
+    /// The channel rate class (D-0077): one budget per private channel, shared by every node and
+    /// both transports (a GCRA record in `valkey-hot`, through the gate), with this node's own
+    /// budget in front of it.
+    ///
+    /// - **The per-node budget first** (no round trip): a node already over the class refuses
+    ///   without asking `valkey-hot`.
+    /// - **Then the cluster's**, waiting at most [`CHANNEL_GATE_WAIT`].
+    /// - **If `valkey-hot` is unreachable or slow, the per-node budget's decision stands**
+    ///   (counted as `channel_rate_local_only`): channel posts keep flowing at the per-node
+    ///   rate, as before D-0077, rather than stopping every channel. Admins are authorized
+    ///   posters, each also under their device's own budget; failing closed would turn a
+    ///   `valkey-hot` outage into a channel outage. The runbook covers it.
+    ///
+    /// # Errors
+    /// Rate limited, with the wait.
+    async fn channel_class(&self, group: &[u8; 16]) -> Result<(), SendStatus> {
+        if let Err(wait) = self.policy.channels.take(group, Instant::now()) {
+            let ms = u32::try_from(wait.as_millis()).unwrap_or(u32::MAX).max(1);
+            return Err(reject(RejectReason::RateLimited, ms));
+        }
+        let Some(gate) = &self.policy.gate else {
+            return Ok(());
+        };
+        match tokio::time::timeout(CHANNEL_GATE_WAIT, gate.channel(group)).await {
+            Ok(Admit::Allow | Admit::Drop) => Ok(()),
+            Ok(Admit::Limited(ms)) => Err(reject(RejectReason::RateLimited, ms.max(1))),
+            Ok(Admit::Unavailable) | Err(_) => {
+                self.metrics.channel_local_only.inc();
+                Ok(())
+            }
+        }
     }
 
     /// The checks that need no store: no envelope in the reserved system-frame format, no device

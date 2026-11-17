@@ -73,6 +73,8 @@ pub struct DeliveryMetrics {
     pub requests_dropped: Counter,
     /// Broadcast sends stored.
     pub broadcasts: Counter,
+    /// Channel posts the per-node budget alone admitted, valkey-hot being unreachable (D-0077).
+    pub channel_local_only: Counter,
     /// From a `Send` frame read to the send durably stored (group commit included): the
     /// server-side part of send-to-deliver that the 2 ms target is about (master prompt §8).
     pub store_seconds: ShardedHistogram,
@@ -93,6 +95,7 @@ impl DeliveryMetrics {
             requests: self.requests.clone(),
             requests_dropped: self.requests_dropped.clone(),
             broadcasts: self.broadcasts.clone(),
+            channel_local_only: self.channel_local_only.clone(),
             store_seconds: self.store_seconds.clone(),
         }
     }
@@ -117,7 +120,7 @@ impl DeliveryMetrics {
             "WebSocket connections open",
             self.connections_open.clone(),
         )?;
-        let counters: [(&str, &str, &Counter); 30] = [
+        let counters: [(&str, &str, &Counter); 31] = [
             (
                 "delivery_connections",
                 "WebSocket connections accepted",
@@ -263,6 +266,11 @@ impl DeliveryMetrics {
                 "delivery_broadcasts",
                 "Broadcast sends stored",
                 &self.broadcasts,
+            ),
+            (
+                "delivery_channel_rate_local_only",
+                "Channel posts admitted by the per-node budget alone (valkey-hot unreachable)",
+                &self.channel_local_only,
             ),
         ];
         for (name, help, c) in counters {

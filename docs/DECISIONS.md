@@ -118,6 +118,65 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0077 — Prompt 5 follow-up 3: the channel rate class across the cluster, in `valkey-hot`, with the per-node budget in front and as the fallback
+
+- Date: 2026-11-17
+- Status: proposed; built and passing live (report `P05-followups.md`); **the threat-model row
+  and the fallback await the owner's approval**
+- Decided by: agent, on the owner's approval of the follow-up at the Prompt 5 gate (2026-11-17)
+- Context: D-0072's channel rate class (1 post a second per channel, burst 10) was per node. A
+  channel's admins posting through several delivery nodes and `api` got each one's budget,
+  and a post is stored for up to 2,048 devices.
+- Options considered:
+  - **A new store or service for the budget** was rejected: `valkey-hot` already holds every
+    cluster-wide budget as a GCRA record on Valkey's clock (`messages::GCRA` for HTTP sends,
+    the gate's request and broadcast budgets).
+  - **A separate Valkey connection and key for the channel class** was rejected: the gate
+    (`songbird_send::Gate`) is already on both transports' send path, with a `valkey-hot`
+    connection and keys every node pins in the registry. The class is one more gate method
+    (`Gate::channel`), and the record `q:c:<HMAC(group)>` comes from the same keys, so Valkey
+    never sees a group ID.
+  - **Replacing the per-node budget** was rejected. It stays in front of the cluster record,
+    as a fast path: a node already over the class refuses without a round trip.
+  - **When `valkey-hot` is down, failing closed** (refusing every channel post) was weighed
+    against **falling back to the per-node budget**:
+    - the gate fails closed for message requests, because they protect a person from
+      strangers, and a block must not be skipped;
+    - channel posts come from the channel's own admins (authorized posters, each also under
+      its device's budget), and the class bounds storage amplification, not who may post;
+    - failing closed would turn a `valkey-hot` outage into a channel outage.
+
+    **Decided: fall back to the per-node budget**, which is D-0072's guarantee, counted
+    (`channel_rate_local_only`) and covered by a runbook. Each post waits at most 250 ms
+    (`CHANNEL_GATE_WAIT`) for Valkey, since a connection to an unreachable host can hang.
+- Decision:
+  - `RequestLimits` gains `channel_per_sec` (1) and `channel_burst` (10), used by both parts
+    of the class (`[api.requests]`, `[delivery.requests]`).
+  - The send path (`SendPath::channel_class`, both transports) runs:
+    1. the per-node budget;
+    2. then `Gate::channel` (`RegistryGate`: cost-weighted GCRA on Valkey's clock), within
+       250 ms;
+    3. refused: reason 1 `RateLimited` with the wait;
+    4. unreachable or slow: the per-node decision stands, and the post is counted.
+  - Without a gate (development), the per-node budget alone, as before.
+- Evidence (Windows 11, `rustc 1.99.1`; live: SurrealDB v4.0.1 and Valkey 9.1.3 under podman):
+  - `crates/send`:
+    - `the_channel_class_is_shared_by_every_send_path`: two send paths with per-node budgets
+      of 5 and one shared gate of 3 admit 3 in all;
+    - `without_valkey_the_per_node_budget_decides_alone`: a store that is down, and one that
+      never answers (each post bounded by the 250 ms wait), admit at the per-node rate and
+      count it;
+    - the existing `channels_have_their_own_rate_class` and `the_channel_budget_refills`.
+  - Live `gate_p05::a_channels_rate_class_is_shared_by_the_websocket_and_http`: Alice posts 24
+    times, alternating a delivery node's WebSocket path and `api`'s HTTP path, each with its
+    own `valkey-hot` connection. 10 to 12 are admitted in all (each node alone would have
+    admitted 10), nothing falls back, and the `q:c:` records hold no group ID.
+- Consequences:
+  - One threat-model §1 row (the keyed channel record in `valkey-hot`), awaiting the owner's
+    approval. The §6 risk "the channel rate class is per node" holds only while `valkey-hot`
+    is down.
+  - Runbook: `docs/RUNBOOKS/delivery.md`, "`valkey-hot` unreachable".
+
 ## D-0076 — Prompt 5 follow-up 2: invite-link proofs members check, under a key the link's creator publishes in the roles extension
 
 - Date: 2026-11-17

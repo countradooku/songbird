@@ -1532,9 +1532,11 @@ one, by their own links.
   edit and manage links; subscribers join read-only (`Policy::CHANNEL`).
   - **Size:** up to 2,048 devices; a group is up to 1,024 (`Limits`). The limit follows the
     policy a commit leaves.
-  - **Rate class:** a channel takes at most 1 post a second, bursting to 10, on each node,
-    whoever of its admins posts. This is on top of each device's own budget. Over it, reason 1
-    `RateLimited` with the wait.
+  - **Rate class:** a channel takes at most 1 post a second, bursting to 10, across the whole
+    cluster and both transports (WebSocket and `PUT /v1/messages`), whoever of its admins
+    posts (D-0077). This is on top of each device's own budget. Over it, reason 1
+    `RateLimited` with the wait. While the cluster's store is unreachable, each node applies
+    the class on its own.
   - **Subscribers see each other's devices** in the ratchet tree, as in any MLS group. Channels
     suit audiences that know each other; public channels are not built (D-0065 §4).
 - **Tiers and receipts** (`songbird_groups::tiers`, the apps' rule; receipts are encrypted):

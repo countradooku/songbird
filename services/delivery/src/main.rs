@@ -350,6 +350,16 @@ impl Service for Delivery {
         let (stop_tx, stop_rx) = watch::channel(false);
         let (directory, follow) = load_directory(self.registry, self.directory).await?;
         let franking = franker(self.settings.franking_key.as_ref())?;
+        // The channel rate class's per-node part, at the cluster's rates (D-0077).
+        let channels = Arc::new(self.settings.requests.as_ref().map_or_else(
+            songbird_send::groups::ChannelBudget::default,
+            |r| {
+                songbird_send::groups::ChannelBudget::new(
+                    r.limits.channel_per_sec,
+                    r.limits.channel_burst,
+                )
+            },
+        ));
         let gate = match (&self.settings.requests, &follow) {
             (Some(r), Some((registry, ..))) => {
                 let secret = r.secret.resolve_key32()?;
@@ -399,7 +409,7 @@ impl Service for Delivery {
                     ));
                 r
             }),
-            channels: Arc::default(),
+            channels,
         });
         let mut pusher_task = None;
         if let Some(jobs) = self.jobs {

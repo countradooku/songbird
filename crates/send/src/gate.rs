@@ -53,6 +53,11 @@ pub trait Gate: Send + Sync + 'static {
     /// A broadcast from `sender` to `accounts` other accounts.
     fn broadcast<'a>(&'a self, sender: &'a AccountId, accounts: u32) -> GateFuture<'a>;
 
+    /// One post to private channel `group` (D-0077): the channel rate class, shared by every
+    /// node and both transports. [`Admit::Unavailable`] when the shared store is unreachable
+    /// (the send path then keeps the per-node budget's decision).
+    fn channel<'a>(&'a self, group: &'a [u8; 16]) -> GateFuture<'a>;
+
     /// A send to an open account: [`Admit::Drop`] if it blocked `sender`, else allowed.
     fn blocked<'a>(&'a self, sender: &'a AccountId, recipient: &'a AccountId) -> GateFuture<'a>;
 }
@@ -82,6 +87,10 @@ pub struct RequestLimits {
     pub broadcast_burst: u32,
     /// Most accounts one broadcast may address.
     pub max_broadcast_accounts: u32,
+    /// Posts per second per private channel, across the cluster (D-0077).
+    pub channel_per_sec: u32,
+    /// Burst of the above.
+    pub channel_burst: u32,
 }
 
 impl Default for RequestLimits {
@@ -96,6 +105,8 @@ impl Default for RequestLimits {
             broadcast_accounts_hour: 1_024,
             broadcast_burst: 256,
             max_broadcast_accounts: 256,
+            channel_per_sec: 1,
+            channel_burst: 10,
         }
     }
 }
@@ -119,6 +130,16 @@ impl songbird_types::config::Validate for RequestLimits {
                 && self.max_broadcast_accounts <= self.broadcast_burst,
             "max_broadcast_accounts",
             "must be in 2..=1024 and at most broadcast_burst",
+        );
+        v.check(
+            (1..=1_000).contains(&self.channel_per_sec),
+            "channel_per_sec",
+            "must be in 1..=1000",
+        );
+        v.check(
+            (1..=10_000).contains(&self.channel_burst),
+            "channel_burst",
+            "must be in 1..=10000",
         );
     }
 }
@@ -173,9 +194,20 @@ impl RegistryGate {
         }
     }
 
-    /// Spends `cost` of a budget; `Ok(0)` when allowed, else the wait in microseconds.
+    /// Spends `cost` of an hourly budget; `Ok(0)` when allowed, else the wait in microseconds.
     async fn spend(&self, record: &str, per_hour: u32, burst: u32, cost: u32) -> Result<u64, ()> {
         let interval_us = 3_600_000_000 / u64::from(per_hour.max(1));
+        self.spend_us(record, interval_us, burst, cost).await
+    }
+
+    /// Spends `cost` of a budget of one per `interval_us`, bursting to `burst`.
+    async fn spend_us(
+        &self,
+        record: &str,
+        interval_us: u64,
+        burst: u32,
+        cost: u32,
+    ) -> Result<u64, ()> {
         let tolerance_us = interval_us.saturating_mul(u64::from(burst.max(1)));
         self.hot
             .query::<i64>(
@@ -258,6 +290,26 @@ impl Gate for RegistryGate {
                     l.broadcast_accounts_hour,
                     l.broadcast_burst,
                     accounts,
+                )
+                .await
+            {
+                Ok(0) => Admit::Allow,
+                Ok(wait) => Admit::Limited(wait_ms(wait)),
+                Err(()) => Admit::Unavailable,
+            }
+        })
+    }
+
+    fn channel<'a>(&'a self, group: &'a [u8; 16]) -> GateFuture<'a> {
+        Box::pin(async move {
+            // `q:c:<keyed hash of the group>`: Valkey never sees the group ID.
+            let l = &self.limits;
+            match self
+                .spend_us(
+                    &self.keys.record("c", &[group]),
+                    1_000_000 / u64::from(l.channel_per_sec.max(1)),
+                    l.channel_burst,
+                    1,
                 )
                 .await
             {
@@ -355,6 +407,22 @@ impl Gate for MemoryGate {
             Admit::Limited(1_000)
         } else {
             *n += accounts;
+            Admit::Allow
+        };
+        Box::pin(std::future::ready(out))
+    }
+
+    fn channel<'a>(&'a self, group: &'a [u8; 16]) -> GateFuture<'a> {
+        // Counted, never refilled: every send path holding this gate shares the count, as every
+        // node shares the Valkey record.
+        let max = self.limits.channel_burst;
+        let mut st = self.lock();
+        let g = AccountId::from_bytes(*group);
+        let n = st.spent.entry(('c', g, g)).or_default();
+        let out = if *n >= max {
+            Admit::Limited(1_000)
+        } else {
+            *n += 1;
             Admit::Allow
         };
         Box::pin(std::future::ready(out))

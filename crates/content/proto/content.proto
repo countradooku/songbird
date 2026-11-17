@@ -426,3 +426,34 @@ message BlockListSync {
 message CallHistorySync {
   repeated CallEvent calls = 1; // at most 256
 }
+
+// Packs (Prompt 6, PROTOCOL §7.4): the manifest is object 0 of a pack, encrypted in the
+// attachment format under a key derived from the pack key; its plaintext is be32(length) then
+// this message, then zero padding.
+message PackManifest {
+  uint32 version = 1;     // 1
+  enum Kind {
+    KIND_UNSPECIFIED = 0; // refused
+    KIND_STICKERS = 1;
+    KIND_SCENE = 2;       // a chat scene (IMVironment)
+    KIND_SOUNDS = 3;
+    KIND_EMOTICONS = 4;
+  }
+  Kind kind = 2;
+  string title = 3;       // at most 128 bytes
+  string author = 4;      // at most 128 bytes
+  uint32 cover = 5;       // an item's object number, 0 for the first
+  repeated PackItem items = 6; // 1 to 200, objects 1 to n exactly once
+}
+
+message PackItem {
+  uint32 object = 1;             // 1 to the item count
+  string content_type = 2;       // 1 to 64 bytes
+  uint64 size = 3;               // plaintext bytes, at most 64 MiB
+  bytes digest = 4;              // 32 bytes: the asset's key commitment
+  repeated string emoji = 5;     // at most 8, each 1 to 32 bytes
+  repeated string shortcodes = 6; // at most 8, each 1 to 32 bytes
+  uint32 width = 7;
+  uint32 height = 8;
+  uint32 duration_ms = 9;
+}

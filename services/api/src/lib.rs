@@ -36,11 +36,13 @@ pub mod client;
 pub mod communities;
 pub mod config;
 pub mod devices;
+pub mod gifs;
 pub mod groups;
 pub mod keys;
 pub mod kt;
 pub mod media;
 pub mod messages;
+pub mod packs;
 pub mod profiles;
 pub mod registration;
 pub mod reports;
@@ -322,6 +324,12 @@ impl App {
         }
         if path.starts_with("/v1/media/") {
             return media::serve(self, req).await;
+        }
+        if path == "/v1/packs" || path.starts_with("/v1/packs/") {
+            return packs::route(self, req).await;
+        }
+        if path.starts_with("/v1/gifs/") {
+            return gifs::route(self, req).await;
         }
         match (&method, path.as_str()) {
             (&Method::PUT, "/v1/push") => {

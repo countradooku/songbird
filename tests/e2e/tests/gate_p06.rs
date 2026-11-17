@@ -688,3 +688,228 @@ async fn media_load() {
     );
     let _ = s.stop.send(true);
 }
+
+/// A sticker pack end to end (Prompt 6, M4, D-0083): made and encrypted on a device, uploaded,
+/// opened by someone holding only the link (pack ID and key), then gone a year after its last
+/// fetch; an unfinished pack goes after a day.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pack_opens_from_its_link_and_expires_when_unused() {
+    use songbird_content::pack::{Item, Kind, Manifest, object_key};
+    let Some(s) = stack().await else { return };
+    let creator = device(&s).await;
+    let pack_key = [0x61u8; 32];
+    let assets: Vec<Vec<u8>> = (1..=2u8).map(|i| vec![i; 3_000 * usize::from(i)]).collect();
+    let mut objects = Vec::new();
+    let mut items = Vec::new();
+    for (i, a) in assets.iter().enumerate() {
+        let n = u16::try_from(i + 1).unwrap();
+        let (_, salt) = attachment::fresh().unwrap();
+        let mut ct = Vec::new();
+        let digest = attachment::encrypt(
+            Suite::DEFAULT,
+            &object_key(&pack_key, n).unwrap(),
+            &salt,
+            a.len() as u64,
+            &mut &a[..],
+            &mut ct,
+        )
+        .unwrap();
+        objects.push(Bytes::from(ct));
+        items.push(Item {
+            object: u32::from(n),
+            content_type: "image/webp".into(),
+            size: a.len() as u64,
+            digest: digest.to_vec(),
+            emoji: vec!["🐦".into()],
+            ..Item::default()
+        });
+    }
+    let manifest = Manifest {
+        version: 1,
+        kind: Kind::Stickers.into(),
+        title: "Songbirds".into(),
+        cover: 1,
+        items,
+        ..Manifest::default()
+    }
+    .seal()
+    .unwrap();
+    let (_, salt) = attachment::fresh().unwrap();
+    let mut mct = Vec::new();
+    attachment::encrypt(
+        Suite::DEFAULT,
+        &object_key(&pack_key, 0).unwrap(),
+        &salt,
+        manifest.len() as u64,
+        &mut &manifest[..],
+        &mut mct,
+    )
+    .unwrap();
+    objects.insert(0, Bytes::from(mct));
+    let token = [0x77u8; 32];
+    let hash = hex::encode(aws_lc_rs::digest::digest(
+        &aws_lc_rs::digest::SHA256,
+        &token,
+    ));
+    let sizes: Vec<String> = objects.iter().map(|o| o.len().to_string()).collect();
+    let (st, b) = creator
+        .send(
+            "POST",
+            "/v1/packs",
+            Some(format!(r#"{{"sizes":[{}],"token":"{hash}"}}"#, sizes.join(",")).as_bytes()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(st, 201);
+    let pack = serde_json::from_slice::<serde_json::Value>(&b).unwrap()["pack"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for (n, o) in objects.iter().enumerate() {
+        let (st, _, _) = creator
+            .upload_with(
+                "PUT",
+                &format!("/v1/packs/{pack}/{n}"),
+                &[("content-length", o.len().to_string())],
+                o.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(st, 201);
+    }
+    assert_eq!(
+        creator
+            .send("POST", &format!("/v1/packs/{pack}/complete"), None)
+            .await
+            .unwrap()
+            .0,
+        201
+    );
+
+    // A friend opens the link: `#<pack>.<key>`. No account, no device.
+    let get_object = |n: usize| {
+        let (s, pack) = (&s, pack.clone());
+        async move {
+            let (st, h, _) = get(s, &format!("/v1/packs/{pack}/{n}"), None).await;
+            assert_eq!(st, 303);
+            let (st, _, b) = get(s, h["location"].to_str().unwrap(), None).await;
+            assert_eq!(st, 200);
+            b
+        }
+    };
+    let mct = get_object(0).await;
+    let k0 = object_key(&pack_key, 0).unwrap();
+    let d0 = attachment::commitment(&k0, &mct[..33]).unwrap();
+    let padded = songbird_proto::media::padded_from_ciphertext(mct.len() as u64).unwrap();
+    let mut plain = Vec::new();
+    attachment::decrypt(&k0[..], &d0, padded, &mut &mct[..], &mut plain).unwrap();
+    let m = Manifest::open(&plain).unwrap();
+    assert_eq!((m.title.as_str(), m.items.len()), ("Songbirds", 2));
+    for item in &m.items {
+        let n = usize::try_from(item.object).unwrap();
+        let ct = get_object(n).await;
+        let mut out = Vec::new();
+        attachment::decrypt(
+            &object_key(&pack_key, u16::try_from(n).unwrap()).unwrap()[..],
+            &item.digest,
+            item.size,
+            &mut &ct[..],
+            &mut out,
+        )
+        .unwrap();
+        assert!(out == assets[n - 1]);
+    }
+
+    // A year without a fetch: the sweep deletes the pack and its objects.
+    let id: [u8; 16] = hex::decode(&pack).unwrap().try_into().unwrap();
+    let row = s.app.registry.pack(&id).await.unwrap().unwrap();
+    s.worker.sweep().await;
+    assert!(
+        s.app.registry.pack(&id).await.unwrap().is_some(),
+        "in use: kept"
+    );
+    s.app
+        .registry
+        .db()
+        .exec(
+            "UPDATE pack:[$p] SET used = time::now() - 366d RETURN NONE;",
+            vec![(
+                "p".into(),
+                songbird_surreal::cbor::Value::Bytes(Bytes::copy_from_slice(&id)),
+            )],
+        )
+        .await
+        .unwrap();
+    s.worker.sweep().await;
+    assert!(s.app.registry.pack(&id).await.unwrap().is_none());
+    for o in &row.objects {
+        assert!(
+            s.app
+                .s3
+                .head_object(&object_name(o))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    // An unfinished pack, a day later: gone, with what was uploaded.
+    let (st, b) = creator
+        .send(
+            "POST",
+            "/v1/packs",
+            Some(format!(r#"{{"sizes":[{}],"token":"{hash}"}}"#, sizes.join(",")).as_bytes()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(st, 201);
+    let half = serde_json::from_slice::<serde_json::Value>(&b).unwrap()["pack"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (st, _, _) = creator
+        .upload_with(
+            "PUT",
+            &format!("/v1/packs/{half}/0"),
+            &[("content-length", objects[0].len().to_string())],
+            objects[0].clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(st, 201);
+    let half_id: [u8; 16] = hex::decode(&half).unwrap().try_into().unwrap();
+    let first = s
+        .app
+        .registry
+        .pack(&half_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .objects[0];
+    s.app
+        .registry
+        .db()
+        .exec(
+            "UPDATE pack:[$p] SET created = time::now() - 25h RETURN NONE;",
+            vec![(
+                "p".into(),
+                songbird_surreal::cbor::Value::Bytes(Bytes::copy_from_slice(&half_id)),
+            )],
+        )
+        .await
+        .unwrap();
+    assert!(
+        s.app.registry.pack(&half_id).await.unwrap().is_none(),
+        "expired: invisible"
+    );
+    s.worker.sweep().await;
+    assert!(
+        s.app
+            .s3
+            .head_object(&object_name(&first))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let _ = s.stop.send(true);
+}

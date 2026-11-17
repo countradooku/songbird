@@ -322,3 +322,87 @@ fn published_vectors() {
         "vectors changed: the format is published, never edit it"
     );
 }
+
+/// A pack end to end (PROTOCOL §7.4): assets and the manifest encrypted under keys derived from
+/// the pack key; a reader with only the link opens the manifest, then each asset against the
+/// commitment the manifest lists. An asset from another pack, or a manifest under another pack
+/// key, never opens.
+#[test]
+fn a_pack_opens_from_its_link_alone() {
+    use songbird_content::pack::{Item, Kind, Manifest, object_key};
+    let pack_key = [0x5c; 32];
+    let assets: Vec<Vec<u8>> = (1..=3).map(|i| data(1_000 * i)).collect();
+    let mut objects = Vec::new();
+    let mut items = Vec::new();
+    for (i, a) in assets.iter().enumerate() {
+        let n = u16::try_from(i + 1).unwrap();
+        let (_, salt) = attachment::fresh().unwrap();
+        let (ct, digest) = seal(Suite::DEFAULT, &object_key(&pack_key, n).unwrap(), &salt, a);
+        objects.push(ct);
+        items.push(Item {
+            object: u32::from(n),
+            content_type: "image/webp".into(),
+            size: a.len() as u64,
+            digest: digest.to_vec(),
+            ..Item::default()
+        });
+    }
+    let manifest = Manifest {
+        version: 1,
+        kind: Kind::Stickers.into(),
+        title: "Birds".into(),
+        cover: 1,
+        items,
+        ..Manifest::default()
+    }
+    .seal()
+    .unwrap();
+    let (_, salt) = attachment::fresh().unwrap();
+    let (mct, _) = seal(
+        Suite::DEFAULT,
+        &object_key(&pack_key, 0).unwrap(),
+        &salt,
+        &manifest,
+    );
+
+    // The reader, with only the link: the manifest's commitment comes from its header and the
+    // derived key; it is opened at its padded length and finds its own end.
+    let k0 = object_key(&pack_key, 0).unwrap();
+    let d0 = attachment::commitment(&k0, &mct[..33]).unwrap();
+    let padded = media::padded_from_ciphertext(mct.len() as u64).unwrap();
+    let mut out = Vec::new();
+    decrypt(&k0[..], &d0, padded, &mut &mct[..], &mut out).unwrap();
+    let m = Manifest::open(&out).unwrap();
+    for item in &m.items {
+        let n = u16::try_from(item.object).unwrap();
+        let ct = &objects[usize::from(n) - 1];
+        let got = open(
+            &object_key(&pack_key, n).unwrap()[..],
+            &item.digest,
+            item.size,
+            ct,
+        )
+        .unwrap();
+        assert_eq!(got, assets[usize::from(n) - 1]);
+        // Under another pack's key: refused before any chunk.
+        assert_eq!(
+            open(
+                &object_key(&[0x5d; 32], n).unwrap()[..],
+                &item.digest,
+                item.size,
+                ct
+            ),
+            Err(Error::Commitment)
+        );
+    }
+    // Asset 2 swapped in for asset 1 (same pack, wrong slot): its commitment is not item 1's.
+    assert!(
+        open(
+            &object_key(&pack_key, 1).unwrap()[..],
+            &m.items[0].digest,
+            m.items[1].size,
+            &objects[1]
+        )
+        .is_err()
+    );
+}

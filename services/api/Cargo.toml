@@ -46,6 +46,8 @@ mimalloc.workspace = true
 redis.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
+# The GIF proxy's TLS trust anchors (Prompt 6, D-0083), as push uses them.
+webpki-roots.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "macros", "time", "sync"] }

@@ -157,6 +157,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "gif_proxy"
+path = "fuzz_targets/gif_proxy.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pack_manifest"
+path = "fuzz_targets/pack_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "media_url"
 path = "fuzz_targets/media_url.rs"
 test = false

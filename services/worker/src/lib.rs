@@ -120,6 +120,8 @@ pub struct WorkerMetrics {
     pub grants_expired: Counter,
     /// Multipart uploads aborted because their grant is gone (Prompt 6, M2).
     pub uploads_aborted: Counter,
+    /// Packs deleted: expired, unfinished, or with their uploading device.
+    pub packs_deleted: Counter,
     /// Removed devices deleted and verified gone (one per job).
     pub devices_deleted: Counter,
     /// Accounts whose deletion started for inactivity.
@@ -170,6 +172,11 @@ impl WorkerMetrics {
                 "worker_uploads_aborted",
                 "Multipart uploads aborted after their grant was gone",
                 &self.uploads_aborted,
+            ),
+            (
+                "worker_packs_deleted",
+                "Packs deleted (expired, unfinished, or with their device)",
+                &self.packs_deleted,
             ),
         ] {
             m.register(name, help, c.clone())?;
@@ -347,6 +354,9 @@ impl Worker {
                 .map_err(|_| Left::Unavailable)?;
             self.registry.delete_grant(g).await.map_err(unavailable)?;
         }
+        // Unfinished packs the devices were uploading (Prompt 6, D-0083). Finished packs are
+        // linked to no one and live on (D-0079 §3).
+        self.delete_packs_of(&devices).await?;
         // Encrypted avatars (Prompt 3, M5): every object the account uploaded.
         let avatars = self
             .registry
@@ -451,6 +461,9 @@ impl Worker {
                 .map_err(|_| Left::Unavailable)?;
             self.registry.delete_grant(g).await.map_err(unavailable)?;
         }
+        // Unfinished packs the devices were uploading (Prompt 6, D-0083). Finished packs are
+        // linked to no one and live on (D-0079 §3).
+        self.delete_packs_of(&devices).await?;
         tokio::time::sleep(self.propagation).await;
         self.delivery.forget(&devices).await?;
         if self.delivery.any_known(&devices).await? {
@@ -487,7 +500,12 @@ impl Worker {
             .grants_of(&devices)
             .await
             .map_err(unavailable)?;
-        if left != 0 || tokens != 0 || !grants_left.is_empty() {
+        let packs_left = self
+            .registry
+            .packs_of(&devices)
+            .await
+            .map_err(unavailable)?;
+        if left != 0 || tokens != 0 || !grants_left.is_empty() || !packs_left.is_empty() {
             return Err(Left::Rows);
         }
         Ok(())
@@ -551,6 +569,34 @@ impl Worker {
             .await
             .map_err(|_| Left::Unavailable)?;
         self.metrics.objects_deleted.inc();
+        Ok(())
+    }
+
+    /// Deletes the unfinished packs some devices were uploading, objects first.
+    async fn delete_packs_of(&self, devices: &[DeviceId]) -> Result<(), Left> {
+        let packs = self
+            .registry
+            .packs_of(devices)
+            .await
+            .map_err(|_| Left::Unavailable)?;
+        for (p, objects) in packs {
+            self.delete_pack(&p, &objects).await?;
+        }
+        Ok(())
+    }
+
+    async fn delete_pack(&self, pack: &[u8; 16], objects: &[ObjectKey]) -> Result<(), Left> {
+        for o in objects {
+            self.s3
+                .delete_object(&object_name(o))
+                .await
+                .map_err(|_| Left::Unavailable)?;
+        }
+        self.registry
+            .delete_pack_row(pack)
+            .await
+            .map_err(|_| Left::Unavailable)?;
+        self.metrics.packs_deleted.inc();
         Ok(())
     }
 
@@ -618,6 +664,15 @@ impl Worker {
             Err(e) => tracing::warn!(error = %e, "grant sweep failed"),
         }
         self.abort_abandoned_uploads().await;
+        // Packs: unfinished after a day, or unfetched for a year (Prompt 6, D-0079 §3).
+        match self.registry.expired_packs(SWEEP_BATCH).await {
+            Ok(packs) => {
+                for (p, objects) in packs {
+                    let _ = self.delete_pack(&p, &objects).await;
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "pack sweep failed"),
+        }
         // Expired codes are refused already; this only stops them taking space.
         if let Err(e) = self.registry.delete_expired_invites(SWEEP_BATCH).await {
             tracing::warn!(error = %e, "invite sweep failed");

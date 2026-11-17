@@ -106,3 +106,9 @@ filter = "info"
 # burst = 600
 # ipv4_prefix = 24
 # ipv6_prefix = 48
+# [api.media.gifs]                                                # Prompt 6, M4 (GIPHY, D-0079); absent: GIF endpoints 503
+# api_key = { file = "/path/to/giphy-key" }                       # the owner's GIPHY key; never in the repository
+# rating = "pg-13"
+# searches_per_hour = 300                                         # per account
+# search_burst = 60
+# provider_per_sec = 50                                           # across the cluster

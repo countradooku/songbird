@@ -543,12 +543,112 @@ pub struct MediaSettings {
     /// Downloads.
     #[serde(default)]
     pub downloads: MediaDownloads,
+    /// The GIF search proxy (Prompt 6, M4). Absent: the GIF endpoints answer 503.
+    #[serde(default)]
+    pub gifs: Option<GifSettings>,
 }
 
 impl Validate for MediaSettings {
     fn validate(&self, v: &mut Validator) {
         v.section("budgets", &self.budgets);
         v.section("downloads", &self.downloads);
+        if let Some(g) = &self.gifs {
+            v.section("gifs", g);
+        }
+    }
+}
+
+/// `[api.media.gifs]` (Prompt 6, M4, D-0083): the GIF provider (GIPHY, D-0079 §4) behind the proxy.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct GifSettings {
+    /// The provider's API key (its file or variable).
+    pub api_key: Option<SecretRef>,
+    /// The API's origin.
+    pub base_url: String,
+    /// The only hosts media is fetched from (`host` or `host:port`).
+    pub cdn_hosts: Vec<String>,
+    /// The content rating asked for (`g`, `pg`, `pg-13`, `r`).
+    pub rating: String,
+    /// Searches per hour per account, and their burst.
+    pub searches_per_hour: u32,
+    /// Their burst.
+    pub search_burst: u32,
+    /// Provider requests per second, across the cluster.
+    pub provider_per_sec: u32,
+    /// Cached answers and files (each).
+    pub cache_entries: usize,
+    /// How long an answer stays cached, seconds.
+    pub cache_ttl_secs: u64,
+    /// Bytes of cached files.
+    pub media_cache_bytes: u64,
+    /// The largest file proxied.
+    pub max_media_bytes: u64,
+    /// Provider request timeout, seconds.
+    pub timeout_secs: u64,
+}
+
+impl Default for GifSettings {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            base_url: "https://api.giphy.com".into(),
+            cdn_hosts: [
+                "media.giphy.com",
+                "media0.giphy.com",
+                "media1.giphy.com",
+                "media2.giphy.com",
+                "media3.giphy.com",
+                "media4.giphy.com",
+                "i.giphy.com",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            rating: "pg-13".into(),
+            searches_per_hour: 300,
+            search_burst: 60,
+            provider_per_sec: 50,
+            cache_entries: 4_096,
+            cache_ttl_secs: 600,
+            media_cache_bytes: 256 << 20,
+            max_media_bytes: 8 << 20,
+            timeout_secs: 5,
+        }
+    }
+}
+
+impl Validate for GifSettings {
+    fn validate(&self, v: &mut Validator) {
+        v.check(
+            self.base_url.starts_with("https://") || self.base_url.starts_with("http://127.0.0.1"),
+            "base_url",
+            "must be https (plain http only to 127.0.0.1, for tests)",
+        );
+        v.check(
+            !self.cdn_hosts.is_empty() && self.cdn_hosts.len() <= 32,
+            "cdn_hosts",
+            "must name 1 to 32 hosts",
+        );
+        v.check(
+            matches!(self.rating.as_str(), "g" | "pg" | "pg-13" | "r"),
+            "rating",
+            "must be g, pg, pg-13 or r",
+        );
+        v.check(
+            self.searches_per_hour >= 1 && self.search_burst >= 1 && self.provider_per_sec >= 1,
+            "searches_per_hour",
+            "budgets must be at least 1",
+        );
+        v.check(
+            (1..=1_000_000).contains(&self.cache_entries)
+                && (1..=86_400).contains(&self.cache_ttl_secs)
+                && self.media_cache_bytes <= 16 << 30
+                && (1..=(64 << 20)).contains(&self.max_media_bytes)
+                && (1..=60).contains(&self.timeout_secs),
+            "cache_entries",
+            "cache and timeout bounds",
+        );
     }
 }
 

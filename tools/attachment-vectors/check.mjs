@@ -95,3 +95,12 @@ for (const line of readFileSync(file, "utf8").split(/\r?\n/).filter(Boolean)) {
   checked++;
 }
 console.log(`${checked} vectors match the independent implementation`);
+
+// Pack object keys (PROTOCOL §7.4): HKDF-SHA256 with an empty salt over the pack key.
+const packKey = Buffer.alloc(32, 0x33);
+const objectKey = (n) => {
+  const info = Buffer.concat([Buffer.from("songbird.v1/pack-object\0", "latin1"), Buffer.from([n >> 8, n & 0xff])]);
+  return Buffer.from(hkdfSync("sha256", packKey, Buffer.alloc(0), info, 64)).toString("hex");
+};
+if (objectKey(0) !== "b4b86d6d8340ed7c0242fbee69938c04cff4d62f59120a703df1ec02124c3c92a328512b4a91c35aee31481cae363c507eed2d7cf6a4fd4907e1643bda6af388" || objectKey(1) !== "259a6b7cb7cf7d091b07cae12cf177127ebb19396d61a4b6bf3f2993f5f7a23f498f371981a38260ef70a53d15521470114e39017c42b3c995a8fa6a5aa788e7") throw new Error("pack object keys differ");
+console.log("pack object keys match the independent implementation");

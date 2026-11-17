@@ -493,3 +493,16 @@ pub fn decrypt(
     }
     Ok(())
 }
+
+/// The key commitment of an object, from its key and its 33-byte header. For an object whose key
+/// alone proves it authentic (a pack's manifest, whose key derives from the pack key in the
+/// link): it stands in for a pointer's `digest`.
+///
+/// # Errors
+/// [`Error::Header`], [`Error::Crypto`].
+pub fn commitment(key: &[u8; KEY_LEN], header: &[u8]) -> Result<[u8; DIGEST_LEN], Error> {
+    let (&version, salt) = header.split_first().ok_or(Error::Header)?;
+    let suite = Suite::from_version(version).ok_or(Error::Header)?;
+    let salt: &[u8; SALT_LEN] = salt.try_into().map_err(|_| Error::Header)?;
+    Ok(derive(suite, key, salt)?.commitment)
+}

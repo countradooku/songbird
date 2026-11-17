@@ -127,6 +127,68 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0083 — Prompt 6, milestone 4: one anonymous pack service; a GIF proxy that hides who searches
+
+- Date: 2026-11-17
+- Status: accepted by the agent under the plan (D-0079 §3 and §4); report `P06-M4.md`. Two
+  threat-model §1 rows (pack records; GIF queries) **await the owner's approval**.
+- Decided by:
+  - owner: packs without an account link, deleted by token or after a year unused; GIPHY behind
+    `api`;
+  - agent: the formats and the mechanisms.
+- Context: the prompt asks for:
+  - one generic service for sticker packs, chat scenes, sound stickers and emoticon packs, with
+    an encrypted manifest and encrypted assets shared by a link carrying the pack key;
+  - a GIF search proxy with caching and rate limits that strips addresses and identifiers;
+  - no server-side link previews.
+- Options considered:
+  - **Pack keys.** A random key per asset listed in the manifest, versus keys derived from the
+    pack key. Chosen: **derived** (HKDF, info `songbird.v1/pack-object\0` ‖ be16(n)). The
+    manifest still lists each asset's commitment, so an asset cannot be swapped.
+  - **The manifest's length.** In the link, or a length prefix inside the object. Chosen: **a
+    be32 prefix**, with the padding after it checked as zeros. The link stays short.
+  - **Upload tracking.** Per-object rows, versus `complete` checking every object in the store.
+    Chosen: **the check at `complete`**: creating a pack is rare, and the check needs no state.
+  - **GIF requests.** A `GET` with the query in the URL, versus a signed `POST` body. Chosen:
+    **`POST`**, so no access log or URL carries a query.
+  - **GIF files.** Straight from the provider's CDN, which shows it the app's address, versus
+    proxied. Chosen: **proxied**, with MAC-protected tokens and a host allowlist, so the proxy
+    never becomes an open proxy.
+  - **Outbound HTTP.** A new client dependency, or the pinned hyper, rustls and tokio-rustls,
+    plus `webpki-roots` (already in the tree for push). Chosen: the latter, so no new crate.
+- Evidence:
+  - `songbird-content`:
+    - `pack` unit tests: bounds, the length prefix and padding, pinned object keys reproduced
+      by Node.js;
+    - `a_pack_opens_from_its_link_alone`: a foreign key or slot is refused before any chunk.
+  - Live (`media_live`):
+    - `packs_are_created_fetched_anonymously_and_deleted_by_token`: creator-only uploads, exact
+      sizes, 409 before every object is there, the creator forgotten, anonymous fetches,
+      token-only deletion;
+    - `the_gif_proxy_hides_who_searches_and_survives_the_provider`: the provider gets exactly
+      six query parameters and three headers; files from other hosts are dropped and HTML is
+      refused; answer and file caches; a tampered token gets 404; 401 without an account; the
+      breaker opens within five failures; the account budget is enforced.
+  - Gate (`gate_p06::a_pack_opens_from_its_link_and_expires_when_unused`): a real encrypted
+    pack, opened from its link alone; gone a year after its last fetch; an unfinished one gone
+    after a day.
+  - Fuzz targets `pack_manifest` and `gif_proxy` (built; they run in the gate's batch).
+- Decision: as PROTOCOL §7.4 and §7.5. GIF defaults:
+  - 300 searches an hour per account, burst 60;
+  - 50 provider requests a second across the cluster;
+  - answers cached 10 minutes, files a day (256 MiB);
+  - files at most 8 MiB;
+  - a 5 s timeout, and a breaker that opens for 30 s after 5 failures.
+- Consequences:
+  - Packs need no account at all once complete. A deleted account's packs live until their year
+    ends, as the owner chose.
+  - GIPHY's key and terms are the owner's before production. `[api.media.gifs]` refuses to start
+    without a key.
+  - A switch to Klipy is a `Provider` adapter and a configuration change (runbook
+    `media.md`).
+  - Revisit: a shared cache across nodes, if GIF traffic grows. Each node's in-memory cache is
+    enough at beta scale.
+
 ## D-0082 — Prompt 6, milestone 3: downloads by capability through short-lived signed URLs, explicit fetch confirmation, no caching proxy
 
 - Date: 2026-11-17

@@ -186,6 +186,7 @@ pub struct Media {
     downloads: MediaDownloads,
     record_key: hmac::Key,
     url_key: hmac::Key,
+    gifs: Option<crate::gifs::Gifs>,
 }
 
 impl std::fmt::Debug for Media {
@@ -216,7 +217,27 @@ impl Media {
                 &derive(secret, b"songbird.v1/media-records"),
             ),
             url_key: hmac::Key::new(hmac::HMAC_SHA256, &derive(secret, b"songbird.v1/media-url")),
+            gifs: None,
         }
+    }
+
+    /// With the GIF proxy.
+    #[must_use]
+    pub fn with_gifs(mut self, gifs: crate::gifs::Gifs) -> Self {
+        self.gifs = Some(gifs);
+        self
+    }
+
+    /// The GIF proxy, if configured.
+    #[must_use]
+    pub fn gifs(&self) -> Option<&crate::gifs::Gifs> {
+        self.gifs.as_ref()
+    }
+
+    /// How long a signed media URL lives, seconds.
+    #[must_use]
+    pub fn url_ttl(&self) -> u64 {
+        self.downloads.url_ttl_secs
     }
 
     /// The signed media URL for `object` of `size` bytes, valid until `expires` (Unix seconds).
@@ -285,7 +306,7 @@ impl Media {
         )
     }
 
-    async fn spend(
+    pub(crate) async fn spend(
         hot: &ValkeyConn,
         record: &str,
         interval_us: u64,
@@ -353,6 +374,12 @@ pub struct MediaMetrics {
     pub redirects: songbird_service::telemetry::sharded::ShardedCounter,
     /// Media URL requests served (whole or a range).
     pub served: songbird_service::telemetry::sharded::ShardedCounter,
+    /// Packs completed.
+    pub packs: songbird_service::telemetry::sharded::ShardedCounter,
+    /// GIF searches answered.
+    pub gif_searches: songbird_service::telemetry::sharded::ShardedCounter,
+    /// GIF files served.
+    pub gif_files: songbird_service::telemetry::sharded::ShardedCounter,
 }
 
 impl MediaMetrics {
@@ -385,6 +412,13 @@ impl MediaMetrics {
                 "Media URL requests served",
                 &self.served,
             ),
+            ("api_packs_completed", "Packs completed", &self.packs),
+            (
+                "api_gif_searches",
+                "GIF searches answered",
+                &self.gif_searches,
+            ),
+            ("api_gif_files", "GIF files served", &self.gif_files),
         ] {
             m.register(name, help, c.clone())?;
         }
@@ -468,7 +502,7 @@ async fn grant(app: &Arc<App>, req: Request<Incoming>) -> Result<Response<Body>,
     ))
 }
 
-async fn account_of(app: &App, device: &DeviceId) -> Result<AccountId, Refusal> {
+pub(crate) async fn account_of(app: &App, device: &DeviceId) -> Result<AccountId, Refusal> {
     app.registry
         .device(device)
         .await
@@ -690,13 +724,13 @@ async fn assemble(
     finish(app, object).await
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
 }
 
-fn peer(req: &Request<Incoming>) -> Result<std::net::IpAddr, Refusal> {
+pub(crate) fn peer(req: &Request<Incoming>) -> Result<std::net::IpAddr, Refusal> {
     req.extensions()
         .get::<crate::registration::Peer>()
         .map(|p| p.0)
@@ -710,7 +744,7 @@ fn media(app: &App) -> Result<&Media, Refusal> {
         .ok_or(status(StatusCode::SERVICE_UNAVAILABLE))
 }
 
-async fn throttle(
+pub(crate) async fn throttle(
     app: &App,
     m: &Media,
     kind: &str,

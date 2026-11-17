@@ -1711,6 +1711,70 @@ travels only inside end-to-end encrypted content, is the capability.
 - **Forwarding** encrypts again under a fresh key and uploads a new object (§7.1). The server
   never copies an object, so two messages never share an ID.
 
+### 7.4 Packs (M4, D-0083)
+
+One generic service carries sticker packs, chat scenes (IMVironments), sound stickers and
+emoticon packs. The kind exists only inside the encrypted manifest (`PackManifest` in
+`content.proto`; `songbird_content::pack`).
+
+- **Objects.**
+  - Object 0 is the manifest; objects 1 to n are the assets. There are at most 200 assets.
+  - Each object is in the attachment format (§7.1) and at most 16 MiB; a pack is at most
+    300 MiB in all.
+  - The key of object `n` is `HKDF-SHA256(salt = "", ikm = pack key, info =
+    "songbird.v1/pack-object\0" ‖ be16(n), 64)`.
+  - The manifest's plaintext is `be32(length) ‖ PackManifest`, then zeros. A reader opens it at
+    its padded length (`padded_from_ciphertext`) and takes its commitment from its header
+    (`attachment::commitment`). Only the pack key opens it.
+  - Each asset is opened against the commitment the manifest lists for it.
+- **The link:** `https://<web domain>/pack#<pack ID, 32 hex>.<pack key, base64url>`. The key is in
+  the fragment, which browsers and apps never send to a server. A sticker in a message is a
+  `StickerRef` carrying the pack ID, the pack key and the item's object number.
+- **Requests:**
+
+  | Request | Body or header | Answer |
+  | --- | --- | --- |
+  | `POST /v1/packs` (signed) | `{"sizes": [each object's ciphertext length, the manifest first], "token": <64 hex: SHA-256 of a random 32-byte management token>}` | 201 `{"pack", "objects"}`; 400 outside the bounds or for a length the format never produces; 429 past the account's budgets (the whole pack counts as one grant and its bytes) |
+  | `PUT /v1/packs/<pack>/<n>` (signed, unsigned body) | object `n`, exactly its size | 201; 400 for another length; 404 not the creating device, or the pack is complete or expired |
+  | `POST /v1/packs/<pack>/complete` (signed) | — | 201 once every object is in the store at its size; 409 otherwise. The pack then forgets the creating device |
+  | `GET /v1/packs/<pack>/<n>` | no account | 303 to the object's signed media URL (§7.3); 404 for an unknown or unfinished pack |
+  | `DELETE /v1/packs/<pack>` | `x-songbird-pack-token: <the token, 64 hex>`, no account | 204; 404 for no pack or a wrong token, which look the same |
+
+- **Lifetime (D-0079 §3):**
+  - An unfinished pack goes after 24 hours.
+  - A complete pack goes when deleted with its token, or one year after the last fetch of any of
+    its objects, which the server records to the day.
+  - A pack has no link to any account, so deleting an account cannot find its packs. The
+    creator's devices keep the token, in their encrypted sync, to delete it.
+
+### 7.5 GIF search (M4, D-0083)
+
+`api` proxies the provider (GIPHY, D-0079 §4). The provider sees queries, never who sent them.
+
+| Request | Body | Answer |
+| --- | --- | --- |
+| `POST /v1/gifs/search` (signed) | `{"q": <1–64 characters>, "offset": <0–4,999>, "lang": <2 lowercase letters, default "en">}` | 200 `{"gifs": [{"id", "width", "height", "gif", "still", "mp4"}], "next": <offset or null>}`; 429 past the account's budget (300 per hour, burst 60); 503 with `Retry-After` while the provider fails |
+| `POST /v1/gifs/trending` (signed) | `{"offset", "lang"}` | as above |
+| `GET /v1/gifs/media/<token>` | no account | the file (`image/gif`, `image/webp`, `image/png`, `image/jpeg`, `video/mp4`); 404 for a bad or expired token; 429 per IP range |
+
+- Queries go in a signed body, never a URL, so no access log or proxy sees them.
+- The provider's request is built from scratch:
+  - `api_key`, `q`, `limit`, `offset`, `rating` and `lang`;
+  - only the headers `Host`, `User-Agent: songbird` and `Accept`.
+
+  No address, header or identifier of the app reaches the provider, and GIPHY's per-user
+  `random_id` is never sent.
+- Every file URL in an answer is a token `hex(be64(expiry) ‖ HMAC16 ‖ URL)`, valid one hour. It
+  only ever names the provider's own hosts (`cdn_hosts`), so the proxy cannot be pointed
+  anywhere else. Files the provider puts elsewhere are dropped from the answer.
+- Answers are cached in memory for 10 minutes, under a keyed hash of language, offset and query.
+  Files are cached in memory for a day (256 MiB at most). Queries are never written to disk or
+  logged.
+- Each node has a circuit breaker: after five consecutive failures it leaves the provider alone
+  for 30 s. Across the cluster, the provider gets at most `provider_per_sec` requests. The
+  runbook is `docs/RUNBOOKS/media.md`.
+- No link previews on the server: apps build them (§5).
+
 ## 8. Calls and the call key schedule (Prompt 7)
 
 ## 9. Push (Prompt 8)
@@ -1860,3 +1924,9 @@ checked by `crates/content/tests/attachment.rs` and independently by
 over the empty file gives the commitment
 `4d3849c61240da287ae2a50f294f8ca593a037dc678a57f7846e425936206aac` and a 1,073-byte ciphertext
 with SHA-256 `fc5c71776298012c8c116848d978cc7068a420c207ca7824f6891f5c70969cb5`.
+
+Packs (Prompt 6, D-0083): for pack key 32 × `33`, object 0's key is
+`b4b86d6d8340ed7c0242fbee69938c04cff4d62f59120a703df1ec02124c3c92a328512b4a91c35aee31481cae363c507eed2d7cf6a4fd4907e1643bda6af388`
+and object 1's is
+`259a6b7cb7cf7d091b07cae12cf177127ebb19396d61a4b6bf3f2993f5f7a23f498f371981a38260ef70a53d15521470114e39017c42b3c995a8fa6a5aa788e7`
+(`crates/content/src/pack.rs`; reproduced by `tools/attachment-vectors/check.mjs`).

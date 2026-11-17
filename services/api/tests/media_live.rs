@@ -13,6 +13,7 @@
     clippy::as_conversions,
     clippy::many_single_char_names,
     clippy::manual_assert_eq,
+    clippy::needless_range_loop,
     reason = "tests"
 )]
 
@@ -23,7 +24,8 @@ use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair as _};
 use bytes::Bytes;
 use songbird_accounts::{Db, Registry, push_token};
 use songbird_api::client::{ApiClient, unsigned_full};
-use songbird_api::config::{AttachmentLimits, MediaBudgets, MediaDownloads};
+use songbird_api::config::{AttachmentLimits, GifSettings, MediaBudgets, MediaDownloads};
+use songbird_api::gifs::{Gifs, Giphy};
 use songbird_api::media::Media;
 use songbird_api::{ApiMetrics, App};
 use songbird_jobs::{Queue, QueueConfig, Stream};
@@ -56,6 +58,15 @@ async fn stack_with(
     budgets: MediaBudgets,
     downloads: MediaDownloads,
     part_size: u64,
+) -> Option<Stack> {
+    stack_full(budgets, downloads, part_size, None).await
+}
+
+async fn stack_full(
+    budgets: MediaBudgets,
+    downloads: MediaDownloads,
+    part_size: u64,
+    gifs: Option<GifSettings>,
 ) -> Option<Stack> {
     let surreal = env("SONGBIRD_TEST_SURREALDB")?;
     let hot = env("SONGBIRD_TEST_VALKEY")?;
@@ -112,7 +123,20 @@ async fn stack_with(
             part_size,
             ..AttachmentLimits::default()
         },
-        media: Some(Media::new(budgets, downloads, &secret)),
+        media: Some({
+            let m = Media::new(budgets, downloads, &secret);
+            match gifs {
+                Some(g) => m.with_gifs(
+                    Gifs::new(
+                        g,
+                        Box::new(Giphy::new("test-key".into(), "pg-13".into())),
+                        &secret,
+                    )
+                    .unwrap(),
+                ),
+                None => m,
+            }
+        }),
         metrics: ApiMetrics::default(),
         messages: None,
         registration: None,
@@ -598,5 +622,328 @@ async fn fetches_are_confirmed_and_the_last_one_deletes() {
         }
     }
     assert!(throttled.is_some_and(|i| i <= 3), "{throttled:?}");
+    let _ = s.stop.send(true);
+}
+
+/// Packs (Prompt 6, M4, D-0083): created by a device and charged to its account; uploaded object
+/// by object at exact sizes; complete only when every object is stored, after which they are
+/// fetched with no account and the pack forgets its creator; deleted only with the token.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn packs_are_created_fetched_anonymously_and_deleted_by_token() {
+    let Some(s) = stack(MediaBudgets::default()).await else {
+        return;
+    };
+    let creator = device(&s).await;
+    let other = device(&s).await;
+    let token = [0x2au8; 32];
+    let token_hash = hex::encode(aws_lc_rs::digest::digest(
+        &aws_lc_rs::digest::SHA256,
+        &token,
+    ));
+    let sizes: Vec<u64> = [500u64, 20_000, 70_000]
+        .iter()
+        .map(|n| ciphertext_len(*n).unwrap())
+        .collect();
+    let body = format!(
+        r#"{{"sizes":[{}],"token":"{token_hash}"}}"#,
+        sizes
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let (st, b) = creator
+        .send("POST", "/v1/packs", Some(body.as_bytes()))
+        .await
+        .unwrap();
+    assert_eq!(st, 201);
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    let pack = v["pack"].as_str().unwrap().to_owned();
+    assert_eq!(v["objects"].as_u64(), Some(3));
+    let objects: Vec<Bytes> = sizes.iter().map(|z| data(*z)).collect();
+    // Only the creating device; only exact sizes; not before it exists anywhere.
+    assert_eq!(pack_put(&other, &pack, 0, Bytes::new()).await, 404);
+    assert_eq!(pack_put(&creator, &pack, 0, Bytes::new()).await, 400);
+    assert_eq!(pack_put(&creator, &pack, 3, Bytes::new()).await, 404);
+    assert_eq!(pack_put(&creator, &pack, 0, objects[0].clone()).await, 201);
+    assert_eq!(pack_put(&creator, &pack, 1, objects[1].clone()).await, 201);
+    // Not fetchable, and not completable, while an object is missing.
+    let fetch_pack = |n: usize| {
+        let path = format!("/v1/packs/{pack}/{n}");
+        let s = &s;
+        async move {
+            unsigned_full(s.addr, SERVER, "GET", &path, &[])
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(fetch_pack(0).await.0, 404);
+    assert_eq!(pack_complete(&creator, &pack).await, 409);
+    assert_eq!(pack_put(&creator, &pack, 2, objects[2].clone()).await, 201);
+    assert_eq!(pack_complete(&other, &pack).await, 404);
+    assert_eq!(pack_complete(&creator, &pack).await, 201);
+    // Complete: the creator is forgotten and can no longer write.
+    let id: [u8; 16] = hex::decode(&pack).unwrap().try_into().unwrap();
+    let row = s.app.registry.pack(&id).await.unwrap().unwrap();
+    assert!(row.done && row.device.is_none());
+    assert_eq!(pack_put(&creator, &pack, 1, Bytes::new()).await, 404);
+    // Anyone with the link fetches, by redirect to signed media URLs.
+    for n in 0..3 {
+        let (st, h, _) = fetch_pack(n).await;
+        assert_eq!(st, 303);
+        let (st, _, got) = fetch(&s, h["location"].to_str().unwrap(), None).await;
+        assert_eq!(st, 200);
+        assert!(got == objects[n]);
+    }
+    assert_eq!(fetch_pack(3).await.0, 404);
+    // Deletion: the wrong token and no token look like no pack; the right one deletes.
+    let del = |t: Option<String>| {
+        let path = format!("/v1/packs/{pack}");
+        let s = &s;
+        async move {
+            let h: Vec<(&str, String)> = t
+                .map(|t| ("x-songbird-pack-token", t))
+                .into_iter()
+                .collect();
+            unsigned_full(s.addr, SERVER, "DELETE", &path, &h)
+                .await
+                .unwrap()
+                .0
+        }
+    };
+    assert_eq!(del(None).await, 404);
+    assert_eq!(del(Some(hex::encode([0x2bu8; 32]))).await, 404);
+    assert_eq!(
+        del(Some(token_hash.clone())).await,
+        404,
+        "the hash is not the token"
+    );
+    assert_eq!(del(Some(hex::encode(token))).await, 204);
+    assert_eq!(fetch_pack(0).await.0, 404);
+    assert!(s.app.registry.pack(&id).await.unwrap().is_none());
+    // Bounds: one object only; an illegal size; a bad token.
+    for bad in [
+        format!(r#"{{"sizes":[{}],"token":"{token_hash}"}}"#, sizes[0]),
+        format!(r#"{{"sizes":[{},4096],"token":"{token_hash}"}}"#, sizes[0]),
+        format!(r#"{{"sizes":[{},{}],"token":"ab"}}"#, sizes[0], sizes[1]),
+    ] {
+        assert_eq!(
+            creator
+                .send("POST", "/v1/packs", Some(bad.as_bytes()))
+                .await
+                .unwrap()
+                .0,
+            400
+        );
+    }
+    let _ = s.stop.send(true);
+}
+
+async fn pack_put(c: &ApiClient, pack: &str, n: usize, body: Bytes) -> u16 {
+    let path = format!("/v1/packs/{pack}/{n}");
+    let len = body.len().to_string();
+    c.upload_with("PUT", &path, &[("content-length", len)], body)
+        .await
+        .map_or(0, |r| r.0)
+}
+
+async fn pack_complete(c: &ApiClient, pack: &str) -> u16 {
+    c.send("POST", &format!("/v1/packs/{pack}/complete"), None)
+        .await
+        .unwrap()
+        .0
+}
+
+/// A request the mock provider received: its URI and headers.
+type Seen = (String, Vec<(String, String)>);
+
+/// A stand-in for GIPHY that records every request it receives.
+struct MockGiphy {
+    addr: std::net::SocketAddr,
+    seen: Arc<std::sync::Mutex<Vec<Seen>>>,
+    fail: Arc<std::sync::atomic::AtomicBool>,
+}
+
+async fn mock_giphy() -> MockGiphy {
+    use hyper::service::service_fn;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (s2, f2) = (Arc::clone(&seen), Arc::clone(&fail));
+    tokio::spawn(async move {
+        loop {
+            let Ok((tcp, _)) = listener.accept().await else {
+                return;
+            };
+            let (seen, fail) = (Arc::clone(&s2), Arc::clone(&f2));
+            tokio::spawn(async move {
+                let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                    let (seen, fail) = (Arc::clone(&seen), Arc::clone(&fail));
+                    async move {
+                        let uri = req.uri().to_string();
+                        let headers = req
+                            .headers()
+                            .iter()
+                            .map(|(k, v)| {
+                                (k.as_str().to_owned(), v.to_str().unwrap_or("").to_owned())
+                            })
+                            .collect();
+                        seen.lock().unwrap().push((uri.clone(), headers));
+                        let path = req.uri().path().to_owned();
+                        let mut r = hyper::Response::new(http_body_util::Full::new(Bytes::new()));
+                        if fail.load(std::sync::atomic::Ordering::Relaxed) {
+                            *r.status_mut() = hyper::StatusCode::INTERNAL_SERVER_ERROR;
+                        } else if path.starts_with("/v1/gifs/") {
+                            let a = format!("http://{addr}/media/a.gif");
+                            let body = format!(
+                                r#"{{"data":[
+                                  {{"id":"a","images":{{"fixed_width":{{"url":"{a}","width":"200","height":"150","mp4":"http://{addr}/media/a.mp4"}},"fixed_width_still":{{"url":"http://{addr}/media/a_s.gif"}}}}}},
+                                  {{"id":"evil","images":{{"fixed_width":{{"url":"https://evil.example/x.gif","width":"1","height":"1"}}}}}},
+                                  {{"id":"page","images":{{"fixed_width":{{"url":"http://{addr}/media/page.html","width":"1","height":"1"}}}}}}
+                                ],"pagination":{{"count":3}}}}"#
+                            );
+                            *r.body_mut() = http_body_util::Full::new(Bytes::from(body));
+                        } else if path == "/media/page.html" {
+                            r.headers_mut()
+                                .insert("content-type", "text/html".parse().unwrap());
+                            *r.body_mut() =
+                                http_body_util::Full::new(Bytes::from_static(b"<html>"));
+                        } else {
+                            r.headers_mut()
+                                .insert("content-type", "image/gif".parse().unwrap());
+                            *r.body_mut() = http_body_util::Full::new(Bytes::from_static(
+                                b"GIF89a fake frames",
+                            ));
+                        }
+                        Ok::<_, std::convert::Infallible>(r)
+                    }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(tcp), svc)
+                    .await;
+            });
+        }
+    });
+    MockGiphy { addr, seen, fail }
+}
+
+/// The GIF proxy (Prompt 6, M4, D-0083): the provider gets the query and nothing of the app;
+/// files come through `api` from the provider's hosts only; answers and files are cached;
+/// searches are budgeted per account; an outage opens the circuit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_gif_proxy_hides_who_searches_and_survives_the_provider() {
+    let giphy = mock_giphy().await;
+    let Some(s) = stack_full(
+        MediaBudgets::default(),
+        MediaDownloads::default(),
+        PART,
+        Some(GifSettings {
+            base_url: format!("http://{}", giphy.addr),
+            cdn_hosts: vec![giphy.addr.to_string()],
+            search_burst: 6,
+            searches_per_hour: 60,
+            ..GifSettings::default()
+        }),
+    )
+    .await
+    else {
+        return;
+    };
+    let c = device(&s).await;
+    let search = |q: &str| {
+        let body = format!(r#"{{"q":"{q}","offset":0,"lang":"en"}}"#);
+        let c = &c;
+        async move {
+            c.send("POST", "/v1/gifs/search", Some(body.as_bytes()))
+                .await
+                .unwrap()
+        }
+    };
+    let (st, b) = search("happy birthday").await;
+    assert_eq!(st, 200);
+    let text = String::from_utf8(b.to_vec()).unwrap();
+    assert!(
+        !text.contains("127.0.0.1") && !text.contains("evil"),
+        "{text}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    let gifs = v["gifs"].as_array().unwrap();
+    assert_eq!(gifs.len(), 2, "the file from another host is dropped");
+    let file = gifs[0]["gif"].as_str().unwrap().to_owned();
+    assert!(file.starts_with("/v1/gifs/media/"));
+    // What the provider received: its key, the query, paging, rating and language; no header
+    // but host, user agent and accept; nothing of the app.
+    {
+        let seen = giphy.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(
+            seen[0].0,
+            "/v1/gifs/search?api_key=test-key&q=happy%20birthday&limit=24&offset=0&rating=pg-13&lang=en"
+        );
+        let mut names: Vec<&str> = seen[0].1.iter().map(|(k, _)| k.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["accept", "host", "user-agent"]);
+    }
+    // The same search again: from the cache.
+    assert_eq!(search("happy birthday").await.0, 200);
+    assert_eq!(giphy.seen.lock().unwrap().len(), 1);
+    // The file, with no account: through api, then from the cache.
+    for _ in 0..2 {
+        let (st, h, body) = unsigned_full(s.addr, SERVER, "GET", &file, &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            (st, h["content-type"].to_str().unwrap()),
+            (200, "image/gif")
+        );
+        assert_eq!(&body[..], b"GIF89a fake frames");
+    }
+    assert_eq!(giphy.seen.lock().unwrap().len(), 2);
+    let mut bad = file.clone();
+    bad.pop();
+    bad.push('0');
+    assert_eq!(
+        unsigned_full(s.addr, SERVER, "GET", &bad, &[])
+            .await
+            .unwrap()
+            .0,
+        404
+    );
+    // A provider answer that is not an image is never passed on.
+    let page = gifs[1]["gif"].as_str().unwrap().to_owned();
+    assert_eq!(
+        unsigned_full(s.addr, SERVER, "GET", &page, &[])
+            .await
+            .unwrap()
+            .0,
+        503
+    );
+    // No account, no search.
+    let (st, _, _) = unsigned_full(s.addr, SERVER, "POST", "/v1/gifs/search", &[])
+        .await
+        .unwrap();
+    assert_eq!(st, 401);
+    // The provider fails: 503 with a wait; after five failures the circuit opens and the
+    // provider is left alone.
+    giphy.fail.store(true, std::sync::atomic::Ordering::Relaxed);
+    let before = giphy.seen.lock().unwrap().len();
+    let mut throttled = false;
+    for i in 0..8 {
+        let (st, _) = search(&format!("outage {i}")).await;
+        if st == 429 {
+            throttled = true;
+            break;
+        }
+        assert_eq!(st, 503);
+    }
+    let after = giphy.seen.lock().unwrap().len();
+    assert!(
+        after - before <= 5,
+        "the circuit opened ({} requests)",
+        after - before
+    );
+    // The account's search budget (a burst of six) ran out along the way.
+    assert!(throttled);
     let _ = s.stop.send(true);
 }

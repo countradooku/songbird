@@ -16,13 +16,14 @@
 
 use prost::Message as _;
 use songbird_content::schema::{
-    AttachmentPointer, BlockListSync, CallEvent, CallHistorySync, ChatPolicy, ChatRef, ChatState,
-    ChatStateSync, ContactCard, Content, DataMessage, Delete, Edit, EventCreate, GroupUpdate,
-    LinkPreview, LocationPin, Message, MessageRef, Nudge, Pin, Plaintext, PollClose, PollCreate,
-    PollVote, Quote, ReadMark, ReadSync, ReceiptMessage, RequestResponse, Rsvp, SentTranscript,
-    SettingsSync, Span, StarredSync, StickerRef, SyncMessage, Text, TimerChange, TypingMessage,
-    VoteHead, call_event, content::Body, data_message::Kind, group_update, receipt_message,
-    request_response, rsvp, span, sync_message,
+    AttachmentPointer, BlockListSync, CallAnswer, CallEvent, CallHangup, CallHistorySync,
+    CallMessage, CallOffer, CallSenderKey, ChatPolicy, ChatRef, ChatState, ChatStateSync,
+    ContactCard, Content, DataMessage, Delete, Edit, EventCreate, GroupUpdate, LinkPreview,
+    LocationPin, Message, MessageRef, Nudge, Pin, Plaintext, PollClose, PollCreate, PollVote,
+    Quote, ReadMark, ReadSync, ReceiptMessage, RequestResponse, Rsvp, SentTranscript, SettingsSync,
+    Span, StarredSync, StickerRef, SyncMessage, Text, TimerChange, TypingMessage, VoteHead,
+    call_event, call_hangup, call_message, content::Body, data_message::Kind, group_update,
+    receipt_message, request_response, rsvp, span, sync_message,
 };
 
 fn b(byte: u8, n: usize) -> Vec<u8> {
@@ -44,6 +45,13 @@ fn content(body: Body) -> Content {
         body: Some(body),
         ..Content::default()
     }
+}
+
+fn call(kind: Option<call_message::Kind>) -> Content {
+    content(Body::Call(CallMessage {
+        call_id: b(0x07, 16),
+        kind,
+    }))
 }
 
 fn data(kind: Kind) -> Content {
@@ -431,6 +439,42 @@ fn vectors() -> Vec<(&'static str, Content)> {
                 action: request_response::Action::Block.into(),
                 chat: account(0x66),
             })),
+        ),
+        (
+            "call_offer_1to1",
+            call(Some(call_message::Kind::Offer(CallOffer {
+                media: call_event::Kind::Video.into(),
+                call_secret: b(0x42, 32),
+                group_id: Vec::new(),
+                ring_until_ms: 1_800_000_060_000,
+            }))),
+        ),
+        (
+            "call_offer_group",
+            call(Some(call_message::Kind::Offer(CallOffer {
+                media: call_event::Kind::Audio.into(),
+                call_secret: Vec::new(),
+                group_id: b(0x99, 16),
+                ring_until_ms: 1_800_000_060_000,
+            }))),
+        ),
+        (
+            "call_answer",
+            call(Some(call_message::Kind::Answer(CallAnswer {}))),
+        ),
+        (
+            "call_hangup",
+            call(Some(call_message::Kind::Hangup(CallHangup {
+                reason: call_hangup::Reason::AnsweredElsewhere.into(),
+            }))),
+        ),
+        (
+            "call_sender_key",
+            call(Some(call_message::Kind::SenderKey(CallSenderKey {
+                identity: "0123456789abcdef0123456789abcdef".into(),
+                key_index: 3,
+                key: b(0x55, 32),
+            }))),
         ),
     ]
 }

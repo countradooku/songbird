@@ -88,6 +88,7 @@ pub fn content(c: &Content) -> R {
         Some(Body::Typing(t)) => opt_id(&t.group_id, "typing.group_id"),
         Some(Body::Sync(s)) => sync(s),
         Some(Body::RequestResponse(r)) => request_response(r),
+        Some(Body::Call(c)) => crate::call::validate(c),
     }
 }
 

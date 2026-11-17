@@ -20,6 +20,7 @@
 #![forbid(unsafe_code)]
 
 pub mod attachment;
+pub mod call;
 pub mod pack;
 pub mod schema;
 pub mod state;

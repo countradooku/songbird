@@ -4935,6 +4935,7 @@ dependencies = [
  "openmls_rust_crypto",
  "openmls_traits",
  "proptest",
+ "songbird-content",
  "songbird-groups",
  "songbird-keys",
  "songbird-types",

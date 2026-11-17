@@ -136,6 +136,33 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0086 — Prompt 7, milestone 1: per-sender call keys from Signal and MLS; Signal-style link keys
+
+- Date: 2026-11-17
+- Status: accepted by the agent; part of the Prompt 7 PR, awaiting the owner with the gate
+- Decided by: agent, within the plan the owner approved (D-0085)
+- Context: LiveKit's E2EE takes a key per participant identity and key index (a ring of 16) and
+  derives its frame keys from it; the prompt asks for 1:1 keys from the Signal session and group
+  keys from the MLS exporter per epoch, rotated on every membership change, with test vectors.
+- Options considered:
+  - **one shared key per epoch** (LiveKit's "shared key" mode) versus **a key per sender derived
+    from the epoch secret and the identity**. The frame cryptor's IV is SSRC, timestamp and a
+    counter; with one key for everyone, two senders whose SSRCs collide reuse IVs under AES-GCM.
+    Per-sender keys cost one HKDF per participant per epoch and remove the risk. Chosen.
+  - **when to switch sending after a commit**: at once (receivers may not have the key yet, so
+    frames drop) or after a delay (a removed device decrypts a little longer). Chosen: install at
+    once, send with the new index 1 second later; the server's removal from the SFU (M2) closes
+    that second.
+  - **link calls**: Signal's design (the owner's choice); cards with account, device, identity
+    and an optional name, sealed under a key from the link's root with ChaCha20-Poly1305 (the
+    cipher already used for content-adjacent sealing in this crate's attachment suite 1), 512 bytes
+    at most.
+- Evidence: P07-M1 (tests, vectors, independent Node.js check, protox check, OpenMLS test).
+- Decision: PROTOCOL §8.1 to §8.5 as written; `songbird_content::call` is the reference.
+- Consequences: apps hand LiveKit sender keys, never a shared key; a group call's keys follow the
+  MLS epoch; the server stores only `SHA-256` of a link ID (M3). Revisit if LiveKit adds SFrame
+  with its own key schedule.
+
 ## D-0085 — Prompt 7: the plan, and the owner's decisions it needs
 
 - Date: 2026-11-17

@@ -48,7 +48,7 @@ pub struct Content {
     pub message_id: Vec<u8>,
     #[prost(uint64, tag = "4")]
     pub sent_at_ms: u64,
-    #[prost(oneof = "content::Body", tags = "10, 11, 12, 13, 14")]
+    #[prost(oneof = "content::Body", tags = "10, 11, 12, 13, 14, 15")]
     pub body: Option<content::Body>,
 }
 
@@ -66,6 +66,8 @@ pub mod content {
         Sync(super::SyncMessage),
         #[prost(message, tag = "14")]
         RequestResponse(super::RequestResponse),
+        #[prost(message, tag = "15")]
+        Call(super::CallMessage),
     }
 }
 
@@ -711,6 +713,103 @@ pub struct CallHistorySync {
     pub calls: Vec<CallEvent>,
 }
 
+#[derive(Clone, PartialEq, ::prost::Message)]
+#[prost(skip_debug)]
+pub struct CallMessage {
+    #[prost(bytes = "vec", tag = "1")]
+    pub call_id: Vec<u8>,
+    #[prost(oneof = "call_message::Kind", tags = "10, 11, 12, 13, 14, 15")]
+    pub kind: Option<call_message::Kind>,
+}
+
+pub mod call_message {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    #[prost(skip_debug)]
+    pub enum Kind {
+        #[prost(message, tag = "10")]
+        Offer(super::CallOffer),
+        #[prost(message, tag = "11")]
+        Answer(super::CallAnswer),
+        #[prost(message, tag = "12")]
+        Decline(super::CallDecline),
+        #[prost(message, tag = "13")]
+        Busy(super::CallBusy),
+        #[prost(message, tag = "14")]
+        Hangup(super::CallHangup),
+        #[prost(message, tag = "15")]
+        SenderKey(super::CallSenderKey),
+    }
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+#[prost(skip_debug)]
+pub struct CallOffer {
+    #[prost(enumeration = "call_event::Kind", tag = "1")]
+    pub media: i32,
+    #[prost(bytes = "vec", tag = "2")]
+    pub call_secret: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub group_id: Vec<u8>,
+    #[prost(uint64, tag = "4")]
+    pub ring_until_ms: u64,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+#[prost(skip_debug)]
+pub struct CallAnswer {}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+#[prost(skip_debug)]
+pub struct CallDecline {}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+#[prost(skip_debug)]
+pub struct CallBusy {}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+#[prost(skip_debug)]
+pub struct CallHangup {
+    #[prost(enumeration = "call_hangup::Reason", tag = "1")]
+    pub reason: i32,
+}
+
+pub mod call_hangup {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum Reason {
+        Unspecified = 0,
+        Normal = 1,
+        AnsweredElsewhere = 2,
+        DeclinedElsewhere = 3,
+        BusyElsewhere = 4,
+        Failed = 5,
+    }
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+#[prost(skip_debug)]
+pub struct CallSenderKey {
+    #[prost(string, tag = "1")]
+    pub identity: String,
+    #[prost(uint32, tag = "2")]
+    pub key_index: u32,
+    #[prost(bytes = "vec", tag = "3")]
+    pub key: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+#[prost(skip_debug)]
+pub struct CallLinkCard {
+    #[prost(bytes = "vec", tag = "1")]
+    pub account: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub device: Vec<u8>,
+    #[prost(string, tag = "3")]
+    pub identity: String,
+    #[prost(string, tag = "4")]
+    pub name: String,
+}
+
 redacted_debug!(
     Plaintext,
     Content,
@@ -758,4 +857,13 @@ redacted_debug!(
     SettingsSync,
     BlockListSync,
     CallHistorySync,
+    CallMessage,
+    call_message::Kind,
+    CallOffer,
+    CallAnswer,
+    CallDecline,
+    CallBusy,
+    CallHangup,
+    CallSenderKey,
+    CallLinkCard,
 );

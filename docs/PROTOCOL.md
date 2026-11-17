@@ -1779,6 +1779,118 @@ emoticon packs. The kind exists only inside the encrypted manifest (`PackManifes
 
 ## 8. Calls and the call key schedule (Prompt 7)
 
+Decisions D-0085 (the owner's) and D-0086 (M1). Calls run on self-hosted LiveKit, always through
+its SFU: there is no peer-to-peer path, so participants never learn each other's IP addresses.
+Every audio and video frame and every data packet is encrypted end to end by LiveKit's frame
+cryptor under keys only the participants hold. **No server component ever receives a media
+key.** The reference implementation of everything in §8.1 to §8.5 is
+`songbird_content::call`; nothing in it is linked by a service.
+
+### 8.1 Calls, rooms and participant identities
+
+- A call has a random 16-byte **call ID**. Its LiveKit room is named by the call ID in lowercase
+  hex. The server chooses it (§8.6), so two calls never share a room.
+- A device in a room appears under a **participant identity** the server chooses: an HMAC of the
+  room and the device under a server key (§8.6), 32 lowercase hex characters. It is stable within
+  one room, so a device that reconnects keeps its keys, and unlinkable across rooms. LiveKit and
+  everyone in the room see only this identity; who it is travels inside encrypted content.
+- Keys go to LiveKit's key provider per identity and **key index** (`0` to `15`, the size of
+  LiveKit's key ring), never as one shared key.
+
+### 8.2 The key schedule
+
+Each key epoch has a 32-byte **epoch secret**; each sender's key in that epoch is derived from it
+and the sender's identity:
+
+```text
+sender key = HKDF-Expand(PRK = epoch secret,
+                         info = "songbird.v1/call-sender\0" ‖ u8(len(identity)) ‖ identity, 32)
+key index  = epoch mod 16
+```
+
+The sender key is what apps hand to LiveKit's key provider (`set_key(identity, key_index, key)`);
+LiveKit then derives its frame key from it as on every platform. Because each sender's key is
+bound to its identity, no two senders encrypt under one key, so LiveKit's per-frame IVs (SSRC,
+timestamp, counter) cannot collide across senders.
+
+- **1:1 calls.** The caller draws a random 32-byte `call_secret` and sends it in the encrypted
+  offer (§8.5) over the Signal session. There is one epoch, `0`:
+
+  ```text
+  epoch secret = HKDF-SHA256(salt = call ID, ikm = call_secret, info = "songbird.v1/call-1to1\0", 32)
+  ```
+
+- **Group calls.** The epoch secret is the group's MLS exporter at its current epoch `e`:
+
+  ```text
+  epoch secret = MLS-Exporter("songbird.v1/call", call ID, 32)      key index = e mod 16
+  ```
+
+  Every commit (an add, a removal, an update) starts a new MLS epoch and so a new secret that a
+  removed device cannot compute. On processing a commit, a participant installs the new keys for
+  every identity at the new index at once and **switches its own sending to the new index 1
+  second later**, so others have installed it before frames arrive; it keeps the old keys in the
+  ring for late frames. The server also disconnects removed devices from the SFU (§8.6).
+- **Call links** are §8.4.
+
+### 8.3 Rules for apps
+
+- Never reuse a `call_secret` or a call ID; never send a sender key or secret outside a Signal
+  session or MLS.
+- Encrypt data packets as well as media (LiveKit's E2EE covers both); a participant whose frames
+  do not decrypt is shown as "can't decrypt", never played in the clear.
+- A group's call ID changes only when a new call starts; the MLS exporter already gives a fresh
+  secret per epoch.
+
+### 8.4 Call links
+
+A call link is `https://<web domain>/call#<root, base64url>`: a random 32-byte **root** in the
+fragment, which never reaches a server.
+
+```text
+link ID   = HKDF-SHA256(salt = "", ikm = root, info = "songbird.v1/call-link-id\0", 32)   sent to the server
+link key  = HKDF-SHA256(salt = "", ikm = root, info = "songbird.v1/call-link-key\0", 32)  never sent
+stored    = SHA-256("songbird.v1/call-link-hash\0" ‖ link ID)                         what the server keeps
+```
+
+- **Cards.** Each participant seals a `CallLinkCard` (its account, its device, its participant
+  identity and an optional display name; `proto/content.proto`) under the link key:
+
+  ```text
+  version u8 (1) | nonce [12] | ChaCha20-Poly1305(key = link key, nonce, card, aad = "songbird.v1/call-link-card\0")
+  ```
+
+  at most 512 bytes. Cards go on LiveKit's data channel and, while someone waits in a lobby,
+  through the server (§8.7), which cannot open them.
+- **Keys** (the owner's choice, D-0085 §2: Signal's design). Every participant draws its own
+  random 32-byte sender key and sends it to each other participant's device over a Signal
+  session, as `CallMessage.sender_key` (identity, key index, key). On every join and every leave,
+  each participant draws a new key at the next index and sends it to those still present, so a
+  newcomer cannot decrypt what came before and a leaver cannot decrypt what follows. Joining
+  needs a Songbird account (sessions need one).
+
+### 8.5 Signalling
+
+Ringing, accepting, declining, busy and hanging up are encrypted content (`Content.call`,
+`CallMessage`; §5):
+
+| Kind | Sent to | Meaning |
+| --- | --- | --- |
+| `offer` | the callee's devices (1:1), or the group (MLS) | `media` (audio or video); `call_secret` (32 bytes) in a 1:1 call, `group_id` (16 bytes) in a group call, exactly one; `ring_until_ms` |
+| `answer` | the caller, and the callee's own devices | accepted on this device; the others stop ringing |
+| `decline`, `busy` | the caller | |
+| `hangup` | everyone in the call | with a reason (normal, answered/declined/busy elsewhere, failed) |
+| `sender_key` | one device, over a Signal session | a link call's key (§8.4) |
+
+- **Live ringing** uses the ephemeral lane (§3.7). An offer to a device that is offline is also
+  sent stored, with `EXPIRES` of 60 seconds, and the server wakes the device (§8.6). An app rings
+  until `ring_until_ms`, never more than 2 minutes after the offer's `sent_at_ms`, and not at all
+  once that has passed (`call::ring_left_ms`).
+- **Non-contacts never ring.** An offer that arrives by the request lane (§5.10) is shown as a
+  request, silently; the server queues no wake-up without the contact proof (§8.6).
+- A missed, declined or finished call is recorded as `CallEvent` in the chat and synced to the
+  user's devices as `call_history`.
+
 ## 9. Push (Prompt 8)
 
 ## 10. Settings sync and presence (Prompt 9)
@@ -1932,3 +2044,11 @@ Packs (Prompt 6, D-0083): for pack key 32 × `33`, object 0's key is
 and object 1's is
 `259a6b7cb7cf7d091b07cae12cf177127ebb19396d61a4b6bf3f2993f5f7a23f498f371981a38260ef70a53d15521470114e39017c42b3c995a8fa6a5aa788e7`
 (`crates/content/src/pack.rs`; reproduced by `tools/attachment-vectors/check.mjs`).
+
+Calls (Prompt 7, D-0086): `crates/content/vectors/call/v1.txt` (§8.2, §8.4), checked by
+`crates/content/tests/call.rs` and independently by `tools/call-vectors/check.mjs` (Node.js and
+OpenSSL). For call ID `00 01 … 0f` and `call_secret` `40 41 … 5f`, the sender key of identity
+`0123456789abcdef0123456789abcdef` is
+`9abfb1f35fa88b5c072d6410879d17a86fff15a196b82fe917a2bb113e490aeb`. For link root `00 01 … 1f`,
+the link ID is `5f88f381e38c44f13807d6c1ca1268a94fdd7437f745cca65ac91b8a29b5480d` and the server
+stores `19a4a59124d6c69329890a7fe6be812afda73dbf92737d7873f18d4c85af3853`.

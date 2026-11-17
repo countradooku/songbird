@@ -32,6 +32,7 @@ pub mod devices;
 pub mod envelope;
 pub mod frame;
 pub mod keys;
+pub mod media;
 pub mod mls;
 pub mod profile;
 pub mod registration;

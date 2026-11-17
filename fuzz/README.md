@@ -22,6 +22,12 @@ every decoder). The crate is outside the main workspace because it needs nightly
 | `franking` | franking stamps in front of envelopes; report bodies from M5 (Prompt 4) | `songbird-proto` |
 | `mls_wire` | `PrivateMessage` prefix, commit bundle, `GroupInfo` signer (Prompt 5) | `songbird-groups` |
 | `mls_commit` | commit bundles against a real post-quantum group; stored group records (Prompt 5) | `songbird-groups` |
+| `attachment_decrypt` | the attachment format: header, commitment, chunks, padding; tampered ciphertexts (Prompt 6) | `songbird-content` |
+| `upload_grant` | upload grant requests; parts covering an upload (Prompt 6) | `songbird-api` |
+| `s3_multipart_xml` | the object store's multipart answers (Prompt 6) | `songbird-s3` |
+| `media_url` | signed media URL queries; `Range` headers (Prompt 6) | `songbird-api` |
+| `pack_manifest` | pack manifests: length prefix, padding, bounds (Prompt 6) | `songbird-content` |
+| `gif_proxy` | GIF requests, the provider's answers, media tokens (Prompt 6) | `songbird-api` |
 
 ```bash
 cargo xtask fuzz --secs 60            # every target, 60 s each (CI fast checks do not fuzz)

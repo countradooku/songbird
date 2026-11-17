@@ -235,6 +235,7 @@ async fn stack(limits: RequestLimits) -> Option<Stack> {
         push_public: [0; 32],
         push_index_secret: [0x31; 32],
         limits: songbird_api::config::AttachmentLimits::default(),
+        media: None,
         messages: Some(Messages {
             path: Box::new(SendStack {
                 directory: Arc::clone(&shared.directory),

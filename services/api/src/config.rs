@@ -65,6 +65,11 @@ impl Validate for ApiConfig {
                 "api.reports",
                 "is required in staging and production (reporting)",
             );
+            v.check(
+                api.media.is_some(),
+                "api.media",
+                "is required in staging and production (upload budgets, downloads, D-0084)",
+            );
             if let Some(s) = &api.send {
                 v.check(
                     s.franking_key.is_some(),
@@ -108,6 +113,10 @@ pub struct ApiSettings {
     /// Attachment limits.
     #[serde(default)]
     pub attachments: AttachmentLimits,
+    /// `[api.media]` (Prompt 6): upload budgets. Absent only in development: uploads then have
+    /// no per-account budget.
+    #[serde(default)]
+    pub media: Option<MediaSettings>,
     /// Account creation for operators and tests (Prompt 3 replaces it with registration).
     #[serde(default)]
     pub admin: Option<AdminSettings>,
@@ -359,6 +368,9 @@ impl Validate for ApiSettings {
         v.section("jobs", &self.jobs);
         v.section("s3", &self.s3);
         v.section("attachments", &self.attachments);
+        if let Some(m) = &self.media {
+            v.section("media", m);
+        }
         if let Some(r) = &self.requests {
             v.section("requests.limits", &r.limits);
         }
@@ -476,16 +488,22 @@ pub struct AttachmentLimits {
     pub max_bytes: u64,
     /// Most recipient fetches one attachment may be granted.
     pub max_fetches: u32,
-    /// How long an upload grant stays valid, seconds.
+    /// How long an upload grant stays valid without activity, seconds (each part of a resumable
+    /// upload renews it, at most 24 hours after it was issued).
     pub grant_ttl_secs: u64,
+    /// Resumable uploads go in parts of this many bytes (the last part is shorter).
+    pub part_size: u64,
 }
 
 impl Default for AttachmentLimits {
     fn default() -> Self {
         Self {
-            max_bytes: 100 << 20,
+            // D-0079: 2 GiB, for WhatsApp parity, until Prompt 11's plans set it.
+            max_bytes: 2 << 30,
             max_fetches: 1024,
             grant_ttl_secs: 3600,
+            // D-0081: 16 MiB, measured against 5 and 64.
+            part_size: 16 << 20,
         }
     }
 }
@@ -506,6 +524,240 @@ impl Validate for AttachmentLimits {
             (60..=86_400).contains(&self.grant_ttl_secs),
             "grant_ttl_secs",
             "must be in 60..=86400",
+        );
+        // S3: every part but the last at least 5 MiB, at most 10,000 parts.
+        v.check(
+            ((5 << 20)..=(512 << 20)).contains(&self.part_size)
+                && self.max_bytes.div_ceil(self.part_size) <= 1_000,
+            "part_size",
+            "must be in 5 MiB..=512 MiB, with max_bytes in at most 1,000 parts (the parts list the server reads)",
+        );
+    }
+}
+
+/// `[api.media]` (Prompt 6, D-0079): the budgets of uploads, and the key of their records.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaSettings {
+    /// 32 bytes (64 hex characters), the same on every `api` node: keys the budget records
+    /// (and, in later milestones, signed download URLs and GIF tokens).
+    pub secret: SecretRef,
+    /// Per-account budgets.
+    #[serde(default)]
+    pub budgets: MediaBudgets,
+    /// Downloads.
+    #[serde(default)]
+    pub downloads: MediaDownloads,
+    /// The GIF search proxy (Prompt 6, M4). Absent: the GIF endpoints answer 503.
+    #[serde(default)]
+    pub gifs: Option<GifSettings>,
+}
+
+impl Validate for MediaSettings {
+    fn validate(&self, v: &mut Validator) {
+        v.section("budgets", &self.budgets);
+        v.section("downloads", &self.downloads);
+        if let Some(g) = &self.gifs {
+            v.section("gifs", g);
+        }
+    }
+}
+
+/// `[api.media.gifs]` (Prompt 6, M4, D-0083): the GIF provider (GIPHY, D-0079 §4) behind the proxy.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct GifSettings {
+    /// The provider's API key (its file or variable).
+    pub api_key: Option<SecretRef>,
+    /// The API's origin.
+    pub base_url: String,
+    /// The only hosts media is fetched from (`host` or `host:port`).
+    pub cdn_hosts: Vec<String>,
+    /// The content rating asked for (`g`, `pg`, `pg-13`, `r`).
+    pub rating: String,
+    /// Searches per hour per account, and their burst.
+    pub searches_per_hour: u32,
+    /// Their burst.
+    pub search_burst: u32,
+    /// Provider requests per second, across the cluster.
+    pub provider_per_sec: u32,
+    /// Cached answers and files (each).
+    pub cache_entries: usize,
+    /// How long an answer stays cached, seconds.
+    pub cache_ttl_secs: u64,
+    /// Bytes of cached files.
+    pub media_cache_bytes: u64,
+    /// The largest file proxied.
+    pub max_media_bytes: u64,
+    /// Provider request timeout, seconds.
+    pub timeout_secs: u64,
+}
+
+impl Default for GifSettings {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            base_url: "https://api.giphy.com".into(),
+            cdn_hosts: [
+                "media.giphy.com",
+                "media0.giphy.com",
+                "media1.giphy.com",
+                "media2.giphy.com",
+                "media3.giphy.com",
+                "media4.giphy.com",
+                "i.giphy.com",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            rating: "pg-13".into(),
+            searches_per_hour: 300,
+            search_burst: 60,
+            provider_per_sec: 50,
+            cache_entries: 4_096,
+            cache_ttl_secs: 600,
+            media_cache_bytes: 256 << 20,
+            max_media_bytes: 8 << 20,
+            timeout_secs: 5,
+        }
+    }
+}
+
+impl Validate for GifSettings {
+    fn validate(&self, v: &mut Validator) {
+        v.check(
+            self.base_url.parse::<hyper::Uri>().is_ok_and(|u| {
+                u.scheme_str() == Some("https")
+                    || (u.scheme_str() == Some("http") && u.host() == Some("127.0.0.1"))
+            }),
+            "base_url",
+            "must be https (plain http only to 127.0.0.1, for tests)",
+        );
+        v.check(
+            !self.cdn_hosts.is_empty() && self.cdn_hosts.len() <= 32,
+            "cdn_hosts",
+            "must name 1 to 32 hosts",
+        );
+        v.check(
+            matches!(self.rating.as_str(), "g" | "pg" | "pg-13" | "r"),
+            "rating",
+            "must be g, pg, pg-13 or r",
+        );
+        v.check(
+            self.searches_per_hour >= 1 && self.search_burst >= 1 && self.provider_per_sec >= 1,
+            "searches_per_hour",
+            "budgets must be at least 1",
+        );
+        v.check(
+            (1..=1_000_000).contains(&self.cache_entries)
+                && (1..=86_400).contains(&self.cache_ttl_secs)
+                && self.media_cache_bytes <= 16 << 30
+                && (1..=(64 << 20)).contains(&self.max_media_bytes)
+                && (1..=60).contains(&self.timeout_secs),
+            "cache_entries",
+            "cache and timeout bounds",
+        );
+    }
+}
+
+/// `[api.media.downloads]` (Prompt 6, M3, D-0082): downloads need no account (the object ID is the
+/// capability); they are throttled per IP range, in keyed records.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MediaDownloads {
+    /// How long a signed media URL works, seconds.
+    pub url_ttl_secs: u64,
+    /// Download redirects and fetch confirmations per hour per IP range.
+    pub per_hour: u32,
+    /// Their burst.
+    pub burst: u32,
+    /// IPv4 prefix length of a range.
+    pub ipv4_prefix: u8,
+    /// IPv6 prefix length of a range.
+    pub ipv6_prefix: u8,
+    /// Signed-URL requests (each range a player asks for) per hour per IP range (D-0084).
+    pub serve_per_hour: u32,
+    /// Their burst.
+    pub serve_burst: u32,
+}
+
+impl Default for MediaDownloads {
+    fn default() -> Self {
+        Self {
+            url_ttl_secs: 600,
+            per_hour: 6_000,
+            burst: 600,
+            ipv4_prefix: 24,
+            ipv6_prefix: 48,
+            serve_per_hour: 36_000,
+            serve_burst: 3_600,
+        }
+    }
+}
+
+impl Validate for MediaDownloads {
+    fn validate(&self, v: &mut Validator) {
+        v.check(
+            (60..=3_600).contains(&self.url_ttl_secs),
+            "url_ttl_secs",
+            "must be in 60..=3600",
+        );
+        v.check(
+            (1..=1_000_000).contains(&self.per_hour)
+                && (1..=100_000).contains(&self.burst)
+                && (1..=10_000_000).contains(&self.serve_per_hour)
+                && (1..=1_000_000).contains(&self.serve_burst),
+            "per_hour",
+            "per_hour must be in 1..=1000000 and burst in 1..=100000",
+        );
+        v.check(
+            (8..=32).contains(&self.ipv4_prefix) && (16..=128).contains(&self.ipv6_prefix),
+            "ipv4_prefix",
+            "prefixes must be 8..=32 (IPv4) and 16..=128 (IPv6)",
+        );
+    }
+}
+
+/// `[api.media.budgets]`: per account, in keyed `valkey-hot` records (no object is ever linked
+/// to an account). Prompt 11's plans will set them per plan.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MediaBudgets {
+    /// Upload grants per hour.
+    pub grants_per_hour: u32,
+    /// Their burst.
+    pub grant_burst: u32,
+    /// Bytes granted per 24 hours (all may be spent at once).
+    pub bytes_per_day: u64,
+}
+
+impl Default for MediaBudgets {
+    fn default() -> Self {
+        // D-0079.
+        Self {
+            grants_per_hour: 300,
+            grant_burst: 60,
+            bytes_per_day: 10 << 30,
+        }
+    }
+}
+
+impl Validate for MediaBudgets {
+    fn validate(&self, v: &mut Validator) {
+        v.check(
+            (1..=100_000).contains(&self.grants_per_hour),
+            "grants_per_hour",
+            "must be in 1..=100000",
+        );
+        v.check(
+            (1..=10_000).contains(&self.grant_burst),
+            "grant_burst",
+            "must be in 1..=10000",
+        );
+        v.check(
+            ((1 << 20)..=(1 << 40)).contains(&self.bytes_per_day),
+            "bytes_per_day",
+            "must be in 1 MiB..=1 TiB",
         );
     }
 }

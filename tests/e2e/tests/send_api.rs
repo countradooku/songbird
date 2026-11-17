@@ -209,6 +209,7 @@ async fn stack(limits: Limits, sends_per_sec: u32, send_burst: u32) -> Option<St
         push_public: [0; 32],
         push_index_secret: [9; 32],
         limits: songbird_api::config::AttachmentLimits::default(),
+        media: None,
         metrics,
         messages: Some(messages),
         registration: None,

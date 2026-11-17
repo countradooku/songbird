@@ -383,3 +383,94 @@ async fn an_overwrite_leaves_the_original_as_the_earliest_version() {
     }
     assert_eq!(got, b"the real backup");
 }
+
+/// Multipart uploads (Prompt 6, M2, D-0081): parts arrive in any order, a broken part stores
+/// nothing and is simply sent again, the listing tells a resuming client what is there, and
+/// completion yields exactly the bytes. Aborted and listed uploads leave nothing behind.
+#[tokio::test]
+async fn multipart_uploads_resume_and_complete_exactly() {
+    let Some(c) = client("multipart") else { return };
+    c.create_bucket().await.unwrap();
+    let part = 5usize << 20;
+    let all = data(2 * part + 1_234);
+    let key = "a/multipart";
+    let up = c.create_multipart_upload(key).await.unwrap();
+    // Part 3 first, then part 1; part 2 breaks halfway (a short body), stores nothing.
+    let p3 = &all[2 * part..];
+    c.upload_part(key, &up, 3, p3.len() as u64, chunks(p3, 65_536))
+        .await
+        .unwrap();
+    c.upload_part(key, &up, 1, part as u64, chunks(&all[..part], 65_536))
+        .await
+        .unwrap();
+    let half = &all[part..part + part / 2];
+    assert_eq!(
+        c.upload_part(key, &up, 2, part as u64, chunks(half, 65_536))
+            .await,
+        Err(Error::LengthMismatch)
+    );
+    let listed = c.list_parts(key, &up).await.unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|p| (p.number, p.size))
+            .collect::<Vec<_>>(),
+        vec![(1, part as u64), (3, p3.len() as u64)]
+    );
+    // The object does not exist until completion.
+    assert!(c.head_object(key).await.unwrap().is_none());
+    c.upload_part(
+        key,
+        &up,
+        2,
+        part as u64,
+        chunks(&all[part..2 * part], 65_536),
+    )
+    .await
+    .unwrap();
+    let parts = c.list_parts(key, &up).await.unwrap();
+    assert_eq!(parts.len(), 3);
+    assert!(
+        c.list_multipart_uploads("a/")
+            .await
+            .unwrap()
+            .iter()
+            .any(|u| u.key == key && u.upload_id == up)
+    );
+    c.complete_multipart_upload(key, &up, &parts).await.unwrap();
+    let (_, len, got) = read_all(&c, key, None).await;
+    assert_eq!(len, all.len() as u64);
+    assert!(got == all, "completed bytes differ");
+    assert!(
+        !c.list_multipart_uploads("a/")
+            .await
+            .unwrap()
+            .iter()
+            .any(|u| u.upload_id == up)
+    );
+    // An aborted upload: its parts are gone, a second abort succeeds, and it cannot complete.
+    let key2 = "a/aborted";
+    let up2 = c.create_multipart_upload(key2).await.unwrap();
+    c.upload_part(key2, &up2, 1, part as u64, chunks(&all[..part], 65_536))
+        .await
+        .unwrap();
+    let parts2 = c.list_parts(key2, &up2).await.unwrap();
+    c.abort_multipart_upload(key2, &up2).await.unwrap();
+    c.abort_multipart_upload(key2, &up2).await.unwrap();
+    assert!(
+        c.complete_multipart_upload(key2, &up2, &parts2)
+            .await
+            .is_err()
+    );
+    assert!(c.head_object(key2).await.unwrap().is_none());
+    // Bounds checked before anything is sent.
+    assert!(matches!(
+        c.upload_part(key, &up, 0, 1, chunks(b"x", 1)).await,
+        Err(Error::InvalidInput(_))
+    ));
+    assert!(matches!(
+        c.list_parts(key, "bad id").await,
+        Err(Error::InvalidInput(_))
+    ));
+    c.delete_object(key).await.unwrap();
+}

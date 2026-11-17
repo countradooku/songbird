@@ -128,6 +128,7 @@ async fn stack() -> Option<Stack> {
         push_public,
         push_index_secret: PUSH_INDEX,
         limits: songbird_api::config::AttachmentLimits::default(),
+        media: None,
         metrics: ApiMetrics::default(),
         messages: None,
         registration: None,

@@ -217,6 +217,30 @@ async fn transparency(s: &ApiSettings) -> Result<Option<songbird_api::kt::Transp
     )?))
 }
 
+/// `[api.media]` (Prompt 6), if configured.
+fn media(s: &ApiSettings) -> Result<Option<songbird_api::media::Media>, BoxError> {
+    let Some(m) = &s.media else {
+        return Ok(None);
+    };
+    let secret = m.secret.resolve_key32()?;
+    let media = songbird_api::media::Media::new(m.budgets, m.downloads, &secret);
+    let Some(g) = &m.gifs else {
+        return Ok(Some(media));
+    };
+    // GIPHY (D-0079 §4): its key comes from the owner's account, never the repository.
+    let key = g
+        .api_key
+        .as_ref()
+        .ok_or("[api.media.gifs] api_key is required")?
+        .resolve()?;
+    let provider = songbird_api::gifs::Giphy::new(key.expose().trim().to_owned(), g.rating.clone());
+    Ok(Some(media.with_gifs(songbird_api::gifs::Gifs::new(
+        g.clone(),
+        Box::new(provider),
+        &secret,
+    )?)))
+}
+
 /// `[api.profiles]` (Prompt 3, M5), if configured.
 fn profiles(
     s: &ApiSettings,
@@ -410,6 +434,7 @@ async fn build(
         push_public,
         push_index_secret: *s.push_index_secret.resolve_key32()?,
         limits: s.attachments,
+        media: media(s)?,
         metrics,
         messages,
         registration,

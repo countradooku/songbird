@@ -1590,6 +1590,193 @@ delivery service proposes that removal itself, as the group's MLS external sende
 
 ## 7. Attachments and packs (Prompt 6)
 
+The server holds only ciphertext. It never parses media. It checks sizes and grants and counts
+fetches (D-0079 to D-0084).
+
+### 7.1 The attachment format (M1, D-0080)
+
+Apps encrypt every attachment, thumbnail and pack asset like this. The reference implementation
+is `songbird_content::attachment`; the sizes are `songbird_proto::media`.
+
+- **Inputs:**
+  - a fresh 64-byte random key (`AttachmentPointer.key`);
+  - a fresh 32-byte random salt;
+  - the plaintext of `n` bytes.
+
+  Forwarding encrypts again under a new key and salt and uploads a new object. Reusing an object
+  ID would let the server link two messages.
+- **Keys:** `HKDF-SHA256(salt = salt, ikm = key, info = "songbird.v1/attachment\0" ‖ version, 64)`.
+  - The first 32 bytes are the chunk key.
+  - The last 32 bytes are the **key commitment**, sent as `AttachmentPointer.digest`.
+  - Readers compare the commitment in constant time before opening any chunk. This makes the
+    format key-committing: one object cannot open to two different files under two keys.
+- **Version byte (the suite):**
+  - `1`: ChaCha20-Poly1305 (RFC 8439);
+  - `2`: AES-256-GCM, which apps write by default (D-0080: about 30 % faster than
+    ChaCha20-Poly1305 on x86 with AES-NI).
+
+  Readers accept both, so a device without AES hardware may write `1`. Any other value is
+  refused.
+- **Padding:** the plaintext is followed by zeros up to `padded = padme(max(n, 1024))`.
+  - Padmé (PURBs, PETS 2019) costs at most 12 % and leaves O(log log n) bits of the size.
+  - `n` itself travels only in the encrypted pointer (`size`).
+  - Readers refuse padding that is not all zeros.
+- **Chunks:** the padded plaintext is cut into 65,536-byte chunks. The last chunk may be shorter
+  and is never empty, so `k = max(1, ⌈padded / 65,536⌉)`.
+  - Chunk `i` is sealed with nonce `00 00 00 ‖ be64(i) ‖ last`, where `last` is `01` for chunk
+    `k − 1` and `00` otherwise, and an empty AAD.
+  - This is the STREAM construction (Hoang, Reyhanitabar, Rogaway, Vizár; as in `age`). A
+    reordered, dropped, truncated or extended chunk fails at that chunk.
+- **Layout:** `version (1) ‖ salt (32) ‖ chunk₀ ‖ tag₀ ‖ … ‖ chunkₖ₋₁ ‖ tagₖ₋₁`.
+  - Total length: `33 + padded + 16k`.
+  - Chunk `i` starts at byte `33 + i × 65,552`. Range requests fetch whole chunks, plus the
+    33-byte header once.
+- **What the server checks:** an upload grant is only issued for a length the format produces.
+  `songbird_proto::media::padded_from_ciphertext` recognises such a length and refuses every
+  other, so an uploader cannot choose an exact size.
+
+Test vectors (§13) are in `crates/content/vectors/attachment/v1.txt`:
+
+- key 64 × `11`, salt 32 × `22`, plaintext byte `i` = `i mod 256`;
+- each suite at 0, 5 and 70,000 bytes;
+- each line has: version, `n`, ciphertext length, commitment, SHA-256 of the ciphertext, and the
+  ciphertext's first 32 bytes after the header.
+
+`tools/attachment-vectors/check.mjs` reproduces every line with Node.js's OpenSSL, from this
+section rather than the Rust code.
+
+### 7.2 Upload grants and uploads (M2, D-0081)
+
+Every request is signed by the device (§3). Upload bodies are the client's own ciphertext: they
+are not signed, only held to their exact length.
+
+| Request | Body | Answer |
+| --- | --- | --- |
+| `POST /v1/attachments` | `{"size": <ciphertext length>, "fetches": <recipient devices>}` | 201 `{"id": <64 hex>, "part_size": <bytes>, "parts": <count>}`; 400 for a length the format (§7.1) never produces, past the limit (2 GiB by default), or 0 or more than 1,024 fetches; 429 with `Retry-After` past a budget |
+| `PUT /v1/attachments/<id>` | the whole ciphertext, `Content-Length` = `size` | 201; 400 for another length; 404 not this device's grant, or used |
+| `PUT /v1/attachments/<id>/parts/<n>` | part `n` (1 to `parts`): `part_size` bytes, the last one `size − (parts − 1) × part_size` | 204; 400 for another length; 404 no such part, or not this device's grant |
+| `GET /v1/attachments/<id>/parts` | — | 200 `{"part_size", "parts": [n, …]}`: the parts stored with exactly their length, in order |
+| `POST /v1/attachments/<id>/complete` | — | 201: the parts become the object and the grant becomes the attachment; 409 while a part is missing |
+
+- **Budgets** (per account, `[api.media.budgets]`):
+  - 300 grants per hour, bursting to 60;
+  - 10 GiB granted per 24 hours, all of which may be spent at once.
+
+  These numbers stay until Prompt 11's plans set them per plan. The records are keyed and name
+  no object.
+- **Resuming:** after any interruption, a client asks `GET …/parts` and sends only the parts
+  that are missing. Parts may go in any order and in parallel; four at a time is what D-0081
+  measured.
+  - A broken part stores nothing; the client sends it again.
+  - Each stored part renews the grant for its idle time (1 hour). A grant never lasts more than
+    24 hours after it was issued.
+  - Parts of an upload whose grant is gone are aborted by the next sweep.
+- **Small attachments** (one part or less) use the single `PUT`.
+- **tus 1.0** was built and measured over the same parts, then removed (D-0081). Clients that
+  want a library can map tus's `PATCH` to consecutive parts themselves.
+
+### 7.3 Downloads and the lifecycle (M3, D-0082)
+
+Downloads carry no account and no device signature (D-0079). The 256-bit object ID, which
+travels only inside end-to-end encrypted content, is the capability.
+
+| Request | Answer |
+| --- | --- |
+| `GET /v1/attachments/<id>` | 303 `Location: /v1/media/<id>?e=<expiry>&z=<size>&s=<MAC>`, with `Cache-Control: no-store`; 404 if the attachment is unknown, fetched out or past 30 days; 429 past the IP range's budget |
+| `GET /v1/media/<id>?e=…&z=…&s=…` | The object: 200, or 206 with `Content-Range` for one `Range: bytes=` range (`a-b`, `a-`, `-n`); 416 with `Content-Range: bytes */<size>` past the end. Several ranges, or a malformed one, get the whole object. `Accept-Ranges: bytes`; `Cache-Control: private, max-age=<until expiry>, immutable`. 403 for a wrong or expired signature; 404 once the object is gone |
+| `POST /v1/attachments/<id>/fetched` | 204: one recipient device has the whole file and has verified it. The last confirmation deletes the record and queues the object's deletion. 404 once nothing is due |
+
+- **The signed URL.** The MAC is HMAC-SHA256 over `"songbird.v1/media-url\0" ‖ id ‖ be64(e) ‖
+  be64(z)`, truncated to 16 bytes, under a key derived from `[api.media].secret`.
+  - The URL lives `url_ttl_secs` (10 minutes by default). A URL dated further ahead than that
+    is refused.
+  - Serving it needs no database access. It carries the size, so `Content-Range` can name the
+    total.
+- **Seeking.** A player fetches the 33-byte header once, then the chunks it needs:
+  - chunk `i` is bytes `33 + i × 65,552` to `33 + i × 65,552 + 65,551` (shorter for the last
+    chunk);
+  - `Decryptor::chunks_for` maps plaintext offsets to chunks (§7.1).
+- **The lifecycle.**
+  - The grant's `fetches` is the number of recipient devices, the uploader's other devices
+    included.
+  - Each device confirms once, after its last chunk verified. Downloading alone counts nothing,
+    so a player may read parts of a file many times.
+  - The last confirmation deletes the attachment. Anything unconfirmed goes after 30 days (the
+    worker's sweep).
+  - Each source counts once per object: an IPv4 address, or an IPv6 /64 (D-0084). A recipient
+    cannot delete a file before the others by confirming many times. Recipients behind one
+    address count as one, and their file is kept until 30 days.
+- **Throttles.** Redirects and confirmations are budgeted per IP range in keyed records: 6,000
+  per hour, a burst of 600, /24 for IPv4 and /48 for IPv6. Signed-URL requests (every range a
+  player asks for) have their own budget: 36,000 per hour, a burst of 3,600 (D-0084).
+- **Forwarding** encrypts again under a fresh key and uploads a new object (§7.1). The server
+  never copies an object, so two messages never share an ID.
+
+### 7.4 Packs (M4, D-0083)
+
+One generic service carries sticker packs, chat scenes (IMVironments), sound stickers and
+emoticon packs. The kind exists only inside the encrypted manifest (`PackManifest` in
+`content.proto`; `songbird_content::pack`).
+
+- **Objects.**
+  - Object 0 is the manifest; objects 1 to n are the assets. There are at most 200 assets.
+  - Each object is in the attachment format (§7.1) and at most 16 MiB; a pack is at most
+    300 MiB in all.
+  - The key of object `n` is `HKDF-SHA256(salt = "", ikm = pack key, info =
+    "songbird.v1/pack-object\0" ‖ be16(n), 64)`.
+  - The manifest's plaintext is `be32(length) ‖ PackManifest`, then zeros. A reader opens it at
+    its padded length (`padded_from_ciphertext`) and takes its commitment from its header
+    (`attachment::commitment`). Only the pack key opens it.
+  - Each asset is opened against the commitment the manifest lists for it.
+- **The link:** `https://<web domain>/pack#<pack ID, 32 hex>.<pack key, base64url>`. The key is in
+  the fragment, which browsers and apps never send to a server. A sticker in a message is a
+  `StickerRef` carrying the pack ID, the pack key and the item's object number.
+- **Requests:**
+
+  | Request | Body or header | Answer |
+  | --- | --- | --- |
+  | `POST /v1/packs` (signed) | `{"sizes": [each object's ciphertext length, the manifest first], "token": <64 hex: SHA-256 of a random 32-byte management token>}` | 201 `{"pack", "objects"}`; 400 outside the bounds or for a length the format never produces; 429 past the account's budgets (the whole pack counts as one grant and its bytes) |
+  | `PUT /v1/packs/<pack>/<n>` (signed, unsigned body) | object `n`, exactly its size | 201; 400 for another length; 404 not the creating device, or the pack is complete or expired |
+  | `POST /v1/packs/<pack>/complete` (signed) | — | 201 once every object is in the store at its size; 409 otherwise. The pack then forgets the creating device |
+  | `GET /v1/packs/<pack>/<n>` | no account | 303 to the object's signed media URL (§7.3); 404 for an unknown or unfinished pack |
+  | `DELETE /v1/packs/<pack>` | `x-songbird-pack-token: <the token, 64 hex>`, no account | 204; 404 for no pack or a wrong token, which look the same |
+
+- **Lifetime (D-0079 §3):**
+  - An unfinished pack goes after 24 hours.
+  - A complete pack goes when deleted with its token, or one year after the last fetch of any of
+    its objects, which the server records to the day.
+  - A pack has no link to any account, so deleting an account cannot find its packs. The
+    creator's devices keep the token, in their encrypted sync, to delete it.
+
+### 7.5 GIF search (M4, D-0083)
+
+`api` proxies the provider (GIPHY, D-0079 §4). The provider sees queries, never who sent them.
+
+| Request | Body | Answer |
+| --- | --- | --- |
+| `POST /v1/gifs/search` (signed) | `{"q": <1–64 characters>, "offset": <0–4,999>, "lang": <2 lowercase letters, default "en">}` | 200 `{"gifs": [{"id", "width", "height", "gif", "still", "mp4"}], "next": <offset or null>}`; 429 past the account's budget (300 per hour, burst 60); 503 with `Retry-After` while the provider fails |
+| `POST /v1/gifs/trending` (signed) | `{"offset", "lang"}` | as above |
+| `GET /v1/gifs/media/<token>` | no account | the file (`image/gif`, `image/webp`, `image/png`, `image/jpeg`, `video/mp4`); 404 for a bad or expired token; 429 per IP range |
+
+- Queries go in a signed body, never a URL, so no access log or proxy sees them.
+- The provider's request is built from scratch:
+  - `api_key`, `q`, `limit`, `offset`, `rating` and `lang`;
+  - only the headers `Host`, `User-Agent: songbird` and `Accept`.
+
+  No address, header or identifier of the app reaches the provider, and GIPHY's per-user
+  `random_id` is never sent.
+- Every file URL in an answer is a token `hex(be64(expiry) ‖ HMAC16 ‖ URL)`, valid one hour. It
+  only ever names the provider's own hosts (`cdn_hosts`), so the proxy cannot be pointed
+  anywhere else. Files the provider puts elsewhere are dropped from the answer.
+- Answers are cached in memory for 10 minutes, under a keyed hash of language, offset and query.
+  Files are cached in memory for a day (256 MiB at most). Queries are never written to disk or
+  logged.
+- Each node has a circuit breaker: after five consecutive provider failures (transport, timeout,
+  5xx, 429) it leaves the provider alone for 30 s. File fetches never move it; they have their
+  own budget and run at most 32 at a time (D-0084). Across the cluster, the provider gets at most `provider_per_sec` requests. The
+  runbook is `docs/RUNBOOKS/media.md`.
+- No link previews on the server: apps build them (§5).
+
 ## 8. Calls and the call key schedule (Prompt 7)
 
 ## 9. Push (Prompt 8)
@@ -1732,3 +1919,16 @@ independently with Python's `hmac` and `hashlib`: secret 32 × `46`, commitment 
 1,800,000,000,000 ms, sender 16 × `0a`, recipient 16 × `0b`. The key ID is
 `3df2c8855889e63b` and the tag is
 `114c33cc2b8f1a5e0ad8943b34ebb738c10f3397504e858b44b8e06e45a8b3b6`.
+
+Attachments (Prompt 6, D-0080): `crates/content/vectors/attachment/v1.txt`, described in §7.1,
+checked by `crates/content/tests/attachment.rs` and independently by
+`tools/attachment-vectors/check.mjs` (Node.js and OpenSSL). For example, AES-256-GCM (version 2)
+over the empty file gives the commitment
+`4d3849c61240da287ae2a50f294f8ca593a037dc678a57f7846e425936206aac` and a 1,073-byte ciphertext
+with SHA-256 `fc5c71776298012c8c116848d978cc7068a420c207ca7824f6891f5c70969cb5`.
+
+Packs (Prompt 6, D-0083): for pack key 32 × `33`, object 0's key is
+`b4b86d6d8340ed7c0242fbee69938c04cff4d62f59120a703df1ec02124c3c92a328512b4a91c35aee31481cae363c507eed2d7cf6a4fd4907e1643bda6af388`
+and object 1's is
+`259a6b7cb7cf7d091b07cae12cf177127ebb19396d61a4b6bf3f2993f5f7a23f498f371981a38260ef70a53d15521470114e39017c42b3c995a8fa6a5aa788e7`
+(`crates/content/src/pack.rs`; reproduced by `tools/attachment-vectors/check.mjs`).

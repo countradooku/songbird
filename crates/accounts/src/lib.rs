@@ -53,6 +53,7 @@ pub mod gdpr;
 pub mod groups;
 pub mod journal;
 pub mod kt;
+pub mod packs;
 pub mod profile;
 pub mod reports;
 pub use db::{Db, DbError, SurrealSettings};
@@ -62,6 +63,9 @@ pub const AUTH_KEY_LEN: usize = 32;
 
 /// Attachments live at most this long (invariant 3).
 pub const ATTACHMENT_MAX_AGE: Duration = Duration::from_hours(30 * 24);
+/// A resumable upload grant lives at most this long, however often its parts keep it alive
+/// (Prompt 6, M2, D-0081).
+pub const GRANT_MAX_AGE: Duration = Duration::from_hours(24);
 
 const SCHEMA: &str = "
 DEFINE TABLE IF NOT EXISTS account SCHEMAFULL;
@@ -184,6 +188,9 @@ DEFINE FIELD IF NOT EXISTS device ON upload_grant TYPE bytes;
 DEFINE FIELD IF NOT EXISTS size ON upload_grant TYPE int;
 DEFINE FIELD IF NOT EXISTS fetches ON upload_grant TYPE int;
 DEFINE FIELD IF NOT EXISTS expires ON upload_grant TYPE datetime;
+DEFINE FIELD IF NOT EXISTS deadline ON upload_grant TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS upload ON upload_grant TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS sent ON upload_grant TYPE int DEFAULT 0;
 DEFINE INDEX IF NOT EXISTS upload_grant_device ON upload_grant FIELDS device;
 DEFINE INDEX IF NOT EXISTS upload_grant_expires ON upload_grant FIELDS expires;
 DEFINE TABLE IF NOT EXISTS attachment SCHEMAFULL;
@@ -230,6 +237,17 @@ DEFINE INDEX IF NOT EXISTS grp_req_at ON grp_req FIELDS at;
 DEFINE FIELD IF NOT EXISTS acct ON grp_req TYPE bytes;
 DEFINE INDEX IF NOT EXISTS grp_req_acct ON grp_req FIELDS acct;
 DEFINE INDEX IF NOT EXISTS grp_link_expires ON grp_link FIELDS expires;
+DEFINE TABLE IF NOT EXISTS pack SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS objects ON pack TYPE array<bytes>;
+DEFINE FIELD IF NOT EXISTS sizes ON pack TYPE array<int>;
+DEFINE FIELD IF NOT EXISTS device ON pack TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS token ON pack TYPE bytes;
+DEFINE FIELD IF NOT EXISTS done ON pack TYPE bool;
+DEFINE FIELD IF NOT EXISTS created ON pack TYPE datetime;
+DEFINE FIELD IF NOT EXISTS used ON pack TYPE datetime;
+DEFINE FIELD IF NOT EXISTS puts ON pack TYPE int DEFAULT 0;
+DEFINE INDEX IF NOT EXISTS pack_used ON pack FIELDS used;
+DEFINE INDEX IF NOT EXISTS pack_device ON pack FIELDS device;
 DEFINE TABLE IF NOT EXISTS cmty SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS ann ON cmty TYPE bytes;
 DEFINE FIELD IF NOT EXISTS meta ON cmty TYPE bytes;
@@ -460,6 +478,35 @@ pub struct Grant {
     pub fetches: u32,
 }
 
+/// A pending upload with its resumable state (Prompt 6, M2, D-0081). `Debug` hides the upload ID.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PendingUpload {
+    /// The grant.
+    pub grant: Grant,
+    /// The object store's multipart upload ID, once the first part arrived.
+    pub upload: Option<String>,
+}
+
+impl std::fmt::Debug for PendingUpload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingUpload")
+            .field("grant", &self.grant)
+            .field("resumable", &self.upload.is_some())
+            .finish()
+    }
+}
+
+/// How an upload ended ([`Registry::finish_upload`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadEnd {
+    /// The grant became the attachment.
+    Completed,
+    /// The object already is an attachment (a retried completion).
+    Attached,
+    /// No live grant: what was stored belongs to nothing.
+    Gone,
+}
+
 /// An uploaded attachment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Attachment {
@@ -478,7 +525,7 @@ pub struct Remnants {
     pub devices: u64,
     /// Push tokens of the devices.
     pub push_tokens: u64,
-    /// Upload grants of the devices.
+    /// Upload grants and unfinished packs of the devices (Prompt 6).
     pub grants: u64,
     /// Usernames still naming the account.
     pub usernames: u64,
@@ -1856,7 +1903,8 @@ impl Registry {
                 "RETURN count(SELECT id FROM account:[$a]);
                  RETURN count(SELECT id FROM device WHERE account = $a OR meta::id(id)[0] IN $ds);
                  RETURN count(SELECT id FROM push_token WHERE meta::id(id)[0] IN $ps);
-                 RETURN count(SELECT id FROM upload_grant WHERE device IN $ds);
+                 RETURN count(SELECT id FROM upload_grant WHERE device IN $ds)
+                   + count(SELECT id FROM pack WHERE device IN $ds);
                  RETURN count(SELECT id FROM username WHERE account = $a);
                  RETURN count(SELECT id FROM ulink WHERE account = $a)
                    + count(SELECT id FROM ltoken WHERE account = $a)
@@ -1959,14 +2007,113 @@ impl Registry {
         self.db
             .query(
                 "CREATE upload_grant:[$o] SET device = $d, size = $n, fetches = $f,
-                   expires = time::now() + duration::from_secs($ttl) RETURN NONE;",
+                   expires = time::now() + duration::from_secs($ttl),
+                   deadline = time::now() + duration::from_secs($max) RETURN NONE;",
                 vec![
                     var("o", bytes(&object.0)),
                     var("d", bytes(grant.device.as_bytes())),
                     var("n", int(grant.size)),
                     var("f", int(u64::from(grant.fetches))),
                     var("ttl", int(ttl.as_secs())),
+                    var("max", int(GRANT_MAX_AGE.as_secs().max(ttl.as_secs()))),
                 ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// An unexpired grant with its resumable state (Prompt 6, M2).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn pending_upload(
+        &self,
+        object: &ObjectKey,
+    ) -> Result<Option<PendingUpload>, RegistryError> {
+        let Some(grant) = self.grant(object).await? else {
+            return Ok(None);
+        };
+        let v = self
+            .db
+            .query1(
+                "SELECT VALUE upload FROM ONLY upload_grant:[$o] WHERE expires > time::now();",
+                vec![var("o", bytes(&object.0))],
+            )
+            .await?;
+        let upload = match v {
+            Value::Array(a) => a
+                .into_iter()
+                .next()
+                .and_then(|u| u.as_text().map(str::to_owned)),
+            other => other.as_text().map(str::to_owned),
+        };
+        Ok(Some(PendingUpload { grant, upload }))
+    }
+
+    /// Records the multipart upload of an unexpired grant, if it has none yet (two first parts
+    /// racing: one wins). Returns the upload ID the grant now holds, or `None` if the grant is
+    /// gone.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn set_grant_upload(
+        &self,
+        object: &ObjectKey,
+        upload: &str,
+    ) -> Result<Option<String>, RegistryError> {
+        let v = self
+            .db
+            .query(
+                "UPDATE upload_grant:[$o] SET upload = $u
+                   WHERE upload = NONE AND expires > time::now() RETURN NONE;
+                 SELECT VALUE upload FROM ONLY upload_grant:[$o] WHERE expires > time::now();",
+                vec![var("o", bytes(&object.0)), var("u", Value::from(upload))],
+            )
+            .await?;
+        Ok(match v.into_iter().nth(1).unwrap_or(Value::Null) {
+            Value::Array(a) => a
+                .into_iter()
+                .next()
+                .and_then(|u| u.as_text().map(str::to_owned)),
+            other => other.as_text().map(str::to_owned),
+        })
+    }
+
+    /// Counts one part write against an unexpired grant, if fewer than `most` were counted:
+    /// retries are allowed, an endless stream of rewrites is not (Prompt 6, D-0084).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn spend_part(&self, object: &ObjectKey, most: u64) -> Result<bool, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "UPDATE upload_grant:[$o] SET sent += 1
+                   WHERE expires > time::now() AND (sent ?? 0) < $m RETURN VALUE sent;",
+                vec![var("o", bytes(&object.0)), var("m", int(most))],
+            )
+            .await?;
+        Ok(!rows(v).is_empty())
+    }
+
+    /// Keeps an unexpired grant alive for `idle` more, never past its deadline
+    /// ([`GRANT_MAX_AGE`] after it was issued): a resumable upload that keeps sending parts
+    /// keeps its grant.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn touch_grant(
+        &self,
+        object: &ObjectKey,
+        idle: Duration,
+    ) -> Result<(), RegistryError> {
+        self.db
+            .query(
+                "UPDATE upload_grant:[$o]
+                   SET expires = IF deadline != NONE AND deadline < time::now() + duration::from_secs($t)
+                       { deadline } ELSE { time::now() + duration::from_secs($t) }
+                   WHERE expires > time::now() RETURN NONE;",
+                vec![var("o", bytes(&object.0)), var("t", int(idle.as_secs()))],
             )
             .await?;
         Ok(())
@@ -2016,13 +2163,24 @@ impl Registry {
     /// # Errors
     /// [`RegistryError`].
     pub async fn complete_upload(&self, object: &ObjectKey) -> Result<bool, RegistryError> {
+        Ok(self.finish_upload(object).await? == UploadEnd::Completed)
+    }
+
+    /// Turns an unexpired grant into an attachment record, and says what happened when it
+    /// could not: the object is already an attachment (a retried completion: keep it), or there is
+    /// no live grant (the caller may delete what it stored). Prompt 6, D-0084.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn finish_upload(&self, object: &ObjectKey) -> Result<UploadEnd, RegistryError> {
         let v = self
             .db
             .query(
                 "BEGIN TRANSACTION;
-                 LET $n = (SELECT VALUE size FROM ONLY upload_grant:[$o]);
-                 LET $f = (SELECT VALUE fetches FROM ONLY upload_grant:[$o]);
-                 IF $n = NONE OR $f = NONE { THROW 'no_grant' };
+                 IF record::exists(attachment:[$o]) { THROW 'songbird:attached' };
+                 LET $n = (SELECT VALUE size FROM ONLY upload_grant:[$o] WHERE expires > time::now());
+                 LET $f = (SELECT VALUE fetches FROM ONLY upload_grant:[$o] WHERE expires > time::now());
+                 IF $n = NONE OR $f = NONE { THROW 'songbird:no_grant' };
                  DELETE upload_grant:[$o] RETURN NONE;
                  CREATE attachment:[$o] SET size = $n, left = $f,
                    expires = time::now() + duration::from_secs($age) RETURN NONE;
@@ -2034,8 +2192,9 @@ impl Registry {
             )
             .await;
         match v {
-            Ok(_) => Ok(true),
-            Err(DbError::Statement(kind)) if kind == "Thrown" => Ok(false),
+            Ok(_) => Ok(UploadEnd::Completed),
+            Err(DbError::Statement(kind)) if kind == "Thrown:attached" => Ok(UploadEnd::Attached),
+            Err(DbError::Statement(kind)) if kind.starts_with("Thrown") => Ok(UploadEnd::Gone),
             Err(e) => Err(e.into()),
         }
     }

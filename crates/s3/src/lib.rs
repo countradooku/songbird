@@ -18,6 +18,7 @@
 #![forbid(unsafe_code)]
 
 mod body;
+pub mod multipart;
 pub mod sigv4;
 mod xml;
 

@@ -4777,6 +4777,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "webpki-roots 1.0.12",
  "zeroize",
 ]
 
@@ -4817,7 +4818,9 @@ dependencies = [
  "proptest",
  "prost",
  "serde_json",
+ "songbird-proto",
  "thiserror 2.0.21",
+ "zeroize",
 ]
 
 [[package]]
@@ -4884,6 +4887,7 @@ dependencies = [
  "songbird-groups-harness",
  "songbird-jobs",
  "songbird-keys",
+ "songbird-link",
  "songbird-mailbox",
  "songbird-proto",
  "songbird-push",

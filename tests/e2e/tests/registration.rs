@@ -180,6 +180,7 @@ async fn registered_accounts_connect_and_talk_without_an_operator() {
         push_public: [0; 32],
         push_index_secret: [9; 32],
         limits: songbird_api::config::AttachmentLimits::default(),
+        media: None,
         metrics: ApiMetrics::default(),
         messages: None,
         registration: Some(reg),

@@ -90,3 +90,25 @@ filter = "info"
 # link_token_ttl_secs = 600
 # channel_ttl_secs = 600
 # long_poll_secs = 25
+#
+# [api.attachments]                                              # defaults (D-0079, D-0081)
+# max_bytes = 2147483648                                          # 2 GiB, a length the format produces
+# part_size = 16777216                                            # resumable parts of 16 MiB
+# [api.media]                                                     # Prompt 6; absent: no upload budgets (development only)
+# secret = { file = "/path/to/media-secret.hex" }                 # 64 hex; same on every api node
+# [api.media.budgets]                                             # per account; defaults
+# grants_per_hour = 300
+# grant_burst = 60
+# bytes_per_day = 10737418240                                     # 10 GiB
+# [api.media.downloads]                                           # Prompt 6, M3; defaults
+# url_ttl_secs = 600                                              # signed media URLs
+# per_hour = 6000                                                 # redirects and confirmations per IP range
+# burst = 600
+# ipv4_prefix = 24
+# ipv6_prefix = 48
+# [api.media.gifs]                                                # Prompt 6, M4 (GIPHY, D-0079); absent: GIF endpoints 503
+# api_key = { file = "/path/to/giphy-key" }                       # the owner's GIPHY key; never in the repository
+# rating = "pg-13"
+# searches_per_hour = 300                                         # per account
+# search_burst = 60
+# provider_per_sec = 50                                           # across the cluster

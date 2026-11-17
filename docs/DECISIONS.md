@@ -20,6 +20,13 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 6 gate (`P06-gate.md`, D-0079 to D-0084; PR #61): **approved by the owner on 2026-11-17** ("i approve"): M1 to M5
+  and the security review's fixes; the benchmarks and the choices they drove (AES-256-GCM, parallel
+  16 MiB parts with tus removed, no caching proxy); five threat-model §1 rows (resumable grants up
+  to 24 h, upload budgets, downloads by capability, packs, GIF queries). Before production: the
+  GIPHY key and terms, and `[api.media]` on every `api` node. Prompt 6 is done once PR #61 merges.
+- Prompt 6 plan (`P06-plan.md`, D-0079): **approved by the owner on 2026-11-17**, every recommendation: downloads without
+  device authentication, size limit and budgets, pack lifetime, GIF provider and design.
 - Prompt 5 follow-ups (`P05-followups.md`, D-0075 to D-0078; PR #60): **approved by the owner
   on 2026-11-17** ("approve all"): the three milestones and the review's fixes; the four
   threat-model §1 rows (the service key and its queued removals in group state, the prune
@@ -124,6 +131,363 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0084 — Prompt 6: the security review's fixes
+
+- Date: 2026-11-17
+- Status: accepted; part of the Prompt 6 PR (report `P06-gate.md`, "Security review")
+- Decided by: agent, on an independent read-only review of the whole Prompt 6 diff. The
+  reviewer was a separate agent, given the code and documents, not the reports' conclusions.
+- Context: the review found no high-severity issue. It found three medium findings, four low
+  and two for information.
+- Decision:
+  1. **One recipient could confirm every fetch and delete a file early** (medium).
+     Confirmations need no account, so a recipient holding the object ID could send N of them.
+     - Each source now counts once per object: an IPv4 address, or an IPv6 /64. The record is
+       keyed in `valkey-hot` for the attachment's lifetime.
+     - Recipients sharing an address count as one. Their file is then kept until 30 days, which
+       is the safe direction.
+     - Per-device receipts were rejected: a group message is one MLS ciphertext for every
+       member, so it cannot carry a receipt per device.
+     - Test: `fetches_are_confirmed_and_the_last_one_deletes` (sources 127.0.0.1 and
+       127.0.0.2; three confirmations from one source count once).
+  2. **A retried completion could delete a completed attachment's object** (medium).
+     - `Registry::finish_upload` returns completed, already an attachment, or no live grant.
+       Only the last deletes what was stored.
+     - A grant must also be unexpired to complete, so the worker's sweep of expired grants
+       cannot race a late completion.
+     - Test: `resumable_grants_record_one_upload_and_slide_to_a_deadline`.
+  3. **The abandoned-upload sweep saw only the first 1,000 uploads** (medium).
+     `list_multipart_uploads` now pages with `NextKeyMarker` and `NextUploadIdMarker`, up to
+     100 pages. Tested in `multipart_documents`.
+  4. **Unauthenticated GIF file requests could open the search breaker** (low/medium).
+     - File fetches no longer move the breaker, have their own provider budget (`m:gm`), and
+       run at most 32 at a time per node.
+     - Searches count only transport errors, timeouts, 5xx and 429.
+     - Test: the live GIF test fetches a removed GIF eight times, then searches successfully.
+  5. **Part rewrites were not bounded** (low). Each grant allows at most 2 × parts + 8 part
+     writes, and each pack 2 × objects + 8, counted with compare-and-set before writing.
+     Retries pass; endless rewrites get 409. Tests: `parts_can_be_retried_but_not_rewritten_forever`
+     and the pack test.
+  6. **A pack upload racing a deletion or expiry left an orphan** (low). After writing, the
+     upload checks that the pack still exists and deletes the object if it does not. A pack
+     completed meanwhile keeps the object: that race is the creator's own, and deleting would
+     break a finished pack.
+  7. **A signed URL could be replayed without limit for 10 minutes** (low). The media path now
+     has a per-IP-range budget: 36,000 an hour, burst 3,600, enough for a player's range
+     requests.
+  8. **`[api.media]` was not required when deployed** (low). It is now required in staging and
+     production. Without it there are no budgets, downloads, packs or GIFs.
+  9. **For information:**
+     - the GIF base URL's host is now parsed and compared exactly;
+     - `part_size` must keep uploads within 1,000 parts, the list the server reads.
+- Not changed, recorded: the attachment `digest` commits to the key, not to the ciphertext.
+  - Objects are immutable once complete: single-use grants, and pack objects writable only by
+    their creator before completion. So no one but the uploader can change content under a
+    pointer, and only before anyone could fetch it.
+  - A ciphertext hash would cost every app a second pass over every file.
+- Consequences: the threat model's §1 download row and §3.23 now say how confirmations count;
+  PROTOCOL §7.3 and §7.5 likewise.
+- CI (2026-11-17): `cargo audit` began failing on two "unmaintained" notices published that day,
+  RUSTSEC-2026-0542 (`humantime`) and RUSTSEC-2026-0543 (`chrono`), both pulled in by the Iggy
+  SDK (`iggy_common` 0.12.0, D-0030) and present on `main` before Prompt 6. They are not
+  vulnerabilities, and no stable Iggy release drops them. They are ignored in `.cargo/audit.toml`,
+  matching cargo-deny's existing `unmaintained = "workspace"`. Revisit with the next Iggy SDK
+  release or by 2027-02-16. Replacing the Iggy SDK stays the owner's decision.
+
+## D-0083 — Prompt 6, milestone 4: one anonymous pack service; a GIF proxy that hides who searches
+
+- Date: 2026-11-17
+- Status: accepted by the agent under the plan (D-0079 §3 and §4); report `P06-M4.md`. Two
+  threat-model §1 rows (pack records; GIF queries): **approved by the owner on 2026-11-17** (the gate).
+- Decided by:
+  - owner: packs without an account link, deleted by token or after a year unused; GIPHY behind
+    `api`;
+  - agent: the formats and the mechanisms.
+- Context: the prompt asks for:
+  - one generic service for sticker packs, chat scenes, sound stickers and emoticon packs, with
+    an encrypted manifest and encrypted assets shared by a link carrying the pack key;
+  - a GIF search proxy with caching and rate limits that strips addresses and identifiers;
+  - no server-side link previews.
+- Options considered:
+  - **Pack keys.** A random key per asset listed in the manifest, versus keys derived from the
+    pack key. Chosen: **derived** (HKDF, info `songbird.v1/pack-object\0` ‖ be16(n)). The
+    manifest still lists each asset's commitment, so an asset cannot be swapped.
+  - **The manifest's length.** In the link, or a length prefix inside the object. Chosen: **a
+    be32 prefix**, with the padding after it checked as zeros. The link stays short.
+  - **Upload tracking.** Per-object rows, versus `complete` checking every object in the store.
+    Chosen: **the check at `complete`**: creating a pack is rare, and the check needs no state.
+  - **GIF requests.** A `GET` with the query in the URL, versus a signed `POST` body. Chosen:
+    **`POST`**, so no access log or URL carries a query.
+  - **GIF files.** Straight from the provider's CDN, which shows it the app's address, versus
+    proxied. Chosen: **proxied**, with MAC-protected tokens and a host allowlist, so the proxy
+    never becomes an open proxy.
+  - **Outbound HTTP.** A new client dependency, or the pinned hyper, rustls and tokio-rustls,
+    plus `webpki-roots` (already in the tree for push). Chosen: the latter, so no new crate.
+- Evidence:
+  - `songbird-content`:
+    - `pack` unit tests: bounds, the length prefix and padding, pinned object keys reproduced
+      by Node.js;
+    - `a_pack_opens_from_its_link_alone`: a foreign key or slot is refused before any chunk.
+  - Live (`media_live`):
+    - `packs_are_created_fetched_anonymously_and_deleted_by_token`: creator-only uploads, exact
+      sizes, 409 before every object is there, the creator forgotten, anonymous fetches,
+      token-only deletion;
+    - `the_gif_proxy_hides_who_searches_and_survives_the_provider`: the provider gets exactly
+      six query parameters and three headers; files from other hosts are dropped and HTML is
+      refused; answer and file caches; a tampered token gets 404; 401 without an account; the
+      breaker opens within five failures; the account budget is enforced.
+  - Gate (`gate_p06::a_pack_opens_from_its_link_and_expires_when_unused`): a real encrypted
+    pack, opened from its link alone; gone a year after its last fetch; an unfinished one gone
+    after a day.
+  - Fuzz targets `pack_manifest` and `gif_proxy` (built; they run in the gate's batch).
+- Decision: as PROTOCOL §7.4 and §7.5. GIF defaults:
+  - 300 searches an hour per account, burst 60;
+  - 50 provider requests a second across the cluster;
+  - answers cached 10 minutes, files a day (256 MiB);
+  - files at most 8 MiB;
+  - a 5 s timeout, and a breaker that opens for 30 s after 5 failures.
+- Consequences:
+  - Packs need no account at all once complete. A deleted account's packs live until their year
+    ends, as the owner chose.
+  - GIPHY's key and terms are the owner's before production. `[api.media.gifs]` refuses to start
+    without a key.
+  - A switch to Klipy is a `Provider` adapter and a configuration change (runbook
+    `media.md`).
+  - Revisit: a shared cache across nodes, if GIF traffic grows. Each node's in-memory cache is
+    enough at beta scale.
+
+## D-0082 — Prompt 6, milestone 3: downloads by capability through short-lived signed URLs, explicit fetch confirmation, no caching proxy
+
+- Date: 2026-11-17
+- Status: accepted by the agent under the plan (D-0079 §1 and §5); report `P06-M3.md`. The
+  threat-model §1 row (downloads by capability, IP-range throttle records): **approved by the owner
+  on 2026-11-17** (the gate).
+- Decided by: owner (no device authentication on downloads, D-0079 §1); agent (the URL design,
+  the confirmation, and the proxy by measurement)
+- Context: the prompt asks for:
+  - unguessable object IDs with short-lived signed URLs;
+  - HTTP range requests;
+  - deletion when every recipient device has fetched an attachment, or after 30 days;
+  - a caching proxy if benchmarks justify one.
+
+  Prompt 2 served whole objects to signed device requests, and counted a fetch when the last
+  byte went out.
+- Options considered:
+  - **URLs.** S3 presigned URLs, which would expose RustFS (loopback-only, D-0035), versus
+    Songbird's own HMAC URLs served by `api`. Chosen: Songbird's own. The URL carries the
+    expiry and the size, so a range request costs one MAC check and no database read.
+  - **Counting.** At the last byte (Prompt 2) versus an explicit confirmation. Chosen:
+    explicit. With ranges, the last byte says nothing (players read the end of an MP4 first),
+    and a device should confirm only once it has verified the whole file.
+  - **Proxy.** A caching proxy in front of RustFS, or not.
+- Evidence:
+  - `gate_p06::media_load`: release build, same machine and stack as D-0081. p50 / p99:
+
+    | Measurement | Result |
+    | --- | --- |
+    | 1 MiB, one at a time | grant 4.6 ms; PUT through `api` 58 ms; PUT straight to RustFS 53 ms. Uploads are RustFS's write latency in this VM |
+    | 1 MiB at concurrency 1 | upload (grant + PUT) 64 / 75 ms; download (redirect + GET) 5.0 / 9.1 ms; 36 MB/s each way |
+    | 1 MiB at concurrency 16 | upload 44 / 125 ms; download 9.2 / 13.9 ms; 486 MB/s each way |
+    | 1 MiB at concurrency 64 | upload 136 / 187 ms; download 44 / 56 ms; 684 MB/s each way |
+    | 1 MiB GET at 32 in flight | straight from RustFS 9.1 / 12.1 ms; through `api`'s signed URL 21.8 / 31.3 ms |
+    | 64 MiB | upload in parallel parts 277 MB/s; download 775 MB/s |
+    | 128 KiB ranges at random offsets, 8 in flight | 4.0 / 5.6 ms |
+
+  - Tests:
+    - `media_live::downloads_need_no_account_and_serve_ranges`: unsigned requests; 303; whole
+      file and five kinds of range; 416; ignored ranges; tampered expiry, size, MAC and object,
+      an expired URL and one dated too far ahead all refused; unknown IDs.
+    - `media_live::fetches_are_confirmed_and_the_last_one_deletes`, including the IP-range
+      budget.
+    - `gate_p06`: a real encrypted file through parallel parts; a seek decrypted chunk by
+      chunk; two devices decrypt and confirm, and the last deletes (worker job); 30 days; the
+      abort of an abandoned upload.
+    - Unit tests for ranges and URLs; fuzz target `media_url`.
+- Decision:
+  - **Downloads.**
+    - `GET /v1/attachments/<id>` takes no account and answers 303 to
+      `/v1/media/<id>?e&z&s`: HMAC-SHA256, truncated to 16 bytes, under a key derived from the
+      media secret, valid 10 minutes.
+    - The media path serves one range or the whole object, and the device's cache may keep it
+      until expiry (`private, immutable`).
+    - `POST …/fetched` counts a fetch, and the last one deletes. Redirects and confirmations
+      are budgeted per IP range.
+    - Without `[api.media]`, downloads answer 503. That configuration is development only.
+  - **No caching proxy.** RustFS accounts for about 9 of the 22 ms of a loaded download. Each
+    attachment is read by its recipients only, a few times, so a cache in front of RustFS would
+    rarely hit.
+    - Packs (M4) and GIFs are the only objects read by many. GIFs are cached in `api`'s memory
+      (M4).
+    - Packs get revisited with Prompt 13's numbers on the production hardware.
+- Consequences:
+  - The approved attachment row's "device-signed download" no longer holds. The new §1 row
+    describes what replaces it, for approval.
+  - Prompt 2's tests (`api_live`, `gate_m5`) moved to the redirect and the confirmation, and to
+    legal sizes.
+  - `api`'s avatar serving reuses the same frame adapter (`media::Frames`).
+  - The test client now sets `TCP_NODELAY` like every other client in the tree.
+
+## D-0081 — Prompt 6, milestone 2: grants held to the format and to per-account budgets; resumable uploads in parallel S3 parts (tus measured and removed)
+
+- Date: 2026-11-17
+- Status: accepted by the agent under the plan (D-0079); report `P06-M2.md`. The two
+  threat-model §1 rows (resumable grants up to 24 h; budget records): **approved by the owner
+  on 2026-11-17** (the gate).
+- Decided by: agent (the protocol and the part size by measurement, as D-0079 §5 delegates)
+- Context:
+  - The prompt asks for upload grants bound to an exact padded size and a per-plan limit,
+    resumable chunked uploads to RustFS (S3 multipart or tus, benchmark both), and per-account
+    upload rate and storage quotas.
+  - RustFS is reachable only from Songbird services (D-0035), so every byte passes through
+    `api`.
+- Options considered:
+  - **Quotas.** A storage quota on the bytes held would need a link from objects to accounts,
+    which the approved attachment row rules out. A **rolling volume budget** bounds storage
+    just as well: at most budget × 30 days per account. Chosen, together with a grant-rate
+    budget. Both are GCRA records, keyed, in `valkey-hot`.
+  - **Resumable protocol.** Two options behind the same S3 multipart machinery:
+    - fixed parts: `PUT …/parts/<n>`, `GET …/parts`, `POST …/complete`;
+    - tus 1.0 core: `HEAD` and `PATCH`, the body split into consecutive parts, with
+      `Upload-Offset` moving in whole parts.
+
+    Neither buffers: each part streams straight into an `UploadPart` with its exact length.
+  - **Part size:** 5, 16 or 64 MiB.
+- Evidence:
+  - `media_live::upload_protocols`: release build, Ryzen 9 7950X, Windows 11 Pro 10.0.26300.
+    RustFS 1.0.5, SurrealDB v4.0.1 and Valkey 9.1.3 ran under podman 5 (WSL 2 VM: 4 vCPU,
+    6 GiB), over loopback port forwarding.
+  - One 256 MiB attachment per run; MB/s, median of 5:
+
+    | Part size | Single `PUT` | Parts, 1 at a time | Parts, 4 at a time | tus, one `PATCH` | tus, one `PATCH` per part |
+    | --- | --- | --- | --- | --- | --- |
+    | 5 MiB | 255 | 79 | 288 | 83 | 58 |
+    | 16 MiB | 376 | 157 | 508 | 144 | 156 |
+    | 64 MiB | 297 | 228 | 731 | 223 | 192 |
+
+  - tus is never faster than parts one at a time: it is the same sequence of `UploadPart`s.
+    Parallel parts are 2 to 3.5 times faster, and only the parts protocol can run them.
+  - The cost per part (RustFS commits each part) dominates small parts.
+  - Live tests (`services/api/tests/media_live.rs`, `crates/s3/tests/rustfs_live.rs`,
+    `crates/accounts/tests/registry_live.rs`):
+    - interruptions mid-part and parts out of order;
+    - racing first parts (one upload kept, the other aborted);
+    - early completion refused (409);
+    - another device, a wrong length or a part past the last refused;
+    - reuse after completion refused;
+    - the byte-exact result;
+    - the budgets;
+    - lengths outside the format refused.
+- Decision:
+  - Grants accept only lengths the attachment format produces, up to `max_bytes`, which now
+    defaults to 2 GiB (D-0079).
+  - Budgets per account: 300 grants per hour (burst 60) and 10 GiB per 24 hours, under
+    `[api.media]`. Without that section (development only), there are no budgets.
+  - **Resumable uploads use the parts protocol**, with **16 MiB parts** by default
+    (configurable from 5 to 512 MiB, at most 10,000 parts). This is the best balance between
+    throughput and how much a dropped mobile connection loses.
+  - tus is removed: it never beats parts, adds a second protocol to audit, and needs a
+    body-splitting stream with a lock.
+  - A resumable grant renews for 1 h with each part and lasts at most 24 h
+    (`GRANT_MAX_AGE`). Clients get no longer than that.
+  - The registry records the multipart upload ID on the grant with compare-and-set.
+  - The worker aborts every multipart upload whose grant is gone (`abort_abandoned_uploads`).
+    This covers expiry, completion, device and account deletion, and crashes in one rule, so
+    deletion paths need not track upload IDs.
+- Consequences:
+  - `crates/s3` gains create, upload part, list parts, complete, abort and list uploads, with a
+    bounded parser and a fuzz target (`s3_multipart_xml`).
+  - The grant decoder becomes `songbird_api::media::GrantRequest`, fuzzed as `upload_grant`.
+  - Prompt 2's attachment test now uses a legal length: 4,096 bytes is not one.
+  - Clients that want tus libraries map their chunks to parts.
+  - To revisit with the apps: the part size on real mobile links, and whether more than four
+    parallel parts helps.
+
+## D-0080 — Prompt 6, milestone 1: the attachment format (STREAM, key-committing, Padmé), AES-256-GCM by default
+
+- Date: 2026-11-17
+- Status: accepted by the agent under the plan (D-0079); report `P06-M1.md`
+- Decided by: agent (the AEAD by measurement, as D-0079 §5 delegates)
+- Context: the prompt asks for files encrypted in fixed-size chunks with a streaming AEAD (stream,
+  resume, verify chunk by chunk) and sizes padded into buckets. Prompt 4 left
+  `AttachmentPointer.key` (64 bytes) and `digest` (32 bytes) opaque.
+- Options considered:
+  - Signal's format: AES-CBC with HMAC over the whole file. Nothing can be verified before the
+    end, and it needs a separate incremental MAC to stream.
+  - Per-chunk AEAD with random nonces: reordering and truncation go undetected without extra
+    framing.
+  - **STREAM** (as `age` and Tink's streaming AEAD): positional nonces and a last-chunk flag.
+    Chosen.
+  - Padding: power-of-two buckets (up to 100 % overhead) versus **Padmé** (at most 12 %,
+    O(log log n) bits leaked). Padmé chosen, with a 1 KiB floor so thumbnails all look alike.
+  - AEAD: AES-256-GCM versus ChaCha20-Poly1305, both from aws-lc-rs.
+- Evidence:
+  - `crates/content/tests/attachment_bench.rs`, release build, Ryzen 9 7950X, Windows 11 Pro
+    10.0.26300, aws-lc-sys 0.47 with its prebuilt NASM objects; medians of 9 runs, encrypt and
+    decrypt in MB/s. Both suites are equal at 64 KiB, where key derivation dominates:
+
+    | Size | ChaCha20-Poly1305 | AES-256-GCM |
+    | --- | --- | --- |
+    | 1 MiB | 2,383 / 2,400 | 3,087 / 3,185 |
+    | 64 MiB | 2,246 / 2,501 | 2,950 / 3,413 |
+
+  - Every ARMv8-A phone core has the AES instructions, so the order should hold on phones. The
+    ARM numbers come with the apps.
+  - Tests in `crates/content/tests/attachment.rs` (10, including a proptest):
+    - round trips at every chunk and padding boundary in both suites;
+    - a flipped bit fails at its chunk; swapped chunks, truncation, a lying size and trailing
+      bytes are refused;
+    - a wrong key, salt, digest or version byte is refused before any chunk (no downgrade
+      between suites);
+    - non-zero padding is refused;
+    - chunks open in any order.
+  - `crates/proto` checks the size arithmetic exhaustively up to 4 MiB (every legal length
+    inverts, every other length is refused) and with proptests to 1 TiB.
+  - Vectors reproduced independently by `tools/attachment-vectors/check.mjs` (Node.js 26,
+    OpenSSL 3.5).
+  - Fuzz target `attachment_decrypt` (built; run with the gate's fuzz batch).
+- Decision:
+  - The format in PROTOCOL §7.1: HKDF-SHA256 from the 64-byte pointer key and a 32-byte header
+    salt to a chunk key and a 32-byte key commitment (the pointer's `digest`); STREAM over
+    64 KiB chunks; Padmé padding of zeros; version byte `1` (ChaCha20-Poly1305) or `2`
+    (AES-256-GCM).
+  - Apps write `2`, and readers accept both.
+  - `digest` changes meaning from "SHA-256 of the object" (Prompt 4's comment) to the key
+    commitment. No app has shipped, and the published content vectors keep their bytes.
+  - The sizes live in `songbird_proto::media`, so `api` can refuse grants for lengths the
+    format never produces without linking `songbird-content`.
+- Consequences:
+  - `songbird-content` now depends on `songbird-proto` and `zeroize` (both already in the tree).
+  - `crates/client` cannot link `songbird-content` (`no_service_links_content` covers every
+    crate), so the plan's "client streaming encrypt" lives in `songbird-content`. The client
+    gets the transport side (resumable upload, ranged download) in M2 and M3.
+  - On this machine, aws-lc-sys builds with `AWS_LC_SYS_PREBUILT_NASM=1`, because NASM is not
+    installed. CI is unaffected.
+
+## D-0079 — Prompt 6: the plan, and the owner's decisions it needs
+
+- Date: 2026-11-17
+- Status: accepted (owner, 2026-11-17, every recommendation)
+- Decided by: owner, on the agent's plan `docs/reports/P06-plan.md`
+- Context: Prompt 2 (D-0036) built single-use, exact-size grants, uploads streamed to RustFS and
+  deletion after the last fetch or 30 days. Prompt 6 adds a chunked encryption format, resumable
+  uploads, range downloads, packs and a GIF proxy. RustFS is reachable only from Songbird
+  services (D-0035), so signed URLs are Songbird's own. Downloads are signed by a device today.
+  Tenor's API closed on 2026-06-30.
+- Options considered and evidence: in the plan ("Findings").
+- Decisions (the agent's recommendations, all accepted by the owner):
+  1. Downloads without device authentication: the object ID is the capability; a 10-minute
+     signed URL serves range requests; fetches confirmed explicitly.
+  2. 2 GiB per attachment; 10 GiB uploaded per account per 24 hours; 300 grants per hour.
+  3. Packs with no account link, deleted by a management token or a year after the last fetch;
+     200 assets and 300 MiB each.
+  4. GIPHY behind a provider trait; `api` proxies search and images and never stores queries.
+  5. Benchmarks decide AES-256-GCM versus ChaCha20-Poly1305, resumable parts versus tus, and a
+     caching proxy.
+  6. One branch and one PR for every milestone (the owner, 2026-11-17).
+- Consequences: downloads stop naming devices (the attachment row in threat model §1 changes, for
+  approval with M3); the attachment limit rises to 2 GiB; packs are anonymous; GIPHY's API key
+  and terms are the owner's before deployment; M1 starts.
 
 ## D-0078 — Prompt 5 follow-ups: the security review's fixes
 

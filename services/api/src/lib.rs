@@ -17,9 +17,7 @@
 //! | `GET /v1/devices`; `PUT /v1/devices/list`; `POST /v1/devices/list/fetch`; `DELETE /v1/devices/self` | The signed device list and removal ([`devices`]) |
 //! | `PUT /v1/push` | Registers the device's push channel, sealed to the push service's key |
 //! | `DELETE /v1/push` | Removes it |
-//! | `POST /v1/attachments` | An upload grant: exact (padded) size and recipient fetches due |
-//! | `PUT /v1/attachments/<id>` | The upload, streamed to `RustFS`; exactly the granted size |
-//! | `GET /v1/attachments/<id>` | A download; each completed one counts a fetch, the last deletes |
+//! | `/v1/attachments…` | Grants, single and resumable uploads, downloads ([`media`]) |
 //! | `DELETE /v1/account` | Deletes the device's account from every store (outbox job; the primary only) |
 //! | `GET /v1/account/export`; `PUT /v1/account/inactivity` | GDPR export; the inactivity period (the primary only) |
 //! | `PUT /v1/messages` | A WebSocket `Send` frame, for clients with no open socket; answers its `SendResult` ([`messages`]) |
@@ -38,10 +36,13 @@ pub mod client;
 pub mod communities;
 pub mod config;
 pub mod devices;
+pub mod gifs;
 pub mod groups;
 pub mod keys;
 pub mod kt;
+pub mod media;
 pub mod messages;
+pub mod packs;
 pub mod profiles;
 pub mod registration;
 pub mod reports;
@@ -49,21 +50,17 @@ pub mod requests;
 pub mod server;
 pub mod usernames;
 
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
-use std::time::Duration;
 
 use bytes::Bytes;
-use futures_core::Stream;
 use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt as _, Empty, Full, Limited, StreamBody};
-use hyper::body::{Frame, Incoming};
+use hyper::body::Incoming;
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderValue};
 use hyper::{Method, Request, Response, StatusCode};
 use serde::Deserialize;
 use songbird_accounts::push_token::{self, Registration};
-use songbird_accounts::{Grant, Registry, push_index};
+use songbird_accounts::{Registry, push_index};
 use songbird_jobs::{Job, ObjectKey, Queue, Work};
 use songbird_service::telemetry::sharded::ShardedCounter as Counter;
 use songbird_types::{AccountId, DeviceId};
@@ -112,6 +109,8 @@ pub struct ApiMetrics {
     pub blocks: requests::RequestsMetrics,
     /// Reports.
     pub reports: reports::ReportMetrics,
+    /// Media (Prompt 6).
+    pub media: media::MediaMetrics,
 }
 
 impl ApiMetrics {
@@ -171,6 +170,7 @@ impl ApiMetrics {
         self.profiles.register(m)?;
         self.blocks.register(m)?;
         self.reports.register(m)?;
+        self.media.register(m)?;
         self.send.register(m, "api")
     }
 }
@@ -193,6 +193,8 @@ pub struct App {
     pub push_index_secret: [u8; 32],
     /// Attachment limits.
     pub limits: config::AttachmentLimits,
+    /// `[api.media]` (Prompt 6): upload budgets; `None` only in development.
+    pub media: Option<media::Media>,
     /// Metrics.
     pub metrics: ApiMetrics,
     /// `PUT /v1/messages` (absent: the endpoint answers 503).
@@ -292,53 +294,6 @@ impl PushBody {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GrantBody {
-    size: u64,
-    fetches: u32,
-}
-
-/// A download that counts its fetch once the whole object went out. hyper stops polling a body
-/// once it has sent `Content-Length` bytes, so the end is the last byte, not the end of stream.
-struct Counted {
-    inner: songbird_s3::ObjectBody,
-    left: u64,
-    on_done: Option<Box<dyn FnOnce() + Send>>,
-}
-
-impl Stream for Counted {
-    type Item = Result<Frame<Bytes>, std::io::Error>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.inner).poll_next(cx) {
-            Poll::Ready(Some(Ok(b))) => {
-                self.left = self
-                    .left
-                    .saturating_sub(u64::try_from(b.len()).unwrap_or(u64::MAX));
-                if self.left == 0
-                    && let Some(f) = self.on_done.take()
-                {
-                    f();
-                }
-                Poll::Ready(Some(Ok(Frame::data(b))))
-            }
-            Poll::Ready(Some(Err(_))) => {
-                // An interrupted download is not a fetch.
-                self.on_done = None;
-                Poll::Ready(Some(Err(std::io::Error::other("object store"))))
-            }
-            Poll::Ready(None) => {
-                if let Some(f) = self.on_done.take() {
-                    f();
-                }
-                Poll::Ready(None)
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
 /// Why a request was refused before its handler ran.
 enum Refusal {
     Status(StatusCode),
@@ -364,16 +319,24 @@ impl App {
     async fn route(self: &Arc<Self>, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
         let path = req.uri().path().to_owned();
         let method = req.method().clone();
-        let object = path
-            .strip_prefix("/v1/attachments/")
-            .map(|id| ObjectKey::parse_hex(id).ok_or(Refusal::Status(StatusCode::NOT_FOUND)))
-            .transpose()?;
-        match (&method, path.as_str(), object) {
-            (&Method::PUT, "/v1/push", None) => {
+        if path == "/v1/attachments" || path.starts_with("/v1/attachments/") {
+            return media::route(self, req).await;
+        }
+        if path.starts_with("/v1/media/") {
+            return media::serve(self, req).await;
+        }
+        if path == "/v1/packs" || path.starts_with("/v1/packs/") {
+            return packs::route(self, req).await;
+        }
+        if path.starts_with("/v1/gifs/") {
+            return gifs::route(self, req).await;
+        }
+        match (&method, path.as_str()) {
+            (&Method::PUT, "/v1/push") => {
                 let (device, body) = self.authenticate_json(req).await?;
                 self.put_push(device, &body).await
             }
-            (&Method::DELETE, "/v1/push", None) => {
+            (&Method::DELETE, "/v1/push") => {
                 let (device, _) = self.authenticate_json(req).await?;
                 self.registry
                     .delete_push_tokens(&[push_index(&self.push_index_secret, &device)])
@@ -381,21 +344,12 @@ impl App {
                     .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
                 Ok(empty(StatusCode::NO_CONTENT))
             }
-            (&Method::POST, "/v1/attachments", None) => {
-                let (device, body) = self.authenticate_json(req).await?;
-                self.grant(device, &body).await
-            }
-            (&Method::PUT, _, Some(o)) => self.upload(req, o).await,
-            (&Method::GET, _, Some(o)) => {
-                let (_, _) = self.authenticate_json(req).await?;
-                self.download(o).await
-            }
-            (&Method::DELETE, "/v1/account", None) => {
+            (&Method::DELETE, "/v1/account") => {
                 let (device, _) = self.authenticate_json(req).await?;
                 self.delete_account(device).await
             }
-            (&Method::PUT, "/v1/messages", None) => self.put_message(req).await,
-            (_, p, None)
+            (&Method::PUT, "/v1/messages") => self.put_message(req).await,
+            (_, p)
                 if p == "/v1/messages/sealed"
                     || p == "/v1/certificate"
                     || p == "/v1/profile"
@@ -403,11 +357,11 @@ impl App {
             {
                 self.profiles(req).await
             }
-            (&Method::POST, "/v1/registration/challenge", None) => {
+            (&Method::POST, "/v1/registration/challenge") => {
                 let (r, peer) = self.registration_and_peer(&req)?;
                 Ok(outcome(r.challenge(&self.hot, peer).await))
             }
-            (&Method::POST, "/v1/registration", None) => {
+            (&Method::POST, "/v1/registration") => {
                 let (r, peer) = self.registration_and_peer(&req)?;
                 let body = bounded_body(req, songbird_proto::registration::MAX_LEN).await?;
                 Ok(outcome(
@@ -415,19 +369,17 @@ impl App {
                         .await,
                 ))
             }
-            (&Method::POST | &Method::GET | &Method::DELETE, "/v1/invites", None) => {
+            (&Method::POST | &Method::GET | &Method::DELETE, "/v1/invites") => {
                 self.invites(req).await
             }
-            (_, p, None) if p == "/v1/username" || p.starts_with("/v1/username/") => {
+            (_, p) if p == "/v1/username" || p.starts_with("/v1/username/") => {
                 self.usernames(req).await
             }
-            (
-                _,
-                "/v1/keys" | "/v1/keys/fetch" | "/v1/keypackages" | "/v1/keypackages/fetch",
-                None,
-            ) => self.keys(req).await,
-            (_, "/v1/blocks" | "/v1/account/requests", None) => self.requests(req).await,
-            (&Method::POST, "/v1/reports", None) => self.report(req).await,
+            (_, "/v1/keys" | "/v1/keys/fetch" | "/v1/keypackages" | "/v1/keypackages/fetch") => {
+                self.keys(req).await
+            }
+            (_, "/v1/blocks" | "/v1/account/requests") => self.requests(req).await,
+            (&Method::POST, "/v1/reports") => self.report(req).await,
             (
                 &Method::POST,
                 "/v1/groups"
@@ -450,11 +402,10 @@ impl App {
                 | "/v1/communities/meta"
                 | "/v1/communities/state"
                 | "/v1/communities/delete",
-                None,
             ) => self.groups(req).await,
-            (_, p, None) if p.starts_with("/v1/account/") => self.factors(req).await,
-            (_, p, None) if p.starts_with("/v1/kt/") => self.kt(req).await,
-            (_, p, None) if p.starts_with("/v1/provisioning") || p.starts_with("/v1/devices") => {
+            (_, p) if p.starts_with("/v1/account/") => self.factors(req).await,
+            (_, p) if p.starts_with("/v1/kt/") => self.kt(req).await,
+            (_, p) if p.starts_with("/v1/provisioning") || p.starts_with("/v1/devices") => {
                 self.devices(req).await
             }
             _ => Err(Refusal::Status(StatusCode::NOT_FOUND)),
@@ -614,12 +565,7 @@ impl App {
             }
             Err(_) => return Err(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE)),
         };
-        let counted = Counted {
-            inner: got.body,
-            left: got.length,
-            on_done: None,
-        };
-        let mut r = Response::new(StreamBody::new(counted).boxed_unsync());
+        let mut r = Response::new(StreamBody::new(media::Frames(got.body)).boxed_unsync());
         r.headers_mut().insert(
             CONTENT_TYPE,
             HeaderValue::from_static("application/octet-stream"),
@@ -1385,140 +1331,6 @@ impl App {
         Ok(empty(StatusCode::NO_CONTENT))
     }
 
-    async fn grant(&self, device: DeviceId, body: &[u8]) -> Result<Response<Body>, Refusal> {
-        let g: GrantBody =
-            serde_json::from_slice(body).map_err(|_| Refusal::Status(StatusCode::BAD_REQUEST))?;
-        if g.size == 0
-            || g.size > self.limits.max_bytes
-            || g.fetches == 0
-            || g.fetches > self.limits.max_fetches
-        {
-            return Err(Refusal::Status(StatusCode::BAD_REQUEST));
-        }
-        let object =
-            ObjectKey::random().map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
-        self.registry
-            .create_grant(
-                &object,
-                &Grant {
-                    device,
-                    size: g.size,
-                    fetches: g.fetches,
-                },
-                Duration::from_secs(self.limits.grant_ttl_secs),
-            )
-            .await
-            .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
-        Ok(json(
-            StatusCode::CREATED,
-            &serde_json::json!({ "id": object.to_hex_unredacted() }),
-        ))
-    }
-
-    async fn upload(
-        &self,
-        req: Request<Incoming>,
-        object: ObjectKey,
-    ) -> Result<Response<Body>, Refusal> {
-        let (parts, body) = req.into_parts();
-        // The body is the client's own ciphertext: unsigned, held to the granted length.
-        let device = self
-            .verify(&parts.method, parts.uri.path(), &parts.headers, &[0; 32])
-            .await?;
-        let grant = self
-            .registry
-            .grant(&object)
-            .await
-            .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?
-            .filter(|g| g.device == device)
-            .ok_or(Refusal::Status(StatusCode::NOT_FOUND))?;
-        let length = parts
-            .headers
-            .get(CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok());
-        if length != Some(grant.size) {
-            return Err(Refusal::Status(StatusCode::BAD_REQUEST));
-        }
-        let stream = body.into_data_stream();
-        match self
-            .s3
-            .put_object(&object_name(&object), grant.size, stream)
-            .await
-        {
-            Ok(()) => {}
-            Err(songbird_s3::Error::LengthMismatch | songbird_s3::Error::BodySource) => {
-                return Err(Refusal::Status(StatusCode::BAD_REQUEST));
-            }
-            Err(_) => return Err(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE)),
-        }
-        let done = self
-            .registry
-            .complete_upload(&object)
-            .await
-            .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
-        if !done {
-            // The grant expired while uploading: the object has no record; remove it.
-            let _ = self.s3.delete_object(&object_name(&object)).await;
-            return Err(Refusal::Status(StatusCode::NOT_FOUND));
-        }
-        self.metrics.uploads.inc();
-        Ok(empty(StatusCode::CREATED))
-    }
-
-    async fn download(self: &Arc<Self>, object: ObjectKey) -> Result<Response<Body>, Refusal> {
-        // Any authenticated device that knows the 256-bit ID may fetch it (the ID travels inside
-        // the end-to-end encrypted message); the record says whether fetches are still due.
-        if self
-            .registry
-            .attachment(&object)
-            .await
-            .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?
-            .is_none()
-        {
-            return Err(Refusal::Status(StatusCode::NOT_FOUND));
-        }
-        let got = match self.s3.get_object(&object_name(&object), None).await {
-            Ok(g) => g,
-            Err(songbird_s3::Error::NotFound) => {
-                return Err(Refusal::Status(StatusCode::NOT_FOUND));
-            }
-            Err(_) => return Err(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE)),
-        };
-        let app = Arc::clone(self);
-        let counted = Counted {
-            inner: got.body,
-            left: got.length,
-            on_done: Some(Box::new(move || {
-                tokio::spawn(async move { app.count_fetch(object).await });
-            })),
-        };
-        let mut r = Response::new(StreamBody::new(counted).boxed_unsync());
-        r.headers_mut().insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static("application/octet-stream"),
-        );
-        r.headers_mut()
-            .insert(CONTENT_LENGTH, HeaderValue::from(got.length));
-        Ok(r)
-    }
-
-    async fn count_fetch(&self, object: ObjectKey) {
-        self.metrics.downloads.inc();
-        match self.registry.count_fetch(&object).await {
-            // The last fetch: delete it now (the worker's sweep catches a lost job).
-            Ok(Some(0)) => {
-                if let Ok(job) = Job::new(Work::DeleteObject { object })
-                    && self.queue.enqueue(&[job]).await.is_err()
-                {
-                    tracing::warn!("cleanup job not queued; the sweep will delete the object");
-                }
-            }
-            Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "fetch not counted"),
-        }
-    }
-
     async fn delete_account(&self, device: DeviceId) -> Result<Response<Body>, Refusal> {
         // Only the primary may delete the account (D-0052): a linked device, above all a pending
         // one the primary has not vouched for, could otherwise delete it irreversibly.
@@ -1805,6 +1617,16 @@ pub fn object_name(o: &ObjectKey) -> String {
     name.push_str("a/");
     name.push_str(&o.to_hex_unredacted());
     name
+}
+
+/// 429 with `Retry-After` in whole seconds (at least one) for a wait in microseconds.
+fn retry_after(wait_us: u64) -> Response<Body> {
+    let mut r = empty(StatusCode::TOO_MANY_REQUESTS);
+    let secs = wait_us.div_ceil(1_000_000).max(1);
+    if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
+        r.headers_mut().insert(hyper::header::RETRY_AFTER, v);
+    }
+    r
 }
 
 #[cfg(test)]

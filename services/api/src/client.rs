@@ -109,6 +109,37 @@ impl ApiClient {
         self.exchange(b, body).await
     }
 
+    /// A request whose body is not signed (uploads, parts, tus), with extra headers; returns the
+    /// status, the response headers and the body. A `GET` or `HEAD` sends no body.
+    ///
+    /// # Errors
+    /// Connection or protocol failure.
+    pub async fn upload_with(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, String)],
+        body: Bytes,
+    ) -> Result<(u16, hyper::HeaderMap, Bytes), hyper::Error> {
+        let (authz, _) = auth::sign(
+            &self.key,
+            &self.device,
+            &self.server_name,
+            method,
+            path,
+            None,
+        );
+        let mut b = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", &self.server_name)
+            .header(auth::AUTHORIZATION, authz);
+        for (n, v) in headers {
+            b = b.header(*n, v.as_str());
+        }
+        exchange_full(self.addr, b, body).await
+    }
+
     /// Sends a prepared request as it is (tests replay or tamper with headers).
     ///
     /// # Errors
@@ -164,6 +195,28 @@ pub async fn unsigned(
     exchange(addr, b, body).await
 }
 
+/// As [`exchange`], with the response headers.
+async fn exchange_full(
+    addr: SocketAddr,
+    b: hyper::http::request::Builder,
+    body: Bytes,
+) -> Result<(u16, hyper::HeaderMap, Bytes), hyper::Error> {
+    let Ok(tcp) = tokio::net::TcpStream::connect(addr).await else {
+        return Ok((0, hyper::HeaderMap::new(), Bytes::new()));
+    };
+    let _ = tcp.set_nodelay(true);
+    let (mut send, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await?;
+    tokio::spawn(conn);
+    let Ok(req) = b.body(Full::new(body)) else {
+        return Ok((0, hyper::HeaderMap::new(), Bytes::new()));
+    };
+    let resp = send.send_request(req).await?;
+    let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
+    let bytes = resp.into_body().collect().await?.to_bytes();
+    Ok((status, headers, bytes))
+}
+
 async fn exchange(
     addr: SocketAddr,
     b: hyper::http::request::Builder,
@@ -173,6 +226,7 @@ async fn exchange(
     let Ok(tcp) = tokio::net::TcpStream::connect(addr).await else {
         return Ok((0, Bytes::new()));
     };
+    let _ = tcp.set_nodelay(true);
     let (mut send, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await?;
     tokio::spawn(conn);
     let Ok(req) = b.body(Full::new(body)) else {
@@ -337,4 +391,69 @@ impl Registrar {
             None => Registered::Refused((status, body)),
         })
     }
+}
+
+/// An unsigned request with extra headers, returning the status, the response headers and the
+/// body (downloads by capability and signed media URLs, Prompt 6).
+///
+/// # Errors
+/// Connection or protocol failure.
+pub async fn unsigned_full(
+    addr: SocketAddr,
+    server_name: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, String)],
+) -> Result<(u16, hyper::HeaderMap, Bytes), hyper::Error> {
+    let mut b = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", server_name);
+    for (n, v) in headers {
+        b = b.header(*n, v.as_str());
+    }
+    exchange_full(addr, b, Bytes::new()).await
+}
+
+/// As [`unsigned_full`], from a chosen local address (tests: two recipients on 127.0.0.1 and
+/// 127.0.0.2 are two sources).
+///
+/// # Errors
+/// Connection or protocol failure.
+pub async fn unsigned_from(
+    addr: SocketAddr,
+    local: std::net::IpAddr,
+    server_name: &str,
+    method: &str,
+    path: &str,
+) -> Result<(u16, hyper::HeaderMap, Bytes), hyper::Error> {
+    let socket = match local {
+        std::net::IpAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
+        std::net::IpAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
+    };
+    let Ok(socket) = socket else {
+        return Ok((0, hyper::HeaderMap::new(), Bytes::new()));
+    };
+    if socket.bind(SocketAddr::new(local, 0)).is_err() {
+        return Ok((0, hyper::HeaderMap::new(), Bytes::new()));
+    }
+    let Ok(tcp) = socket.connect(addr).await else {
+        return Ok((0, hyper::HeaderMap::new(), Bytes::new()));
+    };
+    let _ = tcp.set_nodelay(true);
+    let (mut send, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await?;
+    tokio::spawn(conn);
+    let Ok(req) = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", server_name)
+        .body(Full::new(Bytes::new()))
+    else {
+        return Ok((0, hyper::HeaderMap::new(), Bytes::new()));
+    };
+    let resp = send.send_request(req).await?;
+    let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
+    let bytes = resp.into_body().collect().await?.to_bytes();
+    Ok((status, headers, bytes))
 }

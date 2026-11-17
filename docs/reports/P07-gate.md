@@ -4,7 +4,7 @@
 - Prompt: [07-calls.md](../prompts/07-calls.md); plan [P07-plan.md](P07-plan.md) (D-0085)
 - Milestones: [M1](P07-M1.md) (D-0086), [M2](P07-M2.md) (D-0087), [M3](P07-M3.md) (D-0088),
   [M4](P07-M4.md) (D-0089), [M5](P07-M5.md) (D-0090); the security review's fixes (D-0091)
-- Branch `claude/p07-calls`, one PR. Status: **waiting for the owner.**
+- Branch `claude/p07-calls`, PR #62. Status: **waiting for the owner.**
 
 ## The gate, item by item
 

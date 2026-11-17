@@ -20,7 +20,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
-- Prompt 7 gate (`P07-gate.md`, D-0086 to D-0091): **waiting for the owner**: M1 to M5 and the
+- Prompt 7 gate (`P07-gate.md`, D-0086 to D-0091; PR #62): **waiting for the owner**: M1 to M5 and the
   security review's fixes; nine threat-model §1 rows (a live 1:1 call with its two accounts for at
   most 24 h, a live group call, LiveKit's state, call budgets, the LiveKit secret, call links,
   lobbies, webhook marks, the deny set). Before production: the `calls.` and `turn.` names, their

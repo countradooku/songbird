@@ -13,12 +13,12 @@
         ethernets:
           eth0:
             addresses: ["{{ turn_ip }}/32"]
-  register: turn_netplan
   when: turn_ip | default("", true)
+  notify: Apply netplan
 
-- name: Apply the TURN address
-  ansible.builtin.command: netplan apply
-  when: turn_netplan is changed
+# LiveKit binds TURN to that address below: apply it now, not at the end of the play.
+- name: Apply the TURN address before LiveKit starts
+  ansible.builtin.meta: flush_handlers
 
 - name: LiveKit's Valkey directory
   ansible.builtin.file:

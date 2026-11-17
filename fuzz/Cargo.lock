@@ -4518,7 +4518,9 @@ version = "0.1.0"
 dependencies = [
  "aws-lc-rs",
  "prost",
+ "songbird-proto",
  "thiserror 2.0.21",
+ "zeroize",
 ]
 
 [[package]]

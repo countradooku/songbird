@@ -19,6 +19,7 @@
 //! pins, timers and message status, all independent of arrival order.
 #![forbid(unsafe_code)]
 
+pub mod attachment;
 pub mod schema;
 pub mod state;
 pub mod validate;

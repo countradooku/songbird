@@ -126,12 +126,12 @@ message Quote {
   AttachmentPointer thumbnail = 4;
 }
 
-// Attachments are encrypted and uploaded by the client (Prompt 6 extends this message).
+// Attachments are encrypted and uploaded by the client in the attachment format (PROTOCOL §7.1).
 message AttachmentPointer {
-  bytes object_id = 1;     // 32 bytes (PROTOCOL §3, upload grants)
-  bytes key = 2;           // 64 bytes: AES-256 key || HMAC-SHA256 key
-  bytes digest = 3;        // 32 bytes: SHA-256 of the encrypted object
-  uint64 size = 4;         // plaintext size in bytes
+  bytes object_id = 1;     // 32 bytes (PROTOCOL §7.2, upload grants)
+  bytes key = 2;           // 64 random bytes: the format's input key (PROTOCOL §7.1)
+  bytes digest = 3;        // 32 bytes: the format's key commitment (PROTOCOL §7.1)
+  uint64 size = 4;         // plaintext size in bytes (the padding after it must be zeros)
   string content_type = 5; // at most 128 bytes
   string file_name = 6;    // at most 256 bytes
   uint32 width = 7;

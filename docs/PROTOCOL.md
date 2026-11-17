@@ -1590,6 +1590,61 @@ delivery service proposes that removal itself, as the group's MLS external sende
 
 ## 7. Attachments and packs (Prompt 6)
 
+The server holds only ciphertext. It never parses media. It checks sizes and grants and counts
+fetches (D-0079 to D-0084).
+
+### 7.1 The attachment format (M1, D-0080)
+
+Apps encrypt every attachment, thumbnail and pack asset like this. The reference implementation
+is `songbird_content::attachment`; the sizes are `songbird_proto::media`.
+
+- **Inputs:**
+  - a fresh 64-byte random key (`AttachmentPointer.key`);
+  - a fresh 32-byte random salt;
+  - the plaintext of `n` bytes.
+
+  Forwarding encrypts again under a new key and salt and uploads a new object. Reusing an object
+  ID would let the server link two messages.
+- **Keys:** `HKDF-SHA256(salt = salt, ikm = key, info = "songbird.v1/attachment\0" ‖ version, 64)`.
+  - The first 32 bytes are the chunk key.
+  - The last 32 bytes are the **key commitment**, sent as `AttachmentPointer.digest`.
+  - Readers compare the commitment in constant time before opening any chunk. This makes the
+    format key-committing: one object cannot open to two different files under two keys.
+- **Version byte (the suite):**
+  - `1`: ChaCha20-Poly1305 (RFC 8439);
+  - `2`: AES-256-GCM, which apps write by default (D-0080: about 30 % faster than
+    ChaCha20-Poly1305 on x86 with AES-NI).
+
+  Readers accept both, so a device without AES hardware may write `1`. Any other value is
+  refused.
+- **Padding:** the plaintext is followed by zeros up to `padded = padme(max(n, 1024))`.
+  - Padmé (PURBs, PETS 2019) costs at most 12 % and leaves O(log log n) bits of the size.
+  - `n` itself travels only in the encrypted pointer (`size`).
+  - Readers refuse padding that is not all zeros.
+- **Chunks:** the padded plaintext is cut into 65,536-byte chunks. The last chunk may be shorter
+  and is never empty, so `k = max(1, ⌈padded / 65,536⌉)`.
+  - Chunk `i` is sealed with nonce `00 00 00 ‖ be64(i) ‖ last`, where `last` is `01` for chunk
+    `k − 1` and `00` otherwise, and an empty AAD.
+  - This is the STREAM construction (Hoang, Reyhanitabar, Rogaway, Vizár; as in `age`). A
+    reordered, dropped, truncated or extended chunk fails at that chunk.
+- **Layout:** `version (1) ‖ salt (32) ‖ chunk₀ ‖ tag₀ ‖ … ‖ chunkₖ₋₁ ‖ tagₖ₋₁`.
+  - Total length: `33 + padded + 16k`.
+  - Chunk `i` starts at byte `33 + i × 65,552`. Range requests fetch whole chunks, plus the
+    33-byte header once.
+- **What the server checks:** an upload grant is only issued for a length the format produces.
+  `songbird_proto::media::padded_from_ciphertext` recognises such a length and refuses every
+  other, so an uploader cannot choose an exact size.
+
+Test vectors (§13) are in `crates/content/vectors/attachment/v1.txt`:
+
+- key 64 × `11`, salt 32 × `22`, plaintext byte `i` = `i mod 256`;
+- each suite at 0, 5 and 70,000 bytes;
+- each line has: version, `n`, ciphertext length, commitment, SHA-256 of the ciphertext, and the
+  ciphertext's first 32 bytes after the header.
+
+`tools/attachment-vectors/check.mjs` reproduces every line with Node.js's OpenSSL, from this
+section rather than the Rust code.
+
 ## 8. Calls and the call key schedule (Prompt 7)
 
 ## 9. Push (Prompt 8)
@@ -1732,3 +1787,10 @@ independently with Python's `hmac` and `hashlib`: secret 32 × `46`, commitment 
 1,800,000,000,000 ms, sender 16 × `0a`, recipient 16 × `0b`. The key ID is
 `3df2c8855889e63b` and the tag is
 `114c33cc2b8f1a5e0ad8943b34ebb738c10f3397504e858b44b8e06e45a8b3b6`.
+
+Attachments (Prompt 6, D-0080): `crates/content/vectors/attachment/v1.txt`, described in §7.1,
+checked by `crates/content/tests/attachment.rs` and independently by
+`tools/attachment-vectors/check.mjs` (Node.js and OpenSSL). For example, AES-256-GCM (version 2)
+over the empty file gives the commitment
+`4d3849c61240da287ae2a50f294f8ca593a037dc678a57f7846e425936206aac` and a 1,073-byte ciphertext
+with SHA-256 `fc5c71776298012c8c116848d978cc7068a420c207ca7824f6891f5c70969cb5`.

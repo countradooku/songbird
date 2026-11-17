@@ -8,9 +8,13 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
+# The attachment format's sizes are the server's grant arithmetic (Prompt 6, D-0080).
+songbird-proto.workspace = true
 aws-lc-rs.workspace = true
 prost.workspace = true
 thiserror.workspace = true
+# Wipes attachment keys and plaintext buffers (Prompt 6, D-0080).
+zeroize.workspace = true
 
 [dev-dependencies]
 hex.workspace = true

@@ -127,6 +127,67 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0080 — Prompt 6, milestone 1: the attachment format (STREAM, key-committing, Padmé), AES-256-GCM by default
+
+- Date: 2026-11-17
+- Status: accepted by the agent under the plan (D-0079); report `P06-M1.md`
+- Decided by: agent (the AEAD by measurement, as D-0079 §5 delegates)
+- Context: the prompt asks for files encrypted in fixed-size chunks with a streaming AEAD (stream,
+  resume, verify chunk by chunk) and sizes padded into buckets. Prompt 4 left
+  `AttachmentPointer.key` (64 bytes) and `digest` (32 bytes) opaque.
+- Options considered:
+  - Signal's format: AES-CBC with HMAC over the whole file. Nothing can be verified before the
+    end, and it needs a separate incremental MAC to stream.
+  - Per-chunk AEAD with random nonces: reordering and truncation go undetected without extra
+    framing.
+  - **STREAM** (as `age` and Tink's streaming AEAD): positional nonces and a last-chunk flag.
+    Chosen.
+  - Padding: power-of-two buckets (up to 100 % overhead) versus **Padmé** (at most 12 %,
+    O(log log n) bits leaked). Padmé chosen, with a 1 KiB floor so thumbnails all look alike.
+  - AEAD: AES-256-GCM versus ChaCha20-Poly1305, both from aws-lc-rs.
+- Evidence:
+  - `crates/content/tests/attachment_bench.rs`, release build, Ryzen 9 7950X, Windows 11 Pro
+    10.0.26300, aws-lc-sys 0.47 with its prebuilt NASM objects; medians of 9 runs, encrypt and
+    decrypt in MB/s. Both suites are equal at 64 KiB, where key derivation dominates:
+
+    | Size | ChaCha20-Poly1305 | AES-256-GCM |
+    | --- | --- | --- |
+    | 1 MiB | 2,383 / 2,400 | 3,087 / 3,185 |
+    | 64 MiB | 2,246 / 2,501 | 2,950 / 3,413 |
+
+  - Every ARMv8-A phone core has the AES instructions, so the order should hold on phones. The
+    ARM numbers come with the apps.
+  - Tests in `crates/content/tests/attachment.rs` (10, including a proptest):
+    - round trips at every chunk and padding boundary in both suites;
+    - a flipped bit fails at its chunk; swapped chunks, truncation, a lying size and trailing
+      bytes are refused;
+    - a wrong key, salt, digest or version byte is refused before any chunk (no downgrade
+      between suites);
+    - non-zero padding is refused;
+    - chunks open in any order.
+  - `crates/proto` checks the size arithmetic exhaustively up to 4 MiB (every legal length
+    inverts, every other length is refused) and with proptests to 1 TiB.
+  - Vectors reproduced independently by `tools/attachment-vectors/check.mjs` (Node.js 26,
+    OpenSSL 3.5).
+  - Fuzz target `attachment_decrypt` (built; run with the gate's fuzz batch).
+- Decision:
+  - The format in PROTOCOL §7.1: HKDF-SHA256 from the 64-byte pointer key and a 32-byte header
+    salt to a chunk key and a 32-byte key commitment (the pointer's `digest`); STREAM over
+    64 KiB chunks; Padmé padding of zeros; version byte `1` (ChaCha20-Poly1305) or `2`
+    (AES-256-GCM).
+  - Apps write `2`, and readers accept both.
+  - `digest` changes meaning from "SHA-256 of the object" (Prompt 4's comment) to the key
+    commitment. No app has shipped, and the published content vectors keep their bytes.
+  - The sizes live in `songbird_proto::media`, so `api` can refuse grants for lengths the
+    format never produces without linking `songbird-content`.
+- Consequences:
+  - `songbird-content` now depends on `songbird-proto` and `zeroize` (both already in the tree).
+  - `crates/client` cannot link `songbird-content` (`no_service_links_content` covers every
+    crate), so the plan's "client streaming encrypt" lives in `songbird-content`. The client
+    gets the transport side (resumable upload, ranged download) in M2 and M3.
+  - On this machine, aws-lc-sys builds with `AWS_LC_SYS_PREBUILT_NASM=1`, because NASM is not
+    installed. CI is unaffected.
+
 ## D-0079 — Prompt 6: the plan, and the owner's decisions it needs
 
 - Date: 2026-11-17

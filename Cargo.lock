@@ -4817,7 +4817,9 @@ dependencies = [
  "proptest",
  "prost",
  "serde_json",
+ "songbird-proto",
  "thiserror 2.0.21",
+ "zeroize",
 ]
 
 [[package]]

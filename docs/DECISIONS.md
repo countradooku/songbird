@@ -20,7 +20,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
-- Prompt 7 gate (`P07-gate.md`, D-0086 to D-0091; PR #62): **waiting for the owner**: M1 to M5 and the
+- Prompt 7 gate (`P07-gate.md`, D-0086 to D-0091; PR #62): **approved by the owner on 2026-11-17**
+  ("all green you can merge"): M1 to M5 and the
   security review's fixes; nine threat-model §1 rows (a live 1:1 call with its two accounts for at
   most 24 h, a live group call, LiveKit's state, call budgets, the LiveKit secret, call links,
   lobbies, webhook marks, the deny set). Before production: the `calls.` and `turn.` names, their
@@ -145,7 +146,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0091 — Prompt 7: the security review's fixes
 
 - Date: 2026-11-17
-- Status: accepted; part of the Prompt 7 PR (report `P07-gate.md`, "Security review")
+- Status: accepted; part of the Prompt 7 PR (report `P07-gate.md`, "Security review"); approved by the owner with the gate on 2026-11-17
 - Decided by: agent, on an independent read-only review of the whole Prompt 7 diff (a separate
   agent given the code and documents, not the reports' conclusions)
 - Context: the review found one high, four medium and seven low findings, and three for
@@ -194,7 +195,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0090 — Prompt 7, milestone 5: per-host capacity, bandwidth per mode, and the caps kept
 
 - Date: 2026-11-17
-- Status: accepted by the agent; part of the Prompt 7 PR, awaiting the owner with the gate
+- Status: accepted by the agent; part of the Prompt 7 PR, approved by the owner with the gate on 2026-11-17
 - Decided by: agent, within the plan the owner approved (D-0085 §3: the caps may move with the
   numbers)
 - Context: the prompt asks for LiveKit's load tester over rooms × participants, CPU and bandwidth
@@ -217,7 +218,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0089 — Prompt 7, milestone 4: LiveKit on its own Valkey, TURN/TLS on a second address, an E2EE harness outside the workspace
 
 - Date: 2026-11-17
-- Status: accepted by the agent; part of the Prompt 7 PR, awaiting the owner with the gate
+- Status: accepted by the agent; part of the Prompt 7 PR, approved by the owner with the gate on 2026-11-17
 - Decided by: agent, within the plan the owner approved (D-0085 §4)
 - Context: the prompt asks for a multi-node LiveKit through its Redis-protocol store (Valkey
   compatibility verified), TURN over TLS on 443, recording and egress disabled, and a harness on
@@ -241,7 +242,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0088 — Prompt 7, milestone 3: call links with no account, lobbies bound to a device, webhooks once
 
 - Date: 2026-11-17
-- Status: accepted by the agent; part of the Prompt 7 PR, awaiting the owner with the gate
+- Status: accepted by the agent; part of the Prompt 7 PR, approved by the owner with the gate on 2026-11-17
 - Decided by: agent, within the plan the owner approved (D-0085)
 - Context: the prompt asks for call links as random secrets stored as hashes, with expiry and an
   optional lobby where an admin admits people, and for signature-verified LiveKit webhooks used
@@ -266,7 +267,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0087 — Prompt 7, milestone 2: tickets with the least grants, pseudonyms per room, removal by reconcile
 
 - Date: 2026-11-17
-- Status: accepted by the agent; part of the Prompt 7 PR, awaiting the owner with the gate
+- Status: accepted by the agent; part of the Prompt 7 PR, approved by the owner with the gate on 2026-11-17
 - Decided by: agent, within the plan the owner approved (D-0085)
 - Context: `api` must admit only the caller and the callee's devices to a 1:1 call, only the
   current roster to a group call, and drop a removed member mid-call; LiveKit's state should
@@ -297,7 +298,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0086 — Prompt 7, milestone 1: per-sender call keys from Signal and MLS; Signal-style link keys
 
 - Date: 2026-11-17
-- Status: accepted by the agent; part of the Prompt 7 PR, awaiting the owner with the gate
+- Status: accepted by the agent; part of the Prompt 7 PR, approved by the owner with the gate on 2026-11-17
 - Decided by: agent, within the plan the owner approved (D-0085)
 - Context: LiveKit's E2EE takes a key per participant identity and key index (a ring of 16) and
   derives its frame keys from it; the prompt asks for 1:1 keys from the Signal session and group

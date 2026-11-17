@@ -4,7 +4,7 @@
 - Prompt: [07-calls.md](../prompts/07-calls.md); plan [P07-plan.md](P07-plan.md) (D-0085)
 - Milestones: [M1](P07-M1.md) (D-0086), [M2](P07-M2.md) (D-0087), [M3](P07-M3.md) (D-0088),
   [M4](P07-M4.md) (D-0089), [M5](P07-M5.md) (D-0090); the security review's fixes (D-0091)
-- Branch `claude/p07-calls`, PR #62. Status: **waiting for the owner.**
+- Branch `claude/p07-calls`, PR #62. Status: **approved by the owner on 2026-11-17** ("all green you can merge"), with the nine threat-model §1 rows.
 
 ## The gate, item by item
 
@@ -62,7 +62,7 @@ four recorded in D-0091 ("Not changed") are fixed, with tests where they are beh
 
 ## Threat model
 
-Nine new §1 rows, all **awaiting the owner's approval**: a live 1:1 call (the two accounts, for the
+Nine new §1 rows, all **approved by the owner on 2026-11-17**: a live 1:1 call (the two accounts, for the
 call's life, at most 24 h), a live group call, LiveKit's own state, call budgets, the LiveKit
 secret (M2); call links, lobbies, webhook marks (M3); the deny set (D-0091). §3.24 holds the
 STRIDE rows.

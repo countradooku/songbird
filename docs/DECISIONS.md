@@ -188,6 +188,12 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   - A ciphertext hash would cost every app a second pass over every file.
 - Consequences: the threat model's §1 download row and §3.23 now say how confirmations count;
   PROTOCOL §7.3 and §7.5 likewise.
+- CI (2026-11-17): `cargo audit` began failing on two "unmaintained" notices published that day,
+  RUSTSEC-2026-0542 (`humantime`) and RUSTSEC-2026-0543 (`chrono`), both pulled in by the Iggy
+  SDK (`iggy_common` 0.12.0, D-0030) and present on `main` before Prompt 6. They are not
+  vulnerabilities, and no stable Iggy release drops them. They are ignored in `.cargo/audit.toml`,
+  matching cargo-deny's existing `unmaintained = "workspace"`. Revisit with the next Iggy SDK
+  release or by 2027-02-16. Replacing the Iggy SDK stays the owner's decision.
 
 ## D-0083 — Prompt 6, milestone 4: one anonymous pack service; a GIF proxy that hides who searches
 

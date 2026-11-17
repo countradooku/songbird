@@ -311,7 +311,7 @@ async fn account_deletion_is_verified_across_every_store() {
         api.send(
             "POST",
             "/v1/attachments",
-            Some(br#"{"size":64,"fetches":1}"#),
+            Some(br#"{"size":1073,"fetches":1}"#),
         )
         .await
         .unwrap(),
@@ -327,7 +327,7 @@ async fn account_deletion_is_verified_across_every_store() {
         api.send(
             "POST",
             "/v1/attachments",
-            Some(br#"{"size":16,"fetches":1}"#),
+            Some(br#"{"size":1073,"fetches":1}"#),
         )
         .await
         .unwrap(),
@@ -335,7 +335,7 @@ async fn account_deletion_is_verified_across_every_store() {
     assert_eq!(
         api.upload(
             &format!("/v1/attachments/{}", sent.to_hex_unredacted()),
-            Bytes::from_static(&[2; 16])
+            Bytes::from_static(&[2; 1073])
         )
         .await
         .unwrap()
@@ -624,7 +624,7 @@ async fn device_removal_is_verified_across_every_store_and_spares_the_rest() {
         .send(
             "POST",
             "/v1/attachments",
-            Some(br#"{"size":64,"fetches":1}"#),
+            Some(br#"{"size":1073,"fetches":1}"#),
         )
         .await
         .unwrap();
@@ -1046,7 +1046,15 @@ async fn m5_numbers() {
         push_public,
         push_index_secret: PUSH_INDEX,
         limits: songbird_api::config::AttachmentLimits::default(),
-        media: None,
+        media: Some(songbird_api::media::Media::new(
+            songbird_api::config::MediaBudgets {
+                grants_per_hour: 100_000,
+                grant_burst: 10_000,
+                bytes_per_day: 1 << 40,
+            },
+            songbird_api::config::MediaDownloads::default(),
+            &[5; 32],
+        )),
         metrics: ApiMetrics::default(),
         messages: None,
         registration: None,
@@ -1067,7 +1075,9 @@ async fn m5_numbers() {
         rx,
     ));
     let api = dev.api(api_addr);
-    for (size, rounds) in [(1usize << 20, 40usize), (16 << 20, 10)] {
+    for (plain, rounds) in [(1u64 << 20, 40usize), (16 << 20, 10)] {
+        // A length the attachment format produces (Prompt 6, D-0081).
+        let size = usize::try_from(songbird_proto::media::ciphertext_len(plain).unwrap()).unwrap();
         let (mut up, mut down) = (Vec::new(), Vec::new());
         let body = Bytes::from(vec![0x5a; size]);
         for _ in 0..rounds {
@@ -1085,7 +1095,17 @@ async fn m5_numbers() {
             assert_eq!(api.upload(&path, body.clone()).await.unwrap().0, 201);
             up.push(t.elapsed());
             let t = Instant::now();
-            let (st, got) = api.send("GET", &path, None).await.unwrap();
+            // By capability, through the signed media URL (Prompt 6, D-0082).
+            let (st, h, _) =
+                songbird_api::client::unsigned_full(api_addr, SERVER_NAME, "GET", &path, &[])
+                    .await
+                    .unwrap();
+            assert_eq!(st, 303);
+            let url = h["location"].to_str().unwrap().to_owned();
+            let (st, _, got) =
+                songbird_api::client::unsigned_full(api_addr, SERVER_NAME, "GET", &url, &[])
+                    .await
+                    .unwrap();
             assert_eq!((st, got.len()), (200, size));
             down.push(t.elapsed());
         }

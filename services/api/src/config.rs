@@ -540,11 +540,64 @@ pub struct MediaSettings {
     /// Per-account budgets.
     #[serde(default)]
     pub budgets: MediaBudgets,
+    /// Downloads.
+    #[serde(default)]
+    pub downloads: MediaDownloads,
 }
 
 impl Validate for MediaSettings {
     fn validate(&self, v: &mut Validator) {
         v.section("budgets", &self.budgets);
+        v.section("downloads", &self.downloads);
+    }
+}
+
+/// `[api.media.downloads]` (Prompt 6, M3, D-0082): downloads need no account (the object ID is the
+/// capability); they are throttled per IP range, in keyed records.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MediaDownloads {
+    /// How long a signed media URL works, seconds.
+    pub url_ttl_secs: u64,
+    /// Download redirects and fetch confirmations per hour per IP range.
+    pub per_hour: u32,
+    /// Their burst.
+    pub burst: u32,
+    /// IPv4 prefix length of a range.
+    pub ipv4_prefix: u8,
+    /// IPv6 prefix length of a range.
+    pub ipv6_prefix: u8,
+}
+
+impl Default for MediaDownloads {
+    fn default() -> Self {
+        Self {
+            url_ttl_secs: 600,
+            per_hour: 6_000,
+            burst: 600,
+            ipv4_prefix: 24,
+            ipv6_prefix: 48,
+        }
+    }
+}
+
+impl Validate for MediaDownloads {
+    fn validate(&self, v: &mut Validator) {
+        v.check(
+            (60..=3_600).contains(&self.url_ttl_secs),
+            "url_ttl_secs",
+            "must be in 60..=3600",
+        );
+        v.check(
+            (1..=1_000_000).contains(&self.per_hour) && (1..=100_000).contains(&self.burst),
+            "per_hour",
+            "per_hour must be in 1..=1000000 and burst in 1..=100000",
+        );
+        v.check(
+            (8..=32).contains(&self.ipv4_prefix) && (16..=128).contains(&self.ipv6_prefix),
+            "ipv4_prefix",
+            "prefixes must be 8..=32 (IPv4) and 16..=128 (IPv6)",
+        );
     }
 }
 

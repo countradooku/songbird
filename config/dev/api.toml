@@ -100,3 +100,9 @@ filter = "info"
 # grants_per_hour = 300
 # grant_burst = 60
 # bytes_per_day = 10737418240                                     # 10 GiB
+# [api.media.downloads]                                           # Prompt 6, M3; defaults
+# url_ttl_secs = 600                                              # signed media URLs
+# per_hour = 6000                                                 # redirects and confirmations per IP range
+# burst = 600
+# ipv4_prefix = 24
+# ipv6_prefix = 48

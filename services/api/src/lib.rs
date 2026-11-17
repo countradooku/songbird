@@ -48,15 +48,12 @@ pub mod requests;
 pub mod server;
 pub mod usernames;
 
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use futures_core::Stream;
 use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt as _, Empty, Full, Limited, StreamBody};
-use hyper::body::{Frame, Incoming};
+use hyper::body::Incoming;
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderValue};
 use hyper::{Method, Request, Response, StatusCode};
 use serde::Deserialize;
@@ -295,46 +292,6 @@ impl PushBody {
     }
 }
 
-/// A download that counts its fetch once the whole object went out. hyper stops polling a body
-/// once it has sent `Content-Length` bytes, so the end is the last byte, not the end of stream.
-struct Counted {
-    inner: songbird_s3::ObjectBody,
-    left: u64,
-    on_done: Option<Box<dyn FnOnce() + Send>>,
-}
-
-impl Stream for Counted {
-    type Item = Result<Frame<Bytes>, std::io::Error>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.inner).poll_next(cx) {
-            Poll::Ready(Some(Ok(b))) => {
-                self.left = self
-                    .left
-                    .saturating_sub(u64::try_from(b.len()).unwrap_or(u64::MAX));
-                if self.left == 0
-                    && let Some(f) = self.on_done.take()
-                {
-                    f();
-                }
-                Poll::Ready(Some(Ok(Frame::data(b))))
-            }
-            Poll::Ready(Some(Err(_))) => {
-                // An interrupted download is not a fetch.
-                self.on_done = None;
-                Poll::Ready(Some(Err(std::io::Error::other("object store"))))
-            }
-            Poll::Ready(None) => {
-                if let Some(f) = self.on_done.take() {
-                    f();
-                }
-                Poll::Ready(None)
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
 /// Why a request was refused before its handler ran.
 enum Refusal {
     Status(StatusCode),
@@ -362,6 +319,9 @@ impl App {
         let method = req.method().clone();
         if path == "/v1/attachments" || path.starts_with("/v1/attachments/") {
             return media::route(self, req).await;
+        }
+        if path.starts_with("/v1/media/") {
+            return media::serve(self, req).await;
         }
         match (&method, path.as_str()) {
             (&Method::PUT, "/v1/push") => {
@@ -597,12 +557,7 @@ impl App {
             }
             Err(_) => return Err(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE)),
         };
-        let counted = Counted {
-            inner: got.body,
-            left: got.length,
-            on_done: None,
-        };
-        let mut r = Response::new(StreamBody::new(counted).boxed_unsync());
+        let mut r = Response::new(StreamBody::new(media::Frames(got.body)).boxed_unsync());
         r.headers_mut().insert(
             CONTENT_TYPE,
             HeaderValue::from_static("application/octet-stream"),
@@ -1366,59 +1321,6 @@ impl App {
             .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
         self.metrics.push_registrations.inc();
         Ok(empty(StatusCode::NO_CONTENT))
-    }
-
-    async fn download(self: &Arc<Self>, object: ObjectKey) -> Result<Response<Body>, Refusal> {
-        // Any authenticated device that knows the 256-bit ID may fetch it (the ID travels inside
-        // the end-to-end encrypted message); the record says whether fetches are still due.
-        if self
-            .registry
-            .attachment(&object)
-            .await
-            .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?
-            .is_none()
-        {
-            return Err(Refusal::Status(StatusCode::NOT_FOUND));
-        }
-        let got = match self.s3.get_object(&object_name(&object), None).await {
-            Ok(g) => g,
-            Err(songbird_s3::Error::NotFound) => {
-                return Err(Refusal::Status(StatusCode::NOT_FOUND));
-            }
-            Err(_) => return Err(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE)),
-        };
-        let app = Arc::clone(self);
-        let counted = Counted {
-            inner: got.body,
-            left: got.length,
-            on_done: Some(Box::new(move || {
-                tokio::spawn(async move { app.count_fetch(object).await });
-            })),
-        };
-        let mut r = Response::new(StreamBody::new(counted).boxed_unsync());
-        r.headers_mut().insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static("application/octet-stream"),
-        );
-        r.headers_mut()
-            .insert(CONTENT_LENGTH, HeaderValue::from(got.length));
-        Ok(r)
-    }
-
-    async fn count_fetch(&self, object: ObjectKey) {
-        self.metrics.downloads.inc();
-        match self.registry.count_fetch(&object).await {
-            // The last fetch: delete it now (the worker's sweep catches a lost job).
-            Ok(Some(0)) => {
-                if let Ok(job) = Job::new(Work::DeleteObject { object })
-                    && self.queue.enqueue(&[job]).await.is_err()
-                {
-                    tracing::warn!("cleanup job not queued; the sweep will delete the object");
-                }
-            }
-            Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "fetch not counted"),
-        }
     }
 
     async fn delete_account(&self, device: DeviceId) -> Result<Response<Body>, Refusal> {

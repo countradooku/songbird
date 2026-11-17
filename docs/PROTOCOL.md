@@ -1675,6 +1675,42 @@ are not signed, only held to their exact length.
 - **tus 1.0** was built and measured over the same parts, then removed (D-0081). Clients that
   want a library can map tus's `PATCH` to consecutive parts themselves.
 
+### 7.3 Downloads and the lifecycle (M3, D-0082)
+
+Downloads carry no account and no device signature (D-0079). The 256-bit object ID, which
+travels only inside end-to-end encrypted content, is the capability.
+
+| Request | Answer |
+| --- | --- |
+| `GET /v1/attachments/<id>` | 303 `Location: /v1/media/<id>?e=<expiry>&z=<size>&s=<MAC>`, with `Cache-Control: no-store`; 404 if the attachment is unknown, fetched out or past 30 days; 429 past the IP range's budget |
+| `GET /v1/media/<id>?e=…&z=…&s=…` | The object: 200, or 206 with `Content-Range` for one `Range: bytes=` range (`a-b`, `a-`, `-n`); 416 with `Content-Range: bytes */<size>` past the end. Several ranges, or a malformed one, get the whole object. `Accept-Ranges: bytes`; `Cache-Control: private, max-age=<until expiry>, immutable`. 403 for a wrong or expired signature; 404 once the object is gone |
+| `POST /v1/attachments/<id>/fetched` | 204: one recipient device has the whole file and has verified it. The last confirmation deletes the record and queues the object's deletion. 404 once nothing is due |
+
+- **The signed URL.** The MAC is HMAC-SHA256 over `"songbird.v1/media-url\0" ‖ id ‖ be64(e) ‖
+  be64(z)`, truncated to 16 bytes, under a key derived from `[api.media].secret`.
+  - The URL lives `url_ttl_secs` (10 minutes by default). A URL dated further ahead than that
+    is refused.
+  - Serving it needs no database access. It carries the size, so `Content-Range` can name the
+    total.
+- **Seeking.** A player fetches the 33-byte header once, then the chunks it needs:
+  - chunk `i` is bytes `33 + i × 65,552` to `33 + i × 65,552 + 65,551` (shorter for the last
+    chunk);
+  - `Decryptor::chunks_for` maps plaintext offsets to chunks (§7.1).
+- **The lifecycle.**
+  - The grant's `fetches` is the number of recipient devices, the uploader's other devices
+    included.
+  - Each device confirms once, after its last chunk verified. Downloading alone counts nothing,
+    so a player may read parts of a file many times.
+  - The last confirmation deletes the attachment. Anything unconfirmed goes after 30 days (the
+    worker's sweep).
+  - A recipient could confirm more than once and delete the file early. That gains it nothing
+    it could not do before, by downloading several times.
+- **Throttles.** Redirects and confirmations are budgeted per IP range in keyed records: 6,000
+  per hour, a burst of 600, /24 for IPv4 and /48 for IPv6. Signed-URL requests are not
+  budgeted: they are cheap, and each URL lives 10 minutes.
+- **Forwarding** encrypts again under a fresh key and uploads a new object (§7.1). The server
+  never copies an object, so two messages never share an ID.
+
 ## 8. Calls and the call key schedule (Prompt 7)
 
 ## 9. Push (Prompt 8)

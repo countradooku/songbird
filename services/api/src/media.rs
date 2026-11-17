@@ -23,7 +23,7 @@ use bytes::Bytes;
 use futures_core::Stream;
 use http_body_util::BodyExt as _;
 use hyper::body::Incoming;
-use hyper::header::CONTENT_LENGTH;
+use hyper::header::{CONTENT_LENGTH, HeaderValue};
 use hyper::{Method, Request, Response, StatusCode};
 use serde::Deserialize;
 use songbird_accounts::{Grant, PendingUpload};
@@ -31,7 +31,7 @@ use songbird_jobs::ObjectKey;
 use songbird_types::{AccountId, DeviceId};
 use songbird_valkey::ValkeyConn;
 
-use crate::config::MediaBudgets;
+use crate::config::{MediaBudgets, MediaDownloads};
 use crate::{App, Body, Refusal, empty, json, object_name};
 
 /// Budget units: the daily volume is counted in MiB.
@@ -65,6 +65,107 @@ impl GrantRequest {
     }
 }
 
+/// The MAC of a media URL: HMAC-SHA256 over the object, expiry and size, truncated to 16 bytes.
+fn url_mac(key: &hmac::Key, object: &ObjectKey, expires: u64, size: u64) -> [u8; 16] {
+    let mut ctx = hmac::Context::with_key(key);
+    ctx.update(b"songbird.v1/media-url\0");
+    ctx.update(&object.0);
+    ctx.update(&expires.to_be_bytes());
+    ctx.update(&size.to_be_bytes());
+    let mut out = [0u8; 16];
+    out.copy_from_slice(ctx.sign().as_ref().get(..16).unwrap_or(&[0; 16]));
+    out
+}
+
+/// A media URL's query: `e=<expiry>&z=<size>&s=<32 hex>`, in that order, nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaQuery {
+    /// Expiry, Unix seconds.
+    pub expires: u64,
+    /// The object's size.
+    pub size: u64,
+    /// The MAC.
+    pub mac: [u8; 16],
+}
+
+impl MediaQuery {
+    /// Parses a media URL's query strictly; `None` for anything else.
+    #[must_use]
+    pub fn parse(query: &str) -> Option<Self> {
+        if query.len() > 96 {
+            return None;
+        }
+        let mut it = query.split('&');
+        let num = |p: Option<&str>, k: &str| {
+            p?.strip_prefix(k)
+                .filter(|v| {
+                    !v.is_empty() && v.len() <= 20 && v.bytes().all(|b| b.is_ascii_digit())
+                })?
+                .parse::<u64>()
+                .ok()
+        };
+        let expires = num(it.next(), "e=")?;
+        let size = num(it.next(), "z=")?;
+        let s = it.next()?.strip_prefix("s=")?;
+        if it.next().is_some() || s.len() != 32 {
+            return None;
+        }
+        let mut mac = [0u8; 16];
+        hex::decode_to_slice(s, &mut mac).ok()?;
+        Some(Self { expires, size, mac })
+    }
+}
+
+/// What a `Range` header asks of an object of `size` bytes (RFC 9110 §14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeAsk {
+    /// The whole object (no header, or one this server ignores: several ranges, bad syntax).
+    Whole,
+    /// The inclusive byte range.
+    Part(u64, u64),
+    /// Nothing satisfiable: 416.
+    Unsatisfiable,
+}
+
+/// Reads a `Range` header: one `bytes=` range (`a-b`, `a-`, `-n`); anything else is ignored.
+#[must_use]
+pub fn parse_range(header: Option<&str>, size: u64) -> RangeAsk {
+    let Some(spec) = header.and_then(|h| h.trim().strip_prefix("bytes=")) else {
+        return RangeAsk::Whole;
+    };
+    if spec.contains(',') || spec.len() > 48 {
+        return RangeAsk::Whole;
+    }
+    let Some((a, b)) = spec.trim().split_once('-') else {
+        return RangeAsk::Whole;
+    };
+    let digits = |s: &str| {
+        (!s.is_empty() && s.len() <= 20 && s.bytes().all(|c| c.is_ascii_digit()))
+            .then(|| s.parse::<u64>().ok())
+            .flatten()
+    };
+    match (a.is_empty(), digits(a), digits(b)) {
+        // `-n`: the last n bytes.
+        (true, _, Some(n)) => {
+            if n == 0 || size == 0 {
+                RangeAsk::Unsatisfiable
+            } else {
+                RangeAsk::Part(size.saturating_sub(n), size - 1)
+            }
+        }
+        (false, Some(first), last) if b.is_empty() || last.is_some() => {
+            if last.is_some_and(|l| l < first) {
+                return RangeAsk::Whole;
+            }
+            if first >= size {
+                return RangeAsk::Unsatisfiable;
+            }
+            RangeAsk::Part(first, last.map_or(size - 1, |l| l.min(size - 1)))
+        }
+        _ => RangeAsk::Whole,
+    }
+}
+
 /// How many parts an upload of `size` bytes has, in parts of `part_size`.
 #[must_use]
 pub fn part_count(size: u64, part_size: u64) -> u64 {
@@ -82,7 +183,9 @@ pub fn part_len(size: u64, part_size: u64, n: u64) -> Option<u64> {
 /// GIFs.
 pub struct Media {
     settings: MediaBudgets,
+    downloads: MediaDownloads,
     record_key: hmac::Key,
+    url_key: hmac::Key,
 }
 
 impl std::fmt::Debug for Media {
@@ -104,14 +207,64 @@ fn derive(secret: &[u8; 32], purpose: &[u8]) -> [u8; 32] {
 impl Media {
     /// From the settings and the media secret.
     #[must_use]
-    pub fn new(settings: MediaBudgets, secret: &[u8; 32]) -> Self {
+    pub fn new(settings: MediaBudgets, downloads: MediaDownloads, secret: &[u8; 32]) -> Self {
         Self {
             settings,
+            downloads,
             record_key: hmac::Key::new(
                 hmac::HMAC_SHA256,
                 &derive(secret, b"songbird.v1/media-records"),
             ),
+            url_key: hmac::Key::new(hmac::HMAC_SHA256, &derive(secret, b"songbird.v1/media-url")),
         }
+    }
+
+    /// The signed media URL for `object` of `size` bytes, valid until `expires` (Unix seconds).
+    #[must_use]
+    pub fn media_url(&self, object: &ObjectKey, size: u64, expires: u64) -> String {
+        format!(
+            "/v1/media/{}?e={expires}&z={size}&s={}",
+            object.to_hex_unredacted(),
+            hex::encode(url_mac(&self.url_key, object, expires, size))
+        )
+    }
+
+    /// Checks a media URL's signature (constant time) and expiry; its object size if valid.
+    #[must_use]
+    pub fn check_url(&self, object: &ObjectKey, q: &MediaQuery, now: u64) -> Option<u64> {
+        let mac = url_mac(&self.url_key, object, q.expires, q.size);
+        (aws_lc_rs::constant_time::verify_slices_are_equal(&mac, &q.mac).is_ok()
+            && q.expires > now
+            && q.expires <= now.saturating_add(self.downloads.url_ttl_secs + 60))
+        .then_some(q.size)
+    }
+
+    /// Spends one request of the IP range's download budget (`kind`: `d` redirects, `f` fetch
+    /// confirmations). `Ok(0)` when allowed, else the wait in microseconds.
+    pub(crate) async fn admit_range(
+        &self,
+        hot: &ValkeyConn,
+        kind: &str,
+        ip: std::net::IpAddr,
+    ) -> Result<u64, ()> {
+        let d = &self.downloads;
+        let range = crate::registration::range_of(ip, d.ipv4_prefix, d.ipv6_prefix);
+        let mut ctx = hmac::Context::with_key(&self.record_key);
+        ctx.update(kind.as_bytes());
+        ctx.update(&[1]);
+        ctx.update(&range);
+        let record = format!(
+            "m:{kind}:{}",
+            hex::encode(ctx.sign().as_ref().get(..16).unwrap_or_default())
+        );
+        Self::spend(
+            hot,
+            &record,
+            3_600_000_000 / u64::from(d.per_hour.max(1)),
+            u64::from(d.burst),
+            1,
+        )
+        .await
     }
 
     /// The settings.
@@ -194,8 +347,12 @@ impl Media {
 pub struct MediaMetrics {
     /// Parts of resumable uploads stored.
     pub parts: songbird_service::telemetry::sharded::ShardedCounter,
-    /// Grants refused by a budget.
+    /// Grants, redirects and confirmations refused by a budget.
     pub throttled: songbird_service::telemetry::sharded::ShardedCounter,
+    /// Download redirects issued.
+    pub redirects: songbird_service::telemetry::sharded::ShardedCounter,
+    /// Media URL requests served (whole or a range).
+    pub served: songbird_service::telemetry::sharded::ShardedCounter,
 }
 
 impl MediaMetrics {
@@ -214,9 +371,19 @@ impl MediaMetrics {
                 &self.parts,
             ),
             (
-                "api_grants_throttled",
-                "Upload grants refused by a budget",
+                "api_media_throttled",
+                "Grants, redirects and confirmations refused by a budget",
                 &self.throttled,
+            ),
+            (
+                "api_media_redirects",
+                "Download redirects issued",
+                &self.redirects,
+            ),
+            (
+                "api_media_served",
+                "Media URL requests served",
+                &self.served,
             ),
         ] {
             m.register(name, help, c.clone())?;
@@ -247,10 +414,8 @@ pub(crate) async fn route(
     let object = ObjectKey::parse_hex(id).ok_or(status(StatusCode::NOT_FOUND))?;
     match (&method, tail) {
         (&Method::PUT, "") => upload(app, req, object).await,
-        (&Method::GET, "") => {
-            let (_, _) = app.authenticate_json(req).await?;
-            app.download(object).await
-        }
+        (&Method::GET, "") => redirect(app, &req, object).await,
+        (&Method::POST, "fetched") => fetched(app, &req, object).await,
         (&Method::GET, "parts") => list(app, req, object).await,
         (&Method::POST, "complete") => complete(app, req, object).await,
         (&Method::PUT, t) => {
@@ -525,6 +690,198 @@ async fn assemble(
     finish(app, object).await
 }
 
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+fn peer(req: &Request<Incoming>) -> Result<std::net::IpAddr, Refusal> {
+    req.extensions()
+        .get::<crate::registration::Peer>()
+        .map(|p| p.0)
+        .ok_or(status(StatusCode::SERVICE_UNAVAILABLE))
+}
+
+/// The media settings, or 503 where `[api.media]` is not configured.
+fn media(app: &App) -> Result<&Media, Refusal> {
+    app.media
+        .as_ref()
+        .ok_or(status(StatusCode::SERVICE_UNAVAILABLE))
+}
+
+async fn throttle(
+    app: &App,
+    m: &Media,
+    kind: &str,
+    ip: std::net::IpAddr,
+) -> Option<Response<Body>> {
+    match m.admit_range(&app.hot, kind, ip).await {
+        Ok(0) => None,
+        Ok(wait) => {
+            app.metrics.media.throttled.inc();
+            Some(crate::retry_after(wait))
+        }
+        Err(()) => Some(empty(StatusCode::SERVICE_UNAVAILABLE)),
+    }
+}
+
+/// `GET /v1/attachments/<id>`: no account. The 256-bit ID (inside an end-to-end encrypted
+/// message) is the capability; the answer is a 303 to a short-lived signed media URL, so the
+/// server never learns which device fetched which object (D-0079).
+async fn redirect(
+    app: &App,
+    req: &Request<Incoming>,
+    object: ObjectKey,
+) -> Result<Response<Body>, Refusal> {
+    let m = media(app)?;
+    if let Some(r) = throttle(app, m, "d", peer(req)?).await {
+        return Ok(r);
+    }
+    let a = app
+        .registry
+        .attachment(&object)
+        .await
+        .map_err(|_| status(StatusCode::SERVICE_UNAVAILABLE))?
+        .ok_or(status(StatusCode::NOT_FOUND))?;
+    let url = m.media_url(&object, a.size, now_secs() + m.downloads.url_ttl_secs);
+    let mut r = empty(StatusCode::SEE_OTHER);
+    let h = r.headers_mut();
+    h.insert(
+        hyper::header::LOCATION,
+        HeaderValue::from_str(&url).map_err(|_| status(StatusCode::SERVICE_UNAVAILABLE))?,
+    );
+    h.insert(
+        hyper::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    app.metrics.media.redirects.inc();
+    Ok(r)
+}
+
+/// `POST /v1/attachments/<id>/fetched`: a recipient device has the whole file, verified. The
+/// last confirmation deletes it (D-0082).
+async fn fetched(
+    app: &App,
+    req: &Request<Incoming>,
+    object: ObjectKey,
+) -> Result<Response<Body>, Refusal> {
+    let m = media(app)?;
+    if let Some(r) = throttle(app, m, "f", peer(req)?).await {
+        return Ok(r);
+    }
+    match app.registry.count_fetch(&object).await {
+        Ok(Some(0)) => {
+            app.metrics.downloads.inc();
+            // The last fetch: delete now (the worker's sweep catches a lost job).
+            if let Ok(job) = songbird_jobs::Job::new(songbird_jobs::Work::DeleteObject { object })
+                && app.queue.enqueue(&[job]).await.is_err()
+            {
+                tracing::warn!("cleanup job not queued; the sweep will delete the object");
+            }
+            Ok(empty(StatusCode::NO_CONTENT))
+        }
+        Ok(Some(_)) => {
+            app.metrics.downloads.inc();
+            Ok(empty(StatusCode::NO_CONTENT))
+        }
+        Ok(None) => Err(status(StatusCode::NOT_FOUND)),
+        Err(_) => Err(status(StatusCode::SERVICE_UNAVAILABLE)),
+    }
+}
+
+/// The object store's body as response frames.
+pub(crate) struct Frames(pub(crate) songbird_s3::ObjectBody);
+
+impl Stream for Frames {
+    type Item = Result<hyper::body::Frame<Bytes>, std::io::Error>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::pin::Pin::new(&mut self.0).poll_next(cx).map(|o| {
+            o.map(|r| {
+                r.map(hyper::body::Frame::data)
+                    .map_err(|_| std::io::Error::other("object store"))
+            })
+        })
+    }
+}
+
+/// `GET /v1/media/<id>?e=…&z=…&s=…`: the signed URL. Checks only its MAC and expiry (no
+/// database access), then serves the object or one byte range of it from the store.
+pub(crate) async fn serve(app: &App, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+    if req.method() != Method::GET {
+        return Err(status(StatusCode::NOT_FOUND));
+    }
+    let m = media(app)?;
+    let object = req
+        .uri()
+        .path()
+        .strip_prefix("/v1/media/")
+        .and_then(ObjectKey::parse_hex)
+        .ok_or(status(StatusCode::NOT_FOUND))?;
+    let q = req
+        .uri()
+        .query()
+        .and_then(MediaQuery::parse)
+        .ok_or(status(StatusCode::NOT_FOUND))?;
+    let now = now_secs();
+    let size = m
+        .check_url(&object, &q, now)
+        .ok_or(status(StatusCode::FORBIDDEN))?;
+    let ask = parse_range(
+        req.headers()
+            .get(hyper::header::RANGE)
+            .and_then(|v| v.to_str().ok()),
+        size,
+    );
+    let range = match ask {
+        RangeAsk::Whole => None,
+        RangeAsk::Part(a, b) => Some((a, b)),
+        RangeAsk::Unsatisfiable => {
+            let mut r = empty(StatusCode::RANGE_NOT_SATISFIABLE);
+            if let Ok(v) = HeaderValue::from_str(&format!("bytes */{size}")) {
+                r.headers_mut().insert(hyper::header::CONTENT_RANGE, v);
+            }
+            return Ok(r);
+        }
+    };
+    let got = match app.s3.get_object(&object_name(&object), range).await {
+        Ok(g) => g,
+        Err(songbird_s3::Error::NotFound) => return Err(status(StatusCode::NOT_FOUND)),
+        Err(_) => return Err(status(StatusCode::SERVICE_UNAVAILABLE)),
+    };
+    let mut r = Response::new(http_body_util::StreamBody::new(Frames(got.body)).boxed_unsync());
+    let h = r.headers_mut();
+    h.insert(
+        hyper::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    h.insert(CONTENT_LENGTH, HeaderValue::from(got.length));
+    h.insert(
+        hyper::header::ACCEPT_RANGES,
+        HeaderValue::from_static("bytes"),
+    );
+    // Immutable ciphertext behind a capability URL: the device may cache it until the URL ends;
+    // shared caches may not.
+    if let Ok(v) = HeaderValue::from_str(&format!(
+        "private, max-age={}, immutable",
+        q.expires.saturating_sub(now)
+    )) {
+        h.insert(hyper::header::CACHE_CONTROL, v);
+    }
+    if let Some((a, b)) = range {
+        *r.status_mut() = StatusCode::PARTIAL_CONTENT;
+        if let Ok(v) = HeaderValue::from_str(&format!("bytes {a}-{b}/{size}")) {
+            r.headers_mut().insert(hyper::header::CONTENT_RANGE, v);
+        }
+    }
+    app.metrics.media.served.inc();
+    Ok(r)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, reason = "tests")]
@@ -575,8 +932,64 @@ mod tests {
     }
 
     #[test]
+    fn ranges_follow_rfc_9110() {
+        use RangeAsk::{Part, Unsatisfiable, Whole};
+        let n = 1_000;
+        for (h, want) in [
+            (None, Whole),
+            (Some("bytes=0-99"), Part(0, 99)),
+            (Some("bytes=990-"), Part(990, 999)),
+            (Some("bytes=-10"), Part(990, 999)),
+            (Some("bytes=-5000"), Part(0, 999)),
+            (Some("bytes=10-5000"), Part(10, 999)),
+            (Some("bytes=1000-"), Unsatisfiable),
+            (Some("bytes=-0"), Unsatisfiable),
+            (Some("bytes=5-1"), Whole),
+            (Some("bytes=0-1,4-5"), Whole),
+            (Some("bytes=a-b"), Whole),
+            (Some("bytes=-"), Whole),
+            (Some("pages=0-1"), Whole),
+            (Some("bytes=+1-2"), Whole),
+        ] {
+            assert_eq!(parse_range(h, n), want, "{h:?}");
+        }
+        assert_eq!(parse_range(Some("bytes=0-"), 0), Unsatisfiable);
+    }
+
+    #[test]
+    fn media_urls_are_signed_bound_and_short_lived() {
+        let m = Media::new(MediaBudgets::default(), MediaDownloads::default(), &[3; 32]);
+        let o = ObjectKey([0x42; 32]);
+        let url = m.media_url(&o, 1_073, 2_000_000_600);
+        let (path, query) = url.split_once('?').unwrap();
+        assert_eq!(path, format!("/v1/media/{}", o.to_hex_unredacted()));
+        let q = MediaQuery::parse(query).unwrap();
+        assert_eq!((q.expires, q.size), (2_000_000_600, 1_073));
+        assert_eq!(m.check_url(&o, &q, 2_000_000_000), Some(1_073));
+        // Expired; too far ahead; another object; another key.
+        assert_eq!(m.check_url(&o, &q, 2_000_000_600), None);
+        assert_eq!(m.check_url(&o, &q, 1_000_000_000), None);
+        assert_eq!(m.check_url(&ObjectKey([0x43; 32]), &q, 2_000_000_000), None);
+        let other = Media::new(MediaBudgets::default(), MediaDownloads::default(), &[4; 32]);
+        assert_eq!(other.check_url(&o, &q, 2_000_000_000), None);
+        for bad in [
+            "",
+            "e=1&z=2",
+            "z=2&e=1&s=00000000000000000000000000000000",
+            "e=1&z=2&s=0000000000000000000000000000000",
+            "e=1&z=2&s=000000000000000000000000000000000",
+            "e=1&z=2&s=0000000000000000000000000000000g",
+            "e=1&z=2&s=00000000000000000000000000000000&x=1",
+            "e=+1&z=2&s=00000000000000000000000000000000",
+            "e=99999999999999999999999&z=2&s=00000000000000000000000000000000",
+        ] {
+            assert_eq!(MediaQuery::parse(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
     fn budget_records_are_keyed_and_reveal_no_account() {
-        let m = Media::new(MediaBudgets::default(), &[7; 32]);
+        let m = Media::new(MediaBudgets::default(), MediaDownloads::default(), &[7; 32]);
         let a = AccountId::random().unwrap();
         let r = m.record("b", &a);
         assert!(r.starts_with("m:b:") && r.len() == 4 + 32);
@@ -584,7 +997,8 @@ mod tests {
         assert_ne!(r, m.record("g", &a));
         assert_ne!(
             r,
-            Media::new(MediaBudgets::default(), &[8; 32]).record("b", &a)
+            Media::new(MediaBudgets::default(), MediaDownloads::default(), &[8; 32])
+                .record("b", &a)
         );
     }
 }

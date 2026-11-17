@@ -127,6 +127,77 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0082 — Prompt 6, milestone 3: downloads by capability through short-lived signed URLs, explicit fetch confirmation, no caching proxy
+
+- Date: 2026-11-17
+- Status: accepted by the agent under the plan (D-0079 §1 and §5); report `P06-M3.md`. The
+  threat-model §1 row (downloads by capability, IP-range throttle records) **awaits the owner's
+  approval**.
+- Decided by: owner (no device authentication on downloads, D-0079 §1); agent (the URL design,
+  the confirmation, and the proxy by measurement)
+- Context: the prompt asks for:
+  - unguessable object IDs with short-lived signed URLs;
+  - HTTP range requests;
+  - deletion when every recipient device has fetched an attachment, or after 30 days;
+  - a caching proxy if benchmarks justify one.
+
+  Prompt 2 served whole objects to signed device requests, and counted a fetch when the last
+  byte went out.
+- Options considered:
+  - **URLs.** S3 presigned URLs, which would expose RustFS (loopback-only, D-0035), versus
+    Songbird's own HMAC URLs served by `api`. Chosen: Songbird's own. The URL carries the
+    expiry and the size, so a range request costs one MAC check and no database read.
+  - **Counting.** At the last byte (Prompt 2) versus an explicit confirmation. Chosen:
+    explicit. With ranges, the last byte says nothing (players read the end of an MP4 first),
+    and a device should confirm only once it has verified the whole file.
+  - **Proxy.** A caching proxy in front of RustFS, or not.
+- Evidence:
+  - `gate_p06::media_load`: release build, same machine and stack as D-0081. p50 / p99:
+
+    | Measurement | Result |
+    | --- | --- |
+    | 1 MiB, one at a time | grant 4.6 ms; PUT through `api` 58 ms; PUT straight to RustFS 53 ms. Uploads are RustFS's write latency in this VM |
+    | 1 MiB at concurrency 1 | upload (grant + PUT) 64 / 75 ms; download (redirect + GET) 5.0 / 9.1 ms; 36 MB/s each way |
+    | 1 MiB at concurrency 16 | upload 44 / 125 ms; download 9.2 / 13.9 ms; 486 MB/s each way |
+    | 1 MiB at concurrency 64 | upload 136 / 187 ms; download 44 / 56 ms; 684 MB/s each way |
+    | 1 MiB GET at 32 in flight | straight from RustFS 9.1 / 12.1 ms; through `api`'s signed URL 21.8 / 31.3 ms |
+    | 64 MiB | upload in parallel parts 277 MB/s; download 775 MB/s |
+    | 128 KiB ranges at random offsets, 8 in flight | 4.0 / 5.6 ms |
+
+  - Tests:
+    - `media_live::downloads_need_no_account_and_serve_ranges`: unsigned requests; 303; whole
+      file and five kinds of range; 416; ignored ranges; tampered expiry, size, MAC and object,
+      an expired URL and one dated too far ahead all refused; unknown IDs.
+    - `media_live::fetches_are_confirmed_and_the_last_one_deletes`, including the IP-range
+      budget.
+    - `gate_p06`: a real encrypted file through parallel parts; a seek decrypted chunk by
+      chunk; two devices decrypt and confirm, and the last deletes (worker job); 30 days; the
+      abort of an abandoned upload.
+    - Unit tests for ranges and URLs; fuzz target `media_url`.
+- Decision:
+  - **Downloads.**
+    - `GET /v1/attachments/<id>` takes no account and answers 303 to
+      `/v1/media/<id>?e&z&s`: HMAC-SHA256, truncated to 16 bytes, under a key derived from the
+      media secret, valid 10 minutes.
+    - The media path serves one range or the whole object, and the device's cache may keep it
+      until expiry (`private, immutable`).
+    - `POST …/fetched` counts a fetch, and the last one deletes. Redirects and confirmations
+      are budgeted per IP range.
+    - Without `[api.media]`, downloads answer 503. That configuration is development only.
+  - **No caching proxy.** RustFS accounts for about 9 of the 22 ms of a loaded download. Each
+    attachment is read by its recipients only, a few times, so a cache in front of RustFS would
+    rarely hit.
+    - Packs (M4) and GIFs are the only objects read by many. GIFs are cached in `api`'s memory
+      (M4).
+    - Packs get revisited with Prompt 13's numbers on the production hardware.
+- Consequences:
+  - The approved attachment row's "device-signed download" no longer holds. The new §1 row
+    describes what replaces it, for approval.
+  - Prompt 2's tests (`api_live`, `gate_m5`) moved to the redirect and the confirmation, and to
+    legal sizes.
+  - `api`'s avatar serving reuses the same frame adapter (`media::Frames`).
+  - The test client now sets `TCP_NODELAY` like every other client in the tree.
+
 ## D-0081 — Prompt 6, milestone 2: grants held to the format and to per-account budgets; resumable uploads in parallel S3 parts (tus measured and removed)
 
 - Date: 2026-11-17

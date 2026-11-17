@@ -8,6 +8,7 @@
     clippy::panic,
     clippy::indexing_slicing,
     clippy::assert_is_empty,
+    clippy::many_single_char_names,
     reason = "tests"
 )]
 
@@ -18,7 +19,7 @@ use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair as _};
 use bytes::Bytes;
 use songbird_accounts::push_token::{self, Registration};
 use songbird_accounts::{Db, Registry, push_index};
-use songbird_api::client::ApiClient;
+use songbird_api::client::{ApiClient, unsigned_full};
 use songbird_api::{ApiMetrics, App};
 use songbird_jobs::{ObjectKey, Queue, QueueConfig, Stream, Work};
 use songbird_types::{AccountId, DeviceId, Secret};
@@ -91,7 +92,11 @@ async fn stack() -> Option<Stack> {
         push_public,
         push_index_secret: [9; 32],
         limits: songbird_api::config::AttachmentLimits::default(),
-        media: None,
+        media: Some(songbird_api::media::Media::new(
+            songbird_api::config::MediaBudgets::default(),
+            songbird_api::config::MediaDownloads::default(),
+            &[5; 32],
+        )),
         metrics: ApiMetrics::default(),
         messages: None,
         registration: None,
@@ -257,19 +262,27 @@ async fn attachments_upload_exactly_and_go_after_the_last_fetch() {
     // The record holds no uploader.
     assert!(s.app.registry.grant(&object).await.unwrap().is_none());
     let depth = s.app.queue.depth(Stream::Cleanup).await.unwrap();
+    // Downloads go by capability (Prompt 6, D-0082): a 303 to a signed URL; each device then
+    // confirms its fetch, and the last confirmation deletes.
     for left in [1u32, 0] {
-        let (st, body) = down.send("GET", &path, None).await.unwrap();
+        let (st, h, _) = unsigned_full(s.addr, SERVER, "GET", &path, &[])
+            .await
+            .unwrap();
+        assert_eq!(st, 303);
+        let url = h["location"].to_str().unwrap().to_owned();
+        let (st, _, body) = unsigned_full(s.addr, SERVER, "GET", &url, &[])
+            .await
+            .unwrap();
         assert_eq!(st, 200);
         assert_eq!(body.len(), 4145);
         assert!(body.iter().all(|b| *b == 7));
-        // Counted after the download completes.
-        for _ in 0..100 {
-            let a = s.app.registry.attachment(&object).await.unwrap();
-            if a.map_or(0, |a| a.left) == left {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        let fetched = format!("{path}/fetched");
+        let (st, _, _) = unsigned_full(s.addr, SERVER, "POST", &fetched, &[])
+            .await
+            .unwrap();
+        assert_eq!(st, 204);
+        let a = s.app.registry.attachment(&object).await.unwrap();
+        assert_eq!(a.map_or(0, |a| a.left), left);
     }
     assert_eq!(
         down.send("GET", &path, None).await.unwrap().0,

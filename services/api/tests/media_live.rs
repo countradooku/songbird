@@ -11,6 +11,8 @@
     clippy::assert_is_empty,
     clippy::single_match_else,
     clippy::as_conversions,
+    clippy::many_single_char_names,
+    clippy::manual_assert_eq,
     reason = "tests"
 )]
 
@@ -20,8 +22,8 @@ use std::time::Duration;
 use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair as _};
 use bytes::Bytes;
 use songbird_accounts::{Db, Registry, push_token};
-use songbird_api::client::ApiClient;
-use songbird_api::config::{AttachmentLimits, MediaBudgets};
+use songbird_api::client::{ApiClient, unsigned_full};
+use songbird_api::config::{AttachmentLimits, MediaBudgets, MediaDownloads};
 use songbird_api::media::Media;
 use songbird_api::{ApiMetrics, App};
 use songbird_jobs::{Queue, QueueConfig, Stream};
@@ -47,10 +49,14 @@ struct Stack {
 }
 
 async fn stack(budgets: MediaBudgets) -> Option<Stack> {
-    stack_with(budgets, PART).await
+    stack_with(budgets, MediaDownloads::default(), PART).await
 }
 
-async fn stack_with(budgets: MediaBudgets, part_size: u64) -> Option<Stack> {
+async fn stack_with(
+    budgets: MediaBudgets,
+    downloads: MediaDownloads,
+    part_size: u64,
+) -> Option<Stack> {
     let surreal = env("SONGBIRD_TEST_SURREALDB")?;
     let hot = env("SONGBIRD_TEST_VALKEY")?;
     let jobs = env("SONGBIRD_TEST_VALKEY_JOBS")?;
@@ -106,7 +112,7 @@ async fn stack_with(budgets: MediaBudgets, part_size: u64) -> Option<Stack> {
             part_size,
             ..AttachmentLimits::default()
         },
-        media: Some(Media::new(budgets, &secret)),
+        media: Some(Media::new(budgets, downloads, &secret)),
         metrics: ApiMetrics::default(),
         messages: None,
         registration: None,
@@ -176,20 +182,38 @@ async fn parts_of(c: &ApiClient, id: &str) -> Vec<u64> {
         .collect()
 }
 
+/// Status 0: the server dropped the connection mid-body (a refused part it stopped reading,
+/// as when two copies of a part race).
 async fn put_part(c: &ApiClient, id: &str, n: u64, body: Bytes) -> u16 {
     let path = format!("/v1/attachments/{id}/parts/{n}");
     let len = body.len().to_string();
     c.upload_with("PUT", &path, &[("content-length", len)], body)
         .await
-        .unwrap()
-        .0
+        .map_or(0, |r| r.0)
 }
 
-async fn download(c: &ApiClient, id: &str) -> Bytes {
-    let (st, b) = c
-        .send("GET", &format!("/v1/attachments/{id}"), None)
+/// The signed media URL for an attachment, by capability (no signature).
+async fn locate(s: &Stack, id: &str) -> (u16, Option<String>) {
+    let (st, h, _) = unsigned_full(s.addr, SERVER, "GET", &format!("/v1/attachments/{id}"), &[])
         .await
         .unwrap();
+    (
+        st,
+        h.get("location").map(|v| v.to_str().unwrap().to_owned()),
+    )
+}
+
+async fn fetch(s: &Stack, url: &str, range: Option<&str>) -> (u16, hyper::HeaderMap, Bytes) {
+    let headers: Vec<(&str, String)> = range.map(|r| ("range", r.to_owned())).into_iter().collect();
+    unsigned_full(s.addr, SERVER, "GET", url, &headers)
+        .await
+        .unwrap()
+}
+
+async fn download(s: &Stack, id: &str) -> Bytes {
+    let (st, url) = locate(s, id).await;
+    assert_eq!(st, 303);
+    let (st, _, b) = fetch(s, &url.unwrap(), None).await;
     assert_eq!(st, 200);
     b
 }
@@ -248,15 +272,9 @@ async fn resumable_parts_survive_interruptions_and_complete_exactly() {
     };
     assert!(parts_of(&up, &id).await.is_empty());
     // Only the granted device; only the exact length of each part; no part past the last.
-    assert_eq!(
-        put_part(&other, &id, 1, Bytes::from_static(b"tiny")).await,
-        404
-    );
-    assert_eq!(
-        put_part(&up, &id, 1, Bytes::from_static(b"short")).await,
-        400
-    );
-    assert_eq!(put_part(&up, &id, 4, Bytes::from_static(b"x")).await, 404);
+    assert_eq!(put_part(&other, &id, 1, Bytes::new()).await, 404);
+    assert_eq!(put_part(&up, &id, 1, Bytes::new()).await, 400);
+    assert_eq!(put_part(&up, &id, 4, Bytes::new()).await, 404);
     // Part 3 first, part 1 in parallel with a second copy of itself (both first parts race to
     // open the upload: one is kept, the other aborted).
     assert_eq!(put_part(&up, &id, 3, part(3)).await, 204);
@@ -297,7 +315,7 @@ async fn resumable_parts_survive_interruptions_and_complete_exactly() {
         201
     );
     // Used: nothing more can be sent, listed or completed.
-    assert_eq!(put_part(&up, &id, 1, part(1)).await, 404);
+    assert_eq!(put_part(&up, &id, 1, Bytes::new()).await, 404);
     assert_eq!(
         up.send("POST", &format!("/v1/attachments/{id}/complete"), None)
             .await
@@ -305,7 +323,7 @@ async fn resumable_parts_survive_interruptions_and_complete_exactly() {
             .0,
         404
     );
-    assert!(download(&other, &id).await == all, "assembled bytes differ");
+    assert!(download(&s, &id).await == all, "assembled bytes differ");
     let _ = s.stop.send(true);
 }
 
@@ -334,6 +352,7 @@ async fn upload_protocols() {
             grant_burst: 10_000,
             bytes_per_day: 1 << 40,
         },
+        MediaDownloads::default(),
         bench_part(),
     )
     .await
@@ -402,5 +421,182 @@ async fn upload_protocols() {
             rates[2], rates[0], rates[4]
         );
     }
+    let _ = s.stop.send(true);
+}
+
+async fn upload_whole(c: &ApiClient, body: &Bytes, fetches: u32) -> String {
+    let (st, id) = grant(c, body.len() as u64, fetches).await;
+    assert_eq!(st, 201);
+    let id = id.unwrap();
+    assert_eq!(
+        c.upload(&format!("/v1/attachments/{id}"), body.clone())
+            .await
+            .unwrap()
+            .0,
+        201
+    );
+    id
+}
+
+/// Downloads (Prompt 6, M3, D-0082): by capability with no account, through a short-lived signed
+/// URL that serves byte ranges; a tampered, expired or misdirected URL serves nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn downloads_need_no_account_and_serve_ranges() {
+    let Some(s) = stack(MediaBudgets::default()).await else {
+        return;
+    };
+    let up = device(&s).await;
+    let size = ciphertext_len(300_000).unwrap();
+    let all = data(size);
+    let id = upload_whole(&up, &all, 3).await;
+    let (st, url) = locate(&s, &id).await;
+    assert_eq!(st, 303);
+    let url = url.unwrap();
+    assert!(url.starts_with(&format!("/v1/media/{id}?e=")));
+    let (st, h, b) = fetch(&s, &url, None).await;
+    assert_eq!(st, 200);
+    assert_eq!(h["accept-ranges"], "bytes");
+    assert!(
+        h["cache-control"]
+            .to_str()
+            .unwrap()
+            .starts_with("private, max-age=")
+    );
+    assert!(b == all);
+    let z = |a: u64, b: u64| all.slice(usize::try_from(a).unwrap()..=usize::try_from(b).unwrap());
+    // Ranges: first bytes, a chunk in the middle, a suffix, an open end, past the end.
+    let chunk = songbird_proto::media::chunk_offset(2);
+    for (ask, a, b) in [
+        ("bytes=0-32".to_owned(), 0, 32),
+        (
+            format!("bytes={chunk}-{}", chunk + 65_551),
+            chunk,
+            chunk + 65_551,
+        ),
+        ("bytes=-50".to_owned(), size - 50, size - 1),
+        (format!("bytes={}-", size - 7), size - 7, size - 1),
+        (format!("bytes=10-{}", size + 1_000), 10, size - 1),
+    ] {
+        let (st, h, body) = fetch(&s, &url, Some(&ask)).await;
+        assert_eq!(st, 206, "{ask}");
+        assert_eq!(
+            h["content-range"].to_str().unwrap(),
+            format!("bytes {a}-{b}/{size}")
+        );
+        assert!(body == z(a, b), "{ask}");
+    }
+    let (st, h, _) = fetch(&s, &url, Some(&format!("bytes={size}-"))).await;
+    assert_eq!(
+        (st, h["content-range"].to_str().unwrap()),
+        (416, format!("bytes */{size}").as_str())
+    );
+    // Several ranges, or nonsense: the whole object.
+    for ask in ["bytes=0-1,5-6", "bytes=9-3", "items=0-1"] {
+        assert_eq!(fetch(&s, &url, Some(ask)).await.0, 200, "{ask}");
+    }
+    // Tampered: another expiry, another size, another MAC, another object; expired.
+    let (path, query) = url.split_once('?').unwrap();
+    let mut parts: Vec<String> = query.split('&').map(str::to_owned).collect();
+    let e: u64 = parts[0][2..].parse().unwrap();
+    for (i, v) in [(0, format!("e={}", e + 1)), (1, format!("z={}", size + 1))] {
+        let mut p = parts.clone();
+        p[i] = v;
+        assert_eq!(
+            fetch(&s, &format!("{path}?{}", p.join("&")), None).await.0,
+            403
+        );
+    }
+    let mac = parts[2].clone();
+    parts[2] = format!(
+        "s={}{}",
+        if mac.as_bytes()[2] == b'0' { '1' } else { '0' },
+        &mac[3..]
+    );
+    assert_eq!(
+        fetch(&s, &format!("{path}?{}", parts.join("&")), None)
+            .await
+            .0,
+        403
+    );
+    let other = upload_whole(&up, &all, 1).await;
+    assert_eq!(fetch(&s, &url.replace(&id, &other), None).await.0, 403);
+    let m = s.app.media.as_ref().unwrap();
+    let object = songbird_jobs::ObjectKey::parse_hex(&id).unwrap();
+    let expired = m.media_url(&object, size, e - 10_000);
+    assert_eq!(fetch(&s, &expired, None).await.0, 403);
+    // Too far in the future is refused too (a URL cannot be made to last).
+    let forever = m.media_url(&object, size, e + 86_400);
+    assert_eq!(fetch(&s, &forever, None).await.0, 403);
+    for bad in ["?e=1&z=2", "?s=00&e=1&z=1", "", "?e=1&z=1&s=zz"] {
+        assert_eq!(
+            fetch(&s, &format!("{path}{bad}"), None).await.0,
+            404,
+            "{bad}"
+        );
+    }
+    // Unknown IDs and malformed ones look the same.
+    assert_eq!(locate(&s, &"ab".repeat(32)).await.0, 404);
+    assert_eq!(locate(&s, "zz").await.0, 404);
+    let _ = s.stop.send(true);
+}
+
+/// The lifecycle's server side (Prompt 6, M3, D-0082): each device confirms its fetch; the last
+/// confirmation removes the record and queues the object's deletion. Redirects and confirmations
+/// are throttled per IP range.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fetches_are_confirmed_and_the_last_one_deletes() {
+    let Some(s) = stack_with(
+        MediaBudgets::default(),
+        MediaDownloads {
+            burst: 6,
+            per_hour: 60,
+            ..MediaDownloads::default()
+        },
+        PART,
+    )
+    .await
+    else {
+        return;
+    };
+    let up = device(&s).await;
+    let all = data(ciphertext_len(2_000).unwrap());
+    let id = upload_whole(&up, &all, 2).await;
+    let depth = s.app.queue.depth(Stream::Cleanup).await.unwrap();
+    let confirm = || async {
+        unsigned_full(
+            s.addr,
+            SERVER,
+            "POST",
+            &format!("/v1/attachments/{id}/fetched"),
+            &[],
+        )
+        .await
+        .unwrap()
+        .0
+    };
+    // Downloading does not count; confirming does.
+    let _ = download(&s, &id).await;
+    let _ = download(&s, &id).await;
+    assert_eq!(confirm().await, 204);
+    assert_eq!(locate(&s, &id).await.0, 303);
+    assert_eq!(confirm().await, 204);
+    // Gone: no URL, no more confirmations, and the object's deletion is queued.
+    assert_eq!(locate(&s, &id).await.0, 404);
+    assert_eq!(confirm().await, 404);
+    assert!(s.app.queue.depth(Stream::Cleanup).await.unwrap() > depth);
+    // The IP range's redirect budget (a burst of six; four spent above) runs out, with a wait.
+    let mut throttled = None;
+    for i in 0..10 {
+        let (st, h, _) =
+            unsigned_full(s.addr, SERVER, "GET", &format!("/v1/attachments/{id}"), &[])
+                .await
+                .unwrap();
+        if st == 429 {
+            assert!(h.contains_key("retry-after"));
+            throttled = Some(i);
+            break;
+        }
+    }
+    assert!(throttled.is_some_and(|i| i <= 3), "{throttled:?}");
     let _ = s.stop.send(true);
 }

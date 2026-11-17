@@ -224,6 +224,7 @@ fn media(s: &ApiSettings) -> Result<Option<songbird_api::media::Media>, BoxError
     };
     Ok(Some(songbird_api::media::Media::new(
         m.budgets,
+        m.downloads,
         &*m.secret.resolve_key32()?,
     )))
 }

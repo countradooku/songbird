@@ -204,6 +204,7 @@ async fn exchange_full(
     let Ok(tcp) = tokio::net::TcpStream::connect(addr).await else {
         return Ok((0, hyper::HeaderMap::new(), Bytes::new()));
     };
+    let _ = tcp.set_nodelay(true);
     let (mut send, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await?;
     tokio::spawn(conn);
     let Ok(req) = b.body(Full::new(body)) else {
@@ -225,6 +226,7 @@ async fn exchange(
     let Ok(tcp) = tokio::net::TcpStream::connect(addr).await else {
         return Ok((0, Bytes::new()));
     };
+    let _ = tcp.set_nodelay(true);
     let (mut send, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await?;
     tokio::spawn(conn);
     let Ok(req) = b.body(Full::new(body)) else {
@@ -389,4 +391,26 @@ impl Registrar {
             None => Registered::Refused((status, body)),
         })
     }
+}
+
+/// An unsigned request with extra headers, returning the status, the response headers and the
+/// body (downloads by capability and signed media URLs, Prompt 6).
+///
+/// # Errors
+/// Connection or protocol failure.
+pub async fn unsigned_full(
+    addr: SocketAddr,
+    server_name: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, String)],
+) -> Result<(u16, hyper::HeaderMap, Bytes), hyper::Error> {
+    let mut b = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", server_name);
+    for (n, v) in headers {
+        b = b.header(*n, v.as_str());
+    }
+    exchange_full(addr, b, Bytes::new()).await
 }

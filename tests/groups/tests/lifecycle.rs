@@ -11,7 +11,9 @@
 )]
 use songbird_groups::wire::{self, Bundle, LogEntry};
 use songbird_groups::{Group, GroupError, Limits, Record};
-use songbird_groups_harness::{Device, Dir, GID, id_from, server_create, welcome_of, with_log};
+use songbird_groups_harness::{
+    Device, Dir, GID, LinkSecret, id_from, server_create, welcome_of, with_log,
+};
 use songbird_types::{AccountId, DeviceId};
 
 fn account(n: u16) -> AccountId {
@@ -375,14 +377,22 @@ fn creation_is_checked() {
     let mut alice = Device::new(1, account(1), &mut dir);
     let bob = Device::new(2, account(2), &mut dir);
     let (gi, tree) = alice.create();
-    let e = Group::create([0; 16], &alice.id, &gi, &tree, &dir).unwrap_err();
+    let e = Group::create([0; 16], &alice.id, &gi, &tree, &dir, &Limits::default()).unwrap_err();
     assert!(matches!(e, GroupError::OtherGroup), "{e:?}");
     // Bob registering Alice's group: he is neither its owner (roles) nor its leaf.
-    let e = Group::create(GID, &bob.id, &gi, &tree, &dir).unwrap_err();
+    let e = Group::create(GID, &bob.id, &gi, &tree, &dir, &Limits::default()).unwrap_err();
     assert!(matches!(e, GroupError::Roles | GroupError::Sender), "{e:?}");
-    let e = Group::create(GID, &alice.id, &gi, &tree, &Dir::default()).unwrap_err();
+    let e = Group::create(
+        GID,
+        &alice.id,
+        &gi,
+        &tree,
+        &Dir::default(),
+        &Limits::default(),
+    )
+    .unwrap_err();
     assert!(matches!(e, GroupError::Credential), "{e:?}");
-    assert!(Group::create(GID, &alice.id, &gi, &tree, &dir).is_ok());
+    assert!(Group::create(GID, &alice.id, &gi, &tree, &dir, &Limits::default()).is_ok());
 }
 
 #[test]
@@ -433,20 +443,25 @@ fn a_stranger_joins_by_link_only_through_apply_join() {
         server,
         ..
     } = setup();
+    let limits = Limits::default();
+    // Alice (an admin: the owner) publishes a link's proof key (D-0076).
+    let link = LinkSecret::random();
+    let b = alice.publish_link(&link);
+    let server = apply(server, &alice, &b, &dir).unwrap();
+    alice.merge();
     let info = server.group_info().to_vec();
     let tree = server.ratchet_tree().unwrap();
     let rec = server.record();
-    let limits = Limits::default();
 
     // Without a link, a stranger's external commit is refused (as above); with one, the
     // delivery service lets it in (D-0071), with the group's default role.
     let mut eve = Device::new(5, account(5), &mut dir);
-    let b = eve.rejoin(&info, &tree);
+    let b = eve.join_by_link(&info, &tree, &link);
     let err = apply(Group::load(rec.clone()).unwrap(), &eve, &b, &dir).unwrap_err();
     assert!(matches!(err, GroupError::External), "{err:?}");
     let (server, applied) = Group::load(rec.clone())
         .unwrap()
-        .apply_join(&eve.id, &b, &dir, &limits)
+        .apply_join(&eve.id, &b, &dir, &limits, &link.handle)
         .unwrap();
     assert_eq!(server.roster().len(), 3);
     assert!(
@@ -466,7 +481,7 @@ fn a_stranger_joins_by_link_only_through_apply_join() {
     let b = alice.update();
     let err = Group::load(server.record())
         .unwrap()
-        .apply_join(&alice.id, &b, &dir, &limits)
+        .apply_join(&alice.id, &b, &dir, &limits, &link.handle)
         .unwrap_err();
     assert!(matches!(err, GroupError::Kind), "{err:?}");
 }
@@ -487,7 +502,7 @@ fn a_channel_has_its_own_size_limit() {
 
     // A group of three is over the group limit...
     let (gi, tree) = owner.create();
-    let group = Group::create(GID, &owner.id, &gi, &tree, &dir).unwrap();
+    let group = Group::create(GID, &owner.id, &gi, &tree, &dir, &limits).unwrap();
     let b = owner.add(&kps);
     let err = group
         .apply_commit(&owner.id, &b, &dir, &limits)
@@ -497,7 +512,7 @@ fn a_channel_has_its_own_size_limit() {
     // ...and within the channel limit, for a channel.
     let mut owner = Device::restored(&owner);
     let (gi, tree) = owner.create_with(songbird_groups::roles::Policy::CHANNEL);
-    let channel = Group::create(GID, &owner.id, &gi, &tree, &dir).unwrap();
+    let channel = Group::create(GID, &owner.id, &gi, &tree, &dir, &limits).unwrap();
     let kps: Vec<_> = subscribers.iter().map(Device::key_package).collect();
     let b = owner.add(&kps);
     let (channel, _) = channel.apply_commit(&owner.id, &b, &dir, &limits).unwrap();

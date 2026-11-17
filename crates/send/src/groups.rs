@@ -224,9 +224,11 @@ impl Rosters for MemoryRosters {
     }
 }
 
-/// The channel rate class (D-0072): posts per channel, across its admins, on this node. A post
-/// to a channel is stored for up to `max_channel_members` devices, so channels get a budget of
-/// their own, on top of each sender's device budget. GCRA: `per_sec` steady, `burst` at once.
+/// The channel rate class's per-node part (D-0072): posts per channel, across its admins, on
+/// this node. A post to a channel is stored for up to `max_channel_members` devices, so
+/// channels get a budget of their own, on top of each sender's device budget. GCRA: `per_sec`
+/// steady, `burst` at once. The cluster-wide part is the gate's (`Gate::channel`, D-0077); this
+/// one answers first, without a round trip, and alone while `valkey-hot` is unreachable.
 #[derive(Debug)]
 pub struct ChannelBudget {
     interval: Duration,

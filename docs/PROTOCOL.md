@@ -1265,8 +1265,9 @@ channels follow in M2–M4.
 `version u8 (1) | group [16] | info_len u32 | GroupInfo | tree_len u32 | ratchet tree`, both parts
 `MLSMessage`/TLS as OpenMLS exports them, at most 4 MiB in all.
 
-- The group is at epoch 0, uses `0x004F`, carries no group-context extension (until M2), and its
-  only leaf is the requesting device, which signed the `GroupInfo`.
+- The group is at epoch 0, uses `0x004F`, and its only leaf is the requesting device, which
+  signed the `GroupInfo`. Its context carries the extensions of §6.6 and `external_senders`
+  naming the delivery service, exactly (§6.11).
 - Answers:
   - 204;
   - 409 `exists`;
@@ -1286,8 +1287,9 @@ The server validates the commit fully (RFC 9420, OpenMLS `PublicGroup`), then ch
 1. a member's commit is signed by the leaf whose credential is the requesting device;
 2. every added KeyPackage names a listed device that is not already in the group;
 3. updates keep their leaf's identity;
-4. the proposals are add, remove, update or self-remove only. Pre-shared keys, re-init,
-   group-context changes and custom proposals are refused until M2 defines them;
+4. the proposals are add, remove, update, self-remove and (§6.6) group-context changes only.
+   Pre-shared keys, re-init and custom proposals are refused. A proposal by reference is a
+   member's, or a `Remove` from the delivery service (§6.11);
 5. an external commit comes from a device whose account already has a device in the group, and
    removes at most that device's own old leaf. A reinstalled device (a new device ID) joins
    without removing anything, and a member then removes the dead leaf;
@@ -1373,6 +1375,11 @@ Every group's context carries two extensions from creation:
   flags u8 | n u16 | n × (account [16] | role u8)    accounts strictly ascending
   ```
 
+  Version 2 (D-0076) is the same followed by the invite links' proof keys (§6.8): `m u8 | m ×
+  (handle [16] | Ed25519 public key [32])`, 1 ≤ m ≤ 16, handles strictly ascending. A group
+  with no link keys uses version 1, so each value has one encoding. Publishing or withdrawing a
+  key needs the `links` role.
+
   - **Roles:** 0 read-only, 1 member, 2 moderator, 3 admin, 4 owner.
   - **Flags:** `0x01` channel, `0x02` joining needs approval.
   - **Unlisted accounts** have `default_role` (1 in a group, 0 in a channel). An entry never
@@ -1389,6 +1396,7 @@ apply the same rule to a commit (`songbird_groups::roles::authorize`):
 | Add a device of an account already in it | Member and above (one's own: anyone) |
 | Remove another person's device | An admin or owner who outranks that person |
 | Remove one's own devices, or a device no longer listed | Anyone |
+| Commit the delivery service's proposal to remove a device (§6.11) | Anyone, and only for a device no longer in its account's signed list: one for a listed device refuses the commit, whoever commits it |
 | Change the policy (send, add, edit info, links, call, default role, flags) | Admin and above |
 | Change someone's role | An admin who outranks both the old and the new role, or an owner (who may make owners) |
 | Lower one's own role | Anyone |
@@ -1434,9 +1442,12 @@ A commit the rule refuses gets 403 `role`, and clients drop it.
 
 - **A link** is `handle [16]` (random, chosen by the app) and a 32-byte secret. Both travel
   only in the link itself (`https://…/g#<handle><secret>`, in the fragment). The app derives
-  two keys from the secret with HKDF-SHA-256 (salt `"songbird.v1/group-link"`):
+  three keys from the secret with HKDF-SHA-256 (salt `"songbird.v1/group-link"`):
   - `auth` (info `"auth"`), shown to the server to open or use the link;
-  - a key for the group's info (info `"info"`), which the server never sees.
+  - a key for the group's info (info `"info"`), which the server never sees;
+  - `proof` (info `"proof"`), the seed of the link's Ed25519 key pair (D-0076). Before sharing
+    the link, its creator commits the public key under the handle into the roles extension
+    (§6.6, version 2); revoking the link also withdraws it.
 
   The server keeps `SHA-256(auth)`, the group, whether a join must be approved, a use count,
   an optional limit and an optional expiry (at most a year).
@@ -1454,8 +1465,14 @@ A commit the rule refuses gets 403 `role`, and clients drop it.
 - **Joining:** `POST /v1/groups/join` with `version | handle | auth | bundle`. The bundle is an
   external commit adding the device (`Sender::NewMemberCommit`), with the group's default role
   (it cannot change roles: RFC 9420 forbids external commits from changing extensions).
+  - **The link proof** (D-0076): the external commit's authenticated data is `version u8 (1) |
+    handle [16] | signature [64]`. The signature is the link's `proof` key over
+    `"songbird.v1/link-proof\0" | group [16] | epoch u64 (the GroupInfo's) | handle | device
+    [16] | key_len u16 | the new leaf's signature key`. The server requires it to name this
+    link and to verify under the key the roles extension publishes for it.
   - Answers as `/v1/groups/commit`, including a retried join that already won.
-  - 404 for a link that cannot be used; 403 `approval` if joins need approval.
+  - 404 for a link that cannot be used; 403 `approval` if joins need approval; 403 `proof`
+    without a valid proof (nothing is spent).
   - The link's use is counted in the same transaction as the commit, so two joins can never
     both take the last use.
 - **Asking:** a link needs approval if the link says so or the group's policy has the approval
@@ -1473,7 +1490,14 @@ A commit the rule refuses gets 403 `role`, and clients drop it.
   to 5. Managing links and requests uses the commit budget.
 - **What members see:** every join by link is an external commit from a new account, with the
   default role (OpenMLS refuses an external commit that changes extensions). Apps show it in
-  the chat. Whether the joiner held a valid link is the server's word; see the threat model.
+  the chat. Before following any external commit, an app applies the rule the server applies
+  (`songbird_groups::ds::check_external_commit`, D-0078): only the joiner's own `ExternalInit`
+  and `Remove`, inline; the joiner's leaf is its device; the only leaf removed is that
+  device's own old one. From an account not yet in the group, it also checks the link proof
+  against the keys its own roles extension publishes (`songbird_groups::links::verify`), and
+  refuses one without a valid proof: a server cannot admit someone who never held a link the
+  members made. Link keys are honest Ed25519 points (no small order, canonical), and apps
+  verify proofs strictly (RFC 8032), so every implementation agrees.
 
 ### 6.9 Communities (M4, D-0072)
 
@@ -1512,9 +1536,11 @@ one, by their own links.
   edit and manage links; subscribers join read-only (`Policy::CHANNEL`).
   - **Size:** up to 2,048 devices; a group is up to 1,024 (`Limits`). The limit follows the
     policy a commit leaves.
-  - **Rate class:** a channel takes at most 1 post a second, bursting to 10, on each node,
-    whoever of its admins posts. This is on top of each device's own budget. Over it, reason 1
-    `RateLimited` with the wait.
+  - **Rate class:** a channel takes at most 1 post a second, bursting to 10, across the whole
+    cluster and both transports (WebSocket and `PUT /v1/messages`), whoever of its admins
+    posts (D-0077). This is on top of each device's own budget. Over it, reason 1
+    `RateLimited` with the wait. While the cluster's store is unreachable, each node applies
+    the class on its own.
   - **Subscribers see each other's devices** in the ratchet tree, as in any MLS group. Channels
     suit audiences that know each other; public channels are not built (D-0065 §4).
 - **Tiers and receipts** (`songbird_groups::tiers`, the apps' rule; receipts are encrypted):
@@ -1524,6 +1550,43 @@ one, by their own links.
   | Small group | up to 32 | every device | if enabled | 1 s |
   | Large group | 33 and more | the primary device only | if enabled | 10 s |
   | Channel | any | none | none | — |
+
+### 6.11 Server-proposed removals (D-0075)
+
+When a device leaves the directory (its account is deleted, its primary's new list leaves it
+out, or it removes itself), its leaf would stay in every group until a member removed it. The
+delivery service proposes that removal itself, as the group's MLS external sender
+(RFC 9420 §12.1.8.1). It can only propose; a member commits.
+
+- **The service's key:** Ed25519, the same on every node. `POST /v1/groups/ds` with `version u8
+  (1)` answers it (32 bytes); apps should also pin it.
+- **Every group names it.** Its context's `external_senders` holds exactly one entry: that key
+  with the basic credential `songbird.v1/ds`. The server refuses a group created without it
+  (400 `kind`), and a commit that drops it or adds another sender (400 `proposal`).
+- **The proposal:** a `PublicMessage` from `external(0)` carrying `Remove(leaf)`, at the
+  group's current epoch, signed by the key (`SignWithLabel(…, "FramedContentTBS", …)`, no
+  membership tag). The server queues it in the group's state and stores it in every listed
+  member's mailbox. Signing is deterministic: the same leaf at the same epoch is the same
+  bytes.
+- **When:** within seconds of the device leaving, confirmed against the registry; and again
+  after any commit that leaves a departed device in the group (proposals do not outlive an
+  epoch).
+- **What apps do** (the trust rule, `songbird_groups::roles::authorize`):
+  1. On receiving a proposal from `external(0)`: keep it (`store_pending_proposal`) only if it
+     is a `Remove` of a leaf that exists and whose device is no longer in its account's signed
+     device list (after refreshing that list). Drop anything else: the service may propose
+     nothing but removals. A removal of a device the app still sees listed is not stored, but
+     kept aside: before processing a commit that references a proposal it lacks, the app
+     refreshes the device lists and judges the kept proposals again (D-0078).
+  2. Commit kept proposals soon (after a random delay of a few seconds, so members do not race;
+     another member's commit may include them first). Committing them needs no role.
+  3. Refuse a commit that includes a server removal of a still-listed device, whoever commits
+     it, and any external proposal that is not a `Remove`.
+  4. Refuse a commit whose context does not name exactly the service key the app pins
+     (`songbird_groups::ds::extensions_allowed`).
+- **The server applies the same rule** to commits. A commit removing a device the node's
+  directory still lists is answered 503 (retry): the service proposes only removals the
+  registry confirmed, and devices never come back, so that node's directory is seconds behind.
 
 ## 7. Attachments and packs (Prompt 6)
 

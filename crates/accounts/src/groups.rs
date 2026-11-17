@@ -33,6 +33,21 @@ pub struct GroupCommit<'a> {
     pub link: Option<&'a [u8; 16]>,
     /// Accounts the commit added: their pending join requests are settled.
     pub joined: &'a [[u8; 16]],
+    /// Devices still in the group that left the directory (D-0075): the group is marked so
+    /// `api` proposes their removal again at the new epoch (proposals do not outlive one). The
+    /// mark names only those whose device rows still exist: a deleted device's ID never comes
+    /// back into a mark after its deletion stripped it (D-0078); the prune pass finds those
+    /// through the directory.
+    pub prune: &'a [[u8; 16]],
+}
+
+/// A group marked for server-proposed removals (D-0075): its ID, the mark's counter (to forget
+/// it only if no later mark came) and the departed devices it holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PruneMark {
+    pub group: [u8; 16],
+    pub n: u64,
+    pub gone: Vec<songbird_types::DeviceId>,
 }
 
 /// An invite link (M3, D-0071).
@@ -213,6 +228,15 @@ impl Registry {
                UPDATE grp_link:[$h] SET uses += 1 RETURN NONE;
              };
              FOR $a IN $joined { DELETE grp_req:[$g, $a] };
+             IF array::len($prune) > 0 {
+               UPSERT grp_prune:[$g] SET n = (n ?? 0) + 1, at = time::now(), gone = gone ?? []
+                 RETURN NONE;
+               FOR $pd IN $prune {
+                 IF record::exists(device:[$pd]) {
+                   UPDATE grp_prune:[$g] SET gone = array::union(gone, [$pd]) RETURN NONE;
+                 };
+               };
+             };
              COMMIT TRANSACTION;";
         self.retry(
             sql,
@@ -233,6 +257,10 @@ impl Registry {
                     var(
                         "joined",
                         Value::Array(commit.joined.iter().map(|a| bytes(a)).collect()),
+                    ),
+                    var(
+                        "prune",
+                        Value::Array(commit.prune.iter().map(|d| bytes(d)).collect()),
                     ),
                 ]
             },
@@ -414,6 +442,74 @@ impl Registry {
             out.push((group, epoch, body));
         }
         Ok(out)
+    }
+}
+
+/// Server-proposed removals (D-0075): groups holding devices that left the directory.
+impl Registry {
+    /// Groups marked for pruning, oldest mark first, at most `limit`.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn groups_to_prune(&self, limit: u64) -> Result<Vec<PruneMark>, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "SELECT meta::id(id)[0] AS g, n, gone, at FROM grp_prune ORDER BY at LIMIT $n;",
+                vec![var("n", int(limit))],
+            )
+            .await?;
+        rows(v)
+            .into_iter()
+            .map(|r| {
+                let group = r
+                    .get("g")
+                    .and_then(Value::as_bytes)
+                    .and_then(|b| <[u8; 16]>::try_from(b.as_ref()).ok())
+                    .ok_or(RegistryError::Shape)?;
+                let n = r.get("n").and_then(u64_of).ok_or(RegistryError::Shape)?;
+                let gone = r
+                    .get("gone")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(Value::as_bytes)
+                            .filter_map(|b| songbird_types::DeviceId::from_slice(b).ok())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(PruneMark { group, n, gone })
+            })
+            .collect()
+    }
+
+    /// Moves a mark that could not be handled to the back of the queue (unless a later mark
+    /// came), so a group that keeps failing never holds up the others (D-0078).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn group_prune_later(&self, group: &[u8; 16], n: u64) -> Result<(), RegistryError> {
+        self.db
+            .exec(
+                "UPDATE grp_prune:[$g] SET at = time::now() WHERE n = $n RETURN NONE;",
+                vec![var("g", bytes(group)), var("n", int(n))],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Forgets a group's prune mark, unless a later mark came since it was read (`n` moved).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn group_pruned(&self, group: &[u8; 16], n: u64) -> Result<(), RegistryError> {
+        self.db
+            .exec(
+                "DELETE grp_prune:[$g] WHERE n = $n;",
+                vec![var("g", bytes(group)), var("n", int(n))],
+            )
+            .await?;
+        Ok(())
     }
 }
 

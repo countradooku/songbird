@@ -98,6 +98,7 @@ fn measure(suite: Ciphersuite, label: &'static str, members: usize) -> Row {
         max_members: members + 8,
         max_channel_members: members + 8,
         max_bundle: 64 << 20,
+        ..Limits::default()
     };
     let mut dir = Dir::default();
     let mut owner = Device::new(0, account(0), &mut dir);

@@ -53,6 +53,12 @@ pub struct Limits {
     pub max_channel_members: usize,
     /// Largest commit bundle accepted, checked before parsing.
     pub max_bundle: usize,
+    /// The delivery service's external-sender key (D-0075). When set, every group's context
+    /// must name exactly this key (with [`crate::external::DS_IDENTITY`]) as its only external
+    /// sender, from creation and after every commit, so the service can propose removing
+    /// devices that left the directory. When unset (tests of other rules), a group may name no
+    /// external sender at all. `api` always sets it.
+    pub external_sender: Option<[u8; 32]>,
 }
 
 impl Default for Limits {
@@ -61,6 +67,7 @@ impl Default for Limits {
             max_members: 1_024,
             max_channel_members: 2_048,
             max_bundle: 4 << 20,
+            external_sender: None,
         }
     }
 }
@@ -116,6 +123,8 @@ pub enum GroupError {
     Forbidden(Denied),
     #[error("the change-log entry is not signed by the committer")]
     LogSignature,
+    #[error("the join carries no valid link proof: {0}")]
+    LinkProof(crate::links::ProofError),
     #[error("state: {0}")]
     State(#[from] StateError),
 }
@@ -152,9 +161,21 @@ fn verify_log(
         .map_err(|_| GroupError::LogSignature)
 }
 
-/// Only the roles extension (and `required_capabilities`) may be in a group's context.
-fn extensions_allowed(ctx: &GroupContext) -> bool {
+/// The `external_senders` extension naming the delivery service's key (D-0075).
+#[must_use]
+pub fn ds_external_senders(key: &[u8; 32]) -> ExternalSendersExtension {
+    vec![ExternalSender::new(
+        SignaturePublicKey::from(&key[..]),
+        BasicCredential::new(crate::external::DS_IDENTITY.to_vec()).into(),
+    )]
+}
+
+/// Only the roles extension, `required_capabilities` and (exactly as `ds`, when set) the
+/// delivery service's `external_senders` may be in a group's context.
+#[must_use]
+pub fn extensions_allowed(ctx: &GroupContext, ds: Option<&[u8; 32]>) -> bool {
     let mut required = false;
+    let mut external = false;
     ctx.extensions().iter().all(|e| match e {
         Extension::Unknown(t, _) => *t == ROLES_EXTENSION,
         // Exactly Songbird's: every member supports the roles extension, `SelfRemove` and basic
@@ -165,8 +186,62 @@ fn extensions_allowed(ctx: &GroupContext) -> bool {
                 && r.credential_types() == [CredentialType::Basic];
             required
         }
+        // Exactly the delivery service, alone: no member may add another external sender (who
+        // could then propose), or drop the service (and keep departed devices' leaves).
+        Extension::ExternalSenders(s) => {
+            external = ds.is_some_and(|k| *s == ds_external_senders(k));
+            external
+        }
         _ => false,
     }) && required
+        && external == ds.is_some()
+}
+
+/// The structural rule for an external commit (a join or a rejoin), which the server and every
+/// app run alike (D-0078):
+///
+/// - its proposals are its own (`NewMemberCommit`), inline, and only `ExternalInit` and
+///   `Remove`: nothing by reference, no pre-shared key, nothing custom;
+/// - its new leaf is the joining device's;
+/// - the only leaf it may remove is that device's own old one (a resync, RFC 9420 §12.4.3.2);
+///   another member's leaf, even another device of the same account, is removed by a
+///   member's commit;
+/// - a device that still holds a leaf must remove it (no device twice).
+///
+/// `leaf_device` names the device of a leaf index in the group before the commit; `joiner_leaf`
+/// is the joining device's leaf there, if any. Who may join at all (an account already present,
+/// or a link and its proof) is decided on top of this. Returns the removed leaves.
+///
+/// # Errors
+/// [`GroupError::Proposal`], [`GroupError::Sender`], [`GroupError::External`] or
+/// [`GroupError::Duplicate`].
+pub fn check_external_commit(
+    staged: &StagedCommit,
+    joiner: &DeviceId,
+    leaf_device: impl Fn(u32) -> Option<DeviceId>,
+    joiner_leaf: Option<u32>,
+) -> Result<BTreeSet<u32>, GroupError> {
+    for q in staged.queued_proposals() {
+        match (q.sender(), q.proposal()) {
+            (Sender::NewMemberCommit, Proposal::ExternalInit(_) | Proposal::Remove(_)) => {}
+            _ => return Err(GroupError::Proposal),
+        }
+    }
+    let leaf = staged.update_path_leaf_node().ok_or(GroupError::External)?;
+    if device_of(leaf.credential())? != *joiner {
+        return Err(GroupError::Sender);
+    }
+    let removed: BTreeSet<u32> = staged
+        .remove_proposals()
+        .map(|r| r.remove_proposal().removed().u32())
+        .collect();
+    if removed.iter().any(|i| leaf_device(*i) != Some(*joiner)) {
+        return Err(GroupError::External);
+    }
+    if joiner_leaf.is_some_and(|i| !removed.contains(&i)) {
+        return Err(GroupError::Duplicate);
+    }
+    Ok(removed)
 }
 
 /// One leaf of the roster.
@@ -246,6 +321,15 @@ pub struct Applied {
     /// Each added KeyPackage's reference, with its device: the caller checks that the device
     /// published it (D-0074), before storing the commit.
     pub key_packages: Vec<(DeviceId, [u8; 32])>,
+}
+
+/// What [`Group::propose_removals`] did (D-0075).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerProposals {
+    /// Every server removal queued at this epoch (`MLSMessage` bytes), to fan out.
+    pub messages: Vec<Vec<u8>>,
+    /// How many of them this call queued: the state changed (store it) only if not zero.
+    pub queued: usize,
 }
 
 /// The stored form of a group: what the registry keeps under the group ID, compared and set
@@ -332,13 +416,15 @@ fn check_group_info(
 
 impl Group {
     /// Starts tracking a group its creator just made: epoch 0, the creator as the only leaf, a
-    /// Songbird ciphersuite, the requested ID.
+    /// Songbird ciphersuite, the requested ID, and (when `limits` names one) the delivery
+    /// service as its only external sender.
     pub fn create(
         id: [u8; GROUP_ID_LEN],
         creator: &DeviceId,
         group_info: &[u8],
         ratchet_tree: &[u8],
         dir: &impl Directory,
+        limits: &Limits,
     ) -> Result<Self, GroupError> {
         let Some(creator_account) = dir.account_of(creator) else {
             return Err(GroupError::Credential);
@@ -353,7 +439,7 @@ impl Group {
         if !GROUP_CIPHERSUITES.contains(&ctx.ciphersuite()) {
             return Err(GroupError::Ciphersuite);
         }
-        if ctx.epoch().as_u64() != 0 || !extensions_allowed(ctx) {
+        if ctx.epoch().as_u64() != 0 || !extensions_allowed(ctx, limits.external_sender.as_ref()) {
             return Err(GroupError::Kind);
         }
         // The creator's account is the only owner, and the only entry.
@@ -453,6 +539,15 @@ impl Group {
                 _ => None,
             })
             .collect();
+        // Leaves removed by the delivery service's proposal (D-0075): only devices that left
+        // the directory, whoever commits it.
+        let server_removed: BTreeSet<u32> = staged
+            .queued_proposals()
+            .filter_map(|q| match (q.proposal(), q.sender()) {
+                (Proposal::Remove(r), Sender::External(_)) => Some(r.removed().u32()),
+                _ => None,
+            })
+            .collect();
         let mut c = Change::default();
         let mut removed_devices = BTreeSet::new();
         for idx in removed_leaves {
@@ -463,7 +558,9 @@ impl Group {
             let device = device_of(leaf.credential())?;
             removed_devices.insert(device);
             if let Some(a) = dir.account_of(&device) {
-                if self_removed.contains(idx) {
+                if server_removed.contains(idx) {
+                    c.external.insert(a);
+                } else if self_removed.contains(idx) {
                     c.left.insert(a);
                 } else {
                     c.lost.insert(a);
@@ -521,7 +618,39 @@ impl Group {
         by_link: bool,
         dir: &impl Directory,
     ) -> Result<BTreeSet<u32>, GroupError> {
+        if external {
+            let removed = check_external_commit(
+                staged,
+                sender,
+                |i| {
+                    self.public
+                        .leaf(LeafNodeIndex::new(i))
+                        .and_then(|l| device_of(l.credential()).ok())
+                },
+                self.roster.leaf(sender),
+            )?;
+            // A rejoin: the account already has a device here (or a join by link).
+            let account_present = self
+                .roster
+                .devices()
+                .any(|d| d != *sender && dir.account_of(&d) == Some(sender_account))
+                || self.roster.leaf(sender).is_some();
+            if !account_present && !by_link {
+                return Err(GroupError::External);
+            }
+            return Ok(removed);
+        }
         for q in staged.queued_proposals() {
+            // Who proposed it: the committer (inline) or a member (by reference), or the
+            // delivery service (by reference, D-0075), which may only propose removals. No
+            // other outsider proposes (no `NewMemberProposal`), and an external commit
+            // carries nothing by reference.
+            match q.sender() {
+                Sender::Member(_) | Sender::NewMemberCommit => {}
+                Sender::External(_) if !external && matches!(q.proposal(), Proposal::Remove(_)) => {
+                }
+                _ => return Err(GroupError::Proposal),
+            }
             match q.proposal() {
                 Proposal::Add(_)
                 | Proposal::Remove(_)
@@ -564,35 +693,6 @@ impl Group {
         for q in staged.queued_proposals() {
             if let (Proposal::SelfRemove, Sender::Member(idx)) = (q.proposal(), q.sender()) {
                 removed.insert(idx.u32());
-            }
-        }
-        if external {
-            // A rejoin: the account already has a device here. The only leaf it may remove is
-            // the joining device's own old one (a resync, RFC 9420 §12.4.3.2); another lost
-            // device of the account is removed by a member's commit.
-            let account_present = self
-                .roster
-                .devices()
-                .any(|d| d != *sender && dir.account_of(&d) == Some(sender_account))
-                || self.roster.leaf(sender).is_some();
-            if !account_present && !by_link {
-                return Err(GroupError::External);
-            }
-            for idx in &removed {
-                let leaf = self
-                    .public
-                    .leaf(LeafNodeIndex::new(*idx))
-                    .ok_or(GroupError::External)?;
-                if device_of(leaf.credential())? != *sender {
-                    return Err(GroupError::External);
-                }
-            }
-            if self
-                .roster
-                .leaf(sender)
-                .is_some_and(|i| !removed.contains(&i))
-            {
-                return Err(GroupError::Duplicate);
             }
         }
         Ok(removed)
@@ -708,6 +808,103 @@ impl Group {
         Ok((self, sha256(msg)))
     }
 
+    /// The devices queued server removals target (D-0075). A commit clears the queue whether it
+    /// includes them or not, so the caller proposes again for those still in the group: they
+    /// were confirmed gone in the registry, whatever a cached directory says.
+    pub fn pending_server_removals(&self) -> Result<Vec<DeviceId>, GroupError> {
+        let mut out = Vec::new();
+        for (_, q) in self.public.queued_proposals(&self.state)? {
+            if let (Proposal::Remove(r), Sender::External(_)) = (q.proposal(), q.sender())
+                && let Some(leaf) = self.public.leaf(r.removed())
+            {
+                out.push(device_of(leaf.credential())?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The delivery service proposes removing every leaf whose device left the directory
+    /// (D-0075): an external `Remove` per leaf, signed by `signer`, checked by this group's own
+    /// validation (the signature against the context's `external_senders`) and queued like a
+    /// member's proposal. Leaves a queued proposal already removes are skipped, so calling it
+    /// again queues nothing new. A group that does not name `signer` gets nothing; a full
+    /// proposal queue stops early (the rest follow the next commit).
+    ///
+    /// The answer lists every server removal queued at this epoch, new or not, as the bytes to
+    /// fan out: signing is deterministic, so a proposal is the same bytes each time (one
+    /// idempotency key), and a fan-out that failed after the state was stored is finished by
+    /// the next call.
+    ///
+    /// `dir` must answer from the registry, not a cached snapshot: members refuse, and the
+    /// server refuses to commit, a server removal of a device that is still listed.
+    ///
+    /// On error the group is dropped, as for a commit.
+    pub fn propose_removals(
+        mut self,
+        dir: &impl Directory,
+        signer: &crate::external::DsSigner,
+    ) -> Result<(Self, ServerProposals), GroupError> {
+        let mut out = ServerProposals::default();
+        let named = self
+            .public
+            .group_context()
+            .extensions()
+            .external_senders()
+            .is_some_and(|s| *s == ds_external_senders(&signer.public_key()));
+        if !named {
+            return Ok((self, out));
+        }
+        let epoch = self.epoch();
+        let mut pending = BTreeSet::new();
+        for (_, q) in self.public.queued_proposals(&self.state)? {
+            match (q.proposal(), q.sender()) {
+                (Proposal::Remove(r), Sender::External(_)) => {
+                    let leaf = r.removed().u32();
+                    pending.insert(leaf);
+                    out.messages.push(crate::external::remove_proposal(
+                        &self.id, epoch, leaf, signer,
+                    ));
+                }
+                (Proposal::Remove(r), _) => {
+                    pending.insert(r.removed().u32());
+                }
+                (Proposal::SelfRemove, Sender::Member(i)) => {
+                    pending.insert(i.u32());
+                }
+                _ => {}
+            }
+        }
+        let dead: Vec<u32> = self
+            .roster
+            .leaves
+            .iter()
+            .filter(|l| dir.account_of(&l.device).is_none() && !pending.contains(&l.index))
+            .map(|l| l.index)
+            .collect();
+        for leaf in dead {
+            let msg = crate::external::remove_proposal(&self.id, epoch, leaf, signer);
+            let MlsMessageBodyIn::PublicMessage(pm) = mls_message(&msg)? else {
+                return Err(GroupError::Kind);
+            };
+            let processed = self
+                .public
+                .process_message(&CRYPTO, pm)
+                .map_err(|_| GroupError::Invalid)?;
+            let ProcessedMessageContent::ProposalMessage(q) = processed.into_content() else {
+                return Err(GroupError::Kind);
+            };
+            match self.public.add_proposal(&self.state, *q) {
+                Ok(()) => {
+                    out.messages.push(msg);
+                    out.queued += 1;
+                }
+                Err(StateError::TooManyProposals) => break,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok((self, out))
+    }
+
     /// Validates, authorizes and merges a commit bundle sent by `sender`. On success the group
     /// is at the next epoch; on error it is dropped, and the caller reloads its record.
     pub fn apply_commit(
@@ -717,35 +914,31 @@ impl Group {
         dir: &impl Directory,
         limits: &Limits,
     ) -> Result<(Self, Applied), GroupError> {
-        self.apply(sender, bundle, dir, limits, false)
+        self.apply(sender, bundle, dir, limits, None)
     }
 
-    /// A person joining by invite link (M3, D-0071): an external commit from a device whose
-    /// account need not be in the group yet. Call it only once the link is checked; the link's
-    /// use is counted with the commit's store. It joins with the default role.
+    /// A person joining by invite link `link` (its handle; M3, D-0071): an external commit from
+    /// a device whose account need not be in the group yet. Call it only once the link is
+    /// checked; the link's use is counted with the commit's store. It joins with the default
+    /// role, and must carry the link's proof (D-0076, `crate::links`): a signature by the key
+    /// the members published for that link, which the server cannot make.
     pub fn apply_join(
         self,
         sender: &DeviceId,
         bundle: &[u8],
         dir: &impl Directory,
         limits: &Limits,
+        link: &[u8; 16],
     ) -> Result<(Self, Applied), GroupError> {
-        self.apply(sender, bundle, dir, limits, true)
+        self.apply(sender, bundle, dir, limits, Some(link))
     }
 
-    fn apply(
-        mut self,
-        sender: &DeviceId,
-        bundle: &[u8],
-        dir: &impl Directory,
-        limits: &Limits,
-        by_link: bool,
-    ) -> Result<(Self, Applied), GroupError> {
-        let b = Bundle::parse(bundle, limits.max_bundle)?;
-        if wire::wire_format(b.commit)? != wire::WIRE_PUBLIC {
+    /// A commit's `PublicMessage`, for this group at its current epoch.
+    fn commit_message(&self, commit: &[u8]) -> Result<PublicMessageIn, GroupError> {
+        if wire::wire_format(commit)? != wire::WIRE_PUBLIC {
             return Err(GroupError::Kind);
         }
-        let MlsMessageBodyIn::PublicMessage(pm) = mls_message(b.commit)? else {
+        let MlsMessageBodyIn::PublicMessage(pm) = mls_message(commit)? else {
             return Err(GroupError::Kind);
         };
         if pm.content_type() != ContentType::Commit {
@@ -754,12 +947,49 @@ impl Group {
         if pm.group_id().as_slice() != self.id {
             return Err(GroupError::OtherGroup);
         }
-        let from_epoch = self.epoch();
-        if pm.epoch().as_u64() != from_epoch {
-            return Err(GroupError::StaleEpoch {
-                current: from_epoch,
-            });
+        let current = self.epoch();
+        if pm.epoch().as_u64() != current {
+            return Err(GroupError::StaleEpoch { current });
         }
+        Ok(pm)
+    }
+
+    /// A join by link proves the joiner held the link (D-0076): a signature by the key the
+    /// members published for `handle` (the link the join is counted against), over this group,
+    /// the current epoch, the joining device and its new leaf's key.
+    fn check_link_proof(
+        &self,
+        staged: &StagedCommit,
+        sender: &DeviceId,
+        aad: &[u8],
+        handle: &[u8; 16],
+    ) -> Result<(), GroupError> {
+        let leaf = staged.update_path_leaf_node().ok_or(GroupError::External)?;
+        crate::links::verify(
+            &roles_of(self.public.group_context())?,
+            &self.id,
+            self.epoch(),
+            aad,
+            sender,
+            leaf.signature_key().as_slice(),
+            Some(handle),
+        )
+        .map(|_| ())
+        .map_err(GroupError::LinkProof)
+    }
+
+    fn apply(
+        mut self,
+        sender: &DeviceId,
+        bundle: &[u8],
+        dir: &impl Directory,
+        limits: &Limits,
+        link: Option<&[u8; 16]>,
+    ) -> Result<(Self, Applied), GroupError> {
+        let by_link = link.is_some();
+        let b = Bundle::parse(bundle, limits.max_bundle)?;
+        let pm = self.commit_message(b.commit)?;
+        let from_epoch = self.epoch();
         let sender_account = dir.account_of(sender).ok_or(GroupError::Sender)?;
         let external = match pm.sender() {
             // A join by link is an external commit.
@@ -778,19 +1008,23 @@ impl Group {
             .public
             .process_message(&CRYPTO, pm)
             .map_err(|_| GroupError::Invalid)?;
+        let aad = processed.aad().to_vec();
         let ProcessedMessageContent::StagedCommitMessage(staged) = processed.into_content() else {
             return Err(GroupError::Kind);
         };
 
         let removed_leaves =
             self.check_leaves(&staged, sender, sender_account, external, by_link, dir)?;
+        if let Some(handle) = link {
+            self.check_link_proof(&staged, sender, &aad, handle)?;
+        }
         let key_packages = self.check_adds(&staged, b.welcome, &removed_leaves, dir)?;
         let added: Vec<DeviceId> = key_packages.iter().map(|(d, _)| *d).collect();
 
         // Roles (D-0070): the commit's new roles extension must be valid and the change allowed
         // for the committer's role. External commits cannot change extensions, and only rejoin.
         let new_context = staged.group_context().clone();
-        if !extensions_allowed(&new_context) {
+        if !extensions_allowed(&new_context, limits.external_sender.as_ref()) {
             return Err(GroupError::Proposal);
         }
         let new_roles = roles_of(&new_context)?;

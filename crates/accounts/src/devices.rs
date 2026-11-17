@@ -262,7 +262,8 @@ impl Registry {
         encoded: &[u8],
         job: &Job,
     ) -> Result<ListChange, RegistryError> {
-        let sql = "BEGIN TRANSACTION;
+        let sql = concat!(
+            "BEGIN TRANSACTION;
              IF account:[$a].deleting != false { THROW 'songbird:mismatch' };
              UPDATE account:[$a] SET dgen = (dgen ?? 0) + 1 RETURN NONE;
              IF (account:[$a].dlist_v ?? -1) >= $v { THROW 'songbird:rollback' };
@@ -276,7 +277,9 @@ impl Registry {
              UPDATE device SET disabled = true, pending = NONE, lconf = NONE
                WHERE account = $a AND disabled = false AND meta::id(id)[0] NOTINSIDE $ids
                RETURN NONE;
-             UPDATE device SET pending = NONE, lconf = NONE
+             LET $gone = $removed;",
+            mark_prune!(),
+            "UPDATE device SET pending = NONE, lconf = NONE
                WHERE account = $a AND meta::id(id)[0] INSIDE $ids RETURN NONE;
              UPDATE account:[$a] SET dlist = $blob, dlist_v = $v, kt_gen = (kt_gen ?? 0) + 1
                RETURN NONE;
@@ -285,7 +288,8 @@ impl Registry {
              };
              UPDATE directory:v SET version += 1 RETURN NONE;
              RETURN $removed;
-             COMMIT TRANSACTION;";
+             COMMIT TRANSACTION;"
+        );
         let list: Vec<Value> = entries
             .iter()
             .map(|e| {
@@ -386,14 +390,18 @@ impl Registry {
         let Some(row) = self.device(device).await? else {
             return Err(RegistryError::Shape);
         };
-        let sql = "BEGIN TRANSACTION;
+        let sql = concat!(
+            "BEGIN TRANSACTION;
              LET $row = (SELECT account, disabled, prim FROM ONLY device:[$d]);
              IF $row = NONE OR $row.disabled OR $row.prim != false { THROW 'songbird:primary' };
              UPDATE account:[$row.account] SET dgen = (dgen ?? 0) + 1 RETURN NONE;
              UPDATE device:[$d] SET disabled = true, pending = NONE, lconf = NONE RETURN NONE;
-             UPSERT outbox:[$j] SET job = $job, at = time::now() RETURN NONE;
+             LET $gone = [$d];",
+            mark_prune!(),
+            "UPSERT outbox:[$j] SET job = $job, at = time::now() RETURN NONE;
              UPDATE directory:v SET version += 1 RETURN NONE;
-             COMMIT TRANSACTION;";
+             COMMIT TRANSACTION;"
+        );
         self.retry(
             sql,
             || {
@@ -485,6 +493,8 @@ impl Registry {
                  DELETE mlskp WHERE device INSIDE $gone RETURN NONE;
                  DELETE mlskp_used WHERE device INSIDE $gone RETURN NONE;
                  FOR $d IN $gone { DELETE device:[$d] RETURN NONE; };
+                 UPDATE grp_prune SET gone = array::complement(gone, $gone)
+                   WHERE gone CONTAINSANY $gone RETURN NONE;
                  UPDATE directory:v SET version += 1 RETURN NONE;
                  COMMIT TRANSACTION;",
                 vec![var("ds", Value::Array(ds))],

@@ -5,6 +5,8 @@
 
 pub mod crypto;
 pub mod ds;
+pub mod external;
+pub mod links;
 pub mod roles;
 pub mod state;
 pub mod tiers;

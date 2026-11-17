@@ -103,6 +103,23 @@ aggregate counters only; nothing in them or in the logs identifies a device (inv
 - Verification: `inv8_store_unavailable_rejects_retryably_and_keeps_sockets`; rejected sends stop
   and the load-generator checker passes afterwards.
 
+## `valkey-hot` unreachable: channel posts at the per-node rate (D-0077)
+
+- Detection: `delivery_channel_rate_local_only_total` and `api_channel_rate_local_only_total`
+  rising; the message-request gate refuses requests and broadcasts as unavailable at the same
+  time (it fails closed).
+- Impact: posts to private channels are no longer held to one budget across the cluster. Each
+  node admits a channel's posts at the class's rate (1 a second, burst 10, by default), so a
+  channel posting through N nodes gets up to N times its class. Each post waits at most
+  `CHANNEL_GATE_WAIT` (250 ms) for Valkey before the node decides alone. Group messages and
+  ordinary sends are unaffected. This is chosen over refusing every channel post: channel
+  admins are authorized posters, each also under their device's own budget.
+- Immediate actions: restore `valkey-hot` (container status, memory, TLS certificates). The
+  connections heal on the next command; nothing needs a restart.
+- Verification: the counters stop rising; `without_valkey_the_per_node_budget_decides_alone`
+  (unit) and `a_channels_rate_class_is_shared_by_the_websocket_and_http` (live) describe both
+  modes.
+
 ## Mailbox writer fenced (node not ready)
 
 - Detection: `/readyz` fails on a delivery node; log `mailbox writer fenced by another writer;

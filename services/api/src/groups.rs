@@ -26,6 +26,8 @@ use std::time::Duration;
 use aws_lc_rs::{digest, hkdf, hmac};
 use bytes::Bytes;
 use songbird_accounts::RegistryError;
+use songbird_groups::external::DsSigner;
+use songbird_groups::roles::Denied;
 use songbird_groups::wire::Bundle;
 use songbird_groups::{Group, GroupError, Limits, Record};
 use songbird_types::{AccountId, DeviceId};
@@ -46,6 +48,9 @@ const PURGE_EVERY_TICKS: u64 = 720;
 pub struct Groups {
     /// Keys the fan-out idempotency keys and the rate records.
     key: hmac::Key,
+    /// The delivery service's external-sender key (D-0075): every group names its public half;
+    /// it signs removals of devices that left the directory.
+    ds: Arc<DsSigner>,
     /// Group size and bundle limits.
     pub limits: Limits,
     /// Commits (and creations) per second per device.
@@ -72,19 +77,28 @@ impl std::fmt::Debug for Groups {
 }
 
 impl Groups {
-    /// Derives the groups key from the cluster secret (every `api` node derives the same);
-    /// `None` if key derivation failed.
+    /// Derives the groups key and the external-sender key from the cluster secret (every `api`
+    /// node derives the same, so every node signs with the key every group names); `None` if
+    /// key derivation failed. `limits.external_sender` is set to that key: every group must
+    /// name the service (D-0075).
     #[must_use]
-    pub fn new(cluster_secret: &[u8; 32], limits: Limits) -> Option<Self> {
-        let mut k = [0u8; 32];
-        hkdf::Salt::new(hkdf::HKDF_SHA256, b"songbird.v1/groups")
-            .extract(cluster_secret)
-            .expand(&[b"group-fanout"], hkdf::HKDF_SHA256)
-            .ok()?
-            .fill(&mut k)
-            .ok()?;
+    pub fn new(cluster_secret: &[u8; 32], mut limits: Limits) -> Option<Self> {
+        let derive = |label: &[u8]| {
+            let mut k = [0u8; 32];
+            hkdf::Salt::new(hkdf::HKDF_SHA256, b"songbird.v1/groups")
+                .extract(cluster_secret)
+                .expand(&[label], hkdf::HKDF_SHA256)
+                .ok()?
+                .fill(&mut k)
+                .ok()?;
+            Some(k)
+        };
+        let k = derive(b"group-fanout")?;
+        let ds = DsSigner::from_seed(&derive(b"external-sender")?)?;
+        limits.external_sender = Some(ds.public_key());
         Some(Self {
             key: hmac::Key::new(hmac::HMAC_SHA256, &k),
+            ds: Arc::new(ds),
             limits,
             commits_per_sec: 2,
             commit_burst: 10,
@@ -93,6 +107,13 @@ impl Groups {
             reads_per_sec: 5,
             read_burst: 20,
         })
+    }
+
+    /// The delivery service's external-sender public key, which every group's context names
+    /// (`POST /v1/groups/ds`; apps also pin it).
+    #[must_use]
+    pub fn external_sender(&self) -> [u8; 32] {
+        self.ds.public_key()
     }
 
     fn idempotency(&self, kind: &[u8], group: &[u8; 16], epoch: u64) -> [u8; 16] {
@@ -163,8 +184,10 @@ const POLICY_EDIT_INFO: usize = 2;
 fn reason(e: &GroupError) -> &'static str {
     match e {
         GroupError::Roles => "roles",
+        GroupError::Forbidden(Denied::Listed) => "listed",
         GroupError::Forbidden(_) => "role",
         GroupError::LogSignature => "log",
+        GroupError::LinkProof(_) => "proof",
         GroupError::Wire(_) | GroupError::Malformed => "malformed",
         GroupError::Kind => "kind",
         GroupError::OtherGroup => "group",
@@ -223,8 +246,9 @@ impl Groups {
         };
         let dir = Listed(m.path.directory());
         let (info, tree) = (info.to_vec(), tree.to_vec());
+        let limits = self.limits;
         let made = tokio::task::spawn_blocking(move || {
-            let g = Group::create(group, &device, &info, &tree, &dir)?;
+            let g = Group::create(group, &device, &info, &tree, &dir, &limits)?;
             Ok::<_, GroupError>((g.record().encode()?, g.roster_bytes(&dir)?))
         })
         .await;
@@ -290,19 +314,18 @@ impl Groups {
         let dir = Listed(m.path.directory());
         let limits = self.limits;
         let bundle_owned = bundle.to_vec();
-        let by_link = link.is_some();
-        let applied = tokio::task::spawn_blocking(move || {
-            let g = Group::load(record)?;
-            let (g, a) = if by_link {
-                g.apply_join(&device, &bundle_owned, &dir, &limits)?
-            } else {
-                g.apply_commit(&device, &bundle_owned, &dir, &limits)?
-            };
-            let roster: Vec<DeviceId> = g.roster().devices().collect();
-            Ok::<_, GroupError>((g.record().encode()?, roster, g.roster_bytes(&dir)?, a))
+        let by_link = link.map(|(handle, _)| handle);
+        let validated = tokio::task::spawn_blocking(move || {
+            validate(record, &device, &bundle_owned, &dir, &limits, by_link)
         })
         .await;
-        let (state, roster, roster_bytes, applied) = match applied {
+        let Validated {
+            state,
+            roster,
+            roster_bytes,
+            applied,
+            dead,
+        } = match validated {
             Ok(Ok(v)) => v,
             // The same commit again (an answer that was lost): it won; finish its fan-out.
             Ok(Err(GroupError::StaleEpoch { current })) if row.last.as_ref() == hash => {
@@ -313,8 +336,18 @@ impl Groups {
             Ok(Err(GroupError::StaleEpoch { current })) => {
                 return Outcome::Stale(current);
             }
+            // A server removal of a device this node still lists (D-0075). The service proposes
+            // only removals the registry confirmed, and a device never comes back, so this
+            // node's directory snapshot is behind the registry (it follows within seconds):
+            // retry, rather than refuse a commit every up-to-date member accepts.
+            Ok(Err(GroupError::Forbidden(Denied::Listed))) => {
+                tracing::warn!("a commit removes a device this node still lists; retry");
+                return Outcome::Unavailable;
+            }
             // The roles rule refused it (D-0070).
             Ok(Err(GroupError::Forbidden(_))) => return Outcome::Forbidden("role"),
+            // A join without a valid proof that its device held the link (D-0076).
+            Ok(Err(GroupError::LinkProof(_))) => return Outcome::Forbidden("proof"),
             Ok(Err(e)) => return Outcome::Malformed(reason(&e)),
             Err(_) => return Outcome::Unavailable,
         };
@@ -345,6 +378,7 @@ impl Groups {
                     log: applied.log.as_deref(),
                     link: link.as_ref().map(|(h, _)| h),
                     joined: &joined,
+                    prune: &dead,
                 },
             )
             .await
@@ -452,6 +486,16 @@ impl Groups {
             return Outcome::NotFound;
         }
         state_blob(&row, &[]).await
+    }
+
+    /// `POST /v1/groups/ds` (D-0075): `version u8 (1)`. 200 with the delivery service's
+    /// external-sender public key (32 bytes): every group's context must name it, with the
+    /// basic credential `songbird.v1/ds`, as its only external sender.
+    pub(crate) fn ds_key(&self, body: &[u8]) -> Outcome {
+        if body != [VERSION] {
+            return Outcome::Malformed("request");
+        }
+        Outcome::Blob(Bytes::copy_from_slice(&self.external_sender()))
     }
 
     /// Who may read a group's state and change log: a device in it, or a listed device of an
@@ -638,6 +682,8 @@ pub async fn redrive(
         };
         let Some(g) = m.groups.as_ref() else { return };
         g.redrive_once(&registry, m, REDRIVE_AFTER_SECS).await;
+        // Groups holding devices that left the directory (D-0075).
+        g.prune_once(&registry, m).await;
         // Hourly: lapsed join requests and expired links (D-0071).
         if ticks.is_multiple_of(PURGE_EVERY_TICKS) && registry.purge_group_invites().await.is_err()
         {
@@ -667,6 +713,167 @@ impl Groups {
             }
         }
         done
+    }
+}
+
+/// What a validated commit leaves to store.
+struct Validated {
+    state: Vec<u8>,
+    roster: Vec<DeviceId>,
+    roster_bytes: Vec<u8>,
+    applied: songbird_groups::Applied,
+    /// Devices still in the group that left the directory: proposals do not outlive an
+    /// epoch, so their removal is proposed again at the new one (D-0075).
+    dead: Vec<[u8; 16]>,
+}
+
+/// Validates a commit (or, with `link`, a join by that invite link) against the stored record
+/// (CPU work: run it off the async threads).
+fn validate(
+    record: Record,
+    device: &DeviceId,
+    bundle: &[u8],
+    dir: &Listed,
+    limits: &Limits,
+    link: Option<[u8; 16]>,
+) -> Result<Validated, GroupError> {
+    let g = Group::load(record)?;
+    // Devices a queued server removal targets: confirmed gone in the registry when proposed.
+    let proposed = g.pending_server_removals()?;
+    let (g, applied) = match link {
+        Some(handle) => g.apply_join(device, bundle, dir, limits, &handle)?,
+        None => g.apply_commit(device, bundle, dir, limits)?,
+    };
+    let roster: Vec<DeviceId> = g.roster().devices().collect();
+    let dead = roster
+        .iter()
+        .filter(|d| {
+            songbird_groups::Directory::account_of(dir, d).is_none() || proposed.contains(d)
+        })
+        .map(|d| *d.as_bytes())
+        .collect();
+    Ok(Validated {
+        state: g.record().encode()?,
+        roster_bytes: g.roster_bytes(dir)?,
+        roster,
+        applied,
+        dead,
+    })
+}
+
+/// The directory a prune decides with: this node's snapshot, overruled by the registry for
+/// every device the prune looked up (D-0075). A stale snapshot can neither propose removing a
+/// device that is still listed nor hide one that left.
+struct Confirmed {
+    snapshot: Arc<songbird_send::Directory>,
+    looked_up: std::collections::HashMap<DeviceId, Option<AccountId>>,
+}
+
+impl songbird_groups::Directory for Confirmed {
+    fn account_of(&self, device: &DeviceId) -> Option<AccountId> {
+        self.looked_up
+            .get(device)
+            .copied()
+            .unwrap_or_else(|| self.snapshot.listed_account(device))
+    }
+}
+
+/// Most groups one prune pass handles.
+const PRUNE_BATCH: u64 = 64;
+
+/// Server-proposed removals (D-0075).
+impl Groups {
+    /// One pass over the groups marked for pruning (a device they hold left the directory);
+    /// returns how many it finished. A group that could not be finished keeps its mark and is
+    /// tried again next pass.
+    pub async fn prune_once(&self, registry: &songbird_accounts::Registry, m: &Messages) -> usize {
+        let Ok(marks) = registry.groups_to_prune(PRUNE_BATCH).await else {
+            return 0;
+        };
+        let mut done = 0;
+        for mark in marks {
+            if self.prune(registry, m, &mark).await.is_ok() {
+                done += 1;
+            } else {
+                tracing::warn!("a group's departed devices could not be proposed for removal yet");
+                // To the back of the queue: a group that keeps failing holds up no other.
+                let _ = registry.group_prune_later(&mark.group, mark.n).await;
+            }
+        }
+        done
+    }
+
+    /// Proposes, as the group's external sender, removing every device it holds that left the
+    /// directory; stores the proposals with the group's state (compare-and-set on epoch and
+    /// revision), fans them out to the members, then forgets the mark.
+    async fn prune(
+        &self,
+        registry: &songbird_accounts::Registry,
+        m: &Messages,
+        mark: &songbird_accounts::groups::PruneMark,
+    ) -> Result<(), ()> {
+        let group = mark.group;
+        let Some(row) = registry.group(&group).await.map_err(|_| ())? else {
+            return registry.group_pruned(&group, mark.n).await.map_err(|_| ());
+        };
+        let record = Record::decode(&row.state).map_err(|_| ())?;
+        // Who left: the devices the mark names and those this node's snapshot no longer
+        // lists, each confirmed in the registry (members refuse a removal of a listed device).
+        let snapshot = m.path.directory();
+        let roster = devices_of(&row.roster);
+        let mut candidates: Vec<DeviceId> = roster
+            .iter()
+            .filter(|d| snapshot.listed_account(d).is_none() || mark.gone.contains(d))
+            .copied()
+            .collect();
+        candidates.sort_unstable();
+        candidates.dedup();
+        let mut looked_up = std::collections::HashMap::with_capacity(candidates.len());
+        for d in candidates {
+            let listed = registry
+                .device(&d)
+                .await
+                .map_err(|_| ())?
+                .filter(|r| !r.disabled && !r.pending)
+                .map(|r| r.account);
+            looked_up.insert(d, listed);
+        }
+        if looked_up.values().all(Option::is_some) {
+            return registry.group_pruned(&group, mark.n).await.map_err(|_| ());
+        }
+        let dir = Confirmed {
+            snapshot,
+            looked_up,
+        };
+        let ds = Arc::clone(&self.ds);
+        let proposed = tokio::task::spawn_blocking(move || {
+            let (g, p) = Group::load(record)?.propose_removals(&dir, &ds)?;
+            let members: Vec<DeviceId> = g
+                .roster()
+                .devices()
+                .filter(|d| songbird_groups::Directory::account_of(&dir, d).is_some())
+                .collect();
+            Ok::<_, GroupError>((g.record().encode()?, p, members))
+        })
+        .await;
+        let Ok(Ok((state, p, members))) = proposed else {
+            return Err(());
+        };
+        if p.queued > 0 {
+            // A commit or another proposal came first: the next pass proposes at its epoch.
+            registry
+                .propose_group(&group, row.epoch, row.rev, &state)
+                .await
+                .map_err(|_| ())?;
+        }
+        for msg in p.messages {
+            let key = self.idempotency_of(b"ds-remove", &group, &sha256(&msg));
+            m.path
+                .shared(&members, Bytes::from(msg), key)
+                .await
+                .or_else(|e| stored_before(&e))?;
+        }
+        registry.group_pruned(&group, mark.n).await.map_err(|_| ())
     }
 }
 

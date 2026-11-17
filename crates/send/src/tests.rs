@@ -1123,3 +1123,117 @@ async fn devices_gone_from_the_directory_get_no_group_messages() {
     assert_eq!(f.mailbox.count_pending(&dev(2)).await.unwrap(), 1);
     assert_eq!(f.mailbox.count_pending(&dev(0x77)).await.unwrap(), 0);
 }
+
+/// A channel `C` with an admin (device 2) and a subscriber (device 1), in a fixture whose
+/// per-node budget is `local` posts at once and whose gate is `gate`.
+fn channel_fixture(local: u32, gate: Arc<dyn Gate>) -> Fixture {
+    const C: [u8; 16] = [0x5D; 16];
+    let mut f = Fixture::new();
+    let r = MemoryRosters::default();
+    r.set_roles(C, 4, [3, 3, 3, 3, 3, 0, 1], vec![(dev(1), 0), (dev(2), 3)]);
+    f.policy.rosters = Some(Arc::new(r));
+    f.policy.channels = Arc::new(groups::ChannelBudget::new(1, local));
+    f.policy.gate = Some(gate);
+    f
+}
+
+fn channel_post(k: u8) -> SendFrame {
+    const C: [u8; 16] = [0x5D; 16];
+    let mut s = group_send(C, group_message(C, 4, 1));
+    s.idempotency_key = [k; 16];
+    s
+}
+
+fn rate_limited(st: &SendStatus) -> bool {
+    matches!(
+        st,
+        SendStatus::Rejected {
+            reason: RejectReason::RateLimited,
+            ..
+        }
+    )
+}
+
+#[tokio::test]
+async fn the_channel_class_is_shared_by_every_send_path() {
+    // D-0077: two send paths (a delivery node's WebSocket, `api`'s HTTP) share one budget per
+    // channel through the gate, as every node shares the `valkey-hot` record. Each node's own
+    // budget alone would admit 5 + 5; the channel's class admits 3 in all.
+    let gate: Arc<dyn Gate> = Arc::new(MemoryGate::new(RequestLimits {
+        channel_burst: 3,
+        ..RequestLimits::default()
+    }));
+    let ws = channel_fixture(5, Arc::clone(&gate));
+    let http = channel_fixture(5, gate);
+    let mut scratch = Vec::new();
+    let now = Instant::now();
+    let mut accepted = 0;
+    for k in 0..8u8 {
+        let f = if k % 2 == 0 { &ws } else { &http };
+        let st = f
+            .path()
+            .send(&dev(2), channel_post(k), now, &mut scratch)
+            .await;
+        if st == SendStatus::Accepted {
+            accepted += 1;
+        } else {
+            assert!(rate_limited(&st), "{st:?}");
+        }
+    }
+    assert_eq!(accepted, 3);
+    assert_eq!(ws.metrics.channel_local_only.get(), 0);
+}
+
+/// A gate whose stores are down: unreachable at once, or never answering.
+struct DownGate {
+    hang: bool,
+}
+
+impl Gate for DownGate {
+    fn request<'a>(&'a self, _: &'a AccountId, _: &'a AccountId, _: bool) -> gate::GateFuture<'a> {
+        Box::pin(std::future::ready(Admit::Unavailable))
+    }
+
+    fn broadcast<'a>(&'a self, _: &'a AccountId, _: u32) -> gate::GateFuture<'a> {
+        Box::pin(std::future::ready(Admit::Unavailable))
+    }
+
+    fn blocked<'a>(&'a self, _: &'a AccountId, _: &'a AccountId) -> gate::GateFuture<'a> {
+        Box::pin(std::future::ready(Admit::Unavailable))
+    }
+
+    fn channel<'a>(&'a self, _: &'a [u8; 16]) -> gate::GateFuture<'a> {
+        if self.hang {
+            Box::pin(std::future::pending())
+        } else {
+            Box::pin(std::future::ready(Admit::Unavailable))
+        }
+    }
+}
+
+#[tokio::test]
+async fn without_valkey_the_per_node_budget_decides_alone() {
+    // D-0077's degraded mode: `valkey-hot` unreachable (or not answering within
+    // CHANNEL_GATE_WAIT). Posts flow at the per-node rate, counted; the node's own budget still
+    // refuses past its burst, before asking anyone.
+    for hang in [false, true] {
+        let f = channel_fixture(2, Arc::new(DownGate { hang }));
+        let mut scratch = Vec::new();
+        let now = Instant::now();
+        for k in [1, 2] {
+            let t = Instant::now();
+            let st = f
+                .path()
+                .send(&dev(2), channel_post(k), now, &mut scratch)
+                .await;
+            assert_eq!(st, SendStatus::Accepted, "hang: {hang}");
+            assert!(t.elapsed() < CHANNEL_GATE_WAIT * 4, "bounded wait");
+        }
+        let st = f
+            .path()
+            .send(&dev(2), channel_post(3), now, &mut scratch)
+            .await;
+        assert!(rate_limited(&st), "{st:?}");
+        assert_eq!(f.metrics.channel_local_only.get(), 2, "hang: {hang}");
+    }
+}

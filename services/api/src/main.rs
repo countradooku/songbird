@@ -75,9 +75,43 @@ fn s3_config(s: &S3Settings) -> Result<songbird_s3::Config, BoxError> {
 /// `PUT /v1/messages`: the send path over a send-only mailbox client (stores on the partition
 /// owners over node links, D-0044), a publish-only router, the registry's directory and push
 /// jobs. Returns the endpoint and its background tasks (directory follower, push batcher).
+/// What `PUT /v1/messages` enforces beyond limits: franking, the gate (requests, broadcasts and
+/// the channel rate class) and group rosters.
+fn send_policy(
+    s: &SendSettings,
+    gate: Option<(Arc<dyn songbird_send::Gate>, songbird_send::RequestLimits)>,
+    registry: &Arc<songbird_accounts::Registry>,
+) -> Result<songbird_send::Policy, BoxError> {
+    let limits = gate
+        .as_ref()
+        .map_or_else(songbird_send::RequestLimits::default, |(_, l)| *l);
+    Ok(songbird_send::Policy {
+        franking: s
+            .franking_key
+            .as_ref()
+            .map(|k| {
+                let secret = k.resolve_key32().map_err(BoxError::from)?;
+                songbird_send::Franker::from_secret(&secret)
+                    .map_err(|_| BoxError::from("franking key derivation failed"))
+            })
+            .transpose()?,
+        max_broadcast_accounts: limits.max_broadcast_accounts,
+        // The channel rate class's per-node part, at the cluster's rates (D-0077).
+        channels: Arc::new(songbird_send::groups::ChannelBudget::new(
+            limits.channel_per_sec,
+            limits.channel_burst,
+        )),
+        gate: gate.map(|(g, _)| g),
+        rosters: Some(Arc::new(songbird_send::RegistryRosters::new(
+            Arc::clone(registry),
+            songbird_send::groups::ROSTER_TTL,
+        ))),
+    })
+}
+
 async fn build_messages(
     s: &SendSettings,
-    gate: Option<(Arc<dyn songbird_send::Gate>, u32)>,
+    gate: Option<(Arc<dyn songbird_send::Gate>, songbird_send::RequestLimits)>,
     registry: &Arc<songbird_accounts::Registry>,
     queue: &Arc<songbird_jobs::Queue>,
     metrics: &ApiMetrics,
@@ -140,27 +174,7 @@ async fn build_messages(
             router,
             push,
             metrics: metrics.send.clone(),
-            policy: songbird_send::Policy {
-                franking: s
-                    .franking_key
-                    .as_ref()
-                    .map(|k| {
-                        let secret = k.resolve_key32().map_err(BoxError::from)?;
-                        songbird_send::Franker::from_secret(&secret)
-                            .map_err(|_| BoxError::from("franking key derivation failed"))
-                    })
-                    .transpose()?,
-                max_broadcast_accounts: gate.as_ref().map_or(
-                    songbird_send::RequestLimits::default().max_broadcast_accounts,
-                    |(_, n)| *n,
-                ),
-                gate: gate.map(|(g, _)| g),
-                rosters: Some(Arc::new(songbird_send::RegistryRosters::new(
-                    Arc::clone(registry),
-                    songbird_send::groups::ROSTER_TTL,
-                ))),
-                channels: Arc::default(),
-            },
+            policy: send_policy(s, gate, registry)?,
         }),
         limits: s.limits.limits(),
         sends_per_sec: s.sends_per_sec,
@@ -237,7 +251,7 @@ async fn requests(
 ) -> Result<
     (
         Option<songbird_api::requests::Requests>,
-        Option<(Arc<dyn songbird_send::Gate>, u32)>,
+        Option<(Arc<dyn songbird_send::Gate>, songbird_send::RequestLimits)>,
     ),
     BoxError,
 > {
@@ -267,7 +281,7 @@ async fn requests(
             keys,
             metrics.blocks.clone(),
         )),
-        Some((gate, r.limits.max_broadcast_accounts)),
+        Some((gate, r.limits)),
     ))
 }
 

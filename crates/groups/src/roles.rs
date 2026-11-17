@@ -28,8 +28,10 @@ use songbird_types::AccountId;
 
 /// The extension's type: MLS private use (RFC 9420 §17.3, `0xF000`–`0xFFFF`).
 pub const ROLES_EXTENSION: u16 = 0xF5B0;
-/// The only encoding version.
+/// The encoding without invite-link keys.
 pub const ROLES_V1: u8 = 1;
+/// The encoding with invite-link keys (D-0076).
+pub const ROLES_V2: u8 = 2;
 /// Most explicit role entries (a group's 1,024 leaves are at most 1,024 accounts).
 pub const MAX_ENTRIES: usize = 1_024;
 
@@ -164,6 +166,9 @@ pub struct Roles {
     pub policy: Policy,
     /// Accounts whose role is not the default.
     pub explicit: BTreeMap<AccountId, Role>,
+    /// Invite links' proof keys (D-0076): handle → Ed25519 public key. A join by a link carries
+    /// a proof under that link's key (`crate::links`). Changed only by the `links` role.
+    pub links: BTreeMap<[u8; 16], [u8; 32]>,
 }
 
 /// Why roles or a change to them were refused.
@@ -179,6 +184,9 @@ pub enum Denied {
     Stale,
     #[error("the actor is not in the group")]
     NotMember,
+    /// A server (external sender) proposal removes a device its account still lists (D-0075).
+    #[error("a server proposal removes a device that is still listed")]
+    Listed,
 }
 
 impl Roles {
@@ -188,6 +196,7 @@ impl Roles {
         Self {
             policy,
             explicit: BTreeMap::from([(owner, Role::Owner)]),
+            links: BTreeMap::new(),
         }
     }
 
@@ -200,11 +209,16 @@ impl Roles {
             .unwrap_or(self.policy.default_role)
     }
 
-    /// The extension's bytes.
+    /// The extension's bytes: version 1 without link keys, version 2 (the same, then the link
+    /// keys) with them, so each value has one encoding.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(10 + self.explicit.len() * 17);
-        out.push(ROLES_V1);
+        let mut out = Vec::with_capacity(11 + self.explicit.len() * 17 + self.links.len() * 48);
+        out.push(if self.links.is_empty() {
+            ROLES_V1
+        } else {
+            ROLES_V2
+        });
         out.extend_from_slice(&self.policy.to_bytes());
         out.extend_from_slice(
             &u16::try_from(self.explicit.len())
@@ -215,24 +229,43 @@ impl Roles {
             out.extend_from_slice(a.as_bytes());
             out.push(r.as_u8());
         }
+        if !self.links.is_empty() {
+            out.push(u8::try_from(self.links.len()).unwrap_or(u8::MAX));
+            for (handle, key) in &self.links {
+                out.extend_from_slice(handle);
+                out.extend_from_slice(key);
+            }
+        }
         out
     }
 
     /// Parses the extension: one encoding only (ascending accounts, no default-role entries,
-    /// no trailing bytes).
+    /// in version 2 one to [`crate::links::MAX_LINK_KEYS`] link keys by ascending handle, no
+    /// trailing bytes).
     pub fn decode(bytes: &[u8]) -> Result<Self, Denied> {
         let (head, rest) = bytes.split_at_checked(10).ok_or(Denied::Malformed)?;
         let [version, policy @ .., count_hi, count_lo] = head else {
             return Err(Denied::Malformed);
         };
-        if *version != ROLES_V1 {
+        if *version != ROLES_V1 && *version != ROLES_V2 {
             return Err(Denied::Malformed);
         }
         let policy: [u8; 7] = policy.try_into().map_err(|_| Denied::Malformed)?;
         let policy = Policy::from_bytes(&policy).ok_or(Denied::Malformed)?;
         let count = usize::from(u16::from_be_bytes([*count_hi, *count_lo]));
+        if count > MAX_ENTRIES {
+            return Err(Denied::Malformed);
+        }
+        let (rest, link_part) = rest.split_at_checked(count * 17).ok_or(Denied::Malformed)?;
+        let links = if *version == ROLES_V2 {
+            decode_links(link_part)?
+        } else if link_part.is_empty() {
+            BTreeMap::new()
+        } else {
+            return Err(Denied::Malformed);
+        };
         let (entries, tail) = rest.as_chunks::<17>();
-        if count > MAX_ENTRIES || entries.len() != count || !tail.is_empty() {
+        if entries.len() != count || !tail.is_empty() {
             return Err(Denied::Malformed);
         }
         let mut explicit = BTreeMap::new();
@@ -251,7 +284,11 @@ impl Roles {
             previous = Some(account);
             explicit.insert(account, role);
         }
-        Ok(Self { policy, explicit })
+        Ok(Self {
+            policy,
+            explicit,
+            links,
+        })
     }
 
     fn owners(&self, present: &BTreeSet<AccountId>) -> usize {
@@ -260,6 +297,35 @@ impl Roles {
             .filter(|a| self.role(a) == Role::Owner)
             .count()
     }
+}
+
+/// Version 2's link keys: `m u8 | m × (handle [16] | key [32])`, 1 ≤ m ≤ 16, handles strictly
+/// ascending, nothing after.
+fn decode_links(b: &[u8]) -> Result<BTreeMap<[u8; 16], [u8; 32]>, Denied> {
+    let (&m, rest) = b.split_first().ok_or(Denied::Malformed)?;
+    let m = usize::from(m);
+    let (keys, tail) = rest.as_chunks::<48>();
+    if m == 0 || m > crate::links::MAX_LINK_KEYS || keys.len() != m || !tail.is_empty() {
+        return Err(Denied::Malformed);
+    }
+    let mut out = BTreeMap::new();
+    let mut previous: Option<[u8; 16]> = None;
+    for k in keys {
+        let (handle, key) = k.split_at(16);
+        let handle: [u8; 16] = handle.try_into().map_err(|_| Denied::Malformed)?;
+        let key: [u8; 32] = key.try_into().map_err(|_| Denied::Malformed)?;
+        // An honest point only (D-0048's check): no small-order or non-canonical key, on which
+        // Ed25519 implementations could disagree about a proof (D-0078).
+        if !songbird_keys::ed25519_public_key_ok(&key) {
+            return Err(Denied::Malformed);
+        }
+        if previous.is_some_and(|p| p >= handle) {
+            return Err(Denied::Malformed);
+        }
+        previous = Some(handle);
+        out.insert(handle, key);
+    }
+    Ok(out)
 }
 
 /// What a commit changes, in accounts (the device-level checks are `ds`'s).
@@ -277,6 +343,10 @@ pub struct Change {
     /// Accounts whose devices left by their own proposal (leaving the group): authorized by
     /// the leaver, not the committer.
     pub left: BTreeSet<AccountId>,
+    /// Accounts with a device that a server proposal (the delivery service as an MLS external
+    /// sender, D-0075) removes although the account still lists it. Any is refused: the server
+    /// may only propose removing devices that left the directory.
+    pub external: BTreeSet<AccountId>,
 }
 
 /// The permission matrix for a commit by `actor`, from roles `old` to roles `new`.
@@ -293,6 +363,9 @@ pub struct Change {
 ///   one, or an owner (who may make other owners). Lowering one's own role is always allowed.
 /// - Afterwards the group keeps at least one owner while it has members, and the list names
 ///   only accounts still in the group.
+/// - **Server removals** (D-0075): a removal proposed by the delivery service (an MLS external
+///   sender) is committed only for a device no longer in its account's signed device list. One
+///   for a listed device refuses the whole commit, whoever commits it.
 pub fn authorize(
     actor: &AccountId,
     old: &Roles,
@@ -301,6 +374,9 @@ pub fn authorize(
 ) -> Result<(), Denied> {
     if !change.before.contains(actor) {
         return Err(Denied::NotMember);
+    }
+    if !change.external.is_empty() {
+        return Err(Denied::Listed);
     }
     let r = old.role(actor);
 
@@ -326,6 +402,10 @@ pub fn authorize(
         }
     }
     if new.policy != old.policy && r < Role::Admin {
+        return Err(Denied::Role);
+    }
+    // Invite links' proof keys (D-0076) are the `links` role's, as the links themselves are.
+    if new.links != old.links && r < old.policy.links {
         return Err(Denied::Role);
     }
     // Succession: when no owner is left in the group (every owner left, or their devices are
@@ -714,6 +794,90 @@ mod tests {
         n.explicit.remove(&acc(3));
         assert_eq!(authorize(&acc(1), &r, &n, &c), Ok(()));
         assert_eq!(authorize(&acc(9), &r, &n, &c), Err(Denied::NotMember));
+    }
+
+    /// A real Ed25519 public key (link keys must be honest points, D-0078).
+    fn link_key(seed: u8) -> [u8; 32] {
+        use aws_lc_rs::signature::KeyPair as _;
+        aws_lc_rs::signature::Ed25519KeyPair::from_seed_unchecked(&[seed; 32])
+            .unwrap()
+            .public_key()
+            .as_ref()
+            .try_into()
+            .unwrap()
+    }
+
+    #[test]
+    fn link_keys_have_one_encoding_and_are_the_links_roles() {
+        // D-0076: version 2 carries the link keys; without any it is version 1, byte for byte.
+        let r = roles();
+        let mut l = r.clone();
+        l.links.insert([2; 16], link_key(7));
+        l.links.insert([1; 16], link_key(8));
+        let b = l.encode();
+        assert_eq!(b.first(), Some(&ROLES_V2));
+        assert_eq!(Roles::decode(&b), Ok(l.clone()));
+        assert_eq!(r.encode().first(), Some(&ROLES_V1));
+        for cut in 0..b.len() {
+            assert!(Roles::decode(&b[..cut]).is_err(), "{cut}");
+        }
+        // Version 2 with no keys, version 1 with keys, handles out of order, too many keys.
+        let mut empty = r.encode();
+        empty[0] = ROLES_V2;
+        empty.push(0);
+        assert_eq!(Roles::decode(&empty), Err(Denied::Malformed));
+        let mut v1 = b.clone();
+        v1[0] = ROLES_V1;
+        assert_eq!(Roles::decode(&v1), Err(Denied::Malformed));
+        let mut swapped = b.clone();
+        let at = b.len() - 96;
+        swapped[at..at + 16].copy_from_slice(&[2; 16]);
+        swapped[at + 48..at + 64].copy_from_slice(&[1; 16]);
+        assert_eq!(Roles::decode(&swapped), Err(Denied::Malformed));
+        let mut many = r.clone();
+        for i in 0..17u8 {
+            many.links.insert([i; 16], link_key(i));
+        }
+        assert_eq!(Roles::decode(&many.encode()), Err(Denied::Malformed));
+        // A key that is not an honest point (small order, not canonical) is refused (D-0078):
+        // every platform's Ed25519 then agrees on every proof.
+        for weak in [[0u8; 32], {
+            let mut identity = [0u8; 32];
+            identity[0] = 1;
+            identity
+        }] {
+            let mut w = r.clone();
+            w.links.insert([3; 16], weak);
+            assert_eq!(Roles::decode(&w.encode()), Err(Denied::Malformed));
+        }
+
+        // Publishing or withdrawing a key needs the `links` role (admins, by default).
+        assert_eq!(authorize(&acc(4), &r, &l, &change()), Err(Denied::Role));
+        assert_eq!(authorize(&acc(3), &r, &l, &change()), Err(Denied::Role));
+        assert_eq!(authorize(&acc(2), &r, &l, &change()), Ok(()));
+        assert_eq!(authorize(&acc(4), &l, &r, &change()), Err(Denied::Role));
+        assert_eq!(authorize(&acc(1), &l, &r, &change()), Ok(()));
+        let mut open = r.clone();
+        open.policy.links = Role::Member;
+        let mut open_l = l.clone();
+        open_l.policy.links = Role::Member;
+        assert_eq!(authorize(&acc(4), &open, &open_l, &change()), Ok(()));
+    }
+
+    #[test]
+    fn server_removals_are_only_for_devices_that_left() {
+        // D-0075: a server proposal removing a still-listed device refuses the commit, even an
+        // owner's (`ds` and clients put such accounts in `external`).
+        let r = roles();
+        let mut c = change();
+        c.external = set(&[5]);
+        assert_eq!(authorize(&acc(1), &r, &r, &c), Err(Denied::Listed));
+        assert_eq!(authorize(&acc(4), &r, &r, &c), Err(Denied::Listed));
+        // A device that left the directory has no account here: removing it needs no role.
+        let mut gone = change();
+        gone.before.remove(&acc(5));
+        gone.after.remove(&acc(5));
+        assert_eq!(authorize(&acc(4), &r, &r, &gone), Ok(()));
     }
 
     #[test]

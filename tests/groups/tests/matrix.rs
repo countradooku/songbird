@@ -55,6 +55,7 @@ fn fixture(policy: Policy) -> Fixture {
         &info,
         &tree,
         &dir,
+        &Limits::default(),
     )
     .unwrap();
     let kps: Vec<_> = d[1..].iter().map(Device::key_package).collect();

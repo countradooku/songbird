@@ -12,6 +12,7 @@
     clippy::too_many_lines,
     clippy::large_futures,
     clippy::many_single_char_names,
+    clippy::assert_is_empty,
     reason = "tests"
 )]
 
@@ -30,7 +31,7 @@ use songbird_delivery::{DeliveryMetrics, Directory, Shared};
 use songbird_e2e::{settings, test_mailbox};
 use songbird_groups::Limits;
 use songbird_groups::roles::Role;
-use songbird_groups_harness::{Device, GID};
+use songbird_groups_harness::{Device, GID, LinkSecret};
 use songbird_mailbox::{AnyMailbox, Mailbox as _};
 use songbird_proto::frame::{RejectReason, SendFrame, SendHints, SendPayload, SendStatus};
 use songbird_router::LocalRouter;
@@ -128,6 +129,22 @@ async fn stack(people: usize) -> Option<Stack> {
             songbird_send::groups::ROSTER_TTL,
         )))
     };
+    // The gate (the channel rate class in `valkey-hot`, D-0077): one per transport, each on its
+    // own connection, with the same keys, as two nodes have.
+    let gate_keys = songbird_send::GateKeys::from_cluster_secret(&random32()).unwrap();
+    let gate = |conn: songbird_valkey::ValkeyConn| -> Option<Arc<dyn songbird_send::Gate>> {
+        Some(Arc::new(songbird_send::RegistryGate::new(
+            Arc::clone(&registry),
+            conn,
+            gate_keys.clone(),
+            songbird_send::RequestLimits::default(),
+        )))
+    };
+    let hot_conn = || async {
+        songbird_valkey::ValkeyConn::connect(redis::Client::open(hot.as_str()).unwrap())
+            .await
+            .unwrap()
+    };
     let mut cfg = settings();
     cfg.listen = "127.0.0.1:0".parse().unwrap();
     let shared = Arc::new(
@@ -140,6 +157,7 @@ async fn stack(people: usize) -> Option<Stack> {
         )
         .with_policy(songbird_delivery::Policy {
             rosters: rosters(),
+            gate: gate(hot_conn().await),
             ..Default::default()
         }),
     );
@@ -157,6 +175,7 @@ async fn stack(people: usize) -> Option<Stack> {
             metrics: metrics.send.clone(),
             policy: songbird_send::Policy {
                 rosters: rosters(),
+                gate: gate(hot_conn().await),
                 ..Default::default()
             },
         }),
@@ -225,6 +244,14 @@ async fn stack(people: usize) -> Option<Stack> {
         64,
         stop_rx,
     ));
+    let ds_key = app
+        .messages
+        .as_ref()
+        .unwrap()
+        .groups
+        .as_ref()
+        .unwrap()
+        .external_sender();
     let people = keys
         .into_iter()
         .map(|(id, seed, account)| Person {
@@ -234,7 +261,12 @@ async fn stack(people: usize) -> Option<Stack> {
                 id,
                 Ed25519KeyPair::from_seed_unchecked(&seed).unwrap(),
             ),
-            mls: Device::unregistered(id, account),
+            mls: {
+                // Every group names the delivery service as its external sender (D-0075).
+                let mut d = Device::unregistered(id, account);
+                d.ds_key = Some(ds_key);
+                d
+            },
         })
         .collect();
     Some(Stack {
@@ -545,7 +577,7 @@ async fn a_lost_answer_is_recognised_and_an_interrupted_fan_out_is_redriven() {
     };
     let (g, applied) = songbird_groups::Group::load(rec)
         .unwrap()
-        .apply_commit(&s.people[0].mls.id, &b, &dir, &Limits::default())
+        .apply_commit(&s.people[0].mls.id, &b, &dir, &s.groups().limits)
         .unwrap();
     let parts = songbird_groups::wire::Bundle::parse(&b, usize::MAX).unwrap();
     let plan = postcard::to_stdvec(&(
@@ -567,6 +599,7 @@ async fn a_lost_answer_is_recognised_and_an_interrupted_fan_out_is_redriven() {
                 log: None,
                 link: None,
                 joined: &[],
+                prune: &[],
             },
         )
         .await
@@ -732,16 +765,40 @@ async fn post(s: &Stack, who: usize, path: &str, rest: &[u8]) -> (u16, Bytes) {
 struct Link {
     handle: [u8; 16],
     auth: [u8; 32],
+    /// The secret apps derive `auth` and the proof key from (D-0076).
+    secret: LinkSecret,
 }
 
 impl Link {
     fn new() -> Self {
-        let mut handle = [0u8; 16];
-        aws_lc_rs::rand::fill(&mut handle).unwrap();
+        let secret = LinkSecret::random();
         Self {
-            handle,
-            auth: random32(),
+            handle: secret.handle,
+            auth: secret.auth(),
+            secret,
         }
+    }
+
+    /// Person `who` commits the link's proof key into the roles extension (D-0076), and every
+    /// other member in the group follows.
+    async fn publish(&self, s: &mut Stack, who: usize) {
+        let b = s.people[who].mls.publish_link(&self.secret);
+        let (st, reply) = commit(s, who, &b).await;
+        assert_eq!(st, 200, "{reply}");
+        s.people[who].mls.merge();
+        for i in 0..s.people.len() {
+            if i != who && s.people[i].mls.group.is_some() {
+                let c = s.pending(i).await.pop().unwrap();
+                s.people[i].mls.receive(&bundle_of(&c));
+            }
+        }
+    }
+
+    /// A join by this link: `handle | auth | bundle`.
+    fn join(&self, bundle: &[u8]) -> Vec<u8> {
+        let mut req = self.open();
+        req.extend_from_slice(bundle);
+        req
     }
 
     /// `handle | auth`.
@@ -782,11 +839,14 @@ async fn invite_links_and_join_requests() {
         409,
         "the handle is taken"
     );
+    // Alice publishes the link's proof key to the members (D-0076): epoch 2.
+    once.publish(&mut s, alice).await;
 
     // Wrong secret and unknown handle: one answer.
     let wrong = Link {
         handle: once.handle,
         auth: random32(),
+        secret: LinkSecret::random(),
     };
     assert_eq!(
         post(&s, carol, "/v1/groups/links/open", &wrong.open())
@@ -806,35 +866,46 @@ async fn invite_links_and_join_requests() {
     assert_eq!((st, opened[0]), (200, 0));
     assert_eq!(opened[1..17], GID);
     let opened_state = &opened[17..];
-    let join = s.people[carol]
+    let (info, tree) = (info_of(opened_state), tree_of(opened_state));
+    // The link's `auth` alone is not enough: a join without the proof only the link's secret
+    // can make (what a server admitting someone would send), or with a proof under a link the
+    // members never published, is refused, and spends nothing (D-0076).
+    let bare = s.people[carol].mls.rejoin(&info, &tree);
+    let (st, reply) = post(&s, carol, "/v1/groups/join", &once.join(&bare)).await;
+    assert_eq!((st, json(&reply)["error"].as_str()), (403, Some("proof")));
+    let other = s.people[carol]
         .mls
-        .rejoin(&info_of(opened_state), &tree_of(opened_state));
+        .join_by_link(&info, &tree, &LinkSecret::random());
+    let (st, reply) = post(&s, carol, "/v1/groups/join", &once.join(&other)).await;
+    assert_eq!((st, json(&reply)["error"].as_str()), (403, Some("proof")));
+    let join = s.people[carol].mls.join_by_link(&info, &tree, &once.secret);
     // A wrong secret cannot carry a join either.
-    let mut wrong_join = wrong.open();
-    wrong_join.extend_from_slice(&join);
-    assert_eq!(post(&s, carol, "/v1/groups/join", &wrong_join).await.0, 404);
-    let mut req = once.open();
-    req.extend_from_slice(&join);
+    assert_eq!(
+        post(&s, carol, "/v1/groups/join", &wrong.join(&join))
+            .await
+            .0,
+        404
+    );
+    let req = once.join(&join);
     let (st, reply) = post(&s, carol, "/v1/groups/join", &req).await;
-    assert_eq!((st, json(&reply)["epoch"].as_u64()), (200, Some(2)));
+    assert_eq!((st, json(&reply)["epoch"].as_u64()), (200, Some(3)));
     // The same join again (a lost answer) is recognised, though the link is now spent.
     let (st, reply) = post(&s, carol, "/v1/groups/join", &req).await;
-    assert_eq!((st, json(&reply)["epoch"].as_u64()), (200, Some(2)));
-    // The members receive it; Carol reads the group from then on.
-    let c = s.pending(alice).await.pop().unwrap();
-    s.people[alice].mls.receive(
-        &songbird_groups::wire::Bundle {
-            commit: &c,
-            welcome: None,
-            group_info: b"-",
-            log: None,
-        }
-        .encode(),
-    );
+    assert_eq!((st, json(&reply)["epoch"].as_u64()), (200, Some(3)));
+    // The members check Carol's proof themselves and follow; Carol reads the group from then
+    // on.
+    let members = client_dir(&s, &[alice, bob, carol]);
+    for i in [alice, bob] {
+        let c = s.pending(i).await.pop().unwrap();
+        s.people[i]
+            .mls
+            .receive_join_checked(&bundle_of(&c), &members)
+            .unwrap();
+    }
     assert_eq!(
         s.pending(bob).await.len(),
-        2,
-        "the Welcome, then Carol's join"
+        3,
+        "the Welcome, the link's key, then Carol's join"
     );
     let msg = s.people[alice].mls.message(b"hi carol");
     assert_eq!(s.people[carol].mls.read(&msg), b"hi carol");
@@ -986,6 +1057,7 @@ async fn parallel_joins_never_exceed_a_links_uses() {
     create(&mut s, 0).await;
     let link = Link::new();
     assert_eq!(link.create(&s, 0, 0, 2, false).await, 204);
+    link.publish(&mut s, 0).await;
     let mut pending: Vec<usize> = (1..6).collect();
     let mut joined = Vec::new();
     while !pending.is_empty() {
@@ -999,7 +1071,11 @@ async fn parallel_joins_never_exceed_a_links_uses() {
             assert_eq!((st, opened[0]), (200, 0));
             let state = &opened[17..];
             let mut req = link.open();
-            req.extend_from_slice(&s.people[i].mls.rejoin(&info_of(state), &tree_of(state)));
+            req.extend_from_slice(&s.people[i].mls.join_by_link(
+                &info_of(state),
+                &tree_of(state),
+                &link.secret,
+            ));
             tries.push((i, req));
         }
         let answers = futures_util::future::join_all(
@@ -1029,7 +1105,7 @@ async fn parallel_joins_never_exceed_a_links_uses() {
     }
     assert_eq!(joined.len(), 2, "exactly the link's two uses: {joined:?}");
     let row = s.registry.group(&GID).await.unwrap().unwrap();
-    assert_eq!(row.epoch, 2);
+    assert_eq!(row.epoch, 3);
     let link_row = s.registry.group_link(&link.handle).await.unwrap().unwrap();
     assert!(!link_row.usable);
 }
@@ -1249,4 +1325,184 @@ async fn outsiders_get_the_answer_for_no_group() {
         .await
         .unwrap();
     assert_eq!(st, 404);
+}
+
+/// The members' view of the directory: these people's devices and accounts.
+fn client_dir(s: &Stack, who: &[usize]) -> songbird_groups_harness::Dir {
+    songbird_groups_harness::Dir(
+        who.iter()
+            .map(|&i| (s.people[i].mls.id, s.people[i].mls.account))
+            .collect(),
+    )
+}
+
+#[tokio::test]
+async fn departed_devices_are_removed_through_server_proposals() {
+    // D-0075: Carol's account is deleted. The deletion marks the group; `api` proposes her
+    // leaf's removal as the group's external sender (confirmed in the registry, although this
+    // node's directory snapshot is stale); members check it and the next commit removes her.
+    let Some(mut s) = stack(3).await else { return };
+    let (alice, bob, carol) = (0, 1, 2);
+    let (st, key) = s.people[alice]
+        .api
+        .send("POST", "/v1/groups/ds", Some(&[1]))
+        .await
+        .unwrap();
+    assert_eq!((st, &key[..]), (200, &s.groups().external_sender()[..]));
+    create(&mut s, alice).await;
+    add(&mut s, &[bob, carol]).await;
+    assert_eq!(s.groups().prune_once(&s.registry, s.messages()).await, 0);
+
+    let account = s.people[carol].mls.account;
+    let job = songbird_jobs::Job::new(songbird_jobs::Work::DeleteAccount { account }).unwrap();
+    assert!(
+        s.registry
+            .begin_account_deletion(&account, &job)
+            .await
+            .unwrap()
+    );
+    assert_eq!(s.registry.groups_to_prune(10).await.unwrap().len(), 1);
+    assert_eq!(s.groups().prune_once(&s.registry, s.messages()).await, 1);
+    assert!(s.registry.groups_to_prune(10).await.unwrap().is_empty());
+
+    let members = client_dir(&s, &[alice, bob]);
+    for i in [alice, bob] {
+        let p = s.pending(i).await.pop().expect("the server's proposal");
+        s.people[i]
+            .mls
+            .receive_server_proposal(&p, &members)
+            .unwrap();
+    }
+    let b = s.people[bob].mls.update();
+    // This node's directory snapshot still lists Carol (nothing here follows the registry):
+    // the commit is answered "retry", not refused, and stores nothing.
+    let (st, _) = commit(&s, bob, &b).await;
+    assert_eq!(st, 503);
+    assert_eq!(s.registry.group(&GID).await.unwrap().unwrap().epoch, 1);
+    // Once the snapshot follows the registry, the same bundle goes through.
+    s.shared
+        .directory
+        .store(Directory::from_registry(&s.registry).await.unwrap());
+    let (st, reply) = commit(&s, bob, &b).await;
+    assert_eq!(st, 200, "{reply}");
+    s.people[bob].mls.merge();
+    let c = s.pending(alice).await.pop().unwrap();
+    s.people[alice]
+        .mls
+        .receive_checked(
+            &songbird_groups::wire::Bundle {
+                commit: &c,
+                welcome: None,
+                group_info: b"-",
+                log: None,
+            }
+            .encode(),
+            &members,
+        )
+        .unwrap();
+    let row = s.registry.group(&GID).await.unwrap().unwrap();
+    let roster = songbird_send::Roster::from_bytes(row.epoch, &row.roster).unwrap();
+    assert_eq!(roster.members.len(), 2);
+    assert!(
+        !roster.contains(&s.people[carol].mls.id),
+        "Carol's leaf is gone"
+    );
+    assert_eq!(s.people[alice].mls.roster(), s.people[bob].mls.roster());
+    assert!(s.registry.groups_to_prune(10).await.unwrap().is_empty());
+
+    // Her account's rows go; nothing names her devices any more.
+    let devices = s.registry.account_devices(&account).await.unwrap();
+    s.registry.delete_account_rows(&account).await.unwrap();
+    let left = s.registry.remnants(&account, &devices, &[]).await.unwrap();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+/// A fanned-out commit (the `MLSMessage` alone) as a bundle the harness reads.
+fn bundle_of(commit: &[u8]) -> Vec<u8> {
+    songbird_groups::wire::Bundle {
+        commit,
+        welcome: None,
+        group_info: b"-",
+        log: None,
+    }
+    .encode()
+}
+
+#[tokio::test]
+async fn a_channels_rate_class_is_shared_by_the_websocket_and_http() {
+    // D-0077: Alice posts to her channel through a delivery node's WebSocket path and through
+    // `api`'s HTTP path, alternately, at once. Each node's own budget would admit 10 + 10; the
+    // class in `valkey-hot` (1 a second, burst 10) admits about 10 in all, and Valkey never
+    // sees the group ID.
+    let Some(mut s) = stack(2).await else { return };
+    let (alice, bob) = (0, 1);
+    let (info, tree) = s.people[alice]
+        .mls
+        .create_with(songbird_groups::roles::Policy::CHANNEL);
+    let (st, _) = s.people[alice]
+        .api
+        .send("POST", "/v1/groups", Some(&body(&parts(&info, &tree))))
+        .await
+        .unwrap();
+    assert_eq!(st, 204);
+    add(&mut s, &[bob]).await;
+
+    let mut accepted = 0;
+    let mut limited = 0;
+    for k in 0..24u8 {
+        let frame = group_frame(100 + k, s.people[alice].mls.message(&[k]));
+        let st = if k % 2 == 0 {
+            s.shared
+                .send_path()
+                .send(
+                    &s.people[alice].mls.id,
+                    frame,
+                    std::time::Instant::now(),
+                    &mut Vec::new(),
+                )
+                .await
+        } else {
+            s.people[alice]
+                .api
+                .put_message(&frame)
+                .await
+                .unwrap()
+                .1
+                .unwrap()
+                .1
+        };
+        match st {
+            SendStatus::Accepted => accepted += 1,
+            SendStatus::Rejected {
+                reason: RejectReason::RateLimited,
+                retry_after_ms,
+            } => {
+                assert!((1..=1_000).contains(&retry_after_ms), "{retry_after_ms}");
+                limited += 1;
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    // A post or two may refill while the loop runs (1 a second).
+    assert!((10..=12).contains(&accepted), "accepted {accepted}");
+    assert_eq!(accepted + limited, 24);
+    assert_eq!(
+        s.messages().metrics.channel_local_only.get()
+            + s.shared.send_metrics.channel_local_only.get(),
+        0
+    );
+    // The record is a keyed hash: no group ID in `valkey-hot`.
+    let mut hot = redis::Client::open(std::env::var("SONGBIRD_TEST_VALKEY").unwrap())
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+    let keys: Vec<String> = redis::cmd("KEYS")
+        .arg("q:c:*")
+        .query_async(&mut hot)
+        .await
+        .unwrap();
+    assert!(!keys.is_empty());
+    let gid = hex::encode(GID);
+    assert!(keys.iter().all(|k| !k.contains(&gid)), "{keys:?}");
 }

@@ -29,6 +29,10 @@ server in plaintext. Adding to this list requires the owner's approval.
 | Per MLS group: change-log entries (`grp_log`): ciphertext (≤ 2 KiB) and the committer's signature, keyed by the commit's epoch; the newest 1,000 | Show "View member changes" on devices that join later; the signature lets the server refuse forgeries | The newest 1,000 entries, or with the group | Prompt 5 (M2), D-0070; approved by the owner on 2026-11-17 (the Prompt 5 gate) |
 | Per MLS group, its invite links (`grp_link`): a random handle, `SHA-256(auth)` (never the link's secret, nor the key to the group's info), whether joins need approval, a use count, a limit and an expiry; at most 16 | Let a person holding a link open and join the group, while the link is usable (D-0071) | Until revoked or expired (swept hourly); used-up ones until the group's next link is made; or with the group | Prompt 5 (M3), D-0071; approved by the owner on 2026-11-17 (the Prompt 5 gate) |
 | Per MLS group, its pending join requests (`grp_req`): **the account asking to join**, and when it asked; at most 256 | Let members with the `add` role approve (add) or decline | Until approved, declined, or 7 days | Prompt 5 (M3), D-0071; approved by the owner on 2026-11-17 (the Prompt 5 gate) |
+| Per MLS group, in its context (part of the group state): the delivery service's external-sender public key (one key for every group) with its credential `songbird.v1/ds`; and, until the next commit, the service's queued `Remove` proposals, each naming the leaf of a device that left the directory | Propose removing departed devices' leaves, so they do not outlive the account or the device in group state (D-0075) | As the group state; a proposal until the next commit | Prompt 5 follow-up 1, D-0075; **approved by the owner on 2026-11-17** |
+| Per MLS group, in its roles extension (part of the group state): each published invite link's handle and its proof public key (Ed25519; the private key comes from the link's secret, which the server never sees); in a join's commit, the proof (the handle and a signature) | Let members check that a joiner held a link they made, and the server apply the same rule (D-0076) | Until the links role withdraws the key, or with the group; the proof with the commit (fan-out) | Prompt 5 follow-up 2, D-0076; the handles were already in `grp_link`; **approved by the owner on 2026-11-17** |
+| Keyed hash (HMAC-SHA256, key from the requests secret) of a private channel's group ID, with its next allowed post time, in `valkey-hot`; no group or device ID | Hold a channel to one post budget across every node and transport (D-0077) | At most the burst window (about 10 s at the defaults), then expired | Prompt 5 follow-up 3, D-0077; keyed form of the group ID; **approved by the owner on 2026-11-17** |
+| Prune marks (`grp_prune`): per group holding a device that left the directory, the group ID, **the IDs of its devices that left**, a counter and the time | Let any `api` node propose their removal within seconds (D-0075) | Until proposed (seconds); the device IDs are stripped at the account's or device's final deletion | Prompt 5 follow-up 1, D-0075; **approved by the owner on 2026-11-17** |
 | Per community (`cmty`, `cmty_grp`): its ID, **which group is its announcement group and which groups belong to it** (opaque IDs; at most 100), and its encrypted info (name, description, picture: ciphertext under a key the members share) with its version | Let the announcement group's admins run the community; show its members the community's groups | Until a group is unlinked or the community deleted | Prompt 5 (M4), D-0072; approved by the owner on 2026-11-17 (the Prompt 5 gate) |
 | Push registration (APNs, FCM or Web Push token / endpoint), **sealed to the push service's X25519 key** and stored under a keyed hash (HMAC-SHA256, push-index secret) of the device ID; `api` and `worker` hold only the public key | Wake an offline device | Until replaced, reported unregistered by the provider, or the device is deleted | Prompt 2 (M5), D-0036; **approved by the owner 2026-11-12** |
 | Attachment record: random 32-byte object ID, padded size, expiry, fetches still due; **no link to the uploading account** once uploaded. Before upload, a grant names the uploading device (at most 1 h) | Accept exactly the granted upload; delete after the last fetch or 30 days | Until the last fetch or 30 days; grant at most 1 h | Prompt 2 (M5), D-0036; **approved by the owner 2026-11-12** |
@@ -425,6 +429,22 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
 | Stale stamps or a retired key | T | Anyone | A 30-day window; old franking keys verify only while listed | `tampering_keys_and_windows_are_refused` |
 | Oversized or malformed reports | D | Anyone | Signed request, length checked before the body is read; strict decoder; fuzzed | `reports_round_trip_and_decode_strictly`; fuzz `franking` |
 
+### 3.22 Prompt 5 follow-ups (D-0075 to D-0077)
+
+| Threat | STRIDE | Attacker | Mitigation | Test or proof |
+| --- | --- | --- | --- | --- |
+| The server removing a member who is still listed, through its external-sender power | T, E | Compromised server or operator; a node with a stale directory | Apps keep and commit a server removal only for a device no longer in its account's signed device list; a commit carrying one for a listed device is refused by clients and the server, whoever commits it; the server confirms candidates in the registry, and a stale node answers 503 | `a_server_removal_of_a_listed_device_is_refused_by_members_and_the_server`; `server_removals_are_only_for_devices_that_left`; live `departed_devices_are_removed_through_server_proposals` |
+| The server admitting someone, or reshaping a group, by external proposal | E | Compromised server | Apps and the server take only `Remove` from the external sender; `NewMemberProposal` is refused | `the_service_may_only_propose_removals` |
+| A member dropping the service (to keep departed leaves) or adding an external sender of its own (to propose) | T, E | Malicious member | The context must name exactly the service's key, at creation and after every commit | `groups_name_exactly_the_service` |
+| Theft of the external-sender key | S | Insider, host compromise | It can only propose removals of departed devices (apps refuse the rest); it is derived from the cluster secret, which is not rotated while groups exist until key rotation is built (`docs/RUNBOOKS/secrets-rotation.md`) | the trust-rule tests above |
+| The server admitting someone who never held a link | S, E | Compromised server or operator | Members follow an external commit from a new account only with a proof signed by a link key the links role published; the server cannot sign (it holds `SHA-256(auth)` only) and applies the same rule (403 `proof`) | `joins_without_a_valid_proof_are_refused_by_the_server_and_members`; live `invite_links_and_join_requests` |
+| An external commit (a join or rejoin) that also removes another member, accepted by a malicious server | T, E | Compromised server with a link holder or a member | Apps run the server's external-commit rule (`check_external_commit`, D-0078): only the joiner's own old leaf may go | `a_join_may_remove_no_one_else_on_the_server_or_in_apps` |
+| A link holder proving for links it never held, or reusing a proof | S | Holder of another link, a past joiner | One key per link, from its own secret; the proof binds group, epoch, handle, device and leaf key | `proofs_bind_the_link_group_epoch_device_and_leaf` |
+| A member publishing a link key to let someone in | E | Malicious member below the links role | Publishing or withdrawing keys is the links role's (`roles::authorize`) | `only_the_links_role_publishes_link_keys`; `link_keys_have_one_encoding_and_are_the_links_roles` |
+| A channel's admins multiplying its post budget by posting through several nodes, or both transports | D | Malicious or careless channel admin | One GCRA record per channel in `valkey-hot`, shared by every node and transport; the per-node budget in front and as the fallback | `the_channel_class_is_shared_by_every_send_path`; live `a_channels_rate_class_is_shared_by_the_websocket_and_http` |
+| `valkey-hot` down or slow stalling channel posts | D | Outage, network fault | Each post waits at most 250 ms, then the per-node budget decides (counted, runbook) | `without_valkey_the_per_node_budget_decides_alone` |
+| Departed devices' leaves outliving the account | I | Anyone reading group state later | Marks in the transactions that disable devices; proposals within seconds; again after each commit; the IDs stripped from marks at deletion | `departing_devices_mark_the_groups_that_hold_them`; live `departed_devices_are_removed_through_server_proposals` |
+
 ## 4. Server-enforced settings
 
 | Setting | Who changes it | Enforced where |
@@ -557,22 +577,47 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
   roles and requests; deletion removes its requests, and group messages skip its devices, but
   its devices' leaves (and an account ID in the roles, if it held one) stay in each group's MLS
   state until a member commits their removal: the server cannot edit a group without forking it.
-- Invite links (Prompt 5, M3; D-0071): the server alone decides whether a joiner held a usable
-  link. A malicious server can admit an account to a group by external commit. It cannot hide
-  the join from the members: every member sees the new leaf, its account and its default role,
-  and can remove it. A link leaked from a chat is usable by whoever holds it until it is
-  revoked, used up or expired; opening it shows the members' devices (the ratchet tree an
-  external commit needs) before any join, unless joins need approval.
+  Since D-0075 the server proposes that removal within seconds, and the next commit by any
+  member includes it. Still open:
+  - a group none of whose members comes back keeps the leaves;
+  - a member can fill the 64-proposal queue so the service's proposals wait for the next
+    commit;
+  - rotating the service's key needs a context change in every group, which is not built
+    (it follows the cluster secret).
+
+  A member whose view of a device list is stale refuses a valid server removal: it keeps the
+  proposal aside and judges it again after refreshing (D-0078).
+- Invite links (Prompt 5, M3; D-0071): the server decides whether a joiner may use a link.
+  Since D-0076 members check for themselves that a joiner held a link they made (a proof under
+  the key the links role published); a malicious server can no longer admit an account apps
+  accept without one. A server that admits one anyway forks itself from the members, who refuse
+  the join. It cannot hide a join from the members: every member sees the new leaf, its account
+  and its default role, and can remove it. A link leaked from a chat is usable by whoever holds
+  it until it is revoked, used up or expired (the proof shows a link was held, not by whom);
+  opening it shows the members' devices (the ratchet tree an external commit needs) before any
+  join, unless joins need approval.
   A join request tells the server which account wants which group before it is a member.
 - Communities and channels (Prompt 5, M4; D-0072): the server knows which groups form a
   community, so with the rosters it knows who shares a community. A private channel is an MLS
   group: subscribers see each other's devices. A full-path commit right after many adds
   encrypts to nearly every leaf (1.2 MiB at 1,024 X-Wing leaves): a member who adds many
-  people and then commits makes every member download that much. The channel rate class is per
-  node, like the WebSocket budgets: a channel posting through several nodes gets each one's.
+  people and then commits makes every member download that much. The channel rate class is
+  cluster-wide since D-0077; while `valkey-hot` is unreachable it falls back to each node's own
+  budget, so a channel posting through several nodes then gets each one's.
 - Review leftovers (D-0074): role checks for metadata, links, requests and communities read the
   roster before the write, so one in-flight action by a just-demoted admin can land. There is
   no per-account cap on creating groups, and groups are not deleted yet. A client whose view
   of the directory differs from the server's may judge a commit differently and stay behind
   until it refreshes. A member can fill the 64-proposal queue until the next commit, which
   removes them.
+- Follow-ups' review leftovers (D-0078):
+  - a channel post is charged to the class before a later failure (a mailbox outage, an
+    idempotent replay), and a refused post still costs its per-node token: stricter than
+    configured, never looser;
+  - anyone who can make `valkey-hot` slower than 250 ms puts channels on per-node budgets;
+  - every `api` node may handle the same prune mark (no lease; the work is idempotent);
+  - the external-sender key shares the cluster secret with the fan-out keys, and HKDF outputs
+    are not zeroized;
+  - apps that verify Ed25519 less strictly than RFC 8032 could disagree with the server on a
+    crafted proof (link keys are checked as honest points; the same holds for every MLS
+    signature).

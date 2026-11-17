@@ -21,9 +21,10 @@ use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use songbird_groups::crypto::GROUP_CIPHERSUITE;
+use songbird_groups::ds::ds_external_senders;
 use songbird_groups::roles::{self, Policy, ROLES_EXTENSION, Roles};
 use songbird_groups::wire::{Bundle, LogEntry, log_signed_content};
-use songbird_groups::{Directory, Group};
+use songbird_groups::{Directory, Group, Limits};
 use songbird_types::{AccountId, DeviceId};
 
 thread_local! {
@@ -60,6 +61,11 @@ pub struct Device {
     pub signer: SignatureKeyPair,
     pub cred: CredentialWithKey,
     pub group: Option<MlsGroup>,
+    /// The delivery service's external-sender key new groups name (D-0075), if any.
+    pub ds_key: Option<[u8; 32]>,
+    /// Server proposals this app refused because the device still looked listed: kept aside,
+    /// outside the OpenMLS pending store, and judged again after a refresh (D-0078).
+    pub held: Vec<Vec<u8>>,
     raw_key: (Vec<u8>, Vec<u8>),
 }
 
@@ -94,12 +100,31 @@ impl Device {
     /// platform keystore): same ID, same signature key.
     #[must_use]
     pub fn restored(other: &Self) -> Self {
-        Self::with_key(
+        let mut d = Self::with_key(
             other.id,
             other.account,
             OpenMlsRustCrypto::default(),
             other.raw_key.clone(),
-        )
+        );
+        d.ds_key = other.ds_key;
+        d
+    }
+
+    /// A new device `n` of `account` holding `other`'s signature key: OpenMLS's external commit
+    /// then removes `other`'s leaf, which no honest app does (tests of the external-commit
+    /// rule, D-0078).
+    #[must_use]
+    pub fn sharing_key(n: u16, account: AccountId, other: &Self, dir: &mut Dir) -> Self {
+        let id = DeviceId::from_bytes(id_from(n, 0xD0));
+        dir.0.insert(id, account);
+        let mut d = Self::with_key(
+            id,
+            account,
+            OpenMlsRustCrypto::default(),
+            other.raw_key.clone(),
+        );
+        d.ds_key = other.ds_key;
+        d
     }
 
     /// A device the directory does not know.
@@ -131,6 +156,8 @@ impl Device {
             signer,
             cred,
             group: None,
+            ds_key: None,
+            held: Vec::new(),
             raw_key,
         }
     }
@@ -178,7 +205,10 @@ impl Device {
             .ciphersuite(suite())
             .max_past_epochs(1)
             .capabilities(caps())
-            .with_group_context_extensions(roles_extensions(&roles))
+            .with_group_context_extensions(context_extensions(
+                &roles,
+                self.ds_key.as_ref().map(ds_external_senders),
+            ))
             .build();
         let group = MlsGroup::new_with_group_id(
             &self.provider,
@@ -236,6 +266,27 @@ impl Device {
         update: bool,
         roles: Option<&Roles>,
     ) -> Vec<u8> {
+        // A context change carries the group's external senders over unchanged (D-0075).
+        let external = self
+            .group
+            .as_ref()
+            .unwrap()
+            .extensions()
+            .external_senders()
+            .cloned();
+        let exts = roles.map(|r| context_extensions(r, external));
+        self.commit_ext(adds, removes, update, exts)
+    }
+
+    /// A commit with adds, removals, a key update and, if given, these context extensions
+    /// exactly (tests of what the server refuses).
+    pub fn commit_ext(
+        &mut self,
+        adds: Vec<KeyPackage>,
+        removes: &[u32],
+        update: bool,
+        exts: Option<Extensions<GroupContext>>,
+    ) -> Vec<u8> {
         let (p, s) = (&self.provider, &self.signer);
         let g = self.group.as_mut().unwrap();
         let mut builder = g
@@ -243,10 +294,8 @@ impl Device {
             .propose_adds(adds)
             .propose_removals(removes.iter().map(|l| LeafNodeIndex::new(*l)))
             .force_self_update(update);
-        if let Some(r) = roles {
-            builder = builder
-                .propose_group_context_extensions(roles_extensions(r))
-                .unwrap();
+        if let Some(e) = exts {
+            builder = builder.propose_group_context_extensions(e).unwrap();
         }
         let bundle = builder
             .load_psks(p.storage())
@@ -334,6 +383,7 @@ impl Device {
     fn judge(&mut self, bundle: &[u8], dir: &Dir, merge: bool) -> Result<(), String> {
         let b = Bundle::parse(bundle, usize::MAX).map_err(|e| e.to_string())?;
         let msg = MlsMessageIn::tls_deserialize_exact(b.commit).map_err(|e| e.to_string())?;
+        let ds = self.ds_key;
         let p = &self.provider;
         let g = self.group.as_mut().unwrap();
         let old_roles = songbird_groups::ds::roles_in(g.extensions()).map_err(|e| e.to_string())?;
@@ -354,6 +404,10 @@ impl Device {
         let ProcessedMessageContent::StagedCommitMessage(staged) = processed.into_content() else {
             return Err("expected a commit".into());
         };
+        // The context names exactly the pinned service, as the server checks (D-0078).
+        if !songbird_groups::ds::extensions_allowed(staged.group_context(), ds.as_ref()) {
+            return Err("a context that does not name exactly the pinned service".into());
+        }
         let new_roles =
             songbird_groups::ds::roles_of(staged.group_context()).map_err(|e| e.to_string())?;
         let account = |c: &Credential| {
@@ -373,10 +427,24 @@ impl Device {
                 _ => None,
             })
             .collect();
+        // The delivery service may propose removals only (D-0075); `external` collects the
+        // still-listed devices it would remove, which `authorize` refuses.
+        let mut server_removed = Vec::new();
+        for q in staged.queued_proposals() {
+            match (q.sender(), q.proposal()) {
+                (Sender::External(_), Proposal::Remove(r)) => server_removed.push(r.removed()),
+                (Sender::External(_) | Sender::NewMemberProposal, _) => {
+                    return Err("an outsider's proposal other than a server removal".into());
+                }
+                _ => {}
+            }
+        }
         for m in g.members() {
             if let Some(a) = account(&m.credential) {
                 change.before.insert(a);
-                if self_removed.contains(&m.index) {
+                if server_removed.contains(&m.index) {
+                    change.external.insert(a);
+                } else if self_removed.contains(&m.index) {
                     change.left.insert(a);
                 } else if removed.contains(&m.index) {
                     change.lost.insert(a);
@@ -466,6 +534,130 @@ impl Device {
         }
     }
 
+    /// A proposal from the delivery service (D-0075), checked as apps check it before storing
+    /// it for their next commit: a `Remove` from the group's external sender, of a device that
+    /// is no longer in its account's signed device list (`dir`, this client's view). Anything
+    /// else is dropped (not stored) and reported. A removal of a device this app still sees
+    /// listed is also refused, but kept aside (`held`): its view may be stale, and another
+    /// member's commit may reference it. [`Device::recheck_held`] judges it again after a
+    /// refresh (D-0078).
+    pub fn receive_server_proposal(&mut self, bytes: &[u8], dir: &Dir) -> Result<(), String> {
+        let msg = MlsMessageIn::tls_deserialize_exact(bytes).map_err(|e| e.to_string())?;
+        let p = &self.provider;
+        let g = self.group.as_mut().unwrap();
+        let processed = g
+            .process_message(
+                p,
+                msg.try_into_protocol_message().map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+        if !matches!(processed.sender(), Sender::External(_)) {
+            return Err("not the delivery service's".into());
+        }
+        let ProcessedMessageContent::ProposalMessage(q) = processed.into_content() else {
+            return Err("not a proposal".into());
+        };
+        let Proposal::Remove(r) = q.proposal() else {
+            return Err("the delivery service may only propose removals".into());
+        };
+        let Some(device) = g
+            .member(r.removed())
+            .and_then(|c| DeviceId::from_slice(c.serialized_content()).ok())
+        else {
+            return Err("a server removal of an empty leaf".into());
+        };
+        if dir.account_of(&device).is_some() {
+            self.held.push(bytes.to_vec());
+            return Err("a server removal of a device that is still listed".into());
+        }
+        g.store_pending_proposal(p.storage(), *q)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Judges the server proposals kept aside again, with a refreshed view `dir` (as an app
+    /// does after refreshing the device lists, and before processing a commit that references
+    /// one it does not hold). Returns how many it now keeps for its next commit.
+    pub fn recheck_held(&mut self, dir: &Dir) -> usize {
+        let held = std::mem::take(&mut self.held);
+        held.iter()
+            .filter(|m| self.receive_server_proposal(m, dir).is_ok())
+            .count()
+    }
+
+    /// Processes an external commit (a join) as apps do (D-0076): from an account already in
+    /// the group it is a rejoin; from a new account it must carry a proof under a link key the
+    /// group's roles extension publishes (`songbird_groups::links::verify`). Refused joins are
+    /// not merged.
+    pub fn receive_join_checked(&mut self, bundle: &[u8], dir: &Dir) -> Result<(), String> {
+        let b = Bundle::parse(bundle, usize::MAX).map_err(|e| e.to_string())?;
+        let msg = MlsMessageIn::tls_deserialize_exact(b.commit).map_err(|e| e.to_string())?;
+        let ds = self.ds_key;
+        let p = &self.provider;
+        let g = self.group.as_mut().unwrap();
+        let roles = songbird_groups::ds::roles_in(g.extensions()).map_err(|e| e.to_string())?;
+        let from_epoch = g.epoch().as_u64();
+        let processed = g
+            .process_message(
+                p,
+                msg.try_into_protocol_message().map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+        if !matches!(processed.sender(), Sender::NewMemberCommit) {
+            return Err("not a join".into());
+        }
+        let aad = processed.aad().to_vec();
+        let ProcessedMessageContent::StagedCommitMessage(staged) = processed.into_content() else {
+            return Err("expected a commit".into());
+        };
+        let leaf = staged.update_path_leaf_node().ok_or("no joiner's leaf")?;
+        let device = DeviceId::from_slice(leaf.credential().serialized_content())
+            .map_err(|e| e.to_string())?;
+        // The structural rule the server runs too (D-0078): only the joiner's own old leaf
+        // may go, nothing by reference, nothing but ExternalInit and Remove.
+        let device_at = |i: u32| {
+            g.member(LeafNodeIndex::new(i))
+                .and_then(|c| DeviceId::from_slice(c.serialized_content()).ok())
+        };
+        let joiner_leaf = g
+            .members()
+            .find(|m| m.credential.serialized_content() == device.as_bytes())
+            .map(|m| m.index.u32());
+        songbird_groups::ds::check_external_commit(&staged, &device, device_at, joiner_leaf)
+            .map_err(|e| format!("an external commit the rule refuses: {e}"))?;
+        if !songbird_groups::ds::extensions_allowed(staged.group_context(), ds.as_ref()) {
+            return Err("a context that does not name exactly the pinned service".into());
+        }
+        let account = dir.account_of(&device).ok_or("an unknown joiner")?;
+        let present = g.members().any(|m| {
+            DeviceId::from_slice(m.credential.serialized_content())
+                .ok()
+                .and_then(|d| dir.account_of(&d))
+                == Some(account)
+        });
+        if !present {
+            let group: [u8; 16] = g.group_id().as_slice().try_into().unwrap();
+            songbird_groups::links::verify(
+                &roles,
+                &group,
+                from_epoch,
+                &aad,
+                &device,
+                leaf.signature_key().as_slice(),
+                None,
+            )
+            .map_err(|e| format!("a join from a new account without a valid link proof: {e}"))?;
+        }
+        g.merge_staged_commit(p, *staged).map_err(|e| e.to_string())
+    }
+
+    /// A commit publishing `link`'s proof key in the group's roles extension (pending), as the
+    /// link's creator commits it before sharing the link (D-0076).
+    pub fn publish_link(&mut self, link: &LinkSecret) -> Vec<u8> {
+        let mut roles = self.roles();
+        roles.links.insert(link.handle, link.public_key());
+        self.set_roles(&roles)
+    }
+
     /// Processes another member's commit (from the bundle the server fanned out).
     pub fn receive(&mut self, bundle: &[u8]) {
         let b = Bundle::parse(bundle, usize::MAX).unwrap();
@@ -534,14 +726,39 @@ impl Device {
     /// Joins by external commit from the server's `GroupInfo` and tree. OpenMLS removes this
     /// device's old leaf itself when its signature key is still in the tree (a resync).
     pub fn rejoin(&mut self, group_info: &[u8], tree: &[u8]) -> Vec<u8> {
+        self.rejoin_with_aad(group_info, tree, |_, _| Vec::new())
+    }
+
+    /// Joins by invite link (D-0076): an external commit carrying `link`'s proof for this
+    /// group, the `GroupInfo`'s epoch, this device and its leaf key.
+    pub fn join_by_link(&mut self, group_info: &[u8], tree: &[u8], link: &LinkSecret) -> Vec<u8> {
+        let (id, key) = (self.id, self.signer.public().to_vec());
+        self.rejoin_with_aad(group_info, tree, |group, epoch| {
+            link.prove(group, epoch, &id, &key)
+        })
+    }
+
+    /// An external commit whose authenticated data is `aad(group, epoch)` (tests of what the
+    /// server and members refuse).
+    pub fn rejoin_with_aad(
+        &mut self,
+        group_info: &[u8],
+        tree: &[u8],
+        aad: impl FnOnce(&[u8; 16], u64) -> Vec<u8>,
+    ) -> Vec<u8> {
         let MlsMessageBodyIn::GroupInfo(gi) = MlsMessageIn::tls_deserialize_exact(group_info)
             .unwrap()
             .extract()
         else {
             panic!("not a GroupInfo")
         };
+        let aad = aad(
+            gi.group_id().as_slice().try_into().unwrap(),
+            gi.epoch().as_u64(),
+        );
         let tree = RatchetTreeIn::tls_deserialize_exact(tree).unwrap();
         let (group, bundle) = MlsGroup::external_commit_builder()
+            .with_aad(aad)
             .with_ratchet_tree(tree)
             .with_config(config().join_config().clone())
             .build_group(&self.provider, gi, self.cred.clone())
@@ -604,15 +821,27 @@ pub fn caps() -> Capabilities {
 /// (OpenMLS accepts a change to a custom extension only if it is required) and the roles.
 #[must_use]
 pub fn roles_extensions(roles: &Roles) -> Extensions<GroupContext> {
-    Extensions::from_vec(vec![
+    context_extensions(roles, None)
+}
+
+/// [`roles_extensions`] plus, if given, the delivery service's `external_senders` (D-0075).
+#[must_use]
+pub fn context_extensions(
+    roles: &Roles,
+    external: Option<ExternalSendersExtension>,
+) -> Extensions<GroupContext> {
+    let mut v = vec![
         Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
             &[ExtensionType::Unknown(ROLES_EXTENSION)],
             &[ProposalType::SelfRemove],
             &[CredentialType::Basic],
         )),
         Extension::Unknown(ROLES_EXTENSION, UnknownExtension(roles.encode())),
-    ])
-    .unwrap()
+    ];
+    if let Some(e) = external {
+        v.push(Extension::ExternalSenders(e));
+    }
+    Extensions::from_vec(v).unwrap()
 }
 
 /// A copy of `bundle` carrying the change-log entry `log`.
@@ -638,6 +867,91 @@ pub fn welcome_of(bundle: &[u8]) -> Vec<u8> {
 
 /// Server helper: start tracking a device's new group.
 pub fn server_create(creator: &mut Device, dir: &Dir) -> Group {
+    server_create_with(creator, dir, &Limits::default())
+}
+
+/// Server helper: start tracking a device's new group under `limits` (the delivery service's
+/// external-sender key among them, D-0075: set `creator.ds_key` to the same key).
+pub fn server_create_with(creator: &mut Device, dir: &Dir, limits: &Limits) -> Group {
     let (gi, tree) = creator.create();
-    Group::create(GID, &creator.id, &gi, &tree, dir).unwrap()
+    Group::create(GID, &creator.id, &gi, &tree, dir, limits).unwrap()
+}
+
+/// An invite link as apps hold it (PROTOCOL §6.8): a random handle and a 32-byte secret, from
+/// which HKDF-SHA-256 (salt `songbird.v1/group-link`) derives `auth` (for the server), `info`
+/// (the group's info key) and `proof` (the seed of the link's Ed25519 key, D-0076).
+#[derive(Debug, Clone)]
+pub struct LinkSecret {
+    pub handle: [u8; 16],
+    pub secret: [u8; 32],
+}
+
+impl LinkSecret {
+    /// A fresh link.
+    #[must_use]
+    pub fn random() -> Self {
+        let mut handle = [0u8; 16];
+        let mut secret = [0u8; 32];
+        aws_lc_rs::rand::fill(&mut handle).unwrap();
+        aws_lc_rs::rand::fill(&mut secret).unwrap();
+        Self { handle, secret }
+    }
+
+    fn derive(&self, info: &[u8]) -> [u8; 32] {
+        use aws_lc_rs::hkdf;
+        let mut out = [0u8; 32];
+        hkdf::Salt::new(hkdf::HKDF_SHA256, b"songbird.v1/group-link")
+            .extract(&self.secret)
+            .expand(&[info], hkdf::HKDF_SHA256)
+            .unwrap()
+            .fill(&mut out)
+            .unwrap();
+        out
+    }
+
+    /// What the server is shown (it keeps `SHA-256(auth)`).
+    #[must_use]
+    pub fn auth(&self) -> [u8; 32] {
+        self.derive(b"auth")
+    }
+
+    fn key(&self) -> aws_lc_rs::signature::Ed25519KeyPair {
+        aws_lc_rs::signature::Ed25519KeyPair::from_seed_unchecked(&self.derive(b"proof")).unwrap()
+    }
+
+    /// The link's proof key, which members publish in the roles extension.
+    #[must_use]
+    pub fn public_key(&self) -> [u8; 32] {
+        use aws_lc_rs::signature::KeyPair as _;
+        self.key().public_key().as_ref().try_into().unwrap()
+    }
+
+    /// A joiner's proof (the external commit's authenticated data).
+    #[must_use]
+    pub fn prove(
+        &self,
+        group: &[u8; 16],
+        epoch: u64,
+        device: &DeviceId,
+        leaf_key: &[u8],
+    ) -> Vec<u8> {
+        let content =
+            songbird_groups::links::proof_content(group, epoch, &self.handle, device, leaf_key);
+        let sig: [u8; 64] = self.key().sign(&content).as_ref().try_into().unwrap();
+        songbird_groups::links::LinkProof::encode(&self.handle, &sig)
+    }
+}
+
+/// The delivery service's signer as an OpenMLS client signer, for building proposals a
+/// malicious server could send (tests of the members' rule). The private half is the seed.
+#[must_use]
+pub fn ds_client_signer(seed: &[u8; 32]) -> SignatureKeyPair {
+    let public = songbird_groups::external::DsSigner::from_seed(seed)
+        .unwrap()
+        .public_key();
+    SignatureKeyPair::from_raw(
+        GROUP_CIPHERSUITE.signature_algorithm(),
+        seed.to_vec(),
+        public.to_vec(),
+    )
 }

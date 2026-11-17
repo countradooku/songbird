@@ -20,6 +20,11 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 6 gate (`P06-gate.md`, D-0079 to D-0084; PR pending): **waiting for the owner**: M1 to M5
+  and the security review's fixes; the benchmarks and the choices they drove (AES-256-GCM, parallel
+  16 MiB parts with tus removed, no caching proxy); five threat-model §1 rows (resumable grants up
+  to 24 h, upload budgets, downloads by capability, packs, GIF queries). Before production: the
+  GIPHY key and terms, and `[api.media]` on every `api` node.
 - Prompt 6 plan (`P06-plan.md`, D-0079): **approved by the owner on 2026-11-17**, every recommendation: downloads without
   device authentication, size limit and budgets, pack lifetime, GIF provider and design.
 - Prompt 5 follow-ups (`P05-followups.md`, D-0075 to D-0078; PR #60): **approved by the owner

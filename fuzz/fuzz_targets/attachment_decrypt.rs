@@ -27,8 +27,17 @@ fuzz_target!(|data: &[u8]| {
     let claimed = if sel & 2 == 0 { n } else { n ^ u64::from(sel >> 2) };
     let mut out = Vec::new();
     if decrypt(&KEY, &digest, claimed, &mut &ct[..], &mut out).is_ok() {
-        assert_eq!(claimed, n);
-        assert_eq!(out, plain);
+        // Authentic bytes only: the plaintext, or (for a longer length claimed in the same padding
+        // bucket) the plaintext followed by the authenticated zero padding (PROTOCOL §7.1).
+        let common = plain.len().min(out.len());
+        assert_eq!(out[..common], plain[..common]);
+        assert!(out[common..].iter().all(|b| *b == 0));
+        assert_eq!(
+            songbird_proto::media::padded_len(claimed),
+            songbird_proto::media::padded_len(n)
+        );
+        // A shorter claim succeeds only if what it cuts off was zeros too.
+        assert!(plain[common..].iter().all(|b| *b == 0));
     }
     // Raw bytes as a header and a chunk.
     if let Ok(d) = Decryptor::new(&KEY, &digest, claimed, rest.get(..33).unwrap_or(rest)) {

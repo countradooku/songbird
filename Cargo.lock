@@ -4887,6 +4887,7 @@ dependencies = [
  "songbird-groups-harness",
  "songbird-jobs",
  "songbird-keys",
+ "songbird-link",
  "songbird-mailbox",
  "songbird-proto",
  "songbird-push",

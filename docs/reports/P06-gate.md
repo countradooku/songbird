@@ -34,7 +34,19 @@
 
 ## Runs
 
-RUNS
+All runs were on the machine above, at `66d79f2` plus this report.
+
+| Run | Result |
+| --- | --- |
+| `cargo fmt --check`; `cargo clippy --workspace --all-targets --locked -D warnings`; workflow policy | Clean (`cargo xtask ci fast`'s first three steps) |
+| `cargo nextest run --workspace --locked --profile ci`, with SurrealDB and Valkey live (as CI's fast tier; tests needing the whole stack skip) | **703 of 705 passed**, 7 skipped. The two failures, `usernames_live::keyed_lookups_take_the_same_time…` (a timing comparison) and `devices_live::a_pin_gates_linking…` (503s from `valkey-hot` under load), pass alone, twice each, and in the serial run below. Prompt 6 does not touch their code; the only change to their files is the `media: None` field. They fail when the whole workspace loads the WSL VM that hosts the stores |
+| The stack suites, one crate at a time with `-j 1` against SurrealDB, both Valkeys and RustFS (as CI runs them) | `songbird-api` **71 of 71**; `songbird-jobs` 12 of 12; `songbird-e2e` **55 of 55** (including `gate_p06` 4 of 4, `gate_m5`, `gate_p03`); accounts, s3, content, proto and worker **172 of 172** |
+| `gate_p06`, live, `SONGBIRD_REQUIRE_STACK=1` | **4 of 4**: an encrypted file in parallel parts, a ranged seek decrypted, and deletion after the last confirmation; 30 days and abandoned uploads; a pack opened from its link and expired; the GDPR export and deletion |
+| Fuzzing, nightly toolchain, ASan, 120 s each | `upload_grant` 4,449,800 runs; `s3_multipart_xml` 3,986,796; `media_url` 13,949,443; `pack_manifest` 10,735,174; `gif_proxy` 954,520: nothing found.<br>`attachment_decrypt`: its first run stopped on the **target's own oracle**, which wrongly required an equal length claim. A longer length in the same padding bucket correctly returns the authenticated zero padding, as specified in §7.1 and tested by `padding_must_be_zeros_and_the_real_length_is_the_pointers`. With the oracle fixed: 98,066 runs, nothing found.<br>All six targets are in the nightly CI matrix (10 minutes each) |
+| Independent vectors | `node tools/attachment-vectors/check.mjs`: 6 attachment vectors and the pack keys match |
+| Benchmarks (release) | `attachment_bench` (D-0080), `media_live::upload_protocols` (D-0081), `gate_p06::media_load` (D-0082) |
+
+The full CI run on Linux is the PR's checks.
 
 ## Security review
 

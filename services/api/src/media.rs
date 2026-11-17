@@ -243,11 +243,18 @@ impl Media {
     /// The signed media URL for `object` of `size` bytes, valid until `expires` (Unix seconds).
     #[must_use]
     pub fn media_url(&self, object: &ObjectKey, size: u64, expires: u64) -> String {
-        format!(
-            "/v1/media/{}?e={expires}&z={size}&s={}",
-            object.to_hex_unredacted(),
-            hex::encode(url_mac(&self.url_key, object, expires, size))
-        )
+        // Built without `format!`: an object ID is never formatted where a log line could be
+        // (invariant 6; the semgrep rule `songbird-unredacted-id-in-format`).
+        let mut url = String::with_capacity(160);
+        url.push_str("/v1/media/");
+        url.push_str(&object.to_hex_unredacted());
+        url.push_str("?e=");
+        url.push_str(&expires.to_string());
+        url.push_str("&z=");
+        url.push_str(&size.to_string());
+        url.push_str("&s=");
+        url.push_str(&hex::encode(url_mac(&self.url_key, object, expires, size)));
+        url
     }
 
     /// Checks a media URL's signature (constant time) and expiry; its object size if valid.
@@ -306,7 +313,7 @@ impl Media {
     ) -> Result<bool, ()> {
         let source = crate::registration::range_of(ip, 32, 64);
         let mut ctx = hmac::Context::with_key(&self.record_key);
-        ctx.update(b"c ");
+        ctx.update(b"c\0");
         ctx.update(&object.0);
         ctx.update(&source);
         let record = format!(
@@ -1062,7 +1069,10 @@ mod tests {
         let o = ObjectKey([0x42; 32]);
         let url = m.media_url(&o, 1_073, 2_000_000_600);
         let (path, query) = url.split_once('?').unwrap();
-        assert_eq!(path, format!("/v1/media/{}", o.to_hex_unredacted()));
+        assert_eq!(
+            path.strip_prefix("/v1/media/"),
+            Some(o.to_hex_unredacted().as_str())
+        );
         let q = MediaQuery::parse(query).unwrap();
         assert_eq!((q.expires, q.size), (2_000_000_600, 1_073));
         assert_eq!(m.check_url(&o, &q, 2_000_000_000), Some(1_073));

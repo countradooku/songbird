@@ -20,6 +20,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 6 plan (`P06-plan.md`, D-0079): **proposed, waiting for the owner**: downloads without
+  device authentication, size limit and budgets, pack lifetime, GIF provider and design.
 - Prompt 5 follow-ups (`P05-followups.md`, D-0075 to D-0078; PR #60): **approved by the owner
   on 2026-11-17** ("approve all"): the three milestones and the review's fixes; the four
   threat-model §1 rows (the service key and its queued removals in group state, the prune
@@ -124,6 +126,29 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0079 — Prompt 6: the plan, and the owner's decisions it needs
+
+- Date: 2026-11-17
+- Status: proposed (waiting for the owner)
+- Decided by: owner, on the agent's plan `docs/reports/P06-plan.md`
+- Context: Prompt 2 (D-0036) built single-use, exact-size grants, uploads streamed to RustFS and
+  deletion after the last fetch or 30 days. Prompt 6 adds a chunked encryption format, resumable
+  uploads, range downloads, packs and a GIF proxy. RustFS is reachable only from Songbird
+  services (D-0035), so signed URLs are Songbird's own. Downloads are signed by a device today.
+  Tenor's API closed on 2026-06-30.
+- Options considered and evidence: in the plan ("Findings").
+- Recommendations to decide:
+  1. Downloads without device authentication: the object ID is the capability; a 10-minute
+     signed URL serves range requests; fetches confirmed explicitly.
+  2. 2 GiB per attachment; 10 GiB uploaded per account per 24 hours; 300 grants per hour.
+  3. Packs with no account link, deleted by a management token or a year after the last fetch;
+     200 assets and 300 MiB each.
+  4. GIPHY behind a provider trait; `api` proxies search and images and never stores queries.
+  5. Benchmarks decide AES-256-GCM versus ChaCha20-Poly1305, resumable parts versus tus, and a
+     caching proxy.
+  6. One branch and one PR for every milestone (the owner, 2026-11-17).
+- Consequences: to record once decided.
 
 ## D-0078 — Prompt 5 follow-ups: the security review's fixes
 

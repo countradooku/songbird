@@ -414,3 +414,46 @@ pub async fn unsigned_full(
     }
     exchange_full(addr, b, Bytes::new()).await
 }
+
+/// As [`unsigned_full`], from a chosen local address (tests: two recipients on 127.0.0.1 and
+/// 127.0.0.2 are two sources).
+///
+/// # Errors
+/// Connection or protocol failure.
+pub async fn unsigned_from(
+    addr: SocketAddr,
+    local: std::net::IpAddr,
+    server_name: &str,
+    method: &str,
+    path: &str,
+) -> Result<(u16, hyper::HeaderMap, Bytes), hyper::Error> {
+    let socket = match local {
+        std::net::IpAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
+        std::net::IpAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
+    };
+    let Ok(socket) = socket else {
+        return Ok((0, hyper::HeaderMap::new(), Bytes::new()));
+    };
+    if socket.bind(SocketAddr::new(local, 0)).is_err() {
+        return Ok((0, hyper::HeaderMap::new(), Bytes::new()));
+    }
+    let Ok(tcp) = socket.connect(addr).await else {
+        return Ok((0, hyper::HeaderMap::new(), Bytes::new()));
+    };
+    let _ = tcp.set_nodelay(true);
+    let (mut send, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await?;
+    tokio::spawn(conn);
+    let Ok(req) = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", server_name)
+        .body(Full::new(Bytes::new()))
+    else {
+        return Ok((0, hyper::HeaderMap::new(), Bytes::new()));
+    };
+    let resp = send.send_request(req).await?;
+    let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
+    let bytes = resp.into_body().collect().await?.to_bytes();
+    Ok((status, headers, bytes))
+}

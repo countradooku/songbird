@@ -190,6 +190,7 @@ DEFINE FIELD IF NOT EXISTS fetches ON upload_grant TYPE int;
 DEFINE FIELD IF NOT EXISTS expires ON upload_grant TYPE datetime;
 DEFINE FIELD IF NOT EXISTS deadline ON upload_grant TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS upload ON upload_grant TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS sent ON upload_grant TYPE int DEFAULT 0;
 DEFINE INDEX IF NOT EXISTS upload_grant_device ON upload_grant FIELDS device;
 DEFINE INDEX IF NOT EXISTS upload_grant_expires ON upload_grant FIELDS expires;
 DEFINE TABLE IF NOT EXISTS attachment SCHEMAFULL;
@@ -244,6 +245,7 @@ DEFINE FIELD IF NOT EXISTS token ON pack TYPE bytes;
 DEFINE FIELD IF NOT EXISTS done ON pack TYPE bool;
 DEFINE FIELD IF NOT EXISTS created ON pack TYPE datetime;
 DEFINE FIELD IF NOT EXISTS used ON pack TYPE datetime;
+DEFINE FIELD IF NOT EXISTS puts ON pack TYPE int DEFAULT 0;
 DEFINE INDEX IF NOT EXISTS pack_used ON pack FIELDS used;
 DEFINE INDEX IF NOT EXISTS pack_device ON pack FIELDS device;
 DEFINE TABLE IF NOT EXISTS cmty SCHEMAFULL;
@@ -492,6 +494,17 @@ impl std::fmt::Debug for PendingUpload {
             .field("resumable", &self.upload.is_some())
             .finish()
     }
+}
+
+/// How an upload ended ([`Registry::finish_upload`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadEnd {
+    /// The grant became the attachment.
+    Completed,
+    /// The object already is an attachment (a retried completion).
+    Attached,
+    /// No live grant: what was stored belongs to nothing.
+    Gone,
 }
 
 /// An uploaded attachment.
@@ -2066,6 +2079,23 @@ impl Registry {
         })
     }
 
+    /// Counts one part write against an unexpired grant, if fewer than `most` were counted:
+    /// retries are allowed, an endless stream of rewrites is not (Prompt 6, D-0084).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn spend_part(&self, object: &ObjectKey, most: u64) -> Result<bool, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "UPDATE upload_grant:[$o] SET sent += 1
+                   WHERE expires > time::now() AND (sent ?? 0) < $m RETURN VALUE sent;",
+                vec![var("o", bytes(&object.0)), var("m", int(most))],
+            )
+            .await?;
+        Ok(!rows(v).is_empty())
+    }
+
     /// Keeps an unexpired grant alive for `idle` more, never past its deadline
     /// ([`GRANT_MAX_AGE`] after it was issued): a resumable upload that keeps sending parts
     /// keeps its grant.
@@ -2133,13 +2163,24 @@ impl Registry {
     /// # Errors
     /// [`RegistryError`].
     pub async fn complete_upload(&self, object: &ObjectKey) -> Result<bool, RegistryError> {
+        Ok(self.finish_upload(object).await? == UploadEnd::Completed)
+    }
+
+    /// Turns an unexpired grant into an attachment record, and says what happened when it
+    /// could not: the object is already an attachment (a retried completion: keep it), or there is
+    /// no live grant (the caller may delete what it stored). Prompt 6, D-0084.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn finish_upload(&self, object: &ObjectKey) -> Result<UploadEnd, RegistryError> {
         let v = self
             .db
             .query(
                 "BEGIN TRANSACTION;
-                 LET $n = (SELECT VALUE size FROM ONLY upload_grant:[$o]);
-                 LET $f = (SELECT VALUE fetches FROM ONLY upload_grant:[$o]);
-                 IF $n = NONE OR $f = NONE { THROW 'no_grant' };
+                 IF record::exists(attachment:[$o]) { THROW 'songbird:attached' };
+                 LET $n = (SELECT VALUE size FROM ONLY upload_grant:[$o] WHERE expires > time::now());
+                 LET $f = (SELECT VALUE fetches FROM ONLY upload_grant:[$o] WHERE expires > time::now());
+                 IF $n = NONE OR $f = NONE { THROW 'songbird:no_grant' };
                  DELETE upload_grant:[$o] RETURN NONE;
                  CREATE attachment:[$o] SET size = $n, left = $f,
                    expires = time::now() + duration::from_secs($age) RETURN NONE;
@@ -2151,8 +2192,9 @@ impl Registry {
             )
             .await;
         match v {
-            Ok(_) => Ok(true),
-            Err(DbError::Statement(kind)) if kind == "Thrown" => Ok(false),
+            Ok(_) => Ok(UploadEnd::Completed),
+            Err(DbError::Statement(kind)) if kind == "Thrown:attached" => Ok(UploadEnd::Attached),
+            Err(DbError::Statement(kind)) if kind.starts_with("Thrown") => Ok(UploadEnd::Gone),
             Err(e) => Err(e.into()),
         }
     }

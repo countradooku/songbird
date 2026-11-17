@@ -23,7 +23,7 @@ use std::time::Duration;
 use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair as _};
 use bytes::Bytes;
 use songbird_accounts::{Db, Registry, push_token};
-use songbird_api::client::{ApiClient, unsigned_full};
+use songbird_api::client::{ApiClient, unsigned_from, unsigned_full};
 use songbird_api::config::{AttachmentLimits, GifSettings, MediaBudgets, MediaDownloads};
 use songbird_api::gifs::{Gifs, Giphy};
 use songbird_api::media::Media;
@@ -586,27 +586,32 @@ async fn fetches_are_confirmed_and_the_last_one_deletes() {
     let all = data(ciphertext_len(2_000).unwrap());
     let id = upload_whole(&up, &all, 2).await;
     let depth = s.app.queue.depth(Stream::Cleanup).await.unwrap();
-    let confirm = || async {
-        unsigned_full(
-            s.addr,
-            SERVER,
-            "POST",
-            &format!("/v1/attachments/{id}/fetched"),
-            &[],
-        )
-        .await
-        .unwrap()
-        .0
+    // Each recipient device confirms from its own address (127.0.0.1, 127.0.0.2, ...).
+    let confirm = |source: u8| {
+        let path = format!("/v1/attachments/{id}/fetched");
+        let s = &s;
+        async move {
+            unsigned_from(s.addr, [127, 0, 0, source].into(), SERVER, "POST", &path)
+                .await
+                .unwrap()
+                .0
+        }
     };
-    // Downloading does not count; confirming does.
+    // Downloading does not count; confirming does, once per source (D-0084).
     let _ = download(&s, &id).await;
     let _ = download(&s, &id).await;
-    assert_eq!(confirm().await, 204);
-    assert_eq!(locate(&s, &id).await.0, 303);
-    assert_eq!(confirm().await, 204);
+    assert_eq!(confirm(1).await, 204);
+    assert_eq!(confirm(1).await, 204, "accepted, but counted once");
+    assert_eq!(confirm(1).await, 204);
+    assert_eq!(
+        locate(&s, &id).await.0,
+        303,
+        "one recipient alone cannot delete it"
+    );
+    assert_eq!(confirm(2).await, 204);
     // Gone: no URL, no more confirmations, and the object's deletion is queued.
     assert_eq!(locate(&s, &id).await.0, 404);
-    assert_eq!(confirm().await, 404);
+    assert_eq!(confirm(3).await, 404);
     assert!(s.app.queue.depth(Stream::Cleanup).await.unwrap() > depth);
     // The IP range's redirect budget (a burst of six; four spent above) runs out, with a wait.
     let mut throttled = None;
@@ -680,6 +685,13 @@ async fn packs_are_created_fetched_anonymously_and_deleted_by_token() {
     assert_eq!(fetch_pack(0).await.0, 404);
     assert_eq!(pack_complete(&creator, &pack).await, 409);
     assert_eq!(pack_put(&creator, &pack, 2, objects[2].clone()).await, 201);
+    // Rewrites are counted: three objects allow 2 × 3 + 8 = 14 writes, three spent so far.
+    let mut codes = Vec::new();
+    for _ in 0..12 {
+        codes.push(pack_put(&creator, &pack, 0, objects[0].clone()).await);
+    }
+    assert_eq!(&codes[..11], &[201; 11]);
+    assert_eq!(codes[11], 409);
     assert_eq!(pack_complete(&other, &pack).await, 404);
     assert_eq!(pack_complete(&creator, &pack).await, 201);
     // Complete: the creator is forgotten and can no longer write.
@@ -800,10 +812,13 @@ async fn mock_giphy() -> MockGiphy {
                                 r#"{{"data":[
                                   {{"id":"a","images":{{"fixed_width":{{"url":"{a}","width":"200","height":"150","mp4":"http://{addr}/media/a.mp4"}},"fixed_width_still":{{"url":"http://{addr}/media/a_s.gif"}}}}}},
                                   {{"id":"evil","images":{{"fixed_width":{{"url":"https://evil.example/x.gif","width":"1","height":"1"}}}}}},
-                                  {{"id":"page","images":{{"fixed_width":{{"url":"http://{addr}/media/page.html","width":"1","height":"1"}}}}}}
+                                  {{"id":"page","images":{{"fixed_width":{{"url":"http://{addr}/media/page.html","width":"1","height":"1"}}}}}},
+                                  {{"id":"gone","images":{{"fixed_width":{{"url":"http://{addr}/media/gone.gif","width":"1","height":"1"}}}}}}
                                 ],"pagination":{{"count":3}}}}"#
                             );
                             *r.body_mut() = http_body_util::Full::new(Bytes::from(body));
+                        } else if path == "/media/gone.gif" {
+                            *r.status_mut() = hyper::StatusCode::NOT_FOUND;
                         } else if path == "/media/page.html" {
                             r.headers_mut()
                                 .insert("content-type", "text/html".parse().unwrap());
@@ -869,7 +884,7 @@ async fn the_gif_proxy_hides_who_searches_and_survives_the_provider() {
     );
     let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
     let gifs = v["gifs"].as_array().unwrap();
-    assert_eq!(gifs.len(), 2, "the file from another host is dropped");
+    assert_eq!(gifs.len(), 3, "the file from another host is dropped");
     let file = gifs[0]["gif"].as_str().unwrap().to_owned();
     assert!(file.starts_with("/v1/gifs/media/"));
     // What the provider received: its key, the query, paging, rating and language; no header
@@ -919,6 +934,19 @@ async fn the_gif_proxy_hides_who_searches_and_survives_the_provider() {
             .0,
         503
     );
+    // A GIF the provider removed (404), fetched again and again with no account: it fails, and
+    // it does not open the circuit for everyone's searches (D-0084).
+    let gone = gifs[2]["gif"].as_str().unwrap().to_owned();
+    for _ in 0..8 {
+        assert_eq!(
+            unsigned_full(s.addr, SERVER, "GET", &gone, &[])
+                .await
+                .unwrap()
+                .0,
+            503
+        );
+    }
+    assert_eq!(search("still searching").await.0, 200);
     // No account, no search.
     let (st, _, _) = unsigned_full(s.addr, SERVER, "POST", "/v1/gifs/search", &[])
         .await
@@ -945,5 +973,36 @@ async fn the_gif_proxy_hides_who_searches_and_survives_the_provider() {
     );
     // The account's search budget (a burst of six) ran out along the way.
     assert!(throttled);
+    let _ = s.stop.send(true);
+}
+
+/// A part may be sent again (a retry), but not endlessly: at most twice the part count and a few
+/// more writes per grant (D-0084).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parts_can_be_retried_but_not_rewritten_forever() {
+    let Some(s) = stack(MediaBudgets::default()).await else {
+        return;
+    };
+    let up = device(&s).await;
+    let size = ciphertext_len(10).unwrap();
+    let (_, id) = grant(&up, size, 1).await;
+    let id = id.unwrap();
+    let body = data(size);
+    let mut codes = Vec::new();
+    for _ in 0..12 {
+        codes.push(put_part(&up, &id, 1, body.clone()).await);
+    }
+    // One part: 2 × 1 + 8 = 10 writes.
+    assert_eq!(&codes[..10], &[204; 10]);
+    assert_eq!(&codes[10..], &[409, 409]);
+    // Completing still works: the stored part is intact.
+    assert_eq!(
+        up.send("POST", &format!("/v1/attachments/{id}/complete"), None)
+            .await
+            .unwrap()
+            .0,
+        201
+    );
+    assert!(download(&s, &id).await == body);
     let _ = s.stop.send(true);
 }

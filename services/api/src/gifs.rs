@@ -44,6 +44,8 @@ const PAGE: u32 = 24;
 /// Consecutive provider failures that open the circuit, and how long it stays open.
 const BREAKER_FAILURES: u32 = 5;
 const BREAKER_OPEN: Duration = Duration::from_secs(30);
+/// GIF files fetched from the provider at once, per node.
+const MEDIA_IN_FLIGHT: usize = 32;
 
 /// One GIF of an answer, as the provider describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,6 +241,15 @@ impl Cache {
     }
 }
 
+/// How a request to the provider failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fetch {
+    /// The provider is failing (transport, timeout, 5xx, 429): counts toward the breaker.
+    Provider,
+    /// Only this request failed (a 4xx, a body too large, a bad URL).
+    Request,
+}
+
 /// Why the proxy could not answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GifError {
@@ -262,6 +273,7 @@ pub struct Gifs {
     media: Mutex<Cache>,
     failures: AtomicU32,
     open_until: AtomicU64,
+    in_flight: tokio::sync::Semaphore,
     started: Instant,
 }
 
@@ -319,6 +331,7 @@ impl Gifs {
             settings,
             failures: AtomicU32::new(0),
             open_until: AtomicU64::new(0),
+            in_flight: tokio::sync::Semaphore::new(MEDIA_IN_FLIGHT),
             started: Instant::now(),
         })
     }
@@ -375,14 +388,14 @@ impl Gifs {
     }
 
     /// Spends one provider request of the cluster-wide budget.
-    async fn provider_budget(&self, hot: &ValkeyConn) -> bool {
+    async fn provider_budget(&self, hot: &ValkeyConn, record: &str) -> bool {
         let per_sec = u64::from(self.settings.provider_per_sec.max(1));
         let interval = 1_000_000 / per_sec;
         hot.query::<i64>(
             redis::cmd("EVAL")
                 .arg(songbird_send::gate::GCRA_COST)
                 .arg(1)
-                .arg("m:gp")
+                .arg(record)
                 .arg(interval)
                 .arg(interval.saturating_mul(per_sec))
                 .arg(1),
@@ -393,42 +406,52 @@ impl Gifs {
 
     /// One GET to the provider's API or CDN, built from scratch: no header of the app's request
     /// is ever copied.
-    async fn get(&self, uri: &Uri, max: usize) -> Result<(Bytes, String), ()> {
-        let host = uri.host().ok_or(())?.to_owned();
+    async fn get(&self, uri: &Uri, max: usize) -> Result<(Bytes, String), Fetch> {
+        let host = uri.host().ok_or(Fetch::Request)?.to_owned();
         let https = uri.scheme_str() == Some("https");
         let port = uri.port_u16().unwrap_or(if https { 443 } else { 80 });
         let timeout = Duration::from_secs(self.settings.timeout_secs);
         let path = uri.path_and_query().map_or("/", |p| p.as_str()).to_owned();
-        let authority = uri.authority().ok_or(())?.as_str().to_owned();
+        let authority = uri.authority().ok_or(Fetch::Request)?.as_str().to_owned();
         let fut = async {
             let tcp = tokio::net::TcpStream::connect((host.as_str(), port))
                 .await
-                .map_err(|_| ())?;
+                .map_err(|_| Fetch::Provider)?;
             let _ = tcp.set_nodelay(true);
             let req = Request::get(path)
                 .header(hyper::header::HOST, authority)
                 .header(hyper::header::USER_AGENT, "songbird")
                 .header(hyper::header::ACCEPT, "*/*")
                 .body(Empty::<Bytes>::new())
-                .map_err(|_| ())?;
+                .map_err(|_| Fetch::Provider)?;
             let resp = if https {
-                let tls = self.tls.as_ref().ok_or(())?;
-                let name = rustls_pki_types::ServerName::try_from(host.clone()).map_err(|_| ())?;
-                let stream = tls.connect(name, tcp).await.map_err(|_| ())?;
+                let tls = self.tls.as_ref().ok_or(Fetch::Request)?;
+                let name = rustls_pki_types::ServerName::try_from(host.clone())
+                    .map_err(|_| Fetch::Provider)?;
+                let stream = tls.connect(name, tcp).await.map_err(|_| Fetch::Provider)?;
                 let (mut send, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
                     .await
-                    .map_err(|_| ())?;
+                    .map_err(|_| Fetch::Provider)?;
                 tokio::spawn(conn);
-                send.send_request(req).await.map_err(|_| ())?
+                send.send_request(req).await.map_err(|_| Fetch::Provider)?
             } else {
                 let (mut send, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tcp))
                     .await
-                    .map_err(|_| ())?;
+                    .map_err(|_| Fetch::Provider)?;
                 tokio::spawn(conn);
-                send.send_request(req).await.map_err(|_| ())?
+                send.send_request(req).await.map_err(|_| Fetch::Provider)?
             };
-            if resp.status() != StatusCode::OK {
-                return Err(());
+            let st = resp.status();
+            if st != StatusCode::OK {
+                // The provider failing (5xx) or throttling us (429) counts; a 4xx about one
+                // request (a removed GIF) does not.
+                return Err(
+                    if st.is_server_error() || st == StatusCode::TOO_MANY_REQUESTS {
+                        Fetch::Provider
+                    } else {
+                        Fetch::Request
+                    },
+                );
             }
             let kind = resp
                 .headers()
@@ -439,11 +462,13 @@ impl Gifs {
             let body = Limited::new(resp.into_body(), max)
                 .collect()
                 .await
-                .map_err(|_| ())?
+                .map_err(|_| Fetch::Request)?
                 .to_bytes();
             Ok((body, kind))
         };
-        tokio::time::timeout(timeout, fut).await.map_err(|_| ())?
+        tokio::time::timeout(timeout, fut)
+            .await
+            .map_err(|_| Fetch::Provider)?
     }
 
     /// A provider URL may be fetched only from the provider's own hosts, over the base URL's
@@ -516,7 +541,7 @@ impl Gifs {
         {
             return Ok(b);
         }
-        if !self.closed() || !self.provider_budget(hot).await {
+        if !self.closed() || !self.provider_budget(hot, "m:gp").await {
             return Err(GifError::Unavailable);
         }
         let path = match search {
@@ -527,8 +552,8 @@ impl Gifs {
             .parse::<Uri>()
             .map_err(|_| GifError::Unavailable)?;
         let got = self.get(&uri, MAX_ANSWER).await;
-        self.outcome(got.is_ok());
-        let (body, _) = got.map_err(|()| GifError::Unavailable)?;
+        self.outcome(!matches!(got, Err(Fetch::Provider)));
+        let (body, _) = got.map_err(|_| GifError::Unavailable)?;
         let gifs = self.provider.parse(&body).map_err(|_| {
             self.outcome(false);
             GifError::Unavailable
@@ -572,17 +597,21 @@ impl Gifs {
         {
             return Ok((b, media_type(&kind).ok_or(GifError::Unavailable)?));
         }
-        if !self.closed() || !self.provider_budget(hot).await {
+        // Files never move the search breaker (an unauthenticated caller could otherwise open it,
+        // D-0084); they have their own budget and at most `MEDIA_IN_FLIGHT` fetches at a time.
+        let Ok(_permit) = self.in_flight.try_acquire() else {
+            return Err(GifError::Unavailable);
+        };
+        if !self.provider_budget(hot, "m:gm").await {
             return Err(GifError::Unavailable);
         }
-        let got = self
+        let (body, kind) = self
             .get(
                 &uri,
                 usize::try_from(self.settings.max_media_bytes).unwrap_or(usize::MAX),
             )
-            .await;
-        self.outcome(got.is_ok());
-        let (body, kind) = got.map_err(|()| GifError::Unavailable)?;
+            .await
+            .map_err(|_| GifError::Unavailable)?;
         let t = media_type(&kind).ok_or(GifError::Unavailable)?;
         if let Ok(mut c) = self.media.lock() {
             c.put(key, body.clone(), t.to_owned());

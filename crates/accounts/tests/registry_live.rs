@@ -1032,4 +1032,26 @@ async fn resumable_grants_record_one_upload_and_slide_to_a_deadline() {
     assert_eq!(r.set_grant_upload(&gone, "x").await.unwrap(), None);
     assert!(r.complete_upload(&obj).await.unwrap());
     assert!(r.pending_upload(&obj).await.unwrap().is_none());
+    // A retried completion finds the attachment: never "gone", so the caller keeps the object
+    // (D-0084); an expired grant cannot complete.
+    assert_eq!(
+        r.finish_upload(&obj).await.unwrap(),
+        songbird_accounts::UploadEnd::Attached
+    );
+    let late = ObjectKey::random().unwrap();
+    r.create_grant(&late, &g, Duration::ZERO).await.unwrap();
+    assert_eq!(
+        r.finish_upload(&late).await.unwrap(),
+        songbird_accounts::UploadEnd::Gone
+    );
+    // Part writes are counted: retries allowed, endless rewrites not.
+    let counted = ObjectKey::random().unwrap();
+    r.create_grant(&counted, &g, Duration::from_secs(60))
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        assert!(r.spend_part(&counted, 3).await.unwrap());
+    }
+    assert!(!r.spend_part(&counted, 3).await.unwrap());
+    assert!(!r.spend_part(&late, 3).await.unwrap(), "expired");
 }

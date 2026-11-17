@@ -1703,11 +1703,12 @@ travels only inside end-to-end encrypted content, is the capability.
     so a player may read parts of a file many times.
   - The last confirmation deletes the attachment. Anything unconfirmed goes after 30 days (the
     worker's sweep).
-  - A recipient could confirm more than once and delete the file early. That gains it nothing
-    it could not do before, by downloading several times.
+  - Each source counts once per object: an IPv4 address, or an IPv6 /64 (D-0084). A recipient
+    cannot delete a file before the others by confirming many times. Recipients behind one
+    address count as one, and their file is kept until 30 days.
 - **Throttles.** Redirects and confirmations are budgeted per IP range in keyed records: 6,000
-  per hour, a burst of 600, /24 for IPv4 and /48 for IPv6. Signed-URL requests are not
-  budgeted: they are cheap, and each URL lives 10 minutes.
+  per hour, a burst of 600, /24 for IPv4 and /48 for IPv6. Signed-URL requests (every range a
+  player asks for) have their own budget: 36,000 per hour, a burst of 3,600 (D-0084).
 - **Forwarding** encrypts again under a fresh key and uploads a new object (§7.1). The server
   never copies an object, so two messages never share an ID.
 
@@ -1770,8 +1771,9 @@ emoticon packs. The kind exists only inside the encrypted manifest (`PackManifes
 - Answers are cached in memory for 10 minutes, under a keyed hash of language, offset and query.
   Files are cached in memory for a day (256 MiB at most). Queries are never written to disk or
   logged.
-- Each node has a circuit breaker: after five consecutive failures it leaves the provider alone
-  for 30 s. Across the cluster, the provider gets at most `provider_per_sec` requests. The
+- Each node has a circuit breaker: after five consecutive provider failures (transport, timeout,
+  5xx, 429) it leaves the provider alone for 30 s. File fetches never move it; they have their
+  own budget and run at most 32 at a time (D-0084). Across the cluster, the provider gets at most `provider_per_sec` requests. The
   runbook is `docs/RUNBOOKS/media.md`.
 - No link previews on the server: apps build them (§5).
 

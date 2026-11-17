@@ -278,14 +278,53 @@ impl Media {
             "m:{kind}:{}",
             hex::encode(ctx.sign().as_ref().get(..16).unwrap_or_default())
         );
+        // Signed-URL requests (`v`: every range a player asks for) have a budget of their own.
+        let (per_hour, burst) = if kind == "v" {
+            (d.serve_per_hour, d.serve_burst)
+        } else {
+            (d.per_hour, d.burst)
+        };
         Self::spend(
             hot,
             &record,
-            3_600_000_000 / u64::from(d.per_hour.max(1)),
-            u64::from(d.burst),
+            3_600_000_000 / u64::from(per_hour.max(1)),
+            u64::from(burst),
             1,
         )
         .await
+    }
+
+    /// Whether this is the first confirmation of `object` from this address (an IPv4 address,
+    /// an IPv6 /64): one source counts once (D-0084), so one recipient cannot confirm every
+    /// fetch and delete a file before the others have it. Kept in `valkey-hot` under a keyed
+    /// name for the attachment's lifetime.
+    pub(crate) async fn first_confirmation(
+        &self,
+        hot: &ValkeyConn,
+        object: &ObjectKey,
+        ip: std::net::IpAddr,
+    ) -> Result<bool, ()> {
+        let source = crate::registration::range_of(ip, 32, 64);
+        let mut ctx = hmac::Context::with_key(&self.record_key);
+        ctx.update(b"c ");
+        ctx.update(&object.0);
+        ctx.update(&source);
+        let record = format!(
+            "m:c:{}",
+            hex::encode(ctx.sign().as_ref().get(..16).unwrap_or_default())
+        );
+        let set: redis::Value = hot
+            .query(
+                redis::cmd("SET")
+                    .arg(record)
+                    .arg(1)
+                    .arg("NX")
+                    .arg("EX")
+                    .arg(songbird_accounts::ATTACHMENT_MAX_AGE.as_secs()),
+            )
+            .await
+            .map_err(|_| ())?;
+        Ok(matches!(set, redis::Value::Okay))
     }
 
     /// The settings.
@@ -565,17 +604,24 @@ async fn upload(
 
 /// The grant becomes the attachment record; an object whose grant expired meanwhile goes.
 async fn finish(app: &App, object: &ObjectKey) -> Result<Response<Body>, Refusal> {
-    let done = app
+    match app
         .registry
-        .complete_upload(object)
+        .finish_upload(object)
         .await
-        .map_err(|_| status(StatusCode::SERVICE_UNAVAILABLE))?;
-    if !done {
-        let _ = app.s3.delete_object(&object_name(object)).await;
-        return Err(status(StatusCode::NOT_FOUND));
+        .map_err(|_| status(StatusCode::SERVICE_UNAVAILABLE))?
+    {
+        songbird_accounts::UploadEnd::Completed => {
+            app.metrics.uploads.inc();
+            Ok(empty(StatusCode::CREATED))
+        }
+        // A retried completion: the attachment stands; never delete its object.
+        songbird_accounts::UploadEnd::Attached => Ok(empty(StatusCode::CREATED)),
+        // No live grant and no attachment: what was stored belongs to nothing.
+        songbird_accounts::UploadEnd::Gone => {
+            let _ = app.s3.delete_object(&object_name(object)).await;
+            Err(status(StatusCode::NOT_FOUND))
+        }
     }
-    app.metrics.uploads.inc();
-    Ok(empty(StatusCode::CREATED))
 }
 
 /// The grant's multipart upload, opened on first use. Two first parts racing open two; the
@@ -633,6 +679,16 @@ async fn put_part(
         .ok_or(status(StatusCode::NOT_FOUND))?;
     if content_length(&parts) != Some(len) {
         return Err(status(StatusCode::BAD_REQUEST));
+    }
+    // Retries yes, endless rewrites no: at most twice the parts, and a few more (D-0084).
+    let most = 2 * part_count(p.grant.size, app.limits.part_size) + 8;
+    if !app
+        .registry
+        .spend_part(&object, most)
+        .await
+        .map_err(|_| status(StatusCode::SERVICE_UNAVAILABLE))?
+    {
+        return Err(status(StatusCode::CONFLICT));
     }
     let upload = open(app, &object, &p).await?;
     send_part(app, &object, &upload, n, len, body.into_data_stream()).await?;
@@ -801,8 +857,15 @@ async fn fetched(
     object: ObjectKey,
 ) -> Result<Response<Body>, Refusal> {
     let m = media(app)?;
-    if let Some(r) = throttle(app, m, "f", peer(req)?).await {
+    let ip = peer(req)?;
+    if let Some(r) = throttle(app, m, "f", ip).await {
         return Ok(r);
+    }
+    // A second confirmation from the same source counts nothing (D-0084).
+    match m.first_confirmation(&app.hot, &object, ip).await {
+        Ok(true) => {}
+        Ok(false) => return Ok(empty(StatusCode::NO_CONTENT)),
+        Err(()) => return Err(status(StatusCode::SERVICE_UNAVAILABLE)),
     }
     match app.registry.count_fetch(&object).await {
         Ok(Some(0)) => {
@@ -850,6 +913,9 @@ pub(crate) async fn serve(app: &App, req: Request<Incoming>) -> Result<Response<
         return Err(status(StatusCode::NOT_FOUND));
     }
     let m = media(app)?;
+    if let Some(r) = throttle(app, m, "v", peer(&req)?).await {
+        return Ok(r);
+    }
     let object = req
         .uri()
         .path()

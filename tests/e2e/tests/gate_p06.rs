@@ -222,13 +222,14 @@ async fn located(s: &Stack, id: &str) -> Option<String> {
     (st == 303).then(|| h["location"].to_str().unwrap().to_owned())
 }
 
-async fn confirm(s: &Stack, id: &str) -> u16 {
-    unsigned_full(
+/// A fetch confirmation from 127.0.0.`source`: each recipient device is its own source.
+async fn confirm(s: &Stack, id: &str, source: u8) -> u16 {
+    songbird_api::client::unsigned_from(
         s.addr,
+        [127, 0, 0, source].into(),
         SERVER,
         "POST",
         &format!("/v1/attachments/{id}/fetched"),
-        &[],
     )
     .await
     .unwrap()
@@ -332,7 +333,7 @@ async fn an_encrypted_file_goes_up_in_parts_comes_back_by_range_and_goes_after_t
         )
         .unwrap();
         assert!(out == plain);
-        assert_eq!(confirm(&s, &id).await, 204);
+        assert_eq!(confirm(&s, &id, if left == 1 { 1 } else { 2 }).await, 204);
         let rec = s
             .app
             .registry
@@ -379,7 +380,7 @@ async fn attachments_nobody_fetches_go_at_30_days_and_abandoned_uploads_are_abor
     );
     let object = ObjectKey::parse_hex(&id).unwrap();
     // One fetch of three confirmed; then 30 days pass (the record is aged in place).
-    assert_eq!(confirm(&s, &id).await, 204);
+    assert_eq!(confirm(&s, &id, 1).await, 204);
     s.worker.sweep().await;
     assert!(
         s.app

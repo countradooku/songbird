@@ -65,6 +65,11 @@ impl Validate for ApiConfig {
                 "api.reports",
                 "is required in staging and production (reporting)",
             );
+            v.check(
+                api.media.is_some(),
+                "api.media",
+                "is required in staging and production (upload budgets, downloads, D-0084)",
+            );
             if let Some(s) = &api.send {
                 v.check(
                     s.franking_key.is_some(),
@@ -523,9 +528,9 @@ impl Validate for AttachmentLimits {
         // S3: every part but the last at least 5 MiB, at most 10,000 parts.
         v.check(
             ((5 << 20)..=(512 << 20)).contains(&self.part_size)
-                && self.max_bytes.div_ceil(self.part_size) <= 10_000,
+                && self.max_bytes.div_ceil(self.part_size) <= 1_000,
             "part_size",
-            "must be in 5 MiB..=512 MiB, with max_bytes in at most 10,000 parts",
+            "must be in 5 MiB..=512 MiB, with max_bytes in at most 1,000 parts (the parts list the server reads)",
         );
     }
 }
@@ -621,7 +626,10 @@ impl Default for GifSettings {
 impl Validate for GifSettings {
     fn validate(&self, v: &mut Validator) {
         v.check(
-            self.base_url.starts_with("https://") || self.base_url.starts_with("http://127.0.0.1"),
+            self.base_url.parse::<hyper::Uri>().is_ok_and(|u| {
+                u.scheme_str() == Some("https")
+                    || (u.scheme_str() == Some("http") && u.host() == Some("127.0.0.1"))
+            }),
             "base_url",
             "must be https (plain http only to 127.0.0.1, for tests)",
         );
@@ -667,6 +675,10 @@ pub struct MediaDownloads {
     pub ipv4_prefix: u8,
     /// IPv6 prefix length of a range.
     pub ipv6_prefix: u8,
+    /// Signed-URL requests (each range a player asks for) per hour per IP range (D-0084).
+    pub serve_per_hour: u32,
+    /// Their burst.
+    pub serve_burst: u32,
 }
 
 impl Default for MediaDownloads {
@@ -677,6 +689,8 @@ impl Default for MediaDownloads {
             burst: 600,
             ipv4_prefix: 24,
             ipv6_prefix: 48,
+            serve_per_hour: 36_000,
+            serve_burst: 3_600,
         }
     }
 }
@@ -689,7 +703,10 @@ impl Validate for MediaDownloads {
             "must be in 60..=3600",
         );
         v.check(
-            (1..=1_000_000).contains(&self.per_hour) && (1..=100_000).contains(&self.burst),
+            (1..=1_000_000).contains(&self.per_hour)
+                && (1..=100_000).contains(&self.burst)
+                && (1..=10_000_000).contains(&self.serve_per_hour)
+                && (1..=1_000_000).contains(&self.serve_burst),
             "per_hour",
             "per_hour must be in 1..=1000000 and burst in 1..=100000",
         );

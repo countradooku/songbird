@@ -12,7 +12,7 @@ fuzz_target!(|data: &[u8]| {
         assert!(parts.windows(2).all(|w| w[0].number < w[1].number));
         assert!(parts.iter().all(|p| p.number >= 1 && !p.etag.is_empty()));
     }
-    if let Ok(ups) = parse::list_uploads(data) {
+    if let Ok((ups, _)) = parse::list_uploads(data) {
         assert!(ups.iter().all(|u| !u.key.is_empty() && !u.upload_id.is_empty()));
     }
     let _ = parse::complete_result(data);

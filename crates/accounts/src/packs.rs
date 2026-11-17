@@ -156,6 +156,28 @@ impl Registry {
         }))
     }
 
+    /// Counts one object write against an unfinished pack, if fewer than `most` were counted
+    /// (Prompt 6, D-0084).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn spend_pack_put(&self, pack: &[u8; 16], most: u64) -> Result<bool, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "UPDATE pack:[$p] SET puts += 1
+                   WHERE done = false AND created > time::now() - duration::from_secs($up)
+                     AND (puts ?? 0) < $m RETURN VALUE puts;",
+                vec![
+                    var("p", bytes(pack)),
+                    var("up", int(PACK_UPLOAD_TIME.as_secs())),
+                    var("m", int(most)),
+                ],
+            )
+            .await?;
+        Ok(!rows(v).is_empty())
+    }
+
     /// Marks an unfinished pack complete and forgets its creating device. False if it was not
     /// unfinished (already complete, expired or gone).
     ///

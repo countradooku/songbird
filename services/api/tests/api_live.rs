@@ -9,6 +9,7 @@
     clippy::indexing_slicing,
     clippy::assert_is_empty,
     clippy::many_single_char_names,
+    clippy::too_many_lines,
     reason = "tests"
 )]
 
@@ -277,9 +278,17 @@ async fn attachments_upload_exactly_and_go_after_the_last_fetch() {
         assert_eq!(body.len(), 4145);
         assert!(body.iter().all(|b| *b == 7));
         let fetched = format!("{path}/fetched");
-        let (st, _, _) = unsigned_full(s.addr, SERVER, "POST", &fetched, &[])
-            .await
-            .unwrap();
+        // Two recipient devices, two source addresses (one source counts once, D-0084).
+        let source = if left == 1 { 1 } else { 2 };
+        let (st, _, _) = songbird_api::client::unsigned_from(
+            s.addr,
+            [127, 0, 0, source].into(),
+            SERVER,
+            "POST",
+            &fetched,
+        )
+        .await
+        .unwrap();
         assert_eq!(st, 204);
         let a = s.app.registry.attachment(&object).await.unwrap();
         assert_eq!(a.map_or(0, |a| a.left), left);

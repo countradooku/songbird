@@ -127,6 +127,63 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0084 — Prompt 6: the security review's fixes
+
+- Date: 2026-11-17
+- Status: accepted; part of the Prompt 6 PR (report `P06-gate.md`, "Security review")
+- Decided by: agent, on an independent read-only review of the whole Prompt 6 diff. The
+  reviewer was a separate agent, given the code and documents, not the reports' conclusions.
+- Context: the review found no high-severity issue. It found three medium findings, four low
+  and two for information.
+- Decision:
+  1. **One recipient could confirm every fetch and delete a file early** (medium).
+     Confirmations need no account, so a recipient holding the object ID could send N of them.
+     - Each source now counts once per object: an IPv4 address, or an IPv6 /64. The record is
+       keyed in `valkey-hot` for the attachment's lifetime.
+     - Recipients sharing an address count as one. Their file is then kept until 30 days, which
+       is the safe direction.
+     - Per-device receipts were rejected: a group message is one MLS ciphertext for every
+       member, so it cannot carry a receipt per device.
+     - Test: `fetches_are_confirmed_and_the_last_one_deletes` (sources 127.0.0.1 and
+       127.0.0.2; three confirmations from one source count once).
+  2. **A retried completion could delete a completed attachment's object** (medium).
+     - `Registry::finish_upload` returns completed, already an attachment, or no live grant.
+       Only the last deletes what was stored.
+     - A grant must also be unexpired to complete, so the worker's sweep of expired grants
+       cannot race a late completion.
+     - Test: `resumable_grants_record_one_upload_and_slide_to_a_deadline`.
+  3. **The abandoned-upload sweep saw only the first 1,000 uploads** (medium).
+     `list_multipart_uploads` now pages with `NextKeyMarker` and `NextUploadIdMarker`, up to
+     100 pages. Tested in `multipart_documents`.
+  4. **Unauthenticated GIF file requests could open the search breaker** (low/medium).
+     - File fetches no longer move the breaker, have their own provider budget (`m:gm`), and
+       run at most 32 at a time per node.
+     - Searches count only transport errors, timeouts, 5xx and 429.
+     - Test: the live GIF test fetches a removed GIF eight times, then searches successfully.
+  5. **Part rewrites were not bounded** (low). Each grant allows at most 2 × parts + 8 part
+     writes, and each pack 2 × objects + 8, counted with compare-and-set before writing.
+     Retries pass; endless rewrites get 409. Tests: `parts_can_be_retried_but_not_rewritten_forever`
+     and the pack test.
+  6. **A pack upload racing a deletion or expiry left an orphan** (low). After writing, the
+     upload checks that the pack still exists and deletes the object if it does not. A pack
+     completed meanwhile keeps the object: that race is the creator's own, and deleting would
+     break a finished pack.
+  7. **A signed URL could be replayed without limit for 10 minutes** (low). The media path now
+     has a per-IP-range budget: 36,000 an hour, burst 3,600, enough for a player's range
+     requests.
+  8. **`[api.media]` was not required when deployed** (low). It is now required in staging and
+     production. Without it there are no budgets, downloads, packs or GIFs.
+  9. **For information:**
+     - the GIF base URL's host is now parsed and compared exactly;
+     - `part_size` must keep uploads within 1,000 parts, the list the server reads.
+- Not changed, recorded: the attachment `digest` commits to the key, not to the ciphertext.
+  - Objects are immutable once complete: single-use grants, and pack objects writable only by
+    their creator before completion. So no one but the uploader can change content under a
+    pointer, and only before anyone could fetch it.
+  - A ciphertext hash would cost every app a second pass over every file.
+- Consequences: the threat model's §1 download row and §3.23 now say how confirmations count;
+  PROTOCOL §7.3 and §7.5 likewise.
+
 ## D-0083 — Prompt 6, milestone 4: one anonymous pack service; a GIF proxy that hides who searches
 
 - Date: 2026-11-17

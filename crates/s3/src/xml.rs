@@ -3,7 +3,7 @@
 //! document size before reading, the scanner only looks for fixed, attribute-free element names,
 //! never recurses and never allocates more than the input it was given.
 
-use crate::multipart::{Part, Upload};
+use crate::multipart::{Part, Upload, UploadPage};
 use crate::{Error, ErrorCode, ListEntry, ListPage, MAX_KEY_BYTES, VersionEntry, VersionPage};
 
 /// The text between the first `<name>` and the following `</name>`, and the rest after it.
@@ -432,12 +432,26 @@ pub(crate) fn list_parts(body: &[u8], max_entries: usize) -> Result<Vec<Part>, E
     Ok(parts)
 }
 
-/// `ListMultipartUploadsResult`: at most `max_entries` uploads.
-pub(crate) fn list_uploads(body: &[u8], max_entries: usize) -> Result<Vec<Upload>, Error> {
+/// `ListMultipartUploadsResult`: at most `max_entries` uploads, and the next page's markers when
+/// it is truncated.
+pub(crate) fn list_uploads(body: &[u8], max_entries: usize) -> Result<UploadPage, Error> {
     let doc = std::str::from_utf8(body).map_err(|_| Error::Protocol("result is not UTF-8"))?;
     if !doc.contains("<ListMultipartUploadsResult") {
         return Err(Error::Protocol("not a ListMultipartUploadsResult"));
     }
+    let head = doc
+        .get(..doc.find("<Upload>").unwrap_or(doc.len()))
+        .unwrap_or(doc);
+    let next = if bool_element(head, "IsTruncated")? == Some(true) {
+        let k = marker(head, "NextKeyMarker")?
+            .ok_or(Error::Protocol("truncated without NextKeyMarker"))?;
+        let u = marker(head, "NextUploadIdMarker")?
+            .filter(|u| crate::multipart::valid_token(u))
+            .ok_or(Error::Protocol("truncated without NextUploadIdMarker"))?;
+        Some((k, u))
+    } else {
+        None
+    };
     let mut uploads = Vec::new();
     let mut rest = doc;
     while let Some((u, after)) = element(rest, "Upload") {
@@ -463,7 +477,7 @@ pub(crate) fn list_uploads(body: &[u8], max_entries: usize) -> Result<Vec<Upload
         });
         rest = after;
     }
-    Ok(uploads)
+    Ok((uploads, next))
 }
 
 /// `CompleteMultipartUpload`'s 200 answer: S3 may still report a failure in the body.
@@ -510,7 +524,20 @@ mod multipart_tests {
             assert!(list_parts(bad, 10).is_err());
         }
         let ups = br"<ListMultipartUploadsResult><Upload><Key>a/k&amp;</Key><UploadId>u1</UploadId><Initiated>2026-11-17T10:00:00.000Z</Initiated></Upload></ListMultipartUploadsResult>";
-        let u = list_uploads(ups, 5).unwrap();
+        let (u, next) = list_uploads(ups, 5).unwrap();
+        assert!(next.is_none());
+        let page = b"<ListMultipartUploadsResult><IsTruncated>true</IsTruncated><NextKeyMarker>a/k</NextKeyMarker><NextUploadIdMarker>u9</NextUploadIdMarker><Upload><Key>a/k</Key><UploadId>u9</UploadId><Initiated>t</Initiated></Upload></ListMultipartUploadsResult>";
+        assert_eq!(
+            list_uploads(page, 5).unwrap().1,
+            Some(("a/k".into(), "u9".into()))
+        );
+        assert!(
+            list_uploads(
+                b"<ListMultipartUploadsResult><IsTruncated>true</IsTruncated></ListMultipartUploadsResult>",
+                5
+            )
+            .is_err()
+        );
         assert_eq!((u[0].key.as_str(), u[0].upload_id.as_str()), ("a/k&", "u1"));
         assert!(!format!("{u:?}").contains("u1"));
         assert!(

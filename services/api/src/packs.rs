@@ -192,12 +192,38 @@ async fn upload(
     if declared != Some(*size) {
         return Err(status(StatusCode::BAD_REQUEST));
     }
+    // Retries yes, endless rewrites no (D-0084).
+    let most = 2 * u64::try_from(p.objects.len()).unwrap_or(u64::MAX) + 8;
+    if !app
+        .registry
+        .spend_pack_put(pack, most)
+        .await
+        .map_err(|_| status(StatusCode::SERVICE_UNAVAILABLE))?
+    {
+        return Err(status(StatusCode::CONFLICT));
+    }
     match app
         .s3
         .put_object(&object_name(object), *size, body.into_data_stream())
         .await
     {
-        Ok(()) => Ok(empty(StatusCode::CREATED)),
+        Ok(()) => {
+            // The pack may have been deleted or expired while this streamed: then nothing refers to
+            // the object any more (D-0084). A pack completed meanwhile keeps it: that race is the
+            // creator's own, and deleting would break a finished pack.
+            let still = app
+                .registry
+                .pack(pack)
+                .await
+                .map_err(|_| status(StatusCode::SERVICE_UNAVAILABLE))?
+                .is_some();
+            if still {
+                Ok(empty(StatusCode::CREATED))
+            } else {
+                let _ = app.s3.delete_object(&object_name(object)).await;
+                Err(status(StatusCode::NOT_FOUND))
+            }
+        }
         Err(songbird_s3::Error::LengthMismatch | songbird_s3::Error::BodySource) => {
             Err(status(StatusCode::BAD_REQUEST))
         }

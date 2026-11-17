@@ -26,6 +26,8 @@ pub const MIN_PART_BYTES: u64 = 5 << 20;
 pub const MAX_PART_BYTES: u64 = 5 << 30;
 /// Longest upload ID or `ETag` accepted.
 pub const MAX_TOKEN_LEN: usize = 1024;
+/// Most pages [`Client::list_multipart_uploads`] reads (100,000 uploads).
+pub const MAX_UPLOAD_PAGES: usize = 100;
 /// Largest `ListParts` or `ListMultipartUploads` document read.
 const MAX_LIST_BYTES: usize = 1 << 20;
 
@@ -67,6 +69,9 @@ impl std::fmt::Debug for Upload {
             .finish_non_exhaustive()
     }
 }
+
+/// One page of uploads in progress, and the next page's markers (key, upload ID) when there is more.
+pub type UploadPage = (Vec<Upload>, Option<(String, String)>);
 
 /// A token the store issued (upload ID, `ETag`): non-empty, short, printable ASCII.
 pub(crate) fn valid_token(t: &str) -> bool {
@@ -286,11 +291,49 @@ impl Client {
         .await
     }
 
-    /// Up to 1,000 uploads in progress whose keys start with `prefix`.
+    /// Every upload in progress whose key starts with `prefix`, page after page (at most
+    /// [`MAX_UPLOAD_PAGES`] pages of 1,000).
+    ///
+    /// # Errors
+    /// [`Error`]; [`Error::Protocol`] past the page limit.
+    pub async fn list_multipart_uploads(&self, prefix: &str) -> Result<Vec<Upload>, Error> {
+        let mut all = Vec::new();
+        let mut marker: Option<(String, String)> = None;
+        for _ in 0..MAX_UPLOAD_PAGES {
+            let (page, next) = self
+                .list_multipart_uploads_page(
+                    prefix,
+                    marker.as_ref().map(|(k, u)| (k.as_str(), u.as_str())),
+                )
+                .await?;
+            all.extend(page);
+            match next {
+                Some(n) if marker.as_ref() != Some(&n) => marker = Some(n),
+                Some(_) => return Err(Error::Protocol("upload listing does not advance")),
+                None => return Ok(all),
+            }
+        }
+        Err(Error::Protocol("too many uploads in progress"))
+    }
+
+    /// One page of up to 1,000 uploads in progress after `marker` (key, upload ID); the next
+    /// page's marker when there is more.
     ///
     /// # Errors
     /// [`Error`].
-    pub async fn list_multipart_uploads(&self, prefix: &str) -> Result<Vec<Upload>, Error> {
+    pub async fn list_multipart_uploads_page(
+        &self,
+        prefix: &str,
+        marker: Option<(&str, &str)>,
+    ) -> Result<UploadPage, Error> {
+        if let Some((k, u)) = marker
+            && (k.is_empty()
+                || k.len() > crate::MAX_KEY_BYTES
+                || k.chars().any(char::is_control)
+                || !valid_token(u))
+        {
+            return Err(Error::InvalidInput("marker"));
+        }
         if prefix.len() > crate::MAX_KEY_BYTES || prefix.chars().any(char::is_control) {
             return Err(Error::InvalidInput("prefix"));
         }
@@ -299,6 +342,10 @@ impl Client {
             let mut query: Vec<(&str, &str)> = vec![("max-uploads", "1000"), ("uploads", "")];
             if !prefix.is_empty() {
                 query.push(("prefix", prefix));
+            }
+            if let Some((k, u)) = marker {
+                query.push(("key-marker", k));
+                query.push(("upload-id-marker", u));
             }
             let req = i.request(
                 &Method::GET,
@@ -340,7 +387,7 @@ pub mod parse {
     ///
     /// # Errors
     /// Malformed.
-    pub fn list_uploads(body: &[u8]) -> Result<Vec<super::Upload>, crate::Error> {
+    pub fn list_uploads(body: &[u8]) -> Result<super::UploadPage, crate::Error> {
         crate::xml::list_uploads(body, 1000)
     }
     /// `CompleteMultipartUpload`'s result.

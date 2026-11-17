@@ -136,6 +136,30 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0089 — Prompt 7, milestone 4: LiveKit on its own Valkey, TURN/TLS on a second address, an E2EE harness outside the workspace
+
+- Date: 2026-11-17
+- Status: accepted by the agent; part of the Prompt 7 PR, awaiting the owner with the gate
+- Decided by: agent, within the plan the owner approved (D-0085 §4)
+- Context: the prompt asks for a multi-node LiveKit through its Redis-protocol store (Valkey
+  compatibility verified), TURN over TLS on 443, recording and egress disabled, and a harness on
+  LiveKit's Rust SDK with E2EE that proves calls connect, wrong keys fail and keys rotate.
+- Evidence: P07-M4 (two nodes on Valkey 9.1.3; the harness output); LiveKit `v1.13.11` source
+  for `turn.bind_addresses`, `redis.tls` and `webhook.filter_params`.
+- Decision:
+  1. LiveKit listens on loopback; apps reach signalling through a TLS front on the public address
+     (443, or 8443 beside the edge role), `api` reaches the room service through a mutual-TLS
+     tunnel on the private address.
+  2. A dedicated Valkey on the first calls host, mutual TLS, no persistence (routing only).
+  3. TURN/TLS on 443 and TURN/UDP on 3478 of a floating IPv4 per calls host; 5349 on the public
+     address where there is no second one.
+  4. `auto_create: false`; webhooks to the local `calls` for six events only.
+  5. `tools/calls-harness` outside the workspace (`+crt-static`, its own lock file), run before
+     releases.
+- Consequences: two new secrets (`livekit_valkey_password`, `calls_secret`), one new certificate
+  component (`valkey-livekit`), a floating IP per calls host; public certificates and DNS for
+  `calls_domain` and `turn_domain` wait for the owner's domain choice.
+
 ## D-0088 — Prompt 7, milestone 3: call links with no account, lobbies bound to a device, webhooks once
 
 - Date: 2026-11-17

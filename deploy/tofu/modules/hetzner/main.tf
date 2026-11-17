@@ -146,11 +146,23 @@ resource "hcloud_server" "host" {
   }
 }
 
+# A second public IPv4 on every calls host, for TURN/TLS on 443 beside signalling on 443 (D-0085
+# §4). Ansible adds it to the interface.
+resource "hcloud_floating_ip" "turn" {
+  for_each      = { for name, h in var.topology.hosts : name => h if contains(h.roles, "calls") }
+  type          = "ipv4"
+  name          = "songbird-${local.env}-${each.key}-turn"
+  home_location = var.location
+  server_id     = hcloud_server.host[each.key].id
+  labels        = local.labels
+}
+
 output "inventory" {
   description = "Host name => addresses and roles, consumed by deploy/ansible."
   value = {
     for name, h in var.topology.hosts : name => {
       public_ipv4 = hcloud_server.host[name].ipv4_address
+      turn_ipv4   = try(hcloud_floating_ip.turn[name].ip_address, null)
       private_ip  = h.private_ip
       fqdn        = h.fqdn
       roles       = h.roles

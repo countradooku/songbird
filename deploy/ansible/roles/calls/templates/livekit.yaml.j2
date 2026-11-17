@@ -1,14 +1,76 @@
-# Managed by Ansible. Keys come from LIVEKIT_KEYS (SOPS). Public signalling over TLS and TURN/TLS
-# are configured in Prompt 7; until then the API listens on the private address only.
+# Managed by Ansible (Prompt 7, D-0085, D-0089). API keys come from LIVEKIT_KEYS (SOPS).
+# LiveKit listens on loopback only: apps reach signalling through the public TLS front
+# (ghostunnel, calls_domain), `api` reaches the room service through the mutual-TLS tunnel on the
+# private address. Recording, egress, ingress and SIP are separate services and never deployed.
 port: 7880
-bind_addresses: ["{{ private_ip }}"]
+bind_addresses: ["127.0.0.1"]
+prometheus_port: 6789
+
 rtc:
   tcp_port: 7881
   port_range_start: 50000
   port_range_end: 60000
-  use_external_ip: true
+  # The SFU only: there is no peer-to-peer path in LiveKit, so participants never see each
+  # other's addresses (Prompt 7).
+  use_external_ip: false
+  node_ip: "{{ public_ip }}"
+  congestion_control:
+    enabled: true
+    allow_pause: true
+
+# Every calls host shares one dedicated Valkey (D-0085 §4), on the first calls host, over mutual
+# TLS with the internal CA.
+redis:
+  address: "{{ hostvars[groups['calls'][0]].private_ip }}:{{ livekit_valkey_port }}"
+  password: "{{ secrets.livekit_valkey_password }}"
+  tls:
+    enabled: true
+    server_name: "valkey-livekit.{{ hostvars[groups['calls'][0]].fqdn }}"
+    ca_cert_file: /tls/ca.crt
+    client_cert_file: /tls/tls.crt
+    client_key_file: /tls/tls.key
+
+# TURN over TLS on 443 of the host's second IPv4 (restrictive networks), TURN/UDP on 3478. A
+# provider without a second address (Scaleway, dormant) gets TURN/TLS on 5349 of the public one.
+turn:
+  enabled: true
+  domain: "{{ turn_domain }}"
+  tls_port: {{ 443 if (turn_ip | default('', true)) else 5349 }}
+  udp_port: 3478
+  bind_addresses: ["{{ turn_ip | default(public_ip, true) }}"]
+  cert_file: /public-tls/turn/tls.crt
+  key_file: /public-tls/turn/tls.key
+  relay_range_start: {{ livekit_turn_relay_range[0] }}
+  relay_range_end: {{ livekit_turn_relay_range[1] }}
+
+room:
+  # Rooms exist only as `api` creates them, with their caps (D-0088).
+  auto_create: false
+  empty_timeout: 180
+  departure_timeout: 20
+  max_participants: 128
+  enabled_codecs:
+    - mime: audio/opus
+    - mime: audio/red
+    - mime: video/VP8
+    - mime: video/H264
+    - mime: video/VP9
+    - mime: video/AV1
+
+# Cleanup and capacity metrics only (D-0088): to this host's `calls` service, on loopback.
+webhook:
+  api_key: "{{ secrets.livekit_api_key }}"
+  urls: ["http://127.0.0.1:{{ livekit_webhook_port }}/livekit"]
+  filter_params:
+    include_events:
+      - room_started
+      - room_finished
+      - participant_joined
+      - participant_left
+      - participant_connection_aborted
+      - track_published
+
 logging:
   json: true
   level: info
-room:
-  empty_timeout: 60
+  pion_level: error

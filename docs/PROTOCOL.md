@@ -2013,6 +2013,22 @@ LiveKit runs with `auto_create: false`, so a token for a room that does not exis
 finished 1:1 call cannot be rejoined. If a webhook is lost, the next group start finds the room
 gone (`ListRooms`) and starts a new call.
 
+### 8.9 Low-data mode and the SFU (M4, M5, D-0089, D-0090)
+
+"Use less data for calls" is the app's choice; the server only has to allow it:
+
+- **Publishing:** in low-data mode an app publishes video at most 320×180 (one simulcast layer,
+  about 150 kbit/s) and Opus at 16–24 kbit/s with DTX on; in normal mode up to 1280×720 with three
+  simulcast layers. Screen sharing is never sent in low-data mode unless the user asks.
+- **Subscribing:** in low-data mode an app subscribes to the lowest simulcast layer of every video
+  (`setVideoQuality(LOW)`) and pauses video it does not show; LiveKit's dynacast then stops layers
+  nobody receives.
+- **The SFU** (`deploy/ansible/roles/calls/templates/livekit.yaml.j2`): simulcast and dynacast are
+  allowed (they are client options), Opus RED and DTX are allowed, congestion control is on with
+  pausing allowed, and the codecs are Opus, RED, VP8, H.264, VP9 and AV1.
+
+The bandwidth each mode uses is measured in M5 (`P07-gate.md`).
+
 ## 9. Push (Prompt 8)
 
 ## 10. Settings sync and presence (Prompt 9)

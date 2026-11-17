@@ -1189,3 +1189,45 @@ async fn a_webhook_livekit_sent_verifies() {
     tampered[length - 3] ^= 1;
     assert_eq!(hooks.handle(auth, &tampered).await, Answer::Refused);
 }
+
+/// Two LiveKit nodes on one Valkey (D-0089): a room `api` created through node A is joined
+/// through node B, node A sees the participant, and node A's removal reaches it on node B. Runs
+/// when `SONGBIRD_TEST_LIVEKIT_B` names a second node of the same cluster.
+#[tokio::test]
+async fn two_livekit_nodes_share_rooms_through_valkey() {
+    let Ok(node_b) = std::env::var("SONGBIRD_TEST_LIVEKIT_B") else {
+        return;
+    };
+    let Some(s) = stack(4).await else { return };
+    // Alice calls Dave (open): the room is created through node A.
+    let (st, v) = s
+        .post(
+            0,
+            "/v1/calls",
+            &serde_json::json!({"callee": hex::encode(s.people[3].mls.account.as_bytes()), "media": "video"}),
+        )
+        .await;
+    assert_eq!(st, 200);
+    let (room, token, identity) = ticket(&v);
+    let b = LiveKit {
+        http: node_b,
+        key: s.livekit.key.clone(),
+        secret: s.livekit.secret.clone(),
+    };
+    let (mut ws, joined) = join(&b, &token).await;
+    assert_eq!(joined.room.unwrap().name, room.name());
+    assert_eq!(
+        s.calls().calls.rooms.participants(&room).await.unwrap(),
+        vec![identity.clone()]
+    );
+    s.calls()
+        .calls
+        .rooms
+        .remove(&room, &identity)
+        .await
+        .unwrap();
+    assert!(
+        told_to_leave(&mut ws).await,
+        "a removal on node A reaches node B"
+    );
+}

@@ -27,7 +27,8 @@ songbird_admin_ports:
 # Internal (private network only) ports by role, opened in nftables from private_cidr only.
 internal_ports_by_role:
   data: [8000, 8090, 6379, 6380, 9010]
-  calls: [7880]
+  # LiveKit's API through its mutual-TLS tunnel; LiveKit's own Valkey (D-0089).
+  calls: [7880, 6381]
   edge: [9101, 9102]
   worker: [9103, 9104]
   calls_admin: [9105]
@@ -56,7 +57,7 @@ tls_components_by_role:
   data: [surrealdb, iggy, valkey-hot, valkey-jobs, rustfs]
   edge: [delivery, api]
   worker: [push, worker]
-  calls: [calls, livekit]
+  calls: [calls, livekit, valkey-livekit]
 tls_owner_uid:
   surrealdb: 65532
   iggy: 0
@@ -64,6 +65,7 @@ tls_owner_uid:
   valkey-jobs: 999
   rustfs: 65532 # read by the ghostunnel in front of RustFS
   livekit: 0
+  valkey-livekit: 999
   delivery: 65532
   api: 65532
   push: 65532
@@ -86,3 +88,13 @@ admin_cidrs: "{{ (lookup('community.sops.sops', songbird_secrets_file) | from_ya
 # Hetzner Object Storage in Helsinki: another location than the servers (D-0042).
 backup_s3_endpoint: "hel1.your-objectstorage.com:443"
 backup_s3_region: hel1
+
+# Calls (Prompt 7, D-0085, D-0089). The public names are the owner's (D-0046); TURN/TLS needs a
+# certificate for turn_domain in /etc/songbird/public-tls/turn, signalling one for calls_domain in
+# /etc/songbird/public-tls/calls.
+calls_domain: "calls.{{ songbird_public_domain | default('songbird.chat') }}"
+turn_domain: "turn.{{ songbird_public_domain | default('songbird.chat') }}"
+livekit_valkey_port: 6381
+livekit_webhook_port: 9106
+livekit_turn_relay_range: [30000, 40000]
+livekit_valkey_maxmemory: 512mb

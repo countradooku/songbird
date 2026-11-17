@@ -36,7 +36,7 @@ members = [
     "xtask",
 ]
 # Fuzz targets need nightly and libFuzzer; they live outside the workspace (see fuzz/README.md).
-exclude = ["fuzz", "tools/libsignal-vectors", "tools/openmls-vectors"]
+exclude = ["fuzz", "tools/libsignal-vectors", "tools/openmls-vectors", "tools/calls-harness"]
 
 [workspace.package]
 version = "0.1.0"

@@ -20,6 +20,10 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 7 plan (`P07-plan.md`, D-0085): **approved by the owner on 2026-11-17**, every
+  recommendation: 1:1 calls name the callee for the call's life only, Signal-style keys for call
+  links, 32 video / 128 audio-only participants, a dedicated Valkey for LiveKit and a second IPv4
+  per calls host for TURN/TLS on 443.
 - Prompt 6 gate (`P06-gate.md`, D-0079 to D-0084; PR #61): **approved by the owner on 2026-11-17** ("i approve"): M1 to M5
   and the security review's fixes; the benchmarks and the choices they drove (AES-256-GCM, parallel
   16 MiB parts with tus removed, no caching proxy); five threat-model §1 rows (resumable grants up
@@ -131,6 +135,33 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0085 — Prompt 7: the plan, and the owner's decisions it needs
+
+- Date: 2026-11-17
+- Status: accepted (owner, 2026-11-17, every recommendation)
+- Decided by: owner, on the agent's plan `docs/reports/P07-plan.md`
+- Context: `services/calls` is empty; LiveKit `v1.13.11` runs in compose and Ansible with no
+  store, TURN/TLS 443 or webhooks. Prompt 5's roster and `call` role exist; Prompt 3's access key
+  proves contacts; the `VoIP` push path exists but nothing uses it.
+- Options considered and evidence: in the plan ("Findings").
+- Decisions (the agent's recommendations, all accepted by the owner):
+  1. A 1:1 call names the callee and carries the contact proof (or the callee is open); the two
+     accounts stay in `valkey-hot` for the call's life only (at most 24 h), never in SurrealDB or
+     logs; the server may queue `VoIP` and high-priority wake-ups for it.
+  2. Call links use Signal's design: identities exchanged over the link's encrypted channel,
+     per-sender keys over Signal sessions, rotated on every join and leave; joining needs an
+     account.
+  3. Caps: 32 participants in a video call, 128 audio-only; configurable.
+  4. LiveKit gets a dedicated Valkey on the calls hosts, and each calls host a second public IPv4
+     for TURN/TLS on 443.
+  5. Agent decisions, not objected to: `livekit-api` for tokens and webhooks only, with Songbird's
+     own Twirp client on aws-lc-rs; the E2EE harness outside the workspace; LiveKit's `lk` CLI as
+     the load tester; tokens valid 2 minutes.
+  6. One branch and one PR for every milestone (the owner, 2026-11-17).
+- Consequences: who calls whom becomes server-visible for the call's life (a threat-model row for
+  approval with M2); the `turn.` name under `songbird.chat` and the second IPv4 are the owner's
+  before deployment; M1 starts.
 
 ## D-0084 — Prompt 6: the security review's fixes
 

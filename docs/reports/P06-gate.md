@@ -5,7 +5,7 @@
 - Status: **waiting for the owner.**
 - Reports: `P06-plan.md` (agreed, D-0079), `P06-M1.md` to `P06-M4.md`, and this report.
 - Decisions: D-0079 to D-0084 (D-0084: the security review's fixes).
-- Branch: `claude/p06-media`, one PR at the owner's request (2026-11-17: "all the milestones in the
+- Branch: `claude/p06-media` (PR #61), one PR at the owner's request (2026-11-17: "all the milestones in the
   same PR").
 - Machine: Windows 11 Pro 10.0.26300, AMD Ryzen 9 7950X, 31 GiB. Live stack under podman 5 (WSL 2
   VM, 4 vCPU, 6 GiB): SurrealDB v4.0.1, Valkey 9.1.3 (×2), RustFS 1.0.5.

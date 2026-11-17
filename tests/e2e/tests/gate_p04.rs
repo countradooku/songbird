@@ -211,6 +211,7 @@ async fn stack(limits: RequestLimits) -> Option<Stack> {
         burst: 5,
     };
     let app = Arc::new(App {
+        calls: None,
         reports: Some(songbird_api::reports::Reports::new(
             songbird_send::Frankers {
                 current: Franker::from_secret(&secret).unwrap(),

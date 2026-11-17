@@ -114,6 +114,7 @@ async fn stack_with(reg: Option<RegistrationSettings>) -> Option<Stack> {
     let app = Arc::new(App {
         requests: None,
         reports: None,
+        calls: None,
         server_name: SERVER.into(),
         registry,
         s3,

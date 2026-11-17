@@ -1891,6 +1891,74 @@ Ringing, accepting, declining, busy and hanging up are encrypted content (`Conte
 - A missed, declined or finished call is recorded as `CallEvent` in the chat and synced to the
   user's devices as `call_history`.
 
+### 8.6 Rooms, tokens and who may join (M2, D-0087)
+
+Every request is signed by the device (§2, like every `api` request). A pending device (linked,
+not yet in its signed list) gets 403 `pending`. Answers are small JSON.
+
+**A ticket** is what a device needs to join:
+
+```json
+{"call": "<call ID, 32 hex>", "url": "wss://calls.<domain>", "token": "<JWT>", "identity": "<32 hex>"}
+```
+
+- The **token** is LiveKit's (HS256, signed with the LiveKit API secret), valid **2 minutes**: the
+  time to connect. LiveKit refreshes a connected participant's token itself.
+- It admits one identity to one room with the least grants: join, subscribe, publish data, and
+  publish only the sources the call allows (microphone, camera, screen share; the microphone
+  only in a group's audio call; nothing for a read-only member). No admin, recording, ingress,
+  SIP or agent grant; no name, metadata or attributes, and no right to set them.
+- The **identity** is `hex(HMAC-SHA256(k_identity, room ‖ device)[..16])` (§8.1): the key
+  schedule binds sender keys to it.
+
+**`POST /v1/calls`** `{"callee": hex, "media": "audio" | "video", "access_key": hex?, "ring": bool}`:
+a 1:1 call.
+
+- The callee must be another account whose devices exist and that is **open**, or whose access
+  key the caller presents (a contact, §5.10). Otherwise 404, the same answer as for an account
+  that does not exist.
+- An open account that blocked the caller (§5.11) gets the same answer as any other call, and no
+  wake-up.
+- The server creates the room (random ID; 32 participants for video, 128 for audio; it closes 20
+  seconds after the last participant leaves, or after 3 minutes if nobody joins) and keeps the
+  call's record (§8.8) until the room closes, at most 24 hours.
+- `ring: true` queues a wake-up for each of the callee's listed devices: `VoIP` on iOS,
+  high-priority FCM on Android (Prompt 8), within the callee's wake budget. The ringing itself is
+  the encrypted offer (§8.5).
+- 200 with the caller's ticket.
+
+**`POST /v1/calls/group`** `{"group": hex, "media": …, "ring": bool}`: the group's call.
+
+- The requesting device must be in the group's roster (404 otherwise, as for no group).
+- If the group has a live call, the device gets a ticket for it, whatever `media` says.
+- Otherwise starting one needs the role the group's policy sets for `call` (§6.6; 403 `role`).
+  Two members starting at once get the same room.
+- `ring: true` wakes every other member account's devices, if the group has at most 32 accounts.
+- Read-only members (a channel's subscribers) get tickets that publish nothing.
+
+**`POST /v1/calls/join`** `{"call": hex, "group": hex?}`: a ticket for a live call.
+
+- A 1:1 call admits only listed devices of its two accounts.
+- A group call needs `group` (the call's record holds only a keyed tag of it) and admits only
+  devices in the group's **current** roster.
+- Anything else, and a call that does not exist or has ended, is 404.
+
+**Removal mid-call.** When `api` accepts a commit to a group with a live call, it asks LiveKit for
+the room's participants and disconnects every identity that is not one of the roster's devices'.
+A removed device is therefore cut off at once; its next join is refused; and the new MLS epoch's
+keys (§8.2) are ones it cannot compute.
+
+**Budgets** (`[api.calls.limits]`, keyed records in `valkey-hot`):
+
+| Budget | Default |
+| --- | --- |
+| Calls started per account | 60 an hour, burst 20 |
+| Wake-ups received per account | 60 an hour, burst 20 (over it: no wake-up; the stored offer still arrives) |
+| Tickets per device | 600 an hour, burst 60 |
+
+Answers: 200 ticket; 400 `request`, `callee`, `group`, `call`, `access_key`; 403 `role`,
+`pending`; 404; 429 with a wait; 503 (LiveKit or `valkey-hot` unavailable: retry).
+
 ## 9. Push (Prompt 8)
 
 ## 10. Settings sync and presence (Prompt 9)

@@ -20,6 +20,7 @@
 //! | `/v1/attachments…` | Grants, single and resumable uploads, downloads ([`media`]) |
 //! | `DELETE /v1/account` | Deletes the device's account from every store (outbox job; the primary only) |
 //! | `GET /v1/account/export`; `PUT /v1/account/inactivity` | GDPR export; the inactivity period (the primary only) |
+//! | `POST /v1/calls`, `/v1/calls/group`, `/v1/calls/join` | Calls: LiveKit rooms and tokens ([`calls`]) |
 //! | `PUT /v1/messages` | A WebSocket `Send` frame, for clients with no open socket; answers its `SendResult` ([`messages`]) |
 //!
 //! Every request but the two registration steps, opening and reading a provisioning channel and
@@ -32,6 +33,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod calls;
 pub mod client;
 pub mod communities;
 pub mod config;
@@ -111,6 +113,8 @@ pub struct ApiMetrics {
     pub reports: reports::ReportMetrics,
     /// Media (Prompt 6).
     pub media: media::MediaMetrics,
+    /// Calls (Prompt 7).
+    pub calls: calls::CallMetrics,
 }
 
 impl ApiMetrics {
@@ -171,6 +175,7 @@ impl ApiMetrics {
         self.blocks.register(m)?;
         self.reports.register(m)?;
         self.media.register(m)?;
+        self.calls.register(m)?;
         self.send.register(m, "api")
     }
 }
@@ -215,6 +220,8 @@ pub struct App {
     pub requests: Option<requests::Requests>,
     /// Reporting with message franking (absent: `POST /v1/reports` answers 503).
     pub reports: Option<reports::Reports>,
+    /// Calls (Prompt 7; absent: `/v1/calls…` answers 503).
+    pub calls: Option<calls::CallsApi>,
 }
 
 impl std::fmt::Debug for App {
@@ -380,6 +387,9 @@ impl App {
             }
             (_, "/v1/blocks" | "/v1/account/requests") => self.requests(req).await,
             (&Method::POST, "/v1/reports") => self.report(req).await,
+            (&Method::POST, "/v1/calls" | "/v1/calls/group" | "/v1/calls/join") => {
+                self.calls(req).await
+            }
             (
                 &Method::POST,
                 "/v1/groups"
@@ -644,6 +654,10 @@ impl App {
             }
         }
         let r = &self.registry;
+        // A commit may remove devices from a live call (Prompt 7, §8.6): `version | group | …`.
+        let committed = (path == "/v1/groups/commit")
+            .then(|| body.get(1..17).and_then(|g| <[u8; 16]>::try_from(g).ok()))
+            .flatten();
         let outcome = match path.as_str() {
             "/v1/groups" => g.create(r, m, device, body).await,
             "/v1/groups/commit" => g.commit(r, m, device, body).await,
@@ -665,6 +679,53 @@ impl App {
             "/v1/communities/state" => g.community_state(r, m, device, body).await,
             "/v1/communities/delete" => g.delete_community(r, device, body).await,
             _ => g.state(&self.registry, m, device, body).await,
+        };
+        if let (Some(group), Some(c), devices::Outcome::Json(_)) =
+            (committed, self.calls.as_ref(), &outcome)
+        {
+            c.reconcile_group(&self.hot, &self.registry, &group).await;
+        }
+        Ok(device_outcome(outcome))
+    }
+
+    /// `POST /v1/calls`, `/v1/calls/group`, `/v1/calls/join` ([`calls`], Prompt 7).
+    async fn calls(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let c = self.calls.as_ref().ok_or_else(unavailable)?;
+        let path = req.uri().path().to_owned();
+        let (device, body) = self.authenticate_json(req).await?;
+        let row = self
+            .registry
+            .device(&device)
+            .await
+            .map_err(|_| unavailable())?
+            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+        if row.pending {
+            return Ok(device_outcome(devices::Outcome::Forbidden("pending")));
+        }
+        let caller = calls::Caller {
+            device,
+            account: row.account,
+        };
+        let outcome = match (path.as_str(), self.messages.as_ref()) {
+            ("/v1/calls/join", _) => c.join(&self.hot, &self.registry, caller, &body).await,
+            (_, None) => return Err(unavailable()),
+            ("/v1/calls", Some(m)) => {
+                c.one_to_one(
+                    &self.hot,
+                    &self.queue,
+                    m,
+                    self.requests.as_ref(),
+                    &self.registry,
+                    caller,
+                    &body,
+                )
+                .await
+            }
+            (_, Some(m)) => {
+                c.group(&self.hot, &self.queue, m, &self.registry, caller, &body)
+                    .await
+            }
         };
         Ok(device_outcome(outcome))
     }

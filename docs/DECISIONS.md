@@ -136,6 +136,37 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0087 — Prompt 7, milestone 2: tickets with the least grants, pseudonyms per room, removal by reconcile
+
+- Date: 2026-11-17
+- Status: accepted by the agent; part of the Prompt 7 PR, awaiting the owner with the gate
+- Decided by: agent, within the plan the owner approved (D-0085)
+- Context: `api` must admit only the caller and the callee's devices to a 1:1 call, only the
+  current roster to a group call, and drop a removed member mid-call; LiveKit's state should
+  reveal as little as possible.
+- Options considered:
+  - **Where calls are authorized**: in `api` (it holds the registry, the directory snapshot and
+    device authentication) through the `songbird-calls` library, or in the `calls` service
+    behind an internal RPC. Chosen: `api`, in process; the LiveKit secret lives in both. A second
+    hop would add latency to ringing and a new internal protocol for no separation that matters:
+    `api` already holds every other user-facing secret.
+  - **Participant identity**: the device ID (links everything), a random per-join ID (needs a
+    table to remove a device later), or `HMAC(k, room ‖ device)` (stable in a room, unlinkable
+    across rooms, recomputable). Chosen: the HMAC, 16 bytes in hex.
+  - **Removal mid-call**: a table of who joined (more metadata), or reconcile the room against the
+    roster after each commit. Chosen: reconcile.
+  - **Dependencies**: `livekit-api` with `access-token` and `webhooks` only (`livekit-token`,
+    `jsonwebtoken` with an HMAC-only provider, `livekit-protocol`, `pbjson-types`); the
+    `services` feature would bring `reqwest` and rustls on `ring`. About 110 crates in its tree,
+    almost all already in the workspace; recorded for `cargo vet`.
+- Evidence: P07-M2 (live tests against LiveKit `v1.13.11`; unit tests).
+- Decision: PROTOCOL §8.6; `[api.calls]` required when deployed; tokens 2 minutes; budgets 60
+  calls an hour per account, 60 wake-ups an hour per receiving account, 600 tickets an hour per
+  device.
+- Consequences: five threat-model §1 rows for approval (live 1:1 call, live group call,
+  LiveKit's state, call budgets, the LiveKit secret). M3 deletes records when LiveKit reports a
+  room finished.
+
 ## D-0086 — Prompt 7, milestone 1: per-sender call keys from Signal and MLS; Signal-style link keys
 
 - Date: 2026-11-17

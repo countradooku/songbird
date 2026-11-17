@@ -27,6 +27,12 @@ songbird-jobs.workspace = true
 songbird-s3.workspace = true
 songbird-valkey.workspace = true
 songbird-api = { path = "../../services/api" }
+# Prompt 7's gate: calls through `api` against a real LiveKit.
+songbird-calls.workspace = true
+livekit-api = { version = "=0.10.2", default-features = false, features = ["access-token"] }
+livekit-protocol = "=0.8.3"
+prost.workspace = true
+zeroize.workspace = true
 songbird-send.workspace = true
 songbird-keys.workspace = true
 songbird-content.workspace = true
@@ -47,6 +53,8 @@ futures-util.workspace = true
 songbird-alloc-count.workspace = true
 songbird-telemetry.workspace = true
 futures-core.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
 futures-sink.workspace = true
 rcgen.workspace = true
 rustls.workspace = true

@@ -156,6 +156,7 @@ async fn registered_accounts_connect_and_talk_without_an_operator() {
     let app = Arc::new(App {
         requests: None,
         reports: None,
+        calls: None,
         server_name: API.into(),
         registry: Arc::clone(&registry),
         s3: songbird_s3::Client::new(songbird_s3::Config::new(

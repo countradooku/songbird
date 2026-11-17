@@ -68,6 +68,24 @@ struct PolicyBody {
     from: String,
 }
 
+impl Requests {
+    /// Whether `blocker` blocked `target` (a call to an open account, Prompt 7).
+    ///
+    /// # Errors
+    /// The registry failed.
+    pub(crate) async fn blocked(
+        &self,
+        registry: &Registry,
+        blocker: &AccountId,
+        target: &AccountId,
+    ) -> Result<bool, ()> {
+        registry
+            .is_blocked(&self.keys.pair(blocker, target))
+            .await
+            .map_err(|_| ())
+    }
+}
+
 fn account_of(body: &[u8]) -> Option<AccountId> {
     let b: BlockBody = serde_json::from_slice(body).ok()?;
     AccountId::parse_hex(&b.account).ok()

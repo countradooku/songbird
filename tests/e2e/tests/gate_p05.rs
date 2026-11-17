@@ -202,6 +202,7 @@ async fn stack(people: usize) -> Option<Stack> {
     let app = Arc::new(App {
         requests: None,
         reports: None,
+        calls: None,
         server_name: API.into(),
         registry: Arc::clone(&registry),
         s3: songbird_s3::Client::new(songbird_s3::Config::new(

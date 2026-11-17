@@ -27,8 +27,8 @@ songbird_admin_ports:
 # Internal (private network only) ports by role, opened in nftables from private_cidr only.
 internal_ports_by_role:
   data: [8000, 8090, 6379, 6380, 9010]
-  # LiveKit's API through its mutual-TLS tunnel; LiveKit's own Valkey (D-0089).
-  calls: [7880, 6381]
+  # LiveKit's tunnel (7880) and Valkey (6381) are opened per source host in nftables (D-0091).
+  calls: []
   edge: [9101, 9102]
   worker: [9103, 9104]
   calls_admin: [9105]

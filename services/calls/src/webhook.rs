@@ -7,6 +7,8 @@
 //! is answered 200 and does nothing). Then:
 //!
 //! - `room_finished` forgets the call's record (and a group's pointer to it);
+//! - `participant_joined` of an identity removed from the room disconnects it again (D-0091);
+//! - an event whose cleanup failed is unmarked, so LiveKit's retry runs it;
 //! - room and participant events count into aggregate counters (no label names a room).
 
 use std::sync::Arc;
@@ -41,6 +43,8 @@ pub struct WebhookMetrics {
     pub participants_left: Counter,
     /// Tracks published (audio, video and screen shares together).
     pub tracks_published: Counter,
+    /// Removed members who reconnected and were disconnected again.
+    pub denied: Counter,
 }
 
 impl WebhookMetrics {
@@ -84,6 +88,11 @@ impl WebhookMetrics {
                 "calls_tracks_published",
                 "Tracks published",
                 &self.tracks_published,
+            ),
+            (
+                "calls_rejoins_refused",
+                "Removed members who reconnected and were disconnected again",
+                &self.denied,
             ),
         ] {
             m.register(name, help, c.clone())?;
@@ -164,7 +173,21 @@ impl Webhooks {
             }
             Err(_) => return Answer::Unavailable,
         }
-        self.metrics.received.inc();
+        let answer = self.apply(&records, &event).await;
+        if answer == Answer::Unavailable {
+            // Let LiveKit's retry run it again.
+            let _ = records.unsee(&event.id).await;
+        } else {
+            self.metrics.received.inc();
+        }
+        answer
+    }
+
+    async fn apply(
+        &self,
+        records: &crate::Records<'_>,
+        event: &livekit_protocol::WebhookEvent,
+    ) -> Answer {
         let room = event.room.as_ref().and_then(|r| RoomId::parse(&r.name));
         match event.event.as_str() {
             "room_started" => self.metrics.rooms_started.inc(),
@@ -184,7 +207,22 @@ impl Webhooks {
                     }
                 }
             }
-            "participant_joined" => self.metrics.participants_joined.inc(),
+            "participant_joined" => {
+                self.metrics.participants_joined.inc();
+                // A removed member back with a token it still held (D-0091).
+                if let (Some(room), Some(p)) = (room, event.participant.as_ref()) {
+                    match records.denied(&room, &p.identity).await {
+                        Ok(false) => {}
+                        Ok(true) => {
+                            if self.calls.rooms.remove(&room, &p.identity).await.is_err() {
+                                return Answer::Unavailable;
+                            }
+                            self.metrics.denied.inc();
+                        }
+                        Err(_) => return Answer::Unavailable,
+                    }
+                }
+            }
             "participant_left" | "participant_connection_aborted" => {
                 self.metrics.participants_left.inc();
             }

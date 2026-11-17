@@ -144,6 +144,12 @@ impl CallKeys {
         self.tag(b"device", device.as_bytes())
     }
 
+    /// The set of identities removed from a room (`cl:x:<tag>`).
+    #[must_use]
+    pub fn deny_record(&self, room: &RoomId) -> String {
+        format!("cl:x:{}", hex::encode(self.tag(b"deny", room.as_bytes())))
+    }
+
     /// The record marking a webhook event handled (`cl:w:<tag>`).
     #[must_use]
     pub fn webhook_record(&self, event: &str) -> String {

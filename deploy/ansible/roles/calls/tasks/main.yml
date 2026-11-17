@@ -76,6 +76,9 @@
       - "{{ songbird_pki_dir }}/livekit:/tls:ro"
       - /etc/songbird/public-tls/turn:/public-tls/turn:ro
     security_opts: [no-new-privileges]
+    # TURN/TLS binds 443: the one capability it needs (D-0091).
+    cap_drop: [ALL]
+    capabilities: [NET_BIND_SERVICE]
   no_log: true
 
 # Signalling (WSS) for apps: TLS on the public address, no client authentication. Beside the edge
@@ -99,7 +102,8 @@
     security_opts: [no-new-privileges]
     cap_drop: [ALL]
 
-# `api` calls LiveKit's room service through this tunnel (internal CA, D-0012).
+# `api` calls LiveKit's room service through this tunnel (internal CA, D-0012): only the edge
+# hosts' `api` certificates are accepted (D-0091).
 - name: Mutual-TLS tunnel to LiveKit's room service
   community.docker.docker_container:
     name: songbird-livekit-api
@@ -107,15 +111,10 @@
     network_mode: host
     restart_policy: unless-stopped
     user: "65532:65532"
-    command:
-      - server
-      - --listen={{ private_ip }}:7880
-      - --target=127.0.0.1:7880
-      - --cert=/tls/tls.crt
-      - --key=/tls/tls.key
-      - --cacert=/tls/ca.crt
-      - --allow-all
-      - --timed-reload=1h
+    command: >-
+      {{ ['server', '--listen=' ~ private_ip ~ ':7880', '--target=127.0.0.1:7880',
+          '--cert=/tls/tls.crt', '--key=/tls/tls.key', '--cacert=/tls/ca.crt', '--timed-reload=1h']
+         + (groups['edge'] | map('extract', hostvars, 'fqdn') | map('regex_replace', '^', '--allow-dns=api.') | list) }}
     volumes: ["{{ songbird_pki_dir }}/livekit:/tls:ro"]
     security_opts: [no-new-privileges]
     cap_drop: [ALL]

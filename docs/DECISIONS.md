@@ -20,6 +20,12 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 7 gate (`P07-gate.md`, D-0086 to D-0091): **waiting for the owner**: M1 to M5 and the
+  security review's fixes; nine threat-model §1 rows (a live 1:1 call with its two accounts for at
+  most 24 h, a live group call, LiveKit's state, call budgets, the LiveKit secret, call links,
+  lobbies, webhook marks, the deny set). Before production: the `calls.` and `turn.` names, their
+  certificates and DNS, `[api.calls]` and `[calls]` with their secrets, load tests on the
+  production host class, a fuzz run of the two new targets.
 - Prompt 7 plan (`P07-plan.md`, D-0085): **approved by the owner on 2026-11-17**, every
   recommendation: 1:1 calls name the callee for the call's life only, Signal-style keys for call
   links, 32 video / 128 audio-only participants, a dedicated Valkey for LiveKit and a second IPv4
@@ -135,6 +141,78 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0091 — Prompt 7: the security review's fixes
+
+- Date: 2026-11-17
+- Status: accepted; part of the Prompt 7 PR (report `P07-gate.md`, "Security review")
+- Decided by: agent, on an independent read-only review of the whole Prompt 7 diff (a separate
+  agent given the code and documents, not the reports' conclusions)
+- Context: the review found one high, four medium and seven low findings, and three for
+  information.
+- Decision:
+  1. **A removed member could rejoin with a token it still held** (high). LiveKit does not revoke
+     tokens on `RemoveParticipant`, and refreshes connected participants' tokens itself. The
+     reconcile now writes the removed identities to the room's **deny set** (`cl:x:`, pseudonyms
+     only, the call's life) before disconnecting them; the `calls` service disconnects any denied
+     identity again on its `participant_joined` webhook. Test: the group gate test reconnects Bob
+     with his old token and shows him cut off. The MLS keys already denied him the media.
+  2. **The group-call claim could split a group across two rooms** (medium). The call's record is
+     written before the pointer is claimed; a pointer younger than 15 s is trusted without asking
+     LiveKit; pointers are released by compare-and-delete (Lua); each join refreshes a live call's
+     records, so a call longer than a day keeps its pointer.
+  3. **A stranger's call to an open account sent a `VoIP` push** (medium), which rings on iOS.
+     Only a caller presenting the access key causes wake-ups now, and a (caller, callee) budget
+     (20 an hour, burst 6) stops one caller spending a callee's whole wake budget. The block check
+     for open accounts became unnecessary and was removed.
+  4. **One device could fill a link's lobby, and declines kept their places** (medium). One place
+     per device (asking again returns it), declines delete at once, and the add and decide steps
+     are single Lua scripts (no lobby recreated without a TTL after a revoke).
+  5. **Missing budgets** (medium): group joins and every link ticket now spend the ticket budget;
+     every link request spends the poll budget first, whatever it claims to be.
+  6. Low: read-only listeners no longer get `can_publish_data`; ringing is capped at 2 minutes
+     from now even if the sender's clock claims the future; a webhook whose cleanup failed is
+     unmarked so LiveKit's retry runs it; a link revoked while its room was being opened gets the
+     room closed again; the reconcile tries three times and counts failures
+     (`api_call_reconcile_failed`, runbook).
+  7. Deployment: the room-service tunnel admits only the edge hosts' `api.<fqdn>` certificates;
+     the firewall opens 7880 to edge hosts and LiveKit's Valkey to calls hosts only; LiveKit runs
+     with every capability dropped but `NET_BIND_SERVICE`; TURN refuses to relay to private,
+     loopback, link-local and CGNAT ranges (`deny_peer_cidrs`).
+- Not changed, recorded:
+  - The public signalling front also forwards LiveKit's room-service API. Every call to it needs
+    a token signed with the LiveKit secret (LiveKit's design; its cloud exposes the same); the
+    private tunnel is defence in depth for `api`'s path, not the only guard.
+  - Valkey's password is on its command line, as for `valkey-hot` and `valkey-jobs` (D-0034);
+    containers on the host see it, nobody else. Revisit for every Valkey together.
+  - Lobby cards are not signed: apps show a joiner as unverified until the Signal session and,
+    for strangers, the safety numbers (PROTOCOL §8.7).
+  - 1:1 audio calls may turn the camera on (WhatsApp does); only group audio calls are
+    microphone-only, for their larger cap.
+- Consequences: one more threat-model §1 row (the deny set); PROTOCOL §8.6–§8.8 updated.
+
+## D-0090 — Prompt 7, milestone 5: per-host capacity, bandwidth per mode, and the caps kept
+
+- Date: 2026-11-17
+- Status: accepted by the agent; part of the Prompt 7 PR, awaiting the owner with the gate
+- Decided by: agent, within the plan the owner approved (D-0085 §3: the caps may move with the
+  numbers)
+- Context: the prompt asks for LiveKit's load tester over rooms × participants, CPU and bandwidth
+  per participant, behaviour under loss and latency, bandwidth per low-data mode, and a sizing
+  table.
+- Evidence: P07-M5 (eight runs on a LiveKit container capped at 4 CPUs; `lk` v2.19.2).
+- Decision:
+  1. **The caps stay at 32 (video) and 128 (audio-only).** A full 32-person video room used 0.29
+     cores and 71 Mbit/s; a 128-person audio room 1.07 cores and 356 MiB: both fit a 4-vCPU host
+     several times over. Larger caps would be bandwidth for people, not for the SFU; the owner's
+     WhatsApp-parity choice holds.
+  2. **Low-data mode** (PROTOCOL §8.9) costs a receiver about 0.15 Mbit/s per camera instead of
+     0.6–0.9 Mbit/s, about 4× less, and halves the SFU's CPU.
+  3. **Sizing:** about 170 concurrent 1:1 video calls, 350 low-data, 900 audio, 9 full video rooms
+     or 2 full audio rooms per 4-vCPU host, at 70 % CPU and 700 Mbit/s; two calls hosts for the
+     beta.
+- Consequences: re-run the load tests from a separate host against the production `calls` class
+  before launch, and replace the table with those numbers.
 
 ## D-0089 — Prompt 7, milestone 4: LiveKit on its own Valkey, TURN/TLS on a second address, an E2EE harness outside the workspace
 

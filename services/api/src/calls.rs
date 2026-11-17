@@ -35,6 +35,14 @@ use crate::registration::Registration;
 const POLICY_CALL: usize = 4;
 /// Role 1, a member: may publish in a group call; role 0 (read-only, a channel's default) listens.
 const ROLE_MEMBER: u8 = 1;
+/// Wake-ups one caller may cause one receiver per hour, and their burst (D-0091).
+const WAKES_PER_PAIR_HOUR: u32 = 20;
+const WAKE_PAIR_BURST: u32 = 6;
+/// A group's call pointer younger than this is live without asking LiveKit: its starter may
+/// still be creating the room (D-0091).
+const YOUNG_CALL_MS: u64 = 15_000;
+/// Attempts at disconnecting removed members after a commit.
+const RECONCILE_ATTEMPTS: u32 = 3;
 
 /// Counters (aggregate only).
 #[derive(Debug, Clone, Default)]
@@ -49,6 +57,8 @@ pub struct CallMetrics {
     pub removed: Counter,
     /// Refused: not a contact, not a member, no such call.
     pub refused: Counter,
+    /// Commits after which removed members could not be disconnected (LiveKit unreachable).
+    pub reconcile_failed: Counter,
 }
 
 impl CallMetrics {
@@ -70,6 +80,11 @@ impl CallMetrics {
                 &self.removed,
             ),
             ("api_calls_refused", "Call requests refused", &self.refused),
+            (
+                "api_call_reconcile_failed",
+                "Commits after which removed call members could not be disconnected",
+                &self.reconcile_failed,
+            ),
         ] {
             m.register(name, help, c.clone())?;
         }
@@ -205,16 +220,23 @@ impl CallsApi {
     }
 
     /// Queues `VoIP` / high-priority wake-ups for `devices`, within the receiving account's wake
-    /// budget (a budget spent is silently skipped: the stored offer still arrives).
+    /// budget and the (caller, receiver) pair's, so one caller cannot spend everyone else's
+    /// (D-0091). A budget spent is silently skipped: the stored offer still arrives.
     async fn wake(
         &self,
         hot: &ValkeyConn,
         queue: &Queue,
+        caller: &AccountId,
         account: &AccountId,
         devices: &[DeviceId],
     ) {
         let l = &self.calls.limits;
+        let pair = [caller.as_bytes().as_slice(), account.as_bytes().as_slice()].concat();
         if devices.is_empty()
+            || self
+                .budget(hot, "wp", &pair, WAKES_PER_PAIR_HOUR, WAKE_PAIR_BURST)
+                .await
+                .is_err()
             || self
                 .budget(hot, "w", account.as_bytes(), l.wakes_per_hour, l.wake_burst)
                 .await
@@ -250,8 +272,6 @@ impl CallsApi {
         hot: &ValkeyConn,
         queue: &Queue,
         m: &Messages,
-        requests: Option<&crate::requests::Requests>,
-        registry: &Registry,
         caller: Caller,
         body: &[u8],
     ) -> Outcome {
@@ -293,15 +313,6 @@ impl CallsApi {
             self.metrics.refused.inc();
             return Outcome::NotFound;
         }
-        // An open account that blocked the caller: the same answer, and no wake-up (§5.11).
-        let blocked = !contact
-            && match requests {
-                Some(r) => match r.blocked(registry, &peer, &caller.account).await {
-                    Ok(b) => b,
-                    Err(()) => return Outcome::Unavailable,
-                },
-                None => false,
-            };
         let media = Media::from(b.media);
         let Some(room) = RoomId::random() else {
             return Outcome::Unavailable;
@@ -321,8 +332,11 @@ impl CallsApi {
             return Outcome::Unavailable;
         }
         self.metrics.created.inc();
-        if b.ring && !blocked {
-            self.wake(hot, queue, &peer, &peer_devices).await;
+        // Only a contact's call wakes anyone: on iOS a VoIP push rings. A stranger's call to an
+        // open account rings nobody; its offer arrives as a message (§8.5, D-0091).
+        if b.ring && contact {
+            self.wake(hot, queue, &caller.account, &peer, &peer_devices)
+                .await;
         }
         self.ticket(&room, &caller.device, Publish::Everything)
     }
@@ -347,6 +361,19 @@ impl CallsApi {
         let Some(group) = hex16(&b.group) else {
             return Outcome::Malformed("group");
         };
+        let l = &self.calls.limits;
+        if let Err(o) = self
+            .budget(
+                hot,
+                "j",
+                caller.device.as_bytes(),
+                l.joins_per_hour,
+                l.join_burst,
+            )
+            .await
+        {
+            return o;
+        }
         let view = match GroupView::load(registry, &group).await {
             Ok(Some(v)) => v,
             Ok(None) => return Outcome::NotFound,
@@ -357,35 +384,22 @@ impl CallsApi {
             return Outcome::NotFound;
         };
         let records = self.calls.records(hot);
-        // A live call: join it, whatever the media asked. A pointer whose room LiveKit no longer
-        // has (its webhook was lost) is forgotten, and the call starts again.
-        match records.group(&group).await {
-            Ok(Some(live)) => match self.calls.rooms.exists(&live.room).await {
-                Ok(true) if matches!(records.get(&live.room).await, Ok(Some(_))) => {
-                    return self.ticket(
-                        &live.room,
-                        &caller.device,
-                        GroupView::publish(role, live.media),
-                    );
-                }
-                Ok(_) => {
-                    let tag = self.calls.keys.group_tag(&group);
-                    if records.forget(&live.room).await.is_err()
-                        || records.release_group_tag(&tag, &live.room).await.is_err()
-                    {
-                        return Outcome::Unavailable;
-                    }
-                }
-                Err(_) => return Outcome::Unavailable,
-            },
+        // A live call: join it, whatever the media asked.
+        match self.live(&records, &group).await {
+            Ok(Some(live)) => {
+                return self.ticket(
+                    &live.room,
+                    &caller.device,
+                    GroupView::publish(role, live.media),
+                );
+            }
             Ok(None) => {}
-            Err(_) => return Outcome::Unavailable,
+            Err(o) => return o,
         }
         if role < view.roster.policy[POLICY_CALL] {
             self.metrics.refused.inc();
             return Outcome::Forbidden("role");
         }
-        let l = &self.calls.limits;
         if let Err(o) = self
             .budget(
                 hot,
@@ -407,8 +421,18 @@ impl CallsApi {
             media,
             created_ms: now_ms(),
         };
+        // The call's record first, so a pointer never names a room without one.
+        let call = Call {
+            kind: Kind::Group(self.calls.keys.group_tag(&group)),
+            media,
+            created_ms: candidate.created_ms,
+        };
+        if records.put(&room, &call).await.is_err() {
+            return Outcome::Unavailable;
+        }
         // Two members starting at once: one room wins, both join it.
         let Ok(live) = records.claim_group(&group, &candidate).await else {
+            let _ = records.forget(&room).await;
             return Outcome::Unavailable;
         };
         if live.room == room {
@@ -416,26 +440,60 @@ impl CallsApi {
                 let _ = records
                     .release_group_tag(&self.calls.keys.group_tag(&group), &room)
                     .await;
-                return Outcome::Unavailable;
-            }
-            let call = Call {
-                kind: Kind::Group(self.calls.keys.group_tag(&group)),
-                media,
-                created_ms: candidate.created_ms,
-            };
-            if records.put(&room, &call).await.is_err() {
+                let _ = records.forget(&room).await;
                 return Outcome::Unavailable;
             }
             self.metrics.created.inc();
             if b.ring {
                 self.ring_group(hot, queue, m, &view, &caller.account).await;
             }
+        } else {
+            let _ = records.forget(&room).await;
         }
         self.ticket(
             &live.room,
             &caller.device,
             GroupView::publish(role, live.media),
         )
+    }
+
+    /// The group's live call. A pointer younger than [`YOUNG_CALL_MS`] is live (its starter may
+    /// still be creating the room); an older one whose room LiveKit no longer has (its webhook
+    /// was lost) is forgotten. A live call's records are kept for another lifetime.
+    async fn live(
+        &self,
+        records: &songbird_calls::Records<'_>,
+        group: &[u8; 16],
+    ) -> Result<Option<GroupCall>, Outcome> {
+        let Some(live) = records
+            .group(group)
+            .await
+            .map_err(|_| Outcome::Unavailable)?
+        else {
+            return Ok(None);
+        };
+        let young = now_ms().saturating_sub(live.created_ms) < YOUNG_CALL_MS;
+        let alive = young
+            || self
+                .calls
+                .rooms
+                .exists(&live.room)
+                .await
+                .map_err(|_| Outcome::Unavailable)?;
+        if alive {
+            records
+                .touch(&live.room, Some(group))
+                .await
+                .map_err(|_| Outcome::Unavailable)?;
+            return Ok(Some(live));
+        }
+        let tag = self.calls.keys.group_tag(group);
+        if records.forget(&live.room).await.is_err()
+            || records.release_group_tag(&tag, &live.room).await.is_err()
+        {
+            return Err(Outcome::Unavailable);
+        }
+        Ok(None)
     }
 
     /// Wakes the other members' devices, if the group is small enough to ring.
@@ -460,7 +518,7 @@ impl CallsApi {
             return;
         }
         for (account, devices) in by_account.iter().filter(|(a, _)| *a != caller) {
-            self.wake(hot, queue, account, devices).await;
+            self.wake(hot, queue, caller, account, devices).await;
         }
     }
 
@@ -553,13 +611,30 @@ impl CallsApi {
             Ok(None) => Vec::new(),
             Err(()) => return,
         };
-        if let Ok(n) = self.calls.reconcile(&live.room, devices.into_iter()).await {
-            self.metrics
-                .removed
-                .inc_by(u64::try_from(n).unwrap_or(u64::MAX));
-        } else {
-            tracing::warn!("a group call's participants could not be reconciled");
+        let records = self.calls.records(hot);
+        for attempt in 1..=RECONCILE_ATTEMPTS {
+            match self
+                .calls
+                .reconcile(&records, &live.room, devices.iter().copied())
+                .await
+            {
+                Ok(n) => {
+                    self.metrics
+                        .removed
+                        .inc_by(u64::try_from(n).unwrap_or(u64::MAX));
+                    return;
+                }
+                Err(_) if attempt < RECONCILE_ATTEMPTS => {
+                    tokio::time::sleep(std::time::Duration::from_millis(200 * u64::from(attempt)))
+                        .await;
+                }
+                Err(_) => {}
+            }
         }
+        // Degraded (runbook calls.md): the removed devices hold no key to the new epoch, and the
+        // next commit, or their next join's webhook, disconnects them.
+        self.metrics.reconcile_failed.inc();
+        tracing::warn!("a group call's participants could not be reconciled");
     }
 }
 
@@ -666,12 +741,34 @@ impl CallsApi {
         Ok((Link { hash, row }, is_admin))
     }
 
-    /// Opens the link's room (idempotent), records it, and issues a ticket.
-    async fn link_ticket(&self, hot: &ValkeyConn, link: &Link, device: &DeviceId) -> Outcome {
+    /// Opens the link's room (idempotent), records it, and issues a ticket. Spends the join
+    /// budget. A link revoked while its room was being opened gets its room closed again.
+    async fn link_ticket(
+        &self,
+        hot: &ValkeyConn,
+        registry: &Registry,
+        link: &Link,
+        device: &DeviceId,
+    ) -> Outcome {
+        let l = &self.calls.limits;
+        if let Err(o) = self
+            .budget(hot, "j", device.as_bytes(), l.joins_per_hour, l.join_burst)
+            .await
+        {
+            return o;
+        }
         let room = RoomId::from_bytes(link.row.room);
         let media = Media::from_byte(link.row.media).unwrap_or(Media::Video);
         if self.calls.open_room(&room, media).await.is_err() {
             return Outcome::Unavailable;
+        }
+        match registry.call_link(&link.hash).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                let _ = self.calls.rooms.delete_room(&room).await;
+                return self.refuse();
+            }
+            Err(_) => return Outcome::Unavailable,
         }
         let call = Call {
             kind: Kind::Link(self.calls.keys.link_tag(&link.hash)),
@@ -752,18 +849,16 @@ impl CallsApi {
         let Ok(b) = serde_json::from_slice::<LinkJoinBody>(body) else {
             return Outcome::Malformed("request");
         };
-        let polling = b.lobby.is_some();
-        let (kind, per_hour, burst) = if polling {
-            ("p", POLLS_PER_HOUR, POLL_BURST)
-        } else {
-            (
-                "j",
-                self.calls.limits.joins_per_hour,
-                self.calls.limits.join_burst,
-            )
-        };
+        // Every request spends the poll budget; a ticket also spends the join budget
+        // (`link_ticket`), whatever the request claims to be (D-0091).
         if let Err(o) = self
-            .budget(hot, kind, caller.device.as_bytes(), per_hour, burst)
+            .budget(
+                hot,
+                "p",
+                caller.device.as_bytes(),
+                POLLS_PER_HOUR,
+                POLL_BURST,
+            )
             .await
         {
             return o;
@@ -777,7 +872,7 @@ impl CallsApi {
             return self.refuse();
         }
         if is_admin || !link.row.lobby {
-            return self.link_ticket(hot, &link, &caller.device).await;
+            return self.link_ticket(hot, registry, &link, &caller.device).await;
         }
         let tag = self.calls.keys.link_tag(&link.hash);
         let records = self.calls.records(hot);
@@ -795,15 +890,11 @@ impl CallsApi {
                 songbird_calls::records::Waiting::Waiting => {
                     Outcome::Accepted(serde_json::json!({ "lobby": hex::encode(handle) }))
                 }
-                songbird_calls::records::Waiting::Declined => {
-                    let _ = records.lobby_remove(&tag, &handle).await;
-                    self.refuse()
-                }
                 songbird_calls::records::Waiting::Admitted => {
-                    if records.lobby_remove(&tag, &handle).await.is_err() {
+                    if records.lobby_remove(&tag, &handle, &me).await.is_err() {
                         return Outcome::Unavailable;
                     }
-                    self.link_ticket(hot, &link, &caller.device).await
+                    self.link_ticket(hot, registry, &link, &caller.device).await
                 }
             };
         }

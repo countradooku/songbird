@@ -69,3 +69,17 @@ content; they stop or degrade calls.
   groups' next commits drop it from the roster, and `api` disconnects it from any live group call
   at that commit. For a 1:1 call, end the room: `songbird-admin` has no call tool yet; use
   LiveKit's `DeleteRoom` with an admin token minted from the API secret on an admin host.
+
+## Removed members could not be disconnected (`api_call_reconcile_failed` grows)
+
+- **Detection:** `api_call_reconcile_failed` grows; `api` logs "a group call's participants could
+  not be reconciled".
+- **Impact:** after a commit removed devices from a group with a live call, LiveKit was unreachable
+  three times in a row, so the removed devices may still be connected to the SFU. They cannot
+  decrypt anything sent after the commit (new MLS epoch), but they still see who is in the room and
+  when people speak. The next commit to the group, or their next join's webhook, disconnects them.
+- **Immediate actions:** fix LiveKit's reachability (section "A LiveKit node is down"); then any
+  member's next commit (an update is enough) reconciles the room.
+- **Verification:** `songbird_calls_rejoins_refused_total` and `api_call_participants_removed`
+  move as expected; the room's participant list (`ListParticipants` with an admin token) holds no
+  removed identity.

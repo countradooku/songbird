@@ -312,7 +312,9 @@ pub fn validate(c: &CallMessage) -> Result<(), Error> {
 /// [`MAX_RING_MS`], and not at all once that is before `now_ms`. Returns the milliseconds left.
 #[must_use]
 pub fn ring_left_ms(sent_at_ms: u64, ring_until_ms: u64, now_ms: u64) -> u64 {
+    // A sender clock in the future counts as now (D-0091): it cannot stretch the ringing.
     ring_until_ms
-        .min(sent_at_ms.saturating_add(MAX_RING_MS))
+        .min(sent_at_ms.min(now_ms).saturating_add(MAX_RING_MS))
         .saturating_sub(now_ms)
+        .min(MAX_RING_MS)
 }

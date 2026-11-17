@@ -2,8 +2,8 @@
 //!
 //! A participant token admits one identity to one room, for [`CallLimits::token_ttl_secs`]
 //! (the time to connect; LiveKit refreshes a connected participant's token itself). It grants the
-//! least that a call needs: join, subscribe, publish data (encrypted cards and media keys travel
-//! there), and publish only the sources the call allows. No admin, recording, ingress or agent
+//! least that a call needs: join, subscribe, and, for those who may speak, publish data (encrypted
+//! cards and keys travel there) and only the sources the call allows. No admin, recording, ingress or agent
 //! grant; no name, metadata or attributes, and no right to set them.
 //!
 //! [`CallLimits::token_ttl_secs`]: crate::config::CallLimits::token_ttl_secs
@@ -99,7 +99,8 @@ impl Minter {
             room: room.name(),
             can_publish: Some(publish != Publish::Nothing),
             can_subscribe: Some(true),
-            can_publish_data: Some(true),
+            // Listeners send nothing, data included (a channel's read-only members).
+            can_publish_data: Some(publish != Publish::Nothing),
             can_publish_sources: publish.sources(),
             can_update_own_metadata: Some(false),
             ..VideoGrants::default()
@@ -183,6 +184,7 @@ mod tests {
             .verify(&listen)
             .unwrap();
         assert_eq!(c.video.can_publish, Some(false));
+        assert_eq!(c.video.can_publish_data, Some(false));
         assert_eq!(c.video.can_publish_sources, Vec::<String>::new());
 
         // Signed by our secret only.

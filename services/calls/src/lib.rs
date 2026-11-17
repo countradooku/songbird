@@ -209,13 +209,16 @@ impl Calls {
         })
     }
 
-    /// Disconnects everyone in `room` whose identity is not one of `allowed` devices';
-    /// returns how many were removed. Used when a group's roster changes mid-call.
+    /// Disconnects everyone in `room` whose identity is not one of `allowed` devices', and
+    /// records them in the room's deny set (a removed member who reconnects with a token it still
+    /// holds is disconnected again at the join's webhook, D-0091); returns how many were removed.
+    /// Used when a group's roster changes mid-call.
     ///
     /// # Errors
     /// [`CallError::Unavailable`]; a room that no longer exists removes nobody.
     pub async fn reconcile(
         &self,
+        records: &Records<'_>,
         room: &RoomId,
         allowed: impl Iterator<Item = DeviceId>,
     ) -> Result<usize, CallError> {
@@ -229,11 +232,14 @@ impl Calls {
         }
         let allowed: std::collections::HashSet<String> =
             allowed.map(|d| self.keys.identity(room, &d)).collect();
-        let mut removed = 0;
-        for identity in present.iter().filter(|i| !allowed.contains(*i)) {
+        let strays: Vec<String> = present
+            .into_iter()
+            .filter(|i| !allowed.contains(i))
+            .collect();
+        records.deny(room, &strays).await?;
+        for identity in &strays {
             self.rooms.remove(room, identity).await?;
-            removed += 1;
         }
-        Ok(removed)
+        Ok(strays.len())
     }
 }

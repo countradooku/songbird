@@ -9,8 +9,10 @@
 //!                      kind 3, a link call:  link tag [16]
 //! cl:g:<tag(group)>  version u8 (1) | room [16] | media u8 | created_ms u64
 //! cl:q:<tag(link)>   a hash: lobby handle (32 hex) → version u8 (1) | state u8 | device tag [16] |
-//!                      sealed card (≤ 512 bytes); at most 64 entries, 10 minutes
+//!                      sealed card (≤ 512 bytes), and d:<device tag> → its handle; at most 64
+//!                      people, 10 minutes
 //! cl:w:<tag(event)>  a webhook event already handled (an hour)
+//! cl:x:<tag(room)>   identities removed from a room mid-call (the call's lifetime)
 //! ```
 
 use songbird_types::AccountId;
@@ -286,7 +288,8 @@ impl<'a> Records<'a> {
     }
 
     /// Drops the group's pointer if it still names `room` (a finished room; a newer call that
-    /// replaced it is kept).
+    /// replaced it is kept). Compare-and-delete in one script, so a pointer claimed meanwhile
+    /// survives.
     ///
     /// # Errors
     /// [`StoreError`].
@@ -297,18 +300,103 @@ impl<'a> Records<'a> {
             .query(redis::cmd("GET").arg(&name))
             .await
             .map_err(|_| StoreError)?;
-        if v.as_deref()
-            .and_then(GroupCall::decode)
-            .is_some_and(|g| g.room == *room)
-        {
-            self.hot
-                .query::<()>(redis::cmd("DEL").arg(&name))
-                .await
-                .map_err(|_| StoreError)?;
+        let Some(v) = v.filter(|v| GroupCall::decode(v).is_some_and(|g| g.room == *room)) else {
+            return Ok(());
+        };
+        self.hot
+            .query::<i64>(
+                redis::cmd("EVAL")
+                    .arg(COMPARE_AND_DELETE)
+                    .arg(1)
+                    .arg(&name)
+                    .arg(v),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|_| StoreError)
+    }
+
+    /// Keeps a live call's records for another full lifetime (a call longer than a day).
+    ///
+    /// # Errors
+    /// [`StoreError`].
+    pub async fn touch(&self, room: &RoomId, group: Option<&[u8; 16]>) -> Result<(), StoreError> {
+        let mut pipe = redis::pipe();
+        pipe.cmd("EXPIRE")
+            .arg(self.keys.call_record(room))
+            .arg(self.ttl_secs)
+            .ignore();
+        if let Some(g) = group {
+            pipe.cmd("EXPIRE")
+                .arg(self.keys.group_record(g))
+                .arg(self.ttl_secs)
+                .ignore();
         }
-        Ok(())
+        self.hot
+            .query_pipe::<()>(&pipe)
+            .await
+            .map_err(|_| StoreError)
+    }
+
+    /// Remembers identities removed from `room`: a removed member who reconnects with a token it
+    /// still holds is disconnected again when LiveKit reports the join (D-0091).
+    ///
+    /// # Errors
+    /// [`StoreError`].
+    pub async fn deny(&self, room: &RoomId, identities: &[String]) -> Result<(), StoreError> {
+        if identities.is_empty() {
+            return Ok(());
+        }
+        let name = self.keys.deny_record(room);
+        let mut pipe = redis::pipe();
+        pipe.cmd("SADD").arg(&name).arg(identities).ignore();
+        pipe.cmd("EXPIRE").arg(&name).arg(self.ttl_secs).ignore();
+        self.hot
+            .query_pipe::<()>(&pipe)
+            .await
+            .map_err(|_| StoreError)
+    }
+
+    /// Whether `identity` was removed from `room`.
+    ///
+    /// # Errors
+    /// [`StoreError`].
+    pub async fn denied(&self, room: &RoomId, identity: &str) -> Result<bool, StoreError> {
+        self.hot
+            .query(
+                redis::cmd("SISMEMBER")
+                    .arg(self.keys.deny_record(room))
+                    .arg(identity),
+            )
+            .await
+            .map_err(|_| StoreError)
     }
 }
+
+/// `GET` then `DEL` if unchanged, as one step.
+const COMPARE_AND_DELETE: &str =
+    "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0";
+
+/// Adds a lobby entry unless the device already has one (then returns that handle) or the lobby
+/// is full (then returns nothing). `KEYS[1]` the lobby; `ARGV`: device tag (hex), new handle
+/// (hex), the entry, the cap, the TTL. Each entry has a `d:<device>` field pointing to its handle.
+const LOBBY_ADD: &str = r"
+local mine = redis.call('HGET', KEYS[1], 'd:' .. ARGV[1])
+if mine then return mine end
+if redis.call('HLEN', KEYS[1]) >= 2 * tonumber(ARGV[4]) then return false end
+redis.call('HSET', KEYS[1], ARGV[2], ARGV[3], 'd:' .. ARGV[1], ARGV[2])
+redis.call('EXPIRE', KEYS[1], ARGV[5])
+return ARGV[2]
+";
+
+/// Admits (sets the entry to `ARGV[2]`) or declines (deletes it and its device field) an entry
+/// that still exists. `ARGV`: handle, admitted entry or empty, device tag (hex).
+const LOBBY_DECIDE: &str = r"
+if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 0 then return 0 end
+if ARGV[2] ~= '' then redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+else redis.call('HDEL', KEYS[1], ARGV[1], 'd:' .. ARGV[3]) end
+return 1
+";
 
 /// Most people waiting in one link's lobby.
 pub const MAX_LOBBY: usize = 64;
@@ -317,15 +405,13 @@ pub const LOBBY_TTL_SECS: u64 = 600;
 /// Largest sealed card a joiner leaves in the lobby (PROTOCOL §8.4).
 pub const MAX_CARD: usize = 512;
 
-/// Where a lobby entry stands.
+/// Where a lobby entry stands (a declined one is deleted).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Waiting {
     /// Waiting for an admin.
     Waiting,
     /// Admitted: the joiner's next poll gets a ticket.
     Admitted,
-    /// Declined: the joiner's next poll gets 404.
-    Declined,
 }
 
 impl Waiting {
@@ -333,7 +419,6 @@ impl Waiting {
         match self {
             Self::Waiting => 0,
             Self::Admitted => 1,
-            Self::Declined => 2,
         }
     }
 
@@ -341,7 +426,6 @@ impl Waiting {
         match b {
             0 => Some(Self::Waiting),
             1 => Some(Self::Admitted),
-            2 => Some(Self::Declined),
             _ => None,
         }
     }
@@ -411,7 +495,8 @@ impl Records<'_> {
         format!("cl:q:{}", hex::encode(link))
     }
 
-    /// Adds a waiting joiner; returns its random 16-byte handle.
+    /// Adds a waiting joiner and returns its random 16-byte handle; a device that is already
+    /// waiting gets its existing handle back (one place per device).
     ///
     /// # Errors
     /// [`LobbyError`].
@@ -421,15 +506,6 @@ impl Records<'_> {
         device: Tag,
         card: Vec<u8>,
     ) -> Result<[u8; 16], LobbyError> {
-        let name = Self::lobby_name(link);
-        let n: usize = self
-            .hot
-            .query(redis::cmd("HLEN").arg(&name))
-            .await
-            .map_err(|_| LobbyError::Store)?;
-        if n >= MAX_LOBBY {
-            return Err(LobbyError::Full);
-        }
         let mut handle = [0u8; 16];
         aws_lc_rs::rand::fill(&mut handle).map_err(|_| LobbyError::Store)?;
         let entry = LobbyEntry {
@@ -437,22 +513,25 @@ impl Records<'_> {
             device,
             card,
         };
-        let mut pipe = redis::pipe();
-        pipe.atomic()
-            .cmd("HSET")
-            .arg(&name)
-            .arg(hex::encode(handle))
-            .arg(entry.encode())
-            .ignore()
-            .cmd("EXPIRE")
-            .arg(&name)
-            .arg(LOBBY_TTL_SECS)
-            .ignore();
-        self.hot
-            .query_pipe::<()>(&pipe)
+        let got: Option<String> = self
+            .hot
+            .query(
+                redis::cmd("EVAL")
+                    .arg(LOBBY_ADD)
+                    .arg(1)
+                    .arg(Self::lobby_name(link))
+                    .arg(hex::encode(device))
+                    .arg(hex::encode(handle))
+                    .arg(entry.encode())
+                    .arg(MAX_LOBBY)
+                    .arg(LOBBY_TTL_SECS),
+            )
             .await
             .map_err(|_| LobbyError::Store)?;
-        Ok(handle)
+        let got = got.ok_or(LobbyError::Full)?;
+        let mut out = [0u8; 16];
+        hex::decode_to_slice(&got, &mut out).map_err(|_| LobbyError::Store)?;
+        Ok(out)
     }
 
     /// One entry.
@@ -499,7 +578,8 @@ impl Records<'_> {
         Ok(out)
     }
 
-    /// Sets an entry's state if it is still waiting; `false` if there is no such entry.
+    /// Admits a waiting entry, or declines it (deleted: its next poll gets 404); `false` if
+    /// there is no such entry. A lobby revoked meanwhile is never recreated.
     ///
     /// # Errors
     /// [`StoreError`].
@@ -515,33 +595,40 @@ impl Records<'_> {
         if e.state != Waiting::Waiting {
             return Ok(true);
         }
-        e.state = if admit {
-            Waiting::Admitted
-        } else {
-            Waiting::Declined
-        };
-        self.hot
-            .query::<()>(
-                redis::cmd("HSET")
+        e.state = Waiting::Admitted;
+        let admitted = if admit { e.encode() } else { Vec::new() };
+        let done: i64 = self
+            .hot
+            .query(
+                redis::cmd("EVAL")
+                    .arg(LOBBY_DECIDE)
+                    .arg(1)
                     .arg(Self::lobby_name(link))
                     .arg(hex::encode(handle))
-                    .arg(e.encode()),
+                    .arg(admitted)
+                    .arg(hex::encode(e.device)),
             )
             .await
             .map_err(|_| StoreError)?;
-        Ok(true)
+        Ok(done == 1)
     }
 
-    /// Removes an entry (redeemed or declined).
+    /// Removes a redeemed entry and its device's place.
     ///
     /// # Errors
     /// [`StoreError`].
-    pub async fn lobby_remove(&self, link: &Tag, handle: &[u8; 16]) -> Result<(), StoreError> {
+    pub async fn lobby_remove(
+        &self,
+        link: &Tag,
+        handle: &[u8; 16],
+        device: &Tag,
+    ) -> Result<(), StoreError> {
         self.hot
             .query::<()>(
                 redis::cmd("HDEL")
                     .arg(Self::lobby_name(link))
-                    .arg(hex::encode(handle)),
+                    .arg(hex::encode(handle))
+                    .arg(format!("d:{}", hex::encode(device))),
             )
             .await
             .map_err(|_| StoreError)
@@ -576,6 +663,17 @@ impl Records<'_> {
             .await
             .map_err(|_| StoreError)?;
         Ok(set.is_some())
+    }
+
+    /// Forgets a webhook event's mark, so LiveKit's retry of an event we failed to handle runs.
+    ///
+    /// # Errors
+    /// [`StoreError`].
+    pub async fn unsee(&self, event: &str) -> Result<(), StoreError> {
+        self.hot
+            .query::<()>(redis::cmd("DEL").arg(self.keys.webhook_record(event)))
+            .await
+            .map_err(|_| StoreError)
     }
 }
 

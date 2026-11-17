@@ -716,18 +716,7 @@ impl App {
             ("/v1/calls/links/admit", _) => c.admin_link(hot, r, caller, "admit", &body).await,
             ("/v1/calls/links/revoke", _) => c.admin_link(hot, r, caller, "revoke", &body).await,
             (_, None) => return Err(unavailable()),
-            ("/v1/calls", Some(m)) => {
-                c.one_to_one(
-                    &self.hot,
-                    &self.queue,
-                    m,
-                    self.requests.as_ref(),
-                    &self.registry,
-                    caller,
-                    &body,
-                )
-                .await
-            }
+            ("/v1/calls", Some(m)) => c.one_to_one(&self.hot, &self.queue, m, caller, &body).await,
             ("/v1/calls/group", Some(m)) => {
                 c.group(&self.hot, &self.queue, m, &self.registry, caller, &body)
                     .await

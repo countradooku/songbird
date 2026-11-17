@@ -269,6 +269,9 @@ fn ringing_is_capped() {
     assert_eq!(call::ring_left_ms(t, t + 10 * MAX_RING_MS, t), MAX_RING_MS);
     assert_eq!(call::ring_left_ms(t, t + 30_000, t + 31_000), 0);
     assert_eq!(call::ring_left_ms(t, u64::MAX, u64::MAX), 0);
+    // A sender clock in the future cannot make a phone ring longer.
+    assert_eq!(call::ring_left_ms(t + 3_600_000, u64::MAX, t), MAX_RING_MS);
+    assert_eq!(call::ring_left_ms(u64::MAX, u64::MAX, t), MAX_RING_MS);
 }
 
 #[test]

@@ -596,17 +596,20 @@ async fn one_to_one_calls_admit_only_the_two_accounts() {
         .0,
         400
     );
-    // An open account needs no key.
+    // An open account needs no key, but a stranger's call rings nobody: on iOS a VoIP push would
+    // (D-0091).
+    let wakes = s.calls().metrics.wakes.get();
     assert_eq!(
         s.post(
             0,
             "/v1/calls",
-            &serde_json::json!({"callee": account(3), "media": "audio"})
+            &serde_json::json!({"callee": account(3), "media": "audio", "ring": true})
         )
         .await
         .0,
         200
     );
+    assert_eq!(s.calls().metrics.wakes.get(), wakes);
 
     // A contact: Alice calls Bob with his key and rings him.
     let wakes = s.calls().metrics.wakes.get();
@@ -822,6 +825,52 @@ async fn group_calls_admit_the_roster_and_drop_removed_members_mid_call() {
         404
     );
     assert_eq!(s.post(1, "/v1/calls/group", &start("video")).await.0, 404);
+
+    // Bob reconnects with the token he still holds (LiveKit does not revoke tokens): LiveKit admits
+    // him, and its `participant_joined` webhook makes `calls` disconnect him again (D-0091).
+    let (mut back, _) = join(&s.livekit, &bob_token).await;
+    let hooks = songbird_calls::webhook::Webhooks::new(
+        Arc::clone(&s.calls().calls),
+        songbird_valkey::ValkeyConn::connect(
+            redis::Client::open(std::env::var("SONGBIRD_TEST_VALKEY").unwrap().as_str()).unwrap(),
+        )
+        .await
+        .unwrap(),
+        songbird_calls::webhook::WebhookMetrics::default(),
+    );
+    let (t, b) = webhook_for(
+        &s.livekit,
+        &s.livekit.secret,
+        "participant_joined",
+        &room,
+        Some(&bob_id),
+        &format!("EV_{}", hex::encode(random32())),
+        unix_now(),
+    );
+    assert_eq!(
+        hooks.handle(&t, b.as_bytes()).await,
+        songbird_calls::webhook::Answer::Ok
+    );
+    assert!(
+        told_to_leave(&mut back).await,
+        "a removed member's rejoin is cut off"
+    );
+    assert_eq!(hooks.metrics.denied.get(), 1);
+    // Carol joining again is not refused.
+    let (t, b) = webhook_for(
+        &s.livekit,
+        &s.livekit.secret,
+        "participant_joined",
+        &room,
+        Some(&carol_id),
+        &format!("EV_{}", hex::encode(random32())),
+        unix_now(),
+    );
+    assert_eq!(
+        hooks.handle(&t, b.as_bytes()).await,
+        songbird_calls::webhook::Answer::Ok
+    );
+    assert_eq!(hooks.metrics.denied.get(), 1);
     drop(carol_ws.close(1000, "").await);
 }
 
@@ -861,6 +910,16 @@ async fn call_links_admit_holders_through_the_lobby_and_end_on_revoke() {
         .await;
     assert_eq!(st, 202, "{v}");
     let bob_handle = v["lobby"].as_str().unwrap().to_owned();
+    // One place per device: asking again returns the same place (D-0091).
+    let (st, v) = s
+        .post(
+            1,
+            "/v1/calls/links/join",
+            &serde_json::json!({"link": link, "card": card(1, "Bob")}),
+        )
+        .await;
+    assert_eq!(st, 202);
+    assert_eq!(v["lobby"].as_str().unwrap(), bob_handle);
     let poll = |h: &str| serde_json::json!({"link": link, "lobby": h});
     assert_eq!(
         s.post(1, "/v1/calls/links/join", &poll(&bob_handle))
@@ -1049,10 +1108,27 @@ fn webhook(
     id: &str,
     at: i64,
 ) -> (String, String) {
+    webhook_for(lk, secret, event, room, None, id, at)
+}
+
+/// [`webhook`] naming a participant.
+fn webhook_for(
+    lk: &LiveKit,
+    secret: &str,
+    event: &str,
+    room: &RoomId,
+    identity: Option<&str>,
+    id: &str,
+    at: i64,
+) -> (String, String) {
     let ev = livekit_protocol::WebhookEvent {
         event: event.into(),
         room: Some(livekit_protocol::Room {
             name: room.name(),
+            ..Default::default()
+        }),
+        participant: identity.map(|i| livekit_protocol::ParticipantInfo {
+            identity: i.into(),
             ..Default::default()
         }),
         id: id.into(),
@@ -1143,8 +1219,14 @@ async fn webhooks_are_verified_fresh_and_once_and_clean_up_finished_rooms() {
     let (second, _, _) = ticket(&v);
     assert_ne!(second, room);
 
-    // A lost webhook: the room ends in LiveKit, nobody tells us. The next start notices.
+    // A lost webhook: the room ends in LiveKit, nobody tells us. For its first 15 s a pointer is
+    // trusted (its starter may still be creating the room, D-0091); after that the next start
+    // notices.
     calls.rooms.delete_room(&second).await.unwrap();
+    let (st, v) = s.post(1, "/v1/calls/group", &start).await;
+    assert_eq!(st, 200);
+    assert_eq!(ticket(&v).0, second, "a young pointer is trusted");
+    tokio::time::sleep(Duration::from_secs(16)).await;
     let (st, v) = s.post(1, "/v1/calls/group", &start).await;
     assert_eq!(st, 200);
     let (third, _, _) = ticket(&v);

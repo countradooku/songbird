@@ -1904,9 +1904,10 @@ not yet in its signed list) gets 403 `pending`. Answers are small JSON.
 
 - The **token** is LiveKit's (HS256, signed with the LiveKit API secret), valid **2 minutes**: the
   time to connect. LiveKit refreshes a connected participant's token itself.
-- It admits one identity to one room with the least grants: join, subscribe, publish data, and
-  publish only the sources the call allows (microphone, camera, screen share; the microphone
-  only in a group's audio call; nothing for a read-only member). No admin, recording, ingress,
+- It admits one identity to one room with the least grants: join, subscribe, and for those who
+  may speak, publish data and only the sources the call allows (microphone, camera, screen share;
+  the microphone only in a group's audio call); a read-only member publishes nothing, data
+  included. No admin, recording, ingress,
   SIP or agent grant; no name, metadata or attributes, and no right to set them.
 - The **identity** is `hex(HMAC-SHA256(k_identity, room ‖ device)[..16])` (§8.1): the key
   schedule binds sender keys to it.
@@ -1917,14 +1918,14 @@ a 1:1 call.
 - The callee must be another account whose devices exist and that is **open**, or whose access
   key the caller presents (a contact, §5.10). Otherwise 404, the same answer as for an account
   that does not exist.
-- An open account that blocked the caller (§5.11) gets the same answer as any other call, and no
-  wake-up.
 - The server creates the room (random ID; 32 participants for video, 128 for audio; it closes 20
   seconds after the last participant leaves, or after 3 minutes if nobody joins) and keeps the
   call's record (§8.8) until the room closes, at most 24 hours.
-- `ring: true` queues a wake-up for each of the callee's listed devices: `VoIP` on iOS,
-  high-priority FCM on Android (Prompt 8), within the callee's wake budget. The ringing itself is
-  the encrypted offer (§8.5).
+- `ring: true` queues a wake-up for each of the callee's listed devices (`VoIP` on iOS,
+  high-priority FCM on Android, Prompt 8) **only when the caller presented the access key**: a
+  `VoIP` push rings, so a stranger's call to an open account rings nobody, and its offer arrives as
+  a message (D-0091). Wake-ups count against the callee's budget and the (caller, callee) pair's.
+  The ringing itself is the encrypted offer (§8.5).
 - 200 with the caller's ticket.
 
 **`POST /v1/calls/group`** `{"group": hex, "media": …, "ring": bool}`: the group's call.
@@ -1944,9 +1945,15 @@ a 1:1 call.
 - Anything else, and a call that does not exist or has ended, is 404.
 
 **Removal mid-call.** When `api` accepts a commit to a group with a live call, it asks LiveKit for
-the room's participants and disconnects every identity that is not one of the roster's devices'.
-A removed device is therefore cut off at once; its next join is refused; and the new MLS epoch's
-keys (§8.2) are ones it cannot compute.
+the room's participants, records every identity that is not one of the roster's devices' in the
+room's deny set (§8.8), and disconnects them (three attempts). A removed device is therefore cut
+off at once; its next ticket is refused; if it reconnects with a token it still holds (LiveKit does
+not revoke tokens), the `calls` service disconnects it again on that join's webhook; and the new
+MLS epoch's keys (§8.2) are ones it cannot compute anyway (D-0091).
+
+A group's call pointer younger than 15 seconds is trusted without asking LiveKit (its starter may
+still be creating the room); an older one is checked with `ListRooms`. Each join keeps a live
+call's records for another 24 hours.
 
 **Budgets** (`[api.calls.limits]`, keyed records in `valkey-hot`):
 
@@ -1954,7 +1961,8 @@ keys (§8.2) are ones it cannot compute.
 | --- | --- |
 | Calls started per account | 60 an hour, burst 20 |
 | Wake-ups received per account | 60 an hour, burst 20 (over it: no wake-up; the stored offer still arrives) |
-| Tickets per device | 600 an hour, burst 60 |
+| Wake-ups one caller causes one account | 20 an hour, burst 6 |
+| Tickets per device (every ticket, group joins and link tickets included) | 600 an hour, burst 60 |
 
 Answers: 200 ticket; 400 `request`, `callee`, `group`, `call`, `access_key`; 403 `role`,
 `pending`; 404; 429 with a wait; 503 (LiveKit or `valkey-hot` unavailable: retry).
@@ -1983,9 +1991,16 @@ admin token (and may share it with co-admins inside encrypted messages).
 - **`POST /v1/calls/links/revoke`** `{"link", "admin"}`: deletes the link and its lobby and ends
   its call for everyone (LiveKit `DeleteRoom`). 204.
 
-A lobby holds at most 64 people (409 `full`) for 10 minutes; each entry holds a keyed tag of the
-waiting device (so only it can redeem the place) and the sealed card. Lobby polls and admin calls
-have their own budget per device (1,800 an hour, burst 120). The worker deletes expired links.
+A lobby holds at most 64 people (409 `full`) for 10 minutes, **one place per device** (asking
+again returns the same handle); each entry holds a keyed tag of the waiting device (so only it can
+redeem the place) and the sealed card. A declined entry is deleted at once, freeing its place.
+Every link request spends a per-device budget (1,800 an hour, burst 120) and every ticket the
+ticket budget. A link revoked while its room was being opened gets the room closed again. The
+worker deletes expired links.
+
+Cards are not signed: anyone holding the link can write any name in one. Apps show a joiner as
+unverified until the Signal session with its device is established and, for strangers, until the
+users compare safety numbers; media keys go only over those sessions (§8.4).
 
 ### 8.8 Call records and LiveKit webhooks (M2, M3, D-0087, D-0088)
 
@@ -1998,14 +2013,17 @@ cl:r:<tag(room)>   version (1) | kind | media | created_ms | caller [16] callee 
 cl:g:<tag(group)>  version (1) | room [16] | media | created_ms      the group's live call
 cl:q:<tag(link)>   lobby: handle → version | state | device tag [16] | sealed card
 cl:w:<tag(event)>  a webhook event already handled
+cl:x:<tag(room)>   identities removed from the room mid-call (its deny set)
 ```
 
 They expire after the call's longest life (24 hours), the lobby after 10 minutes, the webhook
 marks after an hour. LiveKit sends its webhooks to the `calls` service on the same host, over
 loopback. A webhook is handled only if its token verifies with the LiveKit API secret, its
 `sha256` claim is the body's hash, its time is within 5 minutes of ours, and its ID is new;
-retries and replays are answered 200 and do nothing. `room_finished` deletes the call's record
-and the group's pointer. Room, participant and track events feed aggregate counters
+retries and replays are answered 200 and do nothing; an event whose cleanup failed is unmarked
+and answered 503, so LiveKit's retry runs it. `room_finished` deletes the call's record and the
+group's pointer (compare-and-delete, so a newer call's pointer survives); `participant_joined` of
+an identity in the room's deny set disconnects it. Room, participant and track events feed aggregate counters
 (`songbird_calls_*`), never a label naming a room. Webhook bodies are not stored or logged (they
 carry LiveKit's per-room TURN credential).
 

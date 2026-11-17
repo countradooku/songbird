@@ -136,6 +136,31 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0088 — Prompt 7, milestone 3: call links with no account, lobbies bound to a device, webhooks once
+
+- Date: 2026-11-17
+- Status: accepted by the agent; part of the Prompt 7 PR, awaiting the owner with the gate
+- Decided by: agent, within the plan the owner approved (D-0085)
+- Context: the prompt asks for call links as random secrets stored as hashes, with expiry and an
+  optional lobby where an admin admits people, and for signature-verified LiveKit webhooks used
+  only for cleanup and capacity metrics.
+- Options considered:
+  - **Link storage**: `valkey-hot` (no persistence: links would vanish on restart) or SurrealDB.
+    Chosen: SurrealDB for links (days), `valkey-hot` for lobbies (minutes).
+  - **Who is admin**: the creating account (the server learns who made which link) or a token
+    (anonymous, like packs, D-0079 §3). Chosen: a token; account deletion cannot find links, which
+    expire within 30 days.
+  - **Lobby redemption**: by handle alone (an admin who sees handles could redeem one for another
+    device) or bound to the waiting device's keyed tag. Chosen: bound.
+  - **Webhook metrics**: gauges (go negative after a restart) or counters. Chosen: counters.
+  - **Room creation on join**: LiveKit's default `auto_create: true` lets a token for a finished
+    room recreate it without our caps. Chosen: `auto_create: false`; liveness by `ListRooms`.
+- Evidence: P07-M3 (live tests, a real LiveKit webhook replayed through the receiver).
+- Decision: PROTOCOL §8.7, §8.8; links default to a day, at most 30 days; lobbies 64 people, 10
+  minutes; webhooks within 5 minutes, once per event ID (an hour).
+- Consequences: three threat-model §1 rows for approval (call links, lobbies, webhook marks);
+  every LiveKit configuration gets `auto_create: false` and a webhook to its local `calls` (M4).
+
 ## D-0087 — Prompt 7, milestone 2: tickets with the least grants, pseudonyms per room, removal by reconcile
 
 - Date: 2026-11-17

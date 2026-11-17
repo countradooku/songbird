@@ -697,7 +697,14 @@ async fn one_to_one_calls_admit_only_the_two_accounts() {
 async fn expired_and_forged_tokens_are_refused_by_livekit() {
     let Some(s) = stack(2).await else { return };
     let lk = &s.livekit;
-    let room = RoomId::random().unwrap().name();
+    // LiveKit creates no room on join (`auto_create: false`): the room must exist.
+    let id = RoomId::random().unwrap();
+    s.calls()
+        .calls
+        .open_room(&id, songbird_calls::Media::Video)
+        .await
+        .unwrap();
+    let room = id.name();
     // Made by hand so the times can be anything: LiveKit allows a minute of clock skew.
     assert_eq!(
         validate(lk, &token_at(lk, &lk.secret, &room, "p", 300)).await,
@@ -816,4 +823,369 @@ async fn group_calls_admit_the_roster_and_drop_removed_members_mid_call() {
     );
     assert_eq!(s.post(1, "/v1/calls/group", &start("video")).await.0, 404);
     drop(carol_ws.close(1000, "").await);
+}
+
+// --- Call links (M3) ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn call_links_admit_holders_through_the_lobby_and_end_on_revoke() {
+    use songbird_content::call::{LinkSecrets, open_card, seal_card};
+    use songbird_content::schema::CallLinkCard;
+    let Some(s) = stack(5).await else { return };
+    let root = random32();
+    let secrets = LinkSecrets::from_root(&root).unwrap();
+    let link = hex::encode(*secrets.id);
+    let admin = hex::encode(random32());
+    let create = serde_json::json!({"link": link, "admin": admin, "media": "video", "lobby": true});
+    assert_eq!(s.post(0, "/v1/calls/links", &create).await.0, 204);
+    assert_eq!(s.post(0, "/v1/calls/links", &create).await.0, 409);
+    let too_long = serde_json::json!({"link": hex::encode(random32()), "admin": admin, "media": "audio", "ttl_secs": 31 * 86_400});
+    assert_eq!(s.post(0, "/v1/calls/links", &too_long).await.0, 400);
+
+    // Bob holds the link: he leaves a sealed card and waits.
+    let card = |i: usize, name: &str| {
+        let c = CallLinkCard {
+            account: s.people[i].mls.account.as_bytes().to_vec(),
+            device: s.people[i].mls.id.as_bytes().to_vec(),
+            identity: "p".into(),
+            name: name.into(),
+        };
+        hex::encode(seal_card(&secrets.key, &c).unwrap())
+    };
+    let (st, v) = s
+        .post(
+            1,
+            "/v1/calls/links/join",
+            &serde_json::json!({"link": link, "card": card(1, "Bob")}),
+        )
+        .await;
+    assert_eq!(st, 202, "{v}");
+    let bob_handle = v["lobby"].as_str().unwrap().to_owned();
+    let poll = |h: &str| serde_json::json!({"link": link, "lobby": h});
+    assert_eq!(
+        s.post(1, "/v1/calls/links/join", &poll(&bob_handle))
+            .await
+            .0,
+        202
+    );
+    // Only Bob's device may redeem Bob's place.
+    assert_eq!(
+        s.post(2, "/v1/calls/links/join", &poll(&bob_handle))
+            .await
+            .0,
+        404
+    );
+    // No card, no place.
+    assert_eq!(
+        s.post(
+            3,
+            "/v1/calls/links/join",
+            &serde_json::json!({"link": link})
+        )
+        .await
+        .0,
+        400
+    );
+
+    // The admin sees who waits, as sealed cards only the link's holders can open.
+    let admin_body = serde_json::json!({"link": link, "admin": admin});
+    let (st, v) = s.post(0, "/v1/calls/links/lobby", &admin_body).await;
+    assert_eq!(st, 200);
+    let waiting = v["waiting"].as_array().unwrap();
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(waiting[0]["handle"], bob_handle.as_str());
+    let opened = open_card(
+        &secrets.key,
+        &hex::decode(waiting[0]["card"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(opened.name, "Bob");
+    assert!(
+        open_card(
+            &secrets.id,
+            &hex::decode(waiting[0]["card"].as_str().unwrap()).unwrap()
+        )
+        .is_err()
+    );
+    // A wrong admin token is no admin at all, and an unknown link looks the same.
+    for body in [
+        serde_json::json!({"link": link, "admin": hex::encode(random32())}),
+        serde_json::json!({"link": hex::encode(random32()), "admin": admin}),
+    ] {
+        assert_eq!(s.post(0, "/v1/calls/links/lobby", &body).await.0, 404);
+    }
+
+    // Admitted, Bob gets a ticket once; declined, Dave gets nothing.
+    let decide = |h: &str, admit: bool| serde_json::json!({"link": link, "admin": admin, "handle": h, "admit": admit});
+    assert_eq!(
+        s.post(0, "/v1/calls/links/admit", &decide(&bob_handle, true))
+            .await
+            .0,
+        204
+    );
+    let (st, v) = s.post(1, "/v1/calls/links/join", &poll(&bob_handle)).await;
+    assert_eq!(st, 200, "{v}");
+    let (call_room, bob_token, bob_id) = ticket(&v);
+    assert_eq!(
+        s.post(1, "/v1/calls/links/join", &poll(&bob_handle))
+            .await
+            .0,
+        404
+    );
+    let (st, v) = s
+        .post(
+            3,
+            "/v1/calls/links/join",
+            &serde_json::json!({"link": link, "card": card(3, "")}),
+        )
+        .await;
+    assert_eq!(st, 202);
+    let dave_handle = v["lobby"].as_str().unwrap().to_owned();
+    assert_eq!(
+        s.post(0, "/v1/calls/links/admit", &decide(&dave_handle, false))
+            .await
+            .0,
+        204
+    );
+    assert_eq!(
+        s.post(3, "/v1/calls/links/join", &poll(&dave_handle))
+            .await
+            .0,
+        404
+    );
+
+    // The admin joins past the lobby, into the same room; a link call is not joinable through
+    // /v1/calls/join.
+    let (st, v) = s
+        .post(
+            0,
+            "/v1/calls/links/join",
+            &serde_json::json!({"link": link, "admin": admin}),
+        )
+        .await;
+    assert_eq!(st, 200);
+    assert_eq!(ticket(&v).0, call_room);
+    assert_eq!(
+        s.post(
+            4,
+            "/v1/calls/join",
+            &serde_json::json!({"call": call_room.name()})
+        )
+        .await
+        .0,
+        404
+    );
+
+    // Bob is in the call; revoking the link ends it for everyone, and the link is gone.
+    let (mut bob_ws, joined) = join(&s.livekit, &bob_token).await;
+    assert_eq!(joined.participant.unwrap().identity, bob_id);
+    assert_eq!(
+        s.post(0, "/v1/calls/links/revoke", &admin_body).await.0,
+        204
+    );
+    assert!(told_to_leave(&mut bob_ws).await, "revoking ends the call");
+    assert_eq!(
+        s.post(
+            1,
+            "/v1/calls/links/join",
+            &serde_json::json!({"link": link, "card": card(1, "Bob")})
+        )
+        .await
+        .0,
+        404
+    );
+
+    // A link without a lobby admits every holder at once.
+    let open_link = hex::encode(*LinkSecrets::from_root(&random32()).unwrap().id);
+    let create =
+        serde_json::json!({"link": open_link, "admin": admin, "media": "audio", "ttl_secs": 600});
+    assert_eq!(s.post(0, "/v1/calls/links", &create).await.0, 204);
+    let (st, v) = s
+        .post(
+            4,
+            "/v1/calls/links/join",
+            &serde_json::json!({"link": open_link}),
+        )
+        .await;
+    assert_eq!(st, 200);
+    let claims = TokenVerifier::with_api_key(&s.livekit.key, &s.livekit.secret)
+        .verify(v["token"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(
+        claims.video.can_publish_sources,
+        vec!["microphone".to_owned()]
+    );
+}
+
+// --- Webhooks (M3) -----------------------------------------------------------------------------
+
+fn base64std(b: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in b.chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            if i <= c.len() {
+                out.push(char::from(
+                    A[usize::try_from((n >> (18 - 6 * i)) & 63).unwrap()],
+                ));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// A webhook as LiveKit sends it: the event's protobuf JSON, and a token signed with the API
+/// secret whose `sha256` claim is the body's hash.
+fn webhook(
+    lk: &LiveKit,
+    secret: &str,
+    event: &str,
+    room: &RoomId,
+    id: &str,
+    at: i64,
+) -> (String, String) {
+    let ev = livekit_protocol::WebhookEvent {
+        event: event.into(),
+        room: Some(livekit_protocol::Room {
+            name: room.name(),
+            ..Default::default()
+        }),
+        id: id.into(),
+        created_at: at,
+        ..Default::default()
+    };
+    let body = serde_json::to_string(&ev).unwrap();
+    let hash = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, body.as_bytes());
+    let token = livekit_api::access_token::AccessToken::with_api_key(&lk.key, secret)
+        .with_sha256(&base64std(hash.as_ref()))
+        .to_jwt()
+        .unwrap();
+    (token, body)
+}
+
+fn unix_now() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn webhooks_are_verified_fresh_and_once_and_clean_up_finished_rooms() {
+    use songbird_calls::webhook::{Answer, WebhookMetrics, Webhooks};
+    let Some(mut s) = stack(3).await else { return };
+    let calls = Arc::clone(&s.calls().calls);
+    let hot = songbird_valkey::ValkeyConn::connect(
+        redis::Client::open(std::env::var("SONGBIRD_TEST_VALKEY").unwrap().as_str()).unwrap(),
+    )
+    .await
+    .unwrap();
+    let hooks = Webhooks::new(Arc::clone(&calls), hot, WebhookMetrics::default());
+    // A live group call: Alice and Bob.
+    group_of(&mut s, &[1]).await;
+    let lk = &s.livekit;
+    let start = serde_json::json!({"group": hex::encode(GID), "media": "video"});
+    let (st, v) = s.post(0, "/v1/calls/group", &start).await;
+    assert_eq!(st, 200);
+    let (room, _, _) = ticket(&v);
+    let records = calls.records(&s.app.hot);
+    assert!(records.get(&room).await.unwrap().is_some());
+
+    // Refused: another secret, a tampered body, a stale event, garbage.
+    let id = format!("EV_{}", hex::encode(random32()));
+    let (t, b) = webhook(
+        lk,
+        "not-the-secret-0123456789abcdef0123",
+        "room_finished",
+        &room,
+        &id,
+        unix_now(),
+    );
+    assert_eq!(hooks.handle(&t, b.as_bytes()).await, Answer::Refused);
+    let (t, b) = webhook(lk, &lk.secret, "room_finished", &room, &id, unix_now());
+    let tampered = b.replace("room_finished", "room_started_");
+    assert_eq!(hooks.handle(&t, tampered.as_bytes()).await, Answer::Refused);
+    let (ts, bs) = webhook(
+        lk,
+        &lk.secret,
+        "room_finished",
+        &room,
+        &id,
+        unix_now() - 3_600,
+    );
+    assert_eq!(hooks.handle(&ts, bs.as_bytes()).await, Answer::Refused);
+    assert_eq!(hooks.handle("x", b"\xff\xfe").await, Answer::Malformed);
+    assert_eq!(hooks.metrics.refused.get(), 4);
+    assert!(
+        records.get(&room).await.unwrap().is_some(),
+        "nothing refused had an effect"
+    );
+
+    // The real one: the call's record and the group's pointer go; a replay does nothing.
+    assert_eq!(hooks.handle(&t, b.as_bytes()).await, Answer::Ok);
+    assert!(records.get(&room).await.unwrap().is_none());
+    assert!(records.group(&GID).await.unwrap().is_none());
+    assert_eq!(hooks.handle(&t, b.as_bytes()).await, Answer::Ok);
+    assert_eq!(hooks.metrics.repeated.get(), 1);
+    assert_eq!(hooks.metrics.rooms_finished.get(), 1);
+
+    // The next start is a new call.
+    let (st, v) = s.post(0, "/v1/calls/group", &start).await;
+    assert_eq!(st, 200);
+    let (second, _, _) = ticket(&v);
+    assert_ne!(second, room);
+
+    // A lost webhook: the room ends in LiveKit, nobody tells us. The next start notices.
+    calls.rooms.delete_room(&second).await.unwrap();
+    let (st, v) = s.post(1, "/v1/calls/group", &start).await;
+    assert_eq!(st, 200);
+    let (third, _, _) = ticket(&v);
+    assert_ne!(third, second);
+    assert!(records.get(&second).await.unwrap().is_none());
+}
+
+/// A webhook LiveKit itself sent, captured raw (`SONGBIRD_TEST_LIVEKIT_WEBHOOK_CAPTURE`: a file
+/// holding one HTTP request as LiveKit wrote it), verifies with our receiver. Its token lives five
+/// minutes, so it runs only on a fresh capture (P07-M3 says how).
+#[tokio::test]
+async fn a_webhook_livekit_sent_verifies() {
+    use songbird_calls::webhook::{Answer, WebhookMetrics, Webhooks};
+    let Ok(path) = std::env::var("SONGBIRD_TEST_LIVEKIT_WEBHOOK_CAPTURE") else {
+        return;
+    };
+    let Some(s) = stack(1).await else { return };
+    let raw = std::fs::read_to_string(path).unwrap();
+    let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+    let auth = head
+        .lines()
+        .find_map(|l| l.strip_prefix("Authorization: "))
+        .unwrap()
+        .trim();
+    let length: usize = head
+        .lines()
+        .find_map(|l| l.strip_prefix("Content-Length: "))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let body = &body.as_bytes()[..length];
+    let hot = songbird_valkey::ValkeyConn::connect(
+        redis::Client::open(std::env::var("SONGBIRD_TEST_VALKEY").unwrap().as_str()).unwrap(),
+    )
+    .await
+    .unwrap();
+    let hooks = Webhooks::new(Arc::clone(&s.calls().calls), hot, WebhookMetrics::default());
+    assert_eq!(hooks.handle(auth, body).await, Answer::Ok);
+    assert_eq!(hooks.metrics.rooms_started.get(), 1);
+    let mut tampered = body.to_vec();
+    tampered[length - 3] ^= 1;
+    assert_eq!(hooks.handle(auth, &tampered).await, Answer::Refused);
 }

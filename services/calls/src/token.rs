@@ -112,8 +112,8 @@ impl Minter {
             .map_err(|_| TokenError)
     }
 
-    /// A short token for the server API: `room_create` (create, delete) or `room_admin` on one
-    /// room (list and remove participants).
+    /// A short token for the server API: `room_create` and `room_list` (create, delete, find
+    /// rooms) or `room_admin` on one room (list and remove participants).
     ///
     /// # Errors
     /// [`TokenError`].
@@ -121,6 +121,7 @@ impl Minter {
         let grants = match room {
             None => VideoGrants {
                 room_create: true,
+                room_list: true,
                 ..VideoGrants::default()
             },
             Some(r) => VideoGrants {
@@ -198,7 +199,8 @@ mod tests {
         let room = RoomId::from_bytes([7; 16]);
         let v = TokenVerifier::with_api_key("devkey", &m.api_secret);
         let c = v.verify(&m.admin(None).unwrap()).unwrap();
-        assert!(c.video.room_create && !c.video.room_admin && !c.video.room_join);
+        assert!(c.video.room_create && c.video.room_list);
+        assert!(!c.video.room_admin && !c.video.room_join && !c.video.room_record);
         let c = v.verify(&m.admin(Some(&room)).unwrap()).unwrap();
         assert!(c.video.room_admin && c.video.room == room.name() && !c.video.room_create);
         assert_eq!(c.exp.saturating_sub(c.nbf), 60);

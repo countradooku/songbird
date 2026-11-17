@@ -20,7 +20,7 @@
 //! | `/v1/attachments…` | Grants, single and resumable uploads, downloads ([`media`]) |
 //! | `DELETE /v1/account` | Deletes the device's account from every store (outbox job; the primary only) |
 //! | `GET /v1/account/export`; `PUT /v1/account/inactivity` | GDPR export; the inactivity period (the primary only) |
-//! | `POST /v1/calls`, `/v1/calls/group`, `/v1/calls/join` | Calls: LiveKit rooms and tokens ([`calls`]) |
+//! | `POST /v1/calls`, `/v1/calls/group`, `/v1/calls/join`, `/v1/calls/links…` | Calls: LiveKit rooms and tokens, call links ([`calls`]) |
 //! | `PUT /v1/messages` | A WebSocket `Send` frame, for clients with no open socket; answers its `SendResult` ([`messages`]) |
 //!
 //! Every request but the two registration steps, opening and reading a provisioning channel and
@@ -387,7 +387,7 @@ impl App {
             }
             (_, "/v1/blocks" | "/v1/account/requests") => self.requests(req).await,
             (&Method::POST, "/v1/reports") => self.report(req).await,
-            (&Method::POST, "/v1/calls" | "/v1/calls/group" | "/v1/calls/join") => {
+            (&Method::POST, p) if p == "/v1/calls" || p.starts_with("/v1/calls/") => {
                 self.calls(req).await
             }
             (
@@ -707,8 +707,14 @@ impl App {
             device,
             account: row.account,
         };
+        let (hot, r) = (&self.hot, &self.registry);
         let outcome = match (path.as_str(), self.messages.as_ref()) {
-            ("/v1/calls/join", _) => c.join(&self.hot, &self.registry, caller, &body).await,
+            ("/v1/calls/join", _) => c.join(hot, r, caller, &body).await,
+            ("/v1/calls/links", _) => c.create_link(hot, r, caller, &body).await,
+            ("/v1/calls/links/join", _) => c.join_link(hot, r, caller, &body).await,
+            ("/v1/calls/links/lobby", _) => c.admin_link(hot, r, caller, "lobby", &body).await,
+            ("/v1/calls/links/admit", _) => c.admin_link(hot, r, caller, "admit", &body).await,
+            ("/v1/calls/links/revoke", _) => c.admin_link(hot, r, caller, "revoke", &body).await,
             (_, None) => return Err(unavailable()),
             ("/v1/calls", Some(m)) => {
                 c.one_to_one(
@@ -722,10 +728,11 @@ impl App {
                 )
                 .await
             }
-            (_, Some(m)) => {
+            ("/v1/calls/group", Some(m)) => {
                 c.group(&self.hot, &self.queue, m, &self.registry, caller, &body)
                     .await
             }
+            _ => devices::Outcome::NotFound,
         };
         Ok(device_outcome(outcome))
     }
@@ -1495,6 +1502,7 @@ fn device_outcome(o: devices::Outcome) -> Response<Body> {
     match o {
         Outcome::Done => empty(StatusCode::NO_CONTENT),
         Outcome::Json(v) => json(StatusCode::OK, &v),
+        Outcome::Accepted(v) => json(StatusCode::ACCEPTED, &v),
         Outcome::Blob(b) => {
             let mut r = Response::new(Full::new(b).map_err(|e| match e {}).boxed_unsync());
             r.headers_mut().insert(

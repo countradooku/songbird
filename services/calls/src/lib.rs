@@ -18,6 +18,7 @@ pub mod ids;
 pub mod records;
 pub mod token;
 pub mod twirp;
+pub mod webhook;
 
 use std::sync::Arc;
 use std::time::Duration;

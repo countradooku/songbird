@@ -121,6 +121,8 @@ pub enum Outcome {
     Done,
     /// 200 with JSON.
     Json(serde_json::Value),
+    /// 202 with JSON: accepted, not done yet (a call link's lobby, Prompt 7).
+    Accepted(serde_json::Value),
     /// 200 with bytes.
     Blob(Bytes),
     /// 400 with a reason.

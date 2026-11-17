@@ -10,6 +10,9 @@
 //! - `POST /v1/calls/join` `{"call": hex, "group": hex?}`: a ticket for a live call: a 1:1 call
 //!   admits only the two accounts' listed devices; a group call only the group's current roster.
 //!
+//! - `POST /v1/calls/links`, `/links/join`, `/links/lobby`, `/links/admit`, `/links/revoke`:
+//!   call links (M3, §8.7): hashed link IDs, an admin token, expiry, an optional lobby.
+//!
 //! Every refusal that would tell a stranger something answers 404, as for no such call. A call to
 //! an open account that blocked the caller is answered like any other and wakes no one (§5.11).
 //! Nothing here logs an account, a device, a room or a group (invariant 6).
@@ -354,16 +357,28 @@ impl CallsApi {
             return Outcome::NotFound;
         };
         let records = self.calls.records(hot);
-        // A live call: join it, whatever the media asked.
+        // A live call: join it, whatever the media asked. A pointer whose room LiveKit no longer
+        // has (its webhook was lost) is forgotten, and the call starts again.
         match records.group(&group).await {
-            Ok(Some(live)) if matches!(records.get(&live.room).await, Ok(Some(_))) => {
-                return self.ticket(
-                    &live.room,
-                    &caller.device,
-                    GroupView::publish(role, live.media),
-                );
-            }
-            Ok(_) => {}
+            Ok(Some(live)) => match self.calls.rooms.exists(&live.room).await {
+                Ok(true) if matches!(records.get(&live.room).await, Ok(Some(_))) => {
+                    return self.ticket(
+                        &live.room,
+                        &caller.device,
+                        GroupView::publish(role, live.media),
+                    );
+                }
+                Ok(_) => {
+                    let tag = self.calls.keys.group_tag(&group);
+                    if records.forget(&live.room).await.is_err()
+                        || records.release_group_tag(&tag, &live.room).await.is_err()
+                    {
+                        return Outcome::Unavailable;
+                    }
+                }
+                Err(_) => return Outcome::Unavailable,
+            },
+            Ok(None) => {}
             Err(_) => return Outcome::Unavailable,
         }
         if role < view.roster.policy[POLICY_CALL] {
@@ -544,6 +559,338 @@ impl CallsApi {
                 .inc_by(u64::try_from(n).unwrap_or(u64::MAX));
         } else {
             tracing::warn!("a group call's participants could not be reconciled");
+        }
+    }
+}
+
+// --- Call links (M3, PROTOCOL §8.7, D-0088) ----------------------------------------------------
+
+/// Domain separation of the stored hash of a link ID (as `songbird_content::call::link_id_hash`).
+const LINK_HASH_CONTEXT: &[u8] = b"songbird.v1/call-link-hash\0";
+/// Domain separation of the stored hash of a link's admin token.
+const ADMIN_HASH_CONTEXT: &[u8] = b"songbird.v1/call-link-admin\0";
+/// A link lives a day unless its creator asks for less or more (at most 30 days).
+const DEFAULT_LINK_TTL_SECS: u64 = 86_400;
+/// Lobby polls per device: a joiner asks every few seconds while it waits.
+const POLLS_PER_HOUR: u32 = 1_800;
+const POLL_BURST: u32 = 120;
+/// The smallest sealed card: version, nonce and tag (PROTOCOL §8.4).
+const MIN_CARD: usize = 1 + 12 + 16;
+
+fn sha256_with(ctx: &[u8], v: &[u8; 32]) -> [u8; 32] {
+    let mut d = aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA256);
+    d.update(ctx);
+    d.update(v);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(d.finish().as_ref());
+    out
+}
+
+fn hex32(s: &str) -> Option<[u8; 32]> {
+    let mut b = [0u8; 32];
+    (s.len() == 64 && !s.bytes().any(|c| c.is_ascii_uppercase()))
+        .then(|| hex::decode_to_slice(s, &mut b).ok())
+        .flatten()
+        .map(|()| b)
+}
+
+/// `POST /v1/calls/links`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LinkCreateBody {
+    link: String,
+    admin: String,
+    media: MediaBody,
+    #[serde(default)]
+    lobby: bool,
+    #[serde(default)]
+    ttl_secs: Option<u64>,
+}
+
+/// `POST /v1/calls/links/join`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LinkJoinBody {
+    link: String,
+    #[serde(default)]
+    admin: Option<String>,
+    #[serde(default)]
+    lobby: Option<String>,
+    #[serde(default)]
+    card: Option<String>,
+}
+
+/// `POST /v1/calls/links/lobby`, `/admit`, `/revoke`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LinkAdminBody {
+    link: String,
+    admin: String,
+    #[serde(default)]
+    handle: Option<String>,
+    #[serde(default)]
+    admit: Option<bool>,
+}
+
+/// A link found and, if asked, its admin token checked.
+struct Link {
+    hash: [u8; 32],
+    row: songbird_accounts::call_links::CallLinkRow,
+}
+
+impl CallsApi {
+    async fn link(
+        registry: &Registry,
+        link: &str,
+        admin: Option<&str>,
+    ) -> Result<(Link, bool), Outcome> {
+        let id = hex32(link).ok_or(Outcome::Malformed("link"))?;
+        let admin = match admin.map(hex32) {
+            None => None,
+            Some(Some(a)) => Some(a),
+            Some(None) => return Err(Outcome::Malformed("admin")),
+        };
+        let hash = sha256_with(LINK_HASH_CONTEXT, &id);
+        let row = match registry.call_link(&hash).await {
+            Ok(Some(r)) => r,
+            Ok(None) => return Err(Outcome::NotFound),
+            Err(_) => return Err(Outcome::Unavailable),
+        };
+        let is_admin = admin.is_some_and(|a| {
+            aws_lc_rs::constant_time::verify_slices_are_equal(
+                &sha256_with(ADMIN_HASH_CONTEXT, &a),
+                &row.admin,
+            )
+            .is_ok()
+        });
+        Ok((Link { hash, row }, is_admin))
+    }
+
+    /// Opens the link's room (idempotent), records it, and issues a ticket.
+    async fn link_ticket(&self, hot: &ValkeyConn, link: &Link, device: &DeviceId) -> Outcome {
+        let room = RoomId::from_bytes(link.row.room);
+        let media = Media::from_byte(link.row.media).unwrap_or(Media::Video);
+        if self.calls.open_room(&room, media).await.is_err() {
+            return Outcome::Unavailable;
+        }
+        let call = Call {
+            kind: Kind::Link(self.calls.keys.link_tag(&link.hash)),
+            media,
+            created_ms: now_ms(),
+        };
+        if self.calls.records(hot).put(&room, &call).await.is_err() {
+            return Outcome::Unavailable;
+        }
+        let publish = match media {
+            Media::Audio => Publish::Audio,
+            Media::Video => Publish::Everything,
+        };
+        self.ticket(&room, device, publish)
+    }
+
+    /// `POST /v1/calls/links`: a new link. Its creator keeps the admin token; no account is
+    /// stored with it.
+    pub(crate) async fn create_link(
+        &self,
+        hot: &ValkeyConn,
+        registry: &Registry,
+        caller: Caller,
+        body: &[u8],
+    ) -> Outcome {
+        let Ok(b) = serde_json::from_slice::<LinkCreateBody>(body) else {
+            return Outcome::Malformed("request");
+        };
+        let (Some(id), Some(admin)) = (hex32(&b.link), hex32(&b.admin)) else {
+            return Outcome::Malformed("link");
+        };
+        let l = &self.calls.limits;
+        if let Err(o) = self
+            .budget(
+                hot,
+                "c",
+                caller.account.as_bytes(),
+                l.calls_per_hour,
+                l.call_burst,
+            )
+            .await
+        {
+            return o;
+        }
+        let Some(room) = RoomId::random() else {
+            return Outcome::Unavailable;
+        };
+        let row = songbird_accounts::call_links::CallLinkRow {
+            room: *room.as_bytes(),
+            admin: sha256_with(ADMIN_HASH_CONTEXT, &admin),
+            media: Media::from(b.media).byte(),
+            lobby: b.lobby,
+        };
+        let ttl = b.ttl_secs.unwrap_or(DEFAULT_LINK_TTL_SECS);
+        match registry
+            .create_call_link(&sha256_with(LINK_HASH_CONTEXT, &id), &row, ttl)
+            .await
+        {
+            Ok(()) => {
+                self.metrics.created.inc();
+                Outcome::Done
+            }
+            Err(songbird_accounts::RegistryError::Exists) => Outcome::Conflict("exists"),
+            Err(songbird_accounts::RegistryError::Shape) => Outcome::Malformed("ttl_secs"),
+            Err(_) => Outcome::Unavailable,
+        }
+    }
+
+    /// `POST /v1/calls/links/join`: a ticket, or a place in the lobby (202 with its handle), or,
+    /// polling with that handle, 202 until an admin decides.
+    pub(crate) async fn join_link(
+        &self,
+        hot: &ValkeyConn,
+        registry: &Registry,
+        caller: Caller,
+        body: &[u8],
+    ) -> Outcome {
+        let Ok(b) = serde_json::from_slice::<LinkJoinBody>(body) else {
+            return Outcome::Malformed("request");
+        };
+        let polling = b.lobby.is_some();
+        let (kind, per_hour, burst) = if polling {
+            ("p", POLLS_PER_HOUR, POLL_BURST)
+        } else {
+            (
+                "j",
+                self.calls.limits.joins_per_hour,
+                self.calls.limits.join_burst,
+            )
+        };
+        if let Err(o) = self
+            .budget(hot, kind, caller.device.as_bytes(), per_hour, burst)
+            .await
+        {
+            return o;
+        }
+        let (link, is_admin) = match Self::link(registry, &b.link, b.admin.as_deref()).await {
+            Ok(v) => v,
+            Err(Outcome::NotFound) => return self.refuse(),
+            Err(o) => return o,
+        };
+        if b.admin.is_some() && !is_admin {
+            return self.refuse();
+        }
+        if is_admin || !link.row.lobby {
+            return self.link_ticket(hot, &link, &caller.device).await;
+        }
+        let tag = self.calls.keys.link_tag(&link.hash);
+        let records = self.calls.records(hot);
+        let me = self.calls.keys.device_tag(&caller.device);
+        if let Some(handle) = b.lobby {
+            let Some(handle) = hex16(&handle) else {
+                return Outcome::Malformed("lobby");
+            };
+            let entry = match records.lobby_get(&tag, &handle).await {
+                Ok(Some(e)) if e.device == me => e,
+                Ok(_) => return self.refuse(),
+                Err(_) => return Outcome::Unavailable,
+            };
+            return match entry.state {
+                songbird_calls::records::Waiting::Waiting => {
+                    Outcome::Accepted(serde_json::json!({ "lobby": hex::encode(handle) }))
+                }
+                songbird_calls::records::Waiting::Declined => {
+                    let _ = records.lobby_remove(&tag, &handle).await;
+                    self.refuse()
+                }
+                songbird_calls::records::Waiting::Admitted => {
+                    if records.lobby_remove(&tag, &handle).await.is_err() {
+                        return Outcome::Unavailable;
+                    }
+                    self.link_ticket(hot, &link, &caller.device).await
+                }
+            };
+        }
+        let Some(card) = b
+            .card
+            .filter(|c| c.len() <= 2 * songbird_calls::records::MAX_CARD)
+            .and_then(|c| hex::decode(c).ok())
+            .filter(|c| c.len() >= MIN_CARD)
+        else {
+            return Outcome::Malformed("card");
+        };
+        match records.lobby_add(&tag, me, card).await {
+            Ok(handle) => Outcome::Accepted(serde_json::json!({ "lobby": hex::encode(handle) })),
+            Err(songbird_calls::records::LobbyError::Full) => Outcome::Conflict("full"),
+            Err(songbird_calls::records::LobbyError::Store) => Outcome::Unavailable,
+        }
+    }
+
+    /// `POST /v1/calls/links/lobby`, `/admit`, `/revoke`: the admin's side. A wrong token is 404,
+    /// like no link.
+    pub(crate) async fn admin_link(
+        &self,
+        hot: &ValkeyConn,
+        registry: &Registry,
+        caller: Caller,
+        action: &str,
+        body: &[u8],
+    ) -> Outcome {
+        let Ok(b) = serde_json::from_slice::<LinkAdminBody>(body) else {
+            return Outcome::Malformed("request");
+        };
+        if let Err(o) = self
+            .budget(
+                hot,
+                "p",
+                caller.device.as_bytes(),
+                POLLS_PER_HOUR,
+                POLL_BURST,
+            )
+            .await
+        {
+            return o;
+        }
+        let (link, is_admin) = match Self::link(registry, &b.link, Some(&b.admin)).await {
+            Ok(v) => v,
+            Err(Outcome::NotFound) => return self.refuse(),
+            Err(o) => return o,
+        };
+        if !is_admin {
+            return self.refuse();
+        }
+        let tag = self.calls.keys.link_tag(&link.hash);
+        let records = self.calls.records(hot);
+        match action {
+            "lobby" => match records.lobby_waiting(&tag).await {
+                Ok(w) => Outcome::Json(serde_json::json!({
+                    "waiting": w.iter().map(|(h, c)| serde_json::json!({
+                        "handle": hex::encode(h), "card": hex::encode(c),
+                    })).collect::<Vec<_>>(),
+                })),
+                Err(_) => Outcome::Unavailable,
+            },
+            "admit" => {
+                let (Some(handle), Some(admit)) = (b.handle.as_deref().and_then(hex16), b.admit)
+                else {
+                    return Outcome::Malformed("handle");
+                };
+                match records.lobby_decide(&tag, &handle, admit).await {
+                    Ok(true) => Outcome::Done,
+                    Ok(false) => Outcome::NotFound,
+                    Err(_) => Outcome::Unavailable,
+                }
+            }
+            _ => {
+                // Revoke: the link goes, its lobby goes, and its call ends for everyone.
+                let room = RoomId::from_bytes(link.row.room);
+                if registry.delete_call_link(&link.hash).await.is_err()
+                    || records.lobby_clear(&tag).await.is_err()
+                    || records.forget(&room).await.is_err()
+                {
+                    return Outcome::Unavailable;
+                }
+                match self.calls.rooms.delete_room(&room).await {
+                    Ok(()) | Err(songbird_calls::TwirpError::NotFound) => Outcome::Done,
+                    Err(_) => Outcome::Unavailable,
+                }
+            }
         }
     }
 }

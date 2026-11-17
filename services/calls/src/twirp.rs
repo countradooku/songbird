@@ -235,6 +235,19 @@ impl RoomClient {
             .map(|_| ())
     }
 
+    /// Whether LiveKit has `room` (`ListRooms` by name: `ListParticipants` answers an empty list
+    /// for a room that does not exist).
+    ///
+    /// # Errors
+    /// [`TwirpError`].
+    pub async fn exists(&self, room: &RoomId) -> Result<bool, TwirpError> {
+        let req = proto::ListRoomsRequest {
+            names: vec![room.name()],
+        };
+        let a: proto::ListRoomsResponse = self.call("ListRooms", None, &req).await?;
+        Ok(a.rooms.iter().any(|r| r.name == room.name()))
+    }
+
     /// The identities in `room`.
     ///
     /// # Errors

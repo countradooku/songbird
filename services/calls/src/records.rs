@@ -8,6 +8,9 @@
 //!                      kind 2, a group call: group tag [16]
 //!                      kind 3, a link call:  link tag [16]
 //! cl:g:<tag(group)>  version u8 (1) | room [16] | media u8 | created_ms u64
+//! cl:q:<tag(link)>   a hash: lobby handle (32 hex) → version u8 (1) | state u8 | device tag [16] |
+//!                      sealed card (≤ 512 bytes); at most 64 entries, 10 minutes
+//! cl:w:<tag(event)>  a webhook event already handled (an hour)
 //! ```
 
 use songbird_types::AccountId;
@@ -146,7 +149,9 @@ pub struct GroupCall {
 }
 
 impl GroupCall {
-    fn encode(&self) -> Vec<u8> {
+    /// The stored form.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(26);
         out.push(VERSION);
         out.extend_from_slice(self.room.as_bytes());
@@ -155,7 +160,9 @@ impl GroupCall {
         out
     }
 
-    fn decode(b: &[u8]) -> Option<Self> {
+    /// Parses the stored form; anything else is `None`.
+    #[must_use]
+    pub fn decode(b: &[u8]) -> Option<Self> {
         let (&version, rest) = b.split_first()?;
         if version != VERSION || rest.len() != 25 {
             return None;
@@ -300,6 +307,275 @@ impl<'a> Records<'a> {
                 .map_err(|_| StoreError)?;
         }
         Ok(())
+    }
+}
+
+/// Most people waiting in one link's lobby.
+pub const MAX_LOBBY: usize = 64;
+/// How long a lobby keeps a waiting joiner (refreshed while people keep arriving).
+pub const LOBBY_TTL_SECS: u64 = 600;
+/// Largest sealed card a joiner leaves in the lobby (PROTOCOL §8.4).
+pub const MAX_CARD: usize = 512;
+
+/// Where a lobby entry stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Waiting {
+    /// Waiting for an admin.
+    Waiting,
+    /// Admitted: the joiner's next poll gets a ticket.
+    Admitted,
+    /// Declined: the joiner's next poll gets 404.
+    Declined,
+}
+
+impl Waiting {
+    const fn byte(self) -> u8 {
+        match self {
+            Self::Waiting => 0,
+            Self::Admitted => 1,
+            Self::Declined => 2,
+        }
+    }
+
+    const fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::Waiting),
+            1 => Some(Self::Admitted),
+            2 => Some(Self::Declined),
+            _ => None,
+        }
+    }
+}
+
+/// One joiner in a lobby: a keyed tag of its device (only that device may redeem the entry),
+/// its sealed card (opaque: the server cannot open it), where it stands.
+#[derive(Clone, PartialEq, Eq)]
+pub struct LobbyEntry {
+    /// Where it stands.
+    pub state: Waiting,
+    /// Keyed tag of the waiting device.
+    pub device: Tag,
+    /// The sealed card.
+    pub card: Vec<u8>,
+}
+
+impl std::fmt::Debug for LobbyEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LobbyEntry")
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LobbyEntry {
+    /// The stored form.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(18 + self.card.len());
+        out.push(VERSION);
+        out.push(self.state.byte());
+        out.extend_from_slice(&self.device);
+        out.extend_from_slice(&self.card);
+        out
+    }
+
+    /// Parses the stored form; anything else is `None`.
+    #[must_use]
+    pub fn decode(b: &[u8]) -> Option<Self> {
+        let (&[version, state], rest) = b.split_first_chunk::<2>()?;
+        let (device, card) = rest.split_first_chunk::<16>()?;
+        if version != VERSION || card.len() > MAX_CARD {
+            return None;
+        }
+        Some(Self {
+            state: Waiting::from_byte(state)?,
+            device: *device,
+            card: card.to_vec(),
+        })
+    }
+}
+
+/// A lobby is full or `valkey-hot` failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum LobbyError {
+    /// [`MAX_LOBBY`] people are already waiting.
+    #[error("lobby full")]
+    Full,
+    /// `valkey-hot` failed.
+    #[error("valkey-hot unavailable")]
+    Store,
+}
+
+impl Records<'_> {
+    fn lobby_name(link: &Tag) -> String {
+        format!("cl:q:{}", hex::encode(link))
+    }
+
+    /// Adds a waiting joiner; returns its random 16-byte handle.
+    ///
+    /// # Errors
+    /// [`LobbyError`].
+    pub async fn lobby_add(
+        &self,
+        link: &Tag,
+        device: Tag,
+        card: Vec<u8>,
+    ) -> Result<[u8; 16], LobbyError> {
+        let name = Self::lobby_name(link);
+        let n: usize = self
+            .hot
+            .query(redis::cmd("HLEN").arg(&name))
+            .await
+            .map_err(|_| LobbyError::Store)?;
+        if n >= MAX_LOBBY {
+            return Err(LobbyError::Full);
+        }
+        let mut handle = [0u8; 16];
+        aws_lc_rs::rand::fill(&mut handle).map_err(|_| LobbyError::Store)?;
+        let entry = LobbyEntry {
+            state: Waiting::Waiting,
+            device,
+            card,
+        };
+        let mut pipe = redis::pipe();
+        pipe.atomic()
+            .cmd("HSET")
+            .arg(&name)
+            .arg(hex::encode(handle))
+            .arg(entry.encode())
+            .ignore()
+            .cmd("EXPIRE")
+            .arg(&name)
+            .arg(LOBBY_TTL_SECS)
+            .ignore();
+        self.hot
+            .query_pipe::<()>(&pipe)
+            .await
+            .map_err(|_| LobbyError::Store)?;
+        Ok(handle)
+    }
+
+    /// One entry.
+    ///
+    /// # Errors
+    /// [`StoreError`].
+    pub async fn lobby_get(
+        &self,
+        link: &Tag,
+        handle: &[u8; 16],
+    ) -> Result<Option<LobbyEntry>, StoreError> {
+        let v: Option<Vec<u8>> = self
+            .hot
+            .query(
+                redis::cmd("HGET")
+                    .arg(Self::lobby_name(link))
+                    .arg(hex::encode(handle)),
+            )
+            .await
+            .map_err(|_| StoreError)?;
+        Ok(v.as_deref().and_then(LobbyEntry::decode))
+    }
+
+    /// Everyone still waiting: their handles and sealed cards.
+    ///
+    /// # Errors
+    /// [`StoreError`].
+    pub async fn lobby_waiting(&self, link: &Tag) -> Result<Vec<([u8; 16], Vec<u8>)>, StoreError> {
+        let all: Vec<(String, Vec<u8>)> = self
+            .hot
+            .query(redis::cmd("HGETALL").arg(Self::lobby_name(link)))
+            .await
+            .map_err(|_| StoreError)?;
+        let mut out: Vec<([u8; 16], Vec<u8>)> = all
+            .into_iter()
+            .filter_map(|(h, v)| {
+                let mut handle = [0u8; 16];
+                hex::decode_to_slice(&h, &mut handle).ok()?;
+                let e = LobbyEntry::decode(&v)?;
+                (e.state == Waiting::Waiting).then_some((handle, e.card))
+            })
+            .collect();
+        out.sort_unstable();
+        Ok(out)
+    }
+
+    /// Sets an entry's state if it is still waiting; `false` if there is no such entry.
+    ///
+    /// # Errors
+    /// [`StoreError`].
+    pub async fn lobby_decide(
+        &self,
+        link: &Tag,
+        handle: &[u8; 16],
+        admit: bool,
+    ) -> Result<bool, StoreError> {
+        let Some(mut e) = self.lobby_get(link, handle).await? else {
+            return Ok(false);
+        };
+        if e.state != Waiting::Waiting {
+            return Ok(true);
+        }
+        e.state = if admit {
+            Waiting::Admitted
+        } else {
+            Waiting::Declined
+        };
+        self.hot
+            .query::<()>(
+                redis::cmd("HSET")
+                    .arg(Self::lobby_name(link))
+                    .arg(hex::encode(handle))
+                    .arg(e.encode()),
+            )
+            .await
+            .map_err(|_| StoreError)?;
+        Ok(true)
+    }
+
+    /// Removes an entry (redeemed or declined).
+    ///
+    /// # Errors
+    /// [`StoreError`].
+    pub async fn lobby_remove(&self, link: &Tag, handle: &[u8; 16]) -> Result<(), StoreError> {
+        self.hot
+            .query::<()>(
+                redis::cmd("HDEL")
+                    .arg(Self::lobby_name(link))
+                    .arg(hex::encode(handle)),
+            )
+            .await
+            .map_err(|_| StoreError)
+    }
+
+    /// Drops a link's lobby (revoked).
+    ///
+    /// # Errors
+    /// [`StoreError`].
+    pub async fn lobby_clear(&self, link: &Tag) -> Result<(), StoreError> {
+        self.hot
+            .query::<()>(redis::cmd("DEL").arg(Self::lobby_name(link)))
+            .await
+            .map_err(|_| StoreError)
+    }
+
+    /// Marks a webhook event ID seen; `false` if it was seen already (a replay or a retry).
+    ///
+    /// # Errors
+    /// [`StoreError`].
+    pub async fn first_sighting(&self, event: &str) -> Result<bool, StoreError> {
+        let set: Option<String> = self
+            .hot
+            .query(
+                redis::cmd("SET")
+                    .arg(self.keys.webhook_record(event))
+                    .arg(1)
+                    .arg("NX")
+                    .arg("EX")
+                    .arg(3_600),
+            )
+            .await
+            .map_err(|_| StoreError)?;
+        Ok(set.is_some())
     }
 }
 

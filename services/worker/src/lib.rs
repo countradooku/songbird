@@ -673,6 +673,10 @@ impl Worker {
             }
             Err(e) => tracing::warn!(error = %e, "pack sweep failed"),
         }
+        // Expired call links are refused already (Prompt 7); this only stops them taking space.
+        if let Err(e) = self.registry.delete_expired_call_links(SWEEP_BATCH).await {
+            tracing::warn!(error = %e, "call link sweep failed");
+        }
         // Expired codes are refused already; this only stops them taking space.
         if let Err(e) = self.registry.delete_expired_invites(SWEEP_BATCH).await {
             tracing::warn!(error = %e, "invite sweep failed");

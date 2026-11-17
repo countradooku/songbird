@@ -1959,6 +1959,60 @@ keys (§8.2) are ones it cannot compute.
 Answers: 200 ticket; 400 `request`, `callee`, `group`, `call`, `access_key`; 403 `role`,
 `pending`; 404; 429 with a wait; 503 (LiveKit or `valkey-hot` unavailable: retry).
 
+### 8.7 Call links (M3, D-0088)
+
+The link and its keys are §8.4. The server stores a link under `SHA-256("songbird.v1/call-link-hash\0"
+‖ link ID)` with its room, `SHA-256("songbird.v1/call-link-admin\0" ‖ admin token)`, audio or
+video, whether a lobby is on, and an expiry. **No account**: the creator keeps the random 32-byte
+admin token (and may share it with co-admins inside encrypted messages).
+
+- **`POST /v1/calls/links`** `{"link": hex32, "admin": hex32, "media": "audio" | "video",
+  "lobby": bool, "ttl_secs": n}`: creates it. `ttl_secs` defaults to a day, at most 30 days
+  (400 `ttl_secs`). 204; 409 `exists`. Counts against the call budget.
+- **`POST /v1/calls/links/join`** `{"link": hex32, "admin": hex32?, "lobby": hex16?, "card": hex?}`:
+  - with the right admin token, or on a link without a lobby: 200 ticket;
+  - otherwise with a `card` (a sealed card, §8.4, 29 to 512 bytes): 202 `{"lobby": handle}`, a
+    random 16-byte place in the lobby;
+  - polling with that handle, from the same device: 202 while waiting, 200 ticket once admitted
+    (once), 404 once declined;
+  - a wrong admin token, another device's handle, an unknown, expired or revoked link: 404.
+- **`POST /v1/calls/links/lobby`** `{"link", "admin"}`: 200 `{"waiting": [{"handle": hex,
+  "card": hex}]}`. Admins open the cards with the link key and decide.
+- **`POST /v1/calls/links/admit`** `{"link", "admin", "handle", "admit": bool}`: 204; 404 for no
+  such handle.
+- **`POST /v1/calls/links/revoke`** `{"link", "admin"}`: deletes the link and its lobby and ends
+  its call for everyone (LiveKit `DeleteRoom`). 204.
+
+A lobby holds at most 64 people (409 `full`) for 10 minutes; each entry holds a keyed tag of the
+waiting device (so only it can redeem the place) and the sealed card. Lobby polls and admin calls
+have their own budget per device (1,800 an hour, burst 120). The worker deletes expired links.
+
+### 8.8 Call records and LiveKit webhooks (M2, M3, D-0087, D-0088)
+
+Live calls are records in `valkey-hot` under keyed names, never in SurrealDB:
+
+```text
+cl:r:<tag(room)>   version (1) | kind | media | created_ms | caller [16] callee [16]   (1:1)
+                                                         | group tag [16]            (group)
+                                                         | link tag [16]             (link)
+cl:g:<tag(group)>  version (1) | room [16] | media | created_ms      the group's live call
+cl:q:<tag(link)>   lobby: handle → version | state | device tag [16] | sealed card
+cl:w:<tag(event)>  a webhook event already handled
+```
+
+They expire after the call's longest life (24 hours), the lobby after 10 minutes, the webhook
+marks after an hour. LiveKit sends its webhooks to the `calls` service on the same host, over
+loopback. A webhook is handled only if its token verifies with the LiveKit API secret, its
+`sha256` claim is the body's hash, its time is within 5 minutes of ours, and its ID is new;
+retries and replays are answered 200 and do nothing. `room_finished` deletes the call's record
+and the group's pointer. Room, participant and track events feed aggregate counters
+(`songbird_calls_*`), never a label naming a room. Webhook bodies are not stored or logged (they
+carry LiveKit's per-room TURN credential).
+
+LiveKit runs with `auto_create: false`, so a token for a room that does not exist admits nobody: a
+finished 1:1 call cannot be rejoined. If a webhook is lost, the next group start finds the room
+gone (`ListRooms`) and starts a new call.
+
 ## 9. Push (Prompt 8)
 
 ## 10. Settings sync and presence (Prompt 9)

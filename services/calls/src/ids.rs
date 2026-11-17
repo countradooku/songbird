@@ -131,6 +131,28 @@ impl CallKeys {
         format!("cl:g:{}", hex::encode(self.group_tag(group)))
     }
 
+    /// The tag of a call link, from the hash the registry names it by: names its call record and
+    /// lobby.
+    #[must_use]
+    pub fn link_tag(&self, link_hash: &[u8; 32]) -> Tag {
+        self.tag(b"link", link_hash)
+    }
+
+    /// The keyed tag of a device, as a lobby entry holds it.
+    #[must_use]
+    pub fn device_tag(&self, device: &DeviceId) -> Tag {
+        self.tag(b"device", device.as_bytes())
+    }
+
+    /// The record marking a webhook event handled (`cl:w:<tag>`).
+    #[must_use]
+    pub fn webhook_record(&self, event: &str) -> String {
+        format!(
+            "cl:w:{}",
+            hex::encode(self.tag(b"webhook", event.as_bytes()))
+        )
+    }
+
     /// A budget's record (`cl:b:<kind>:<tag>`): `kind` names the budget, `subject` what it
     /// counts (an account or a device), never stored in the name.
     #[must_use]

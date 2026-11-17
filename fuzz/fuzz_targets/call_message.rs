@@ -4,7 +4,7 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use prost::Message as _;
-use songbird_content::call::{open_card, seal_card_with_nonce, validate, validate_card};
+use songbird_content::call::{open_card, seal_card, validate, validate_card};
 use songbird_content::schema::{CallLinkCard, CallMessage};
 
 const KEY: [u8; 32] = [7; 32];
@@ -16,7 +16,7 @@ fuzz_target!(|data: &[u8]| {
     let _ = open_card(&KEY, data);
     if let Ok(c) = CallLinkCard::decode(data)
         && validate_card(&c).is_ok()
-        && let Ok(sealed) = seal_card_with_nonce(&KEY, &c, [1; 12])
+        && let Ok(sealed) = seal_card(&KEY, &c)
     {
         assert_eq!(open_card(&KEY, &sealed).unwrap(), c);
         assert!(open_card(&[8; 32], &sealed).is_err());

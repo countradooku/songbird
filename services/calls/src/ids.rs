@@ -31,9 +31,10 @@ impl RoomId {
     /// `None` if the random source failed.
     #[must_use]
     pub fn random() -> Option<Self> {
-        let mut b = [0u8; 16];
-        aws_lc_rs::rand::fill(&mut b).ok()?;
-        Some(Self(b))
+        let rng = aws_lc_rs::rand::SystemRandom::new();
+        Some(Self(
+            aws_lc_rs::rand::generate::<[u8; 16]>(&rng).ok()?.expose(),
+        ))
     }
 
     /// From its bytes.

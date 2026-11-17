@@ -13,7 +13,7 @@
 //! decoded frame proves decryption.
 //!
 //! ```text
-//! cargo run --release -- <ws url> <http url> <api key> <api secret>
+//! LIVEKIT_WS_URL=ws://… LIVEKIT_URL=http://… LIVEKIT_API_KEY=… LIVEKIT_API_SECRET=… cargo run --release
 //! ```
 //! The LiveKit node must advertise an address this machine reaches (`rtc.node_ip`).
 
@@ -251,16 +251,21 @@ fn provider() -> KeyProvider {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    let [_, ws, http, key, secret] = args.as_slice() else {
-        bail!("usage: calls-harness <ws url> <http url> <api key> <api secret>");
+    // Settings from the environment (the API secret never on a command line).
+    let var = |name: &str| {
+        std::env::var(name).with_context(|| {
+            format!("{name} is not set (LIVEKIT_WS_URL, LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET)")
+        })
     };
+    let (ws, http) = (var("LIVEKIT_WS_URL")?, var("LIVEKIT_URL")?);
+    let (key, secret) = (var("LIVEKIT_API_KEY")?, var("LIVEKIT_API_SECRET")?);
+    let ws = ws.as_str();
     let calls = Calls::new(
         &random32(),
-        key,
-        secret.clone().into(),
+        &key,
+        secret.into(),
         ws,
-        http,
+        &http,
         None,
         CallLimits::default(),
     )

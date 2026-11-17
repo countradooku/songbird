@@ -242,8 +242,9 @@ pub fn seal_card_with_nonce(
 /// # Errors
 /// As [`seal_card_with_nonce`]; [`Error::Invalid`] if the system's random source fails.
 pub fn seal_card(key: &[u8; KEY_LEN], card: &CallLinkCard) -> Result<Vec<u8>, Error> {
-    let mut nonce = [0u8; NONCE_LEN];
-    aws_lc_rs::rand::fill(&mut nonce).map_err(|_| Error::Invalid("call.random"))?;
+    let nonce = aws_lc_rs::rand::generate::<[u8; NONCE_LEN]>(&aws_lc_rs::rand::SystemRandom::new())
+        .map_err(|_| Error::Invalid("call.random"))?
+        .expose();
     seal_card_with_nonce(key, card, nonce)
 }
 

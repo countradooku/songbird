@@ -18,7 +18,8 @@ build time).
 # Windows: a short target directory (libwebrtc's headers exceed MAX_PATH under a deep one);
 # .cargo/config.toml links the static C runtime, as libwebrtc's prebuilt libraries do.
 CARGO_TARGET_DIR=C:/Users/<short>/.sbh cargo build --release
-calls-harness ws://127.0.0.1:47880 http://127.0.0.1:47880 <api key> <api secret>
+LIVEKIT_WS_URL=ws://127.0.0.1:47880 LIVEKIT_URL=http://127.0.0.1:47880 \
+  LIVEKIT_API_KEY=<key> LIVEKIT_API_SECRET=<secret> calls-harness
 ```
 
 The LiveKit node must create no room on join (`auto_create: false`, as deployed) and advertise an

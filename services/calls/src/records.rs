@@ -506,8 +506,9 @@ impl Records<'_> {
         device: Tag,
         card: Vec<u8>,
     ) -> Result<[u8; 16], LobbyError> {
-        let mut handle = [0u8; 16];
-        aws_lc_rs::rand::fill(&mut handle).map_err(|_| LobbyError::Store)?;
+        let handle = aws_lc_rs::rand::generate::<[u8; 16]>(&aws_lc_rs::rand::SystemRandom::new())
+            .map_err(|_| LobbyError::Store)?
+            .expose();
         let entry = LobbyEntry {
             state: Waiting::Waiting,
             device,

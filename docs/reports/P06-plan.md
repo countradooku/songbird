@@ -2,7 +2,7 @@
 
 - Date: 2026-11-17
 - Prompt: [06-media.md](../prompts/06-media.md)
-- Status: **proposed**, waiting for the owner (D-0079)
+- Status: **agreed by the owner on 2026-11-17**, every recommended answer below (D-0079).
 - Base: `main` at `ae76726` (Prompt 5 and its follow-ups done, PR #60).
 - Way of working (the owner, 2026-11-17: "all the milestones in the same PR"): one branch and one PR
   (`claude/p06-media`). Each milestone gets its own commit, tests, report `docs/reports/P06-Mn.md`,

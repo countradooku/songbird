@@ -20,7 +20,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
-- Prompt 6 plan (`P06-plan.md`, D-0079): **proposed, waiting for the owner**: downloads without
+- Prompt 6 plan (`P06-plan.md`, D-0079): **approved by the owner on 2026-11-17**, every recommendation: downloads without
   device authentication, size limit and budgets, pack lifetime, GIF provider and design.
 - Prompt 5 follow-ups (`P05-followups.md`, D-0075 to D-0078; PR #60): **approved by the owner
   on 2026-11-17** ("approve all"): the three milestones and the review's fixes; the four
@@ -130,7 +130,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0079 — Prompt 6: the plan, and the owner's decisions it needs
 
 - Date: 2026-11-17
-- Status: proposed (waiting for the owner)
+- Status: accepted (owner, 2026-11-17, every recommendation)
 - Decided by: owner, on the agent's plan `docs/reports/P06-plan.md`
 - Context: Prompt 2 (D-0036) built single-use, exact-size grants, uploads streamed to RustFS and
   deletion after the last fetch or 30 days. Prompt 6 adds a chunked encryption format, resumable
@@ -138,7 +138,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   services (D-0035), so signed URLs are Songbird's own. Downloads are signed by a device today.
   Tenor's API closed on 2026-06-30.
 - Options considered and evidence: in the plan ("Findings").
-- Recommendations to decide:
+- Decisions (the agent's recommendations, all accepted by the owner):
   1. Downloads without device authentication: the object ID is the capability; a 10-minute
      signed URL serves range requests; fetches confirmed explicitly.
   2. 2 GiB per attachment; 10 GiB uploaded per account per 24 hours; 300 grants per hour.
@@ -148,7 +148,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   5. Benchmarks decide AES-256-GCM versus ChaCha20-Poly1305, resumable parts versus tus, and a
      caching proxy.
   6. One branch and one PR for every milestone (the owner, 2026-11-17).
-- Consequences: to record once decided.
+- Consequences: downloads stop naming devices (the attachment row in threat model §1 changes, for
+  approval with M3); the attachment limit rises to 2 GiB; packs are anonymous; GIPHY's API key
+  and terms are the owner's before deployment; M1 starts.
 
 ## D-0078 — Prompt 5 follow-ups: the security review's fixes
 

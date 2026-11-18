@@ -6,7 +6,8 @@
   [M6](P08-M6.md) (D-0098), [M4](P08-M4.md) and [M5](P08-M5.md) first part (D-0099); the
   security review's fixes (D-0100)
 - Branch `claude/p08-push`, PR #65 (merged with `main`'s app redesign, PR #66).
-- Status: **awaiting the owner**. This gate covers the server side and the app's own
+- Status: **approved by the owner on 2026-11-18** ("Approve all"), with the four threat-model
+  §1 rows; where alerts go is still the owner's to choose. This gate covers the server side and the app's own
   notifications. The iOS and Android host projects and the real-provider checks are **deferred by
   the owner until the whole app is built** (2026-11-18); they will close M4 and M5.
 
@@ -73,7 +74,7 @@ findings, two medium, five low, three informational. All are fixed or recorded i
 
 ## Threat model
 
-Four new §1 rows, **awaiting the owner's approval**: `SILENT` on a send (and what it reveals);
+Four new §1 rows, **approved by the owner on 2026-11-18**: `SILENT` on a send (and what it reveals);
 push registrations in their own database; call rings on their own job stream; a call ring's
 timing seen by Apple. §3.25 holds the STRIDE rows.
 

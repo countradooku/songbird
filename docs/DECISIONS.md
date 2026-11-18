@@ -25,10 +25,11 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   projects (APNs token, PushKit with CallKit, FCM, UnifiedPush, ConnectionService), the Apple
   bundle IDs and filtering entitlement, the Firebase Android app, and the real-provider checks
   (APNs sandbox wake-up, VoIP on a physical iPhone, FCM on the emulator).
-- Prompt 8 gate (`P08-gate.md`, D-0095 to D-0100; PR #65): **awaiting the owner**: M1, M2, M3,
-  M6 and the first part of M4 and M5 with the security review's fixes; four threat-model §1 rows
-  (`SILENT`; push registrations in their own database; call rings on their own job stream; a
-  ring's timing seen by Apple); where alerts go.
+- Prompt 8 gate (`P08-gate.md`, D-0095 to D-0100; PR #65): **approved by the owner on 2026-11-18**
+  ("Approve all"): M1, M2, M3, M6 and the first part of M4 and M5 with the security review's
+  fixes; the four threat-model §1 rows (`SILENT`; push registrations in their own database; call
+  rings on their own job stream; a ring's timing seen by Apple). Still the owner's: where alerts
+  go (email, ntfy or Matrix). The rest of M4 and M5 is deferred until the whole app is built.
 - Prompt 8 plan (`P08-plan.md`, D-0094): **approved by the owner on 2026-11-18** ("Approve
   all"), every recommendation, desktop without a push service included. Still the owner's: where
   alerts go (email, ntfy or Matrix; M3 builds with the receiver left to configure); before M4,
@@ -364,8 +365,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0095 — Prompt 8, milestone 1: rings on their own stream, trailing wake-ups, `SILENT` sends, push tokens in their own database
 
 - Date: 2026-11-18
-- Status: accepted (agent, under D-0094); three threat-model §1 rows **awaiting the owner's
-  approval**; report `docs/reports/P08-M1.md`
+- Status: accepted (agent, under D-0094); its threat-model §1 rows **approved by the owner on
+  2026-11-18** with the Prompt 8 gate; report `docs/reports/P08-M1.md`
 - Decided by: agent, on the owner-approved plan (D-0094 questions 1 and 3, findings 1 and 2)
 - Decision:
   - **Rings.** `Work::Ring { device, until_ms }` on `j:ring` (sealed like every job; the push kind's

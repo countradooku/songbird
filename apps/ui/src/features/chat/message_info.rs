@@ -31,17 +31,18 @@ fn body(chat: ChatId, id: MsgId) -> AnyElement {
     };
     let cv = Conv::new(chat, s);
     let item: ItemMemo = computed(move || {
-        s.message(chat, id).map(|m| Item { m, place: Place { day_break: false, first: true, last: true } })
+        s.message(chat, id).map(|m| Item { m, place: Place { day_break: false, time: false, first: true, last: true } })
     });
-    // The message on the chat's background, a hairline under the band (it
-    // is close to the page in dark); the bubble's edge on the cards' edge.
+    // The message on the chat's own canvas (its theme), a hairline under
+    // the band (it is close to the page in dark); the bubble's edge on the
+    // cards' edge.
     let preview = view()
-        .bg(move || c::chat_bg())
+        .bg(move || cv.canvas())
         .border_b(hairline())
         .border_color(move || c::border())
         .py_6()
         .items_end()
-        .child(view().w_full().max_w(px(640.0)).px_4().self_center().items_end().child(bubbles::bubble_column(cv, item)));
+        .child(view().w_full().max_w(px(640.0)).px_4().self_center().items_end().child(bubbles::bubble_column(cv, item, false)));
     // The tick in an icon tile's width, so the labels sit on the same
     // column as every other card's titles (and its separators).
     let mark = |tick: Tick| view().w(px(30.0)).items_center().child(ticks(move || tick));

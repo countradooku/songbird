@@ -1,7 +1,10 @@
 //! The conversation's plain logic: grouping, text spans, durations,
 //! waveforms, the forward limit. No NSH here, so it is unit-tested.
 
-use crate::store::{Body, Message, day_of};
+use crate::{
+    store::{Body, Message, clock, day_label, day_of},
+    ui::Tick,
+};
 
 /// At most this many chats per forward (WhatsApp's limit against spam).
 pub const FORWARD_LIMIT: usize = 5;
@@ -9,14 +12,24 @@ pub const FORWARD_LIMIT: usize = 5;
 /// Messages closer than this (minutes) from one sender read as one run.
 const GROUP_GAP: i64 = 10;
 
+/// A pause this long (minutes) earns a time label: times show where the
+/// conversation rests, never in every bubble (REDESIGN.md "Quiet
+/// metadata"). An hour, as iMessage: at 15 minutes a family chat that
+/// trickles through the day had a label between nearly every run.
+pub const TIME_GAP: i64 = 60;
+
 /// What a row shows around its message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Place {
-    /// A date separator goes above it (a new day starts).
+    /// A new day starts here: its time label names the day too.
     pub day_break: bool,
+    /// A time label goes above it (a new day, or a pause of
+    /// [`TIME_GAP`] or more).
+    pub time: bool,
     /// First of a run from one sender (name in groups, more space above).
     pub first: bool,
-    /// Last of a run (the bubble's tail, the sender's avatar in groups).
+    /// Last of a run (the sender's avatar in groups; the run's joint
+    /// corners end here).
     pub last: bool,
 }
 
@@ -46,10 +59,39 @@ pub fn place(prev: Option<&Message>, cur: &Message, next: Option<&Message>) -> P
         // The first message after the opening notice starts its day.
         Some(p) => day_of(p.at) != day_of(cur.at) || opening_notice(p),
     };
+    let pause = prev.is_some_and(|p| cur.at - p.at >= TIME_GAP);
     Place {
         day_break,
+        time: day_break || pause,
         first: prev.is_none_or(|p| !same_run(p, cur)),
         last: next.is_none_or(|n| !same_run(cur, n)),
+    }
+}
+
+/// A time label's words: the clock ("09:24"), with the day at a day
+/// break ("Today 09:24", "Yesterday 18:02", "7 Nov 09:24").
+pub fn time_label(at: i64, day_break: bool) -> String {
+    if day_break { format!("{} {}", day_label(at), clock(at)) } else { clock(at) }
+}
+
+/// When a message was sent, in full (the desktop tooltip, message info):
+/// "Today, 09:24".
+pub fn sent_at(at: i64) -> String {
+    format!("{}, {}", day_label(at), clock(at))
+}
+
+/// The status line under the user's latest message: "Sent", "Delivered",
+/// "Read", in groups "Read by 4" once anyone read it; a failed send says
+/// "Not sent" (its Retry is a button beside it).
+pub fn status_words(status: Tick, group: bool, read_by: usize) -> String {
+    match status {
+        Tick::Sending => "Sending…".into(),
+        Tick::Sent => "Sent".into(),
+        Tick::Delivered => "Delivered".into(),
+        Tick::Read | Tick::Played if group && read_by > 0 => format!("Read by {read_by}"),
+        Tick::Read => "Read".into(),
+        Tick::Played => "Played".into(),
+        Tick::Failed => "Not sent".into(),
     }
 }
 
@@ -264,7 +306,6 @@ pub fn next_voice(messages: &[Message], index: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::Tick;
 
     fn msg(id: u64, from: Option<u64>, at: i64, body: Body) -> Message {
         Message {
@@ -293,9 +334,9 @@ mod tests {
         let a = text(1, Some(2), -30);
         let b = text(2, Some(2), -28);
         let c = text(3, None, -27);
-        assert_eq!(place(None, &a, Some(&b)), Place { day_break: true, first: true, last: false });
-        assert_eq!(place(Some(&a), &b, Some(&c)), Place { day_break: false, first: false, last: true });
-        assert_eq!(place(Some(&b), &c, None), Place { day_break: false, first: true, last: true });
+        assert_eq!(place(None, &a, Some(&b)), Place { day_break: true, time: true, first: true, last: false });
+        assert_eq!(place(Some(&a), &b, Some(&c)), Place { day_break: false, time: false, first: false, last: true });
+        assert_eq!(place(Some(&b), &c, None), Place { day_break: false, time: false, first: true, last: true });
         // A long gap starts a new run.
         let late = text(4, Some(2), -5);
         assert!(place(Some(&b), &late, None).first);
@@ -304,6 +345,31 @@ mod tests {
         let today = text(6, Some(2), -620);
         let p = place(Some(&yesterday), &today, None);
         assert!(p.day_break && p.first);
+    }
+
+    #[test]
+    fn times_show_where_the_conversation_pauses() {
+        let a = text(1, Some(2), -200);
+        let soon = text(2, None, -141);
+        let later = text(3, None, -81);
+        assert!(!place(Some(&a), &soon, None).time, "59 minutes: no label");
+        assert!(place(Some(&soon), &later, None).time, "an hour: a label");
+        assert_eq!(time_label(-60, false), "09:24");
+        assert_eq!(time_label(-60, true), "Today 09:24");
+        assert_eq!(time_label(-60 * 11, true), "Yesterday 23:24");
+        // A day break always has its label, even after a short pause.
+        let yesterday = text(4, Some(2), -625);
+        let today = text(5, Some(2), -620);
+        assert!(place(Some(&yesterday), &today, None).time);
+    }
+
+    #[test]
+    fn status_words_stay_quiet() {
+        assert_eq!(status_words(Tick::Delivered, false, 0), "Delivered");
+        assert_eq!(status_words(Tick::Read, false, 0), "Read");
+        assert_eq!(status_words(Tick::Read, true, 4), "Read by 4");
+        assert_eq!(status_words(Tick::Read, true, 0), "Read");
+        assert_eq!(status_words(Tick::Failed, true, 0), "Not sent");
     }
 
     #[test]

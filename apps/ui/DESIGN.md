@@ -1,5 +1,9 @@
 # Songbird design system (A1 foundations)
 
+> **Superseded in part by [REDESIGN.md](REDESIGN.md) (Floating, 2026-11-18).** Where the two disagree,
+> REDESIGN.md wins: floating panes instead of the rail, Spaces instead of Communities, the Lists capsule
+> instead of filter chips, no per-bubble ticks or times, per-chat themes, and ⌘K jump-to.
+
 The promise: **as easy as WhatsApp, as trustworthy as Proton.** Calm, clear,
 familiar; security visible but never in the way. This file is the app's
 design standard (NSH Design Guides, "Establish the app's design system

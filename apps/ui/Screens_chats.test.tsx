@@ -54,12 +54,17 @@ for (const scheme of ["light", "dark"] as const) {
       await shot(`desktop-pinned-${scheme}`);
     });
     await step("archived", async () => {
-      await app.press("text:Archived");
+      // "Archived · 2" is now a quiet row at the list's end, not the top
+      // (its accessibility label: "Archived, 2 chats").
+      // REDESIGN: the list is virtual; if the footer isn't made until the
+      // list scrolls near its end, scroll the chat list here first.
+      await app.press("label:/^Archived, /");
       await shot(`desktop-archived-${scheme}`);
     });
     await back();
     await step("requests", async () => {
-      await app.press("text:Message requests");
+      // An inline notice at the top now: "1 message request".
+      await app.press("text:/^\\d+ message requests?$/");
       await shot(`desktop-requests-${scheme}`);
     });
     await back();
@@ -82,13 +87,29 @@ for (const scheme of ["light", "dark"] as const) {
   test(`phone ${scheme}`, async () => {
     const { app, shot, back } = await start(390, 844, scheme);
     await shot(`phone-${scheme}`);
-    await step("unread chip", async () => {
+    // The filter chips became the Lists capsule (All plus the user's
+    // lists) and an Unread toggle beside the search field.
+    await step("unread toggle", async () => {
       await app.press("label:Unread");
       await shot(`phone-unread-${scheme}`);
-      await app.press("label:Channels");
+      await app.press("label:Unread");
+    });
+    // Channels and Favourites are views in the header's More options menu.
+    // REDESIGN: assumes the menu items are named by their text.
+    await step("views menu", async () => {
+      await app.press("label:More options >> nth=0");
+      await app.press("text:Channels");
       await shot(`phone-channels-${scheme}`);
-      await app.press("label:Favourites");
+      await app.press("label:More options >> nth=0");
+      await app.press("text:Favourites");
       await shot(`phone-favourites-${scheme}`);
+      await app.press("label:All");
+    });
+    await step("lists capsule", async () => {
+      await app.press("label:Family");
+      await shot(`phone-list-family-${scheme}`);
+      await app.press("label:Work");
+      await shot(`phone-list-work-${scheme}`);
       await app.press("label:All");
     });
     await step("phone hold", async () => {
@@ -96,18 +117,19 @@ for (const scheme of ["light", "dark"] as const) {
       await shot(`phone-hold-${scheme}`);
     });
     await step("phone right click", async () => {
-      await app.rightClick("text:Mama");
+      await app.rightClick("text:Mama >> nth=0");
       await shot(`phone-menu-${scheme}`);
       await app.press("text:Mark as unread");
       await shot(`phone-marked-${scheme}`);
     });
     await step("phone requests", async () => {
-      await app.press("text:Message requests");
+      await app.press("text:/^\\d+ message requests?$/");
       await shot(`phone-requests-${scheme}`);
     });
     await back();
     await step("phone archived", async () => {
-      await app.press("text:Archived");
+      // REDESIGN: at the list's end now; may need a scroll first (see above).
+      await app.press("label:/^Archived, /");
       await shot(`phone-archived-${scheme}`);
     });
     await back();

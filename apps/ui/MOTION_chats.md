@@ -1,5 +1,9 @@
 # Motion inventory: chat list (A5)
 
+> **Superseded in part by [REDESIGN.md](REDESIGN.md) (Floating, 2026-11-18).** Where the two disagree,
+> REDESIGN.md wins: floating panes instead of the rail, Spaces instead of Communities, the Lists capsule
+> instead of filter chips, no per-bubble ticks or times, per-chat themes, and ⌘K jump-to.
+
 Tokens from `ui::motion`. Every line checks `motion::reduced()`.
 
 | Change | Motion | Reduced |
@@ -22,3 +26,12 @@ Tokens from `ui::motion`. Every line checks `motion::reduced()`.
 Verified in the running app (macOS host, screenshots): row hover/selected wash, desktop menu and
 submenu, pin reorder, chips, page push. Not verifiable on screenshots: the exact entrance curve and
 the phone long-press sheet (the macOS host's mouse never triggers a hold, by design of `context_menu`).
+
+## Floating redesign (REDESIGN.md)
+
+| Change | Motion | Reduced |
+| --- | --- | --- |
+| A list chosen in the Lists capsule | The indicator springs to the segment; rows glide (`animate_change`) | Indicator jumps; rows swap |
+| Unread toggle | Rows that leave fade, the rest glide | Instant |
+| Pin or unpin | The chat leaves the rows and appears in pinned people (glide and fade) | Instant |
+| Unread ring colour | Fades over `BASE` | Kept (a colour fade) |

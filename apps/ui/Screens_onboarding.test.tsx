@@ -24,12 +24,9 @@ async function newUser(prefix: string, size: [number, number], scheme: "light" |
   await app.press("Get started");
   await pause(500);
   await shot("03-invite");
-  await app.type("Invite code", "usedcode");
-  await app.press("Continue");
-  await pause(1100);
-  await shot("04-invite-refused");
-  await app.clear("Invite code");
-  await app.type("Invite code", "K7P2QX9M");
+  // A refused invite now shows after the username step (the server checks
+  // it when the account is made); Polish_account covers that path.
+  await app.type("Invite code", "K7P2QX9MAB3DEH4JNR5STV6W");
   await app.press("Continue");
   await pause(1200);
   await app.type("e.g. ana.popescu", "ana");
@@ -55,9 +52,8 @@ async function newUser(prefix: string, size: [number, number], scheme: "light" |
   await app.press("Continue");
   await pause(500);
   await shot("11-backup-offer");
+  // The offer is the backup intro: the wizard starts at the destination.
   await app.press("Set up backups");
-  await pause(500);
-  await app.press("Continue");
   await pause(500);
   await shot("12-backup-where");
   await app.press("Continue");
@@ -107,7 +103,8 @@ async function returningUser(prefix: string, size: [number, number], scheme: "li
   await app.type("XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX", "SB4K7Q2MXN8P3HVAR9TELW6CJD5F2KBG");
   await pause(300);
   await shot("r2-restore-key");
-  await app.press("Try a damaged backup (preview)");
+  // Debug builds only: the damaged-backup path has no button, only a key.
+  await app.keyboard.press("mod+alt+d");
   await pause(1300);
   await shot("r3-restore-running");
   await pause(1500);
@@ -119,18 +116,22 @@ async function returningUser(prefix: string, size: [number, number], scheme: "li
   await shot("r5-restore-progress");
   await pause(2400);
   await shot("r6-restore-done");
-  await app.press("Back");
-  await pause(400);
-  await app.press("Link to another device");
-  await pause(600);
-  await shot("r7-link");
-  await pause(4500);
-  await shot("r8-linked");
-  await app.press("Back");
-  await pause(400);
-  await app.press("I lost my recovery key");
+  // A finished restore has no way back (it continues into the app), so the
+  // link and lost-key screens start from a fresh window.
+  const again = await fresh(size, scheme);
+  const shot2 = (name: string) => again.screenshot(`shots/onboarding-${prefix}-${name}.png`);
+  await again.press("I already have an account");
   await pause(500);
-  await shot("r9-lost-key");
+  await again.press("Link to another device");
+  await pause(600);
+  await shot2("r7-link");
+  await pause(4500);
+  await shot2("r8-linked");
+  await again.press("Back");
+  await pause(400);
+  await again.press("I lost my recovery key");
+  await pause(500);
+  await shot2("r9-lost-key");
 }
 
 test("returning user, desktop, dark", async () => {

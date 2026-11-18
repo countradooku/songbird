@@ -1,5 +1,5 @@
-//! A6: groups, communities and channels — the Communities tab, the new
-//! group flow, group, community and channel info, roles and permissions,
+//! A6: groups, spaces and channels — the Spaces tab, the new group flow,
+//! group, space and channel info, roles and permissions,
 //! invite links, join requests and the member change log.
 //!
 //! Roles are clear everywhere: every action a member cannot take says who
@@ -32,9 +32,9 @@ pub(crate) use create::check_circle;
 
 // ------------------------------------------------------------------ entry points
 
-/// The Communities tab: the user's communities with their groups, then
-/// the channels they follow.
-pub fn communities_tab() -> AnyElement {
+/// The Spaces tab: the user's spaces with their groups, then the channels
+/// they follow. (In the store a space is still a `ChatKind::Community`.)
+pub fn spaces_tab() -> AnyElement {
     let s = store();
     let communities = move || {
         s.chats.with(|cs| {
@@ -45,16 +45,16 @@ pub fn communities_tab() -> AnyElement {
     view()
         .flex_1()
         .child(app_header(
-            "Communities",
+            "Spaces",
             false,
-            Some(icon_btn(Icon::Plus, "New community", new_community).into_element()),
+            Some(icon_btn(Icon::Plus, "New space", new_community).into_element()),
         ))
         .child(page_scroll(
             view()
                 .pt_3()
                 .gap_4()
                 .child(when(none, intro_card).otherwise(move || {
-                    list_card([list_row(square_tile(Icon::Plus), "New community", None, None, new_community)
+                    list_card([list_row(square_tile(Icon::Plus), "New space", None, None, new_community)
                         .into_element()])
                 }))
                 .child(
@@ -78,7 +78,7 @@ pub fn group_info(chat: ChatId) {
     crate::nav::push(format!("info:{chat}"), move || info::info_page(chat));
 }
 
-/// A community's home, pushed.
+/// A space's home, pushed.
 pub fn community_home(chat: ChatId) {
     crate::nav::push(format!("community:{chat}"), move || community::home_page(chat));
 }
@@ -91,7 +91,7 @@ fn intro_card() -> View {
             .items_center()
             .gap_3()
             .py_6()
-            .child(square_tile(Icon::Communities).size(px(56.0)))
+            .child(square_tile(Icon::Spaces).size(px(56.0)))
             .child(
                 text("Bring your groups together")
                     .text_size(px(font::TITLE))
@@ -100,15 +100,15 @@ fn intro_card() -> View {
                     .role(AccessibilityRole::Header),
             )
             .child(
-                muted("A community keeps related groups in one place, with an announcement group to reach everyone at once.")
+                muted("A space keeps related groups in one place, with an announcement group to reach everyone at once.")
                     .text_center()
                     .max_w(px(320.0)),
             )
-            .child(btn("Start a community", Variant::Primary, BtnSize::Md, new_community)),
+            .child(btn("New space", Variant::Primary, BtnSize::Md, new_community)),
     )
 }
 
-/// One community: its header, its groups (Announcements first), View all.
+/// One space: its header, its groups (Announcements first), View all.
 fn community_block(s: Store, id: ChatId) -> View {
     view().child(dynamic(move || {
         let community = s.chat(id);
@@ -133,7 +133,7 @@ fn community_block(s: Store, id: ChatId) -> View {
     }))
 }
 
-/// A group inside a community list: its last line and unread count.
+/// A group inside a space's list: its last line and unread count.
 pub(crate) fn group_row(s: Store, g: &Chat) -> AnyElement {
     let id = g.id;
     let unread = g.unread;
@@ -231,7 +231,7 @@ fn chevron() -> View {
     view().text_color(move || c::muted_fg()).child(icon(Icon::ChevronRight, 18.0))
 }
 
-/// One row of the Communities tab and a community's home: a 40pt
+/// One row of the Spaces tab and a space's home: a 40pt
 /// picture, a one-line title, a one-line subtitle (previews never wrap,
 /// so rows keep one height), and an optional trailing element. The
 /// picture and the text block are centred as a unit.
@@ -272,9 +272,9 @@ pub(crate) fn list_row(
         )
 }
 
-/// "View all" under a community's groups: a short row whose label starts
-/// on the text column, in the primary ink, so it reads as a link to the
-/// community rather than as another group.
+/// "View all" under a space's groups: a short row whose label starts on
+/// the text column, in the primary ink, so it reads as a link to the space
+/// rather than as another group.
 fn view_all(on_press: impl Fn() + 'static) -> nsh_base::ButtonElement {
     press_surface(Press::Row, on_press).accessibility_label("View all").child(
         view()
@@ -318,10 +318,10 @@ pub(crate) fn card_rows(rows: impl IntoIterator<Item = AnyElement>, inset: f32) 
         }))
 }
 
-/// A community's mark: its picture (a mock scene) in a rounded square,
+/// A space's mark: its picture (a mock scene) in a rounded square,
 /// with the small kind badge the chat list puts on groups (a 2pt ring in
 /// `ring`, the surface it sits on, around a quiet disc and glyph), here
-/// with the communities glyph. Rounded squares are communities; circles
+/// with the Spaces glyph. Rounded squares are spaces; circles
 /// are people, groups and channels.
 pub(crate) fn community_mark(seed: u64, size: f32, ring: fn() -> AdaptiveColor) -> View {
     let big = size >= 64.0;
@@ -360,12 +360,12 @@ pub(crate) fn community_mark(seed: u64, size: f32, ring: fn() -> AdaptiveColor) 
                         .justify_center()
                         .bg(move || c::secondary())
                         .text_color(move || c::muted_fg())
-                        .child(icon(Icon::Communities, ((disc * 0.6) / 2.0).round() * 2.0)),
+                        .child(icon(Icon::Spaces, ((disc * 0.6) / 2.0).round() * 2.0)),
                 ),
         )
 }
 
-/// A rounded square with an icon: communities and the tab's actions.
+/// A rounded square with an icon: spaces and the tab's actions.
 pub(crate) fn square_tile(glyph: Icon) -> View {
     view()
         .size(px(40.0))
@@ -378,7 +378,7 @@ pub(crate) fn square_tile(glyph: Icon) -> View {
         .child(icon(glyph, 20.0))
 }
 
-/// The picture of a group, community or channel.
+/// The picture of a group, space or channel.
 pub(crate) fn chat_avatar(chat: &Chat, size: f32) -> View {
     let seed = chat.seed;
     match chat.kind {
@@ -398,7 +398,7 @@ pub(crate) fn chat_avatar(chat: &Chat, size: f32) -> View {
     }
 }
 
-/// The picture of a group, community, channel or person, for other
+/// The picture of a group, space, channel or person, for other
 /// features' rows (forward lists).
 pub fn chat_avatar_for(chat: &Chat, size: f32) -> View {
     chat_avatar(chat, size)

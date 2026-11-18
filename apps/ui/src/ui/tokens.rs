@@ -8,8 +8,13 @@ use nsh_core::prelude::*;
 
 /// A custom colour role from `theme.json`. A missing token shows as the
 /// destructive colour so it is caught in review instead of hiding.
+///
+/// NSH's own lookup comes first. The iOS release runtime of NSH 0.6 drops
+/// custom token names (the standard roles survive; seen on the iPhone
+/// simulator as red capsules), so the app's own copy of the tokens it
+/// applied (`theming::custom_color`) answers when NSH has none.
 fn role(name: &str) -> AdaptiveColor {
-    theme().color(name).unwrap_or(theme().destructive)
+    theme().color(name).or_else(|| crate::theming::custom_color(name)).unwrap_or(theme().destructive)
 }
 
 /// Named colour roles the default shadcn set does not have.
@@ -72,6 +77,20 @@ pub mod c {
     pub fn raised() -> AdaptiveColor { role("raised") }
     /// The secondary button's fill: distinct from cards, sheets and popovers.
     pub fn control() -> AdaptiveColor { role("control") }
+    /// The wide window's canvas behind the floating panes: a step under
+    /// the pane (darker in light and dark; lighter in high-contrast dark,
+    /// where nothing is darker than the black page).
+    pub fn canvas() -> AdaptiveColor { role("canvas") }
+    /// A floating pane's surface: the page's own colour (`background`), so
+    /// content made for a page sits in a pane seamlessly.
+    pub fn pane() -> AdaptiveColor { role("pane") }
+    /// A pane's hairline edge on the canvas (Apple, Fluent, Adwaita).
+    pub fn pane_border() -> AdaptiveColor { role("pane-border") }
+    /// A capsule floating over a conversation (header, composer, header
+    /// actions): the skin's raised surface.
+    pub fn capsule() -> AdaptiveColor { role("capsule") }
+    /// A capsule's hairline edge.
+    pub fn capsule_border() -> AdaptiveColor { role("capsule-border") }
     /// Initials on the avatar hues: white in both themes (large text).
     pub fn on_avatar() -> AdaptiveColor { role("avatar-foreground") }
 
@@ -102,6 +121,8 @@ pub mod radius {
     pub fn bubble() -> Points { px(spec().radius.bubble) }
     /// Sheets' top corners.
     pub fn sheet() -> Points { px(spec().radius.sheet) }
+    /// The wide window's floating panes.
+    pub fn pane() -> Points { px(spec().radius.pane) }
 }
 
 /// The type scale, in points. Phones get a step up for body text (16pt

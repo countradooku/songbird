@@ -6,12 +6,12 @@
 
 use std::time::Duration;
 
-use nsh_core::{TouchEvent, TouchPhase, element::input, prelude::*};
+use nsh_core::{LayoutCurve, LayoutTransition, TouchEvent, TouchPhase, element::input, prelude::*};
 
 use super::{Conv, Rec, logic};
 use crate::{
     store::{Body, ChatKind, Role},
-    ui::*,
+    ui::{floating, *},
 };
 
 /// What the bottom of the conversation shows.
@@ -46,34 +46,52 @@ fn mode(cv: Conv) -> Mode {
     }
 }
 
-/// The bottom bar for the current mode.
+/// The bottom bar for the current mode, floating over the canvas 12pt in
+/// from the pane's sides and bottom (REDESIGN.md "Phone layout"), in the
+/// messages' column.
 pub(crate) fn bottom(cv: Conv) -> AnyElement {
     let current = computed(move || mode(cv));
     view()
-        .pb_safe_area()
-        .child(dynamic(move || {
-            let m = current.get();
-            Some(untracked(|| match m {
-                Mode::Compose => composer(cv),
-                Mode::Select => select_bar(cv),
-                Mode::Request => request_bar(cv),
-                Mode::Blocked => blocked_bar(cv),
-                Mode::AdminsOnly => notice_bar(Icon::Megaphone, "Only admins can send messages"),
-                Mode::Follower => follower_bar(cv),
-            }))
-        }))
+        .w_full()
+        .items_center()
+        .px(px(INSET))
+        .when(cv.wide, |v| v.pb(px(INSET)))
+        // Phones: over the home indicator at rest; on the keyboard's edge
+        // while it shows (the indicator is under the keyboard then).
+        .when(!cv.wide, |v| {
+            v.pb(move || px(if keyboard_height().0 > 0.0 { INSET } else { safe_area().bottom.0 + INSET }))
+        })
+        .pointer_events(PointerEvents::BoxNone)
+        .child(
+            view().w_full().max_w(px(760.0)).pointer_events(PointerEvents::BoxNone).child(dynamic(move || {
+                let m = current.get();
+                Some(untracked(|| match m {
+                    Mode::Compose => composer(cv),
+                    Mode::Select => select_bar(cv),
+                    Mode::Request => request_bar(cv),
+                    Mode::Blocked => blocked_bar(cv),
+                    Mode::AdminsOnly => notice_bar(Icon::Megaphone, "Only admins can send messages"),
+                    Mode::Follower => follower_bar(cv),
+                }))
+            })),
+        )
         .into_element()
 }
 
-/// A calm bar holding one line or a few actions.
+/// How far the composer floats in from the pane's edges.
+const INSET: f32 = 12.0;
+
+/// A floating surface in the capsules' language with `corner` radius:
+/// the composer (a capsule whose ends keep their one-line radius as it
+/// grows) and the bars that replace it.
+fn surface(corner: f32) -> View {
+    let v = view().style_when(|| true, move |st| floating::capsule_style(st).rounded(px(corner)));
+    if skin() == Skin::Apple { v.glass_effect(nsh_core::GlassEffect::Regular) } else { v }
+}
+
+/// A calm floating bar holding one line or a few actions.
 fn bar() -> View {
-    view()
-        .bg(move || c::background())
-        .border_t_1()
-        .border_color(move || c::border())
-        .px_4()
-        .py_3()
-        .items_center()
+    surface(spec().radius.card).px_4().py_3().items_center()
 }
 
 fn notice_bar(glyph: Icon, line: &'static str) -> AnyElement {
@@ -172,15 +190,13 @@ fn select_bar(cv: Conv) -> AnyElement {
     let count = move || cv.selected.with(Vec::len);
     let ids = move || cv.selected.get_untracked();
     let any = move || count() > 0;
-    view()
+    // The selection's actions on one capsule, where the composer was.
+    surface(floating::capsule_height() / 2.0)
         .flex_row()
         .items_center()
         .gap_1()
-        .px_2()
-        .py_2()
-        .bg(move || c::background())
-        .border_t_1()
-        .border_color(move || c::border())
+        .min_h(px(floating::capsule_height()))
+        .px(px(2.0))
         .child(icon_btn(Icon::Close, "Cancel selection", move || cv.end_select()))
         .child(
             text(move || match count() {
@@ -245,12 +261,9 @@ fn context_bar(cv: Conv) -> AnyElement {
             .items_center()
             .gap_2()
             .mb_2()
-            .rounded(move || radius::lg())
+            .style_when(|| true, |st| floating::capsule_style(st).rounded(radius::lg()))
             .overflow_hidden()
-            .bg(move || c::card())
-            .border_1()
-            .border_color(move || c::border())
-            .child(view().w(px(4.0)).self_stretch().bg(hue))
+            .child(view().w(px(3.0)).self_stretch().bg(hue))
             .child(
                 dynamic(move || {
                     let edit = editing();
@@ -287,30 +300,11 @@ fn context_bar(cv: Conv) -> AnyElement {
 }
 
 fn composer(cv: Conv) -> AnyElement {
-    // The same column as the messages (`list::row`: 760pt at most, 20pt
-    // gutters on desktops, 8pt on phones), so the send button's edge is
-    // the outgoing bubbles' edge.
     view()
         .w_full()
-        .items_center()
-        .pt_2()
-        .pb_2()
-        .child(
-            view()
-                .w_full()
-                .max_w(px(760.0))
-                .px(px(if cv.wide { 20.0 } else { 12.0 }))
-                .child(context_bar(cv))
-                .child(when(move || cv.rec.get().is_some(), move || recorder(cv)).otherwise(move || input_row(cv))),
-        )
+        .child(context_bar(cv))
+        .child(when(move || cv.rec.get().is_some(), move || recorder(cv)).otherwise(move || input_row(cv)))
         .into_element()
-}
-
-/// The growing input with the chat's draft.
-/// The composer's height at one line: the send button's side, so the
-/// field and the button are one row of equal circles' ends.
-fn bar_height() -> f32 {
-    if is_desktop() { 42.0 } else { 48.0 }
 }
 
 /// The input's line height.
@@ -318,112 +312,138 @@ fn input_line() -> f32 {
     if is_desktop() { 20.0 } else { 22.0 }
 }
 
+/// The most lines the field grows to; past them it scrolls.
+const MAX_LINES: f32 = 6.0;
+
+/// The composer: ONE capsule holding attach, the field, emoji, and the
+/// mic (empty) or send (text). Every button is a square of the capsule's
+/// height (a full touch target), drawn smaller inside; as the field grows
+/// they stay on its last line, and the capsule keeps its one-line ends.
 fn input_row(cv: Conv) -> View {
     let (s, chat) = (cv.s, cv.chat);
     let draft = cv.draft;
     let lh = input_line();
+    let h = floating::capsule_height();
     let height = signal(lh);
-    // Inside the 1pt border: the input's padding centres one line, and the
-    // icon buttons sit centred on that same line (and stay at the bottom
-    // as the field grows).
-    let inner = bar_height() - 2.0;
-    let input_pad = ((inner - lh) / 2.0).floor();
-    let icon_side = if is_desktop() { 32.0 } else { 44.0 };
-    let icon_pad = ((inner - icon_side) / 2.0).floor();
+    let shell = element_ref();
+    let reduced = motion::reduced();
+    // The field's padding centres one line on the capsule's height.
+    let input_pad = ((h - lh) / 2.0).floor();
     let enter_sends = s.settings.with_untracked(|x| x.enter_sends) && is_desktop();
     let placeholder = if s.chat(chat).is_some_and(|c| matches!(c.kind, ChatKind::WhatsApp(_))) {
         "Message on WhatsApp"
     } else {
         "Message"
     };
-    view()
+    let attach = {
+        // Desktops: the attach popover opens at the button (measured as it
+        // is pressed).
+        let clip = element_ref();
+        ghost(Icon::Plus, "Attach", move || {
+            if !cv.wide {
+                cv.attach_open.set(true);
+                return;
+            }
+            spawn(async move {
+                if let Some(m) = clip.measure().await {
+                    let size = m.frame.size;
+                    cv.attach_at.set(Some((m.page.x.0, m.page.y.0, size.width.0, size.height.0)));
+                }
+                cv.attach_open.set(true);
+            });
+        })
+        .element_ref(&clip)
+    };
+    surface(h / 2.0)
+        .element_ref(&shell)
+        .w_full()
         .flex_row()
         .items_end()
-        .gap_2()
+        .min_h(px(h))
+        .child(attach)
         .child(
-            view()
+            input()
+                .element_ref(&cv.input)
+                .test_id("composer")
                 .flex_1()
-                .flex_row()
-                .items_end()
-                .min_h(px(bar_height()))
-                // Half the one-line height: the same ends as the send
-                // button beside it, kept as the field grows.
-                .rounded(px(bar_height() / 2.0))
-                .bg(move || c::card())
-                .border_1()
-                .border_color(move || c::border())
-                .px(px(icon_pad + 1.0))
-                .child(view().py(px(icon_pad)).child(icon_btn(Icon::Smile, "Emoji", move || cv.emoji_open.set(true))))
-                .child(
-                    input()
-                        .element_ref(&cv.input)
-                        .test_id("composer")
-                        .flex_1()
-                        .multiline(true)
-                        .value(move || draft.get())
-                        .on_change(move |t: &str| {
-                            draft.set(t.to_owned());
-                            if cv.editing.get_untracked().is_none() {
-                                s.set_draft(chat, t.to_owned());
-                            }
-                        })
-                        .submit_behavior(if enter_sends { SubmitBehavior::Submit } else { SubmitBehavior::Newline })
-                        .on_submit(move |_: &str| cv.send_draft())
-                        .on_content_size_change(move |size: &Size<Points>| {
-                            height.set(size.height.0.clamp(lh, lh * 6.0).round());
-                        })
-                        .placeholder(placeholder.to_string())
-                        .label(placeholder)
-                        .placeholder_color(|| color(c::muted_fg()))
-                        .caret_color(|| color(c::primary()))
-                        .selection_color(|| color(c::accent()))
-                        .h(move || px(height.get() + 2.0 * input_pad))
-                        .px_1()
-                        .py(px(input_pad))
-                        .text_size(px(font::body()))
-                        .line_height(px(lh))
-                        .text_color(move || c::foreground()),
-                )
-                .child(view().py(px(icon_pad)).child({
-                    // Desktops: the attach popover opens at the paperclip
-                    // (measured as it is pressed).
-                    let clip = element_ref();
-                    icon_btn(Icon::Paperclip, "Attach", move || {
-                        if !cv.wide {
-                            cv.attach_open.set(true);
-                            return;
-                        }
-                        spawn(async move {
-                            if let Some(m) = clip.measure().await {
-                                let size = m.frame.size;
-                                cv.attach_at.set(Some((m.page.x.0, m.page.y.0, size.width.0, size.height.0)));
-                            }
-                            cv.attach_open.set(true);
-                        });
-                    })
-                    .element_ref(&clip)
-                })),
+                .multiline(true)
+                .value(move || draft.get())
+                .on_change(move |t: &str| {
+                    draft.set(t.to_owned());
+                    if cv.editing.get_untracked().is_none() {
+                        s.set_draft(chat, t.to_owned());
+                    }
+                })
+                .submit_behavior(if enter_sends { SubmitBehavior::Submit } else { SubmitBehavior::Newline })
+                .on_submit(move |_: &str| cv.send_draft())
+                .on_content_size_change(move |size: &Size<Points>| {
+                    let next = size.height.0.clamp(lh, lh * MAX_LINES).round();
+                    if (next - height.get_untracked()).abs() < 0.5 {
+                        return;
+                    }
+                    // The capsule grows and shrinks smoothly a line at a
+                    // time (at once with reduced motion).
+                    if !reduced {
+                        shell.animate_layout(LayoutTransition::new(LayoutCurve::EaseOut, motion::FAST));
+                    }
+                    height.set(next);
+                })
+                .placeholder(placeholder.to_string())
+                .label(placeholder)
+                .placeholder_color(|| color(c::muted_fg()))
+                .caret_color(|| color(c::primary()))
+                .selection_color(|| color(c::accent()))
+                .h(move || px(height.get() + 2.0 * input_pad))
+                .px_1()
+                .py(px(input_pad))
+                .text_size(px(font::body()))
+                .line_height(px(lh))
+                .text_color(move || c::foreground()),
         )
+        .child(ghost(Icon::Smile, "Emoji", move || cv.emoji_open.set(true)))
         .child(send_button(cv))
 }
 
-/// Send when there is text, the mic when there is none: the glyphs swap
-/// (shrink and fade out, grow in). Phones: hold the mic to record,
-/// release to send, slide left to cancel, up to lock; a tap locks.
+/// A ghost icon button of the capsule's height, round.
+fn ghost(glyph: Icon, label: &'static str, f: impl Fn() + 'static) -> nsh_base::ButtonElement {
+    let h = floating::capsule_height();
+    icon_btn(glyph, label, f).size(px(h)).rounded_full().text_color(move || c::muted_fg())
+}
+
+/// Send when there is text, the mic when there is none. The mic is a
+/// ghost glyph; send is a filled `primary` circle that grows in from the
+/// mic's place (scale 0.6 → 1 and a fade, `BASE`) as the first character
+/// lands, and shrinks away when the field empties. Phones: hold the mic to
+/// record, release to send, slide left to cancel, up to lock; a tap locks.
 fn send_button(cv: Conv) -> View {
     let empty = move || cv.draft.with(|d| d.trim().is_empty());
     let reduced = motion::reduced();
-    let glyph = move |g: Icon, shown: fn(bool) -> bool| {
-        icon(g, 22.0)
-            .absolute()
-            .opacity(move || if shown(empty()) { 1.0_f32 } else { 0.0 })
-            .scale(move || if shown(empty()) || reduced { 1.0_f32 } else { 0.5 })
-            .rotate(move || deg(if shown(empty()) || reduced { 0.0 } else { -30.0 }))
-            .transition_all()
-            .duration(motion::BASE)
-            .ease_in_out()
-    };
-    let side = bar_height();
+    let h = floating::capsule_height();
+    // The filled circle sits 4pt in from the capsule's end: concentric.
+    let disc = h - 8.0;
+    let shown = move |want_empty: bool| move || empty() == want_empty;
+    let mic = icon(Icon::Mic, 20.0)
+        .absolute()
+        .text_color(move || c::muted_fg())
+        .opacity(move || if shown(true)() { 1.0_f32 } else { 0.0 })
+        .scale(move || if shown(true)() || reduced { 1.0_f32 } else { 0.6 })
+        .transition_all()
+        .duration(motion::BASE)
+        .ease_in_out();
+    let send = view()
+        .absolute()
+        .size(px(disc))
+        .rounded_full()
+        .items_center()
+        .justify_center()
+        .bg(move || c::primary())
+        .text_color(move || c::on_primary())
+        .opacity(move || if shown(false)() { 1.0_f32 } else { 0.0 })
+        .scale(move || if shown(false)() || reduced { 1.0_f32 } else { 0.6 })
+        .transition_all()
+        .duration(motion::BASE)
+        .ease_in_out()
+        .child(icon(Icon::Send, 18.0));
     let button = pressable()
         .on_press(move || {
             if !empty() {
@@ -434,16 +454,18 @@ fn send_button(cv: Conv) -> View {
             cv.held_press.set(false);
         })
         .accessibility_label(super::say(move || if empty() { "Record voice message" } else { "Send" }))
-        .size(px(side))
+        .size(px(h))
         .rounded_full()
         .items_center()
         .justify_center()
-        .bg(move || c::primary())
-        .text_color(move || c::on_primary())
-        .shadow_sm()
-        .active(move |st| if reduced { st.opacity(0.85) } else { st.scale(0.94) })
-        .child(glyph(Icon::Mic, |e| e))
-        .child(glyph(Icon::Send, |e| !e));
+        .cursor_pointer()
+        .transition()
+        .duration(motion::FAST)
+        .hover(move |st| if empty() { st.bg(move || c::foreground().opacity(0.06)) } else { st })
+        .active(move |st| if reduced { st.opacity(0.85) } else { st.scale(motion::ICON_PRESS_SCALE) })
+        .focus_visible(|st| st.outline(px(2.0)).outline_offset(px(-2.0)).outline_color(move || c::ring()))
+        .child(mic)
+        .child(send);
     if is_desktop() {
         return view().child(button);
     }
@@ -519,67 +541,69 @@ pub(crate) fn install_recorder(cv: Conv) {
 /// Delete and Send (locked, and on desktops).
 fn recorder(cv: Conv) -> View {
     let held = move || cv.rec.get() == Some(Rec::Held);
+    let h = floating::capsule_height();
     let dot = motion();
     let _ = dot.play(
         MotionSpec::new(super::looping(1200.0, 0.0))
             .values(MotionChannel::Opacity, [1.0, 0.25, 1.0]),
     );
-    view()
+    // The same capsule as the composer: Delete where attach was, Send
+    // where send is.
+    surface(h / 2.0)
+        .w_full()
         .flex_row()
         .items_center()
-        .gap_2()
-        .min_h(px(bar_height()))
+        .gap_3()
+        .h(px(h))
+        .pl(px(2.0))
+        .child(when(move || !held(), move || ghost(Icon::Trash, "Delete recording", move || cv.rec.set(None))))
+        .child(view().size(px(10.0)).ml(px(10.0)).rounded_full().bg(move || c::destructive()).bind_motion(&dot))
         .child(
+            text(move || logic::duration(cv.rec_secs.get()))
+                .text_size(px(font::body()))
+                .tabular_nums()
+                .role(AccessibilityRole::Timer),
+        )
+        .child(view().flex_1())
+        .child(when(held, || {
             view()
-                .flex_1()
                 .flex_row()
                 .items_center()
-                .gap_3()
-                .h(px(bar_height()))
-                .px_3()
-                .rounded(px(bar_height() / 2.0))
-                .bg(move || c::card())
-                .border_1()
-                .border_color(move || c::border())
-                .child(when(move || !held(), move || icon_btn(Icon::Trash, "Delete recording", move || cv.rec.set(None))))
-                .child(view().size(px(10.0)).rounded_full().bg(move || c::destructive()).bind_motion(&dot))
-                .child(
-                    text(move || logic::duration(cv.rec_secs.get()))
-                        .text_size(px(font::body()))
-                        .tabular_nums()
-                        .role(AccessibilityRole::Timer),
-                )
-                .child(view().flex_1())
-                .child(when(held, || {
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .text_color(move || c::muted_fg())
-                        .child(view().style_with(|st| st.rotate(deg(90.0))).child(icon(Icon::ChevronDown, 16.0)))
-                        .child(text("Slide to cancel").text_size(px(font::SMALL)))
-                }))
-                .child(when(held, || {
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .pl_2()
-                        .text_color(move || c::muted_fg())
-                        .child(icon(Icon::Lock, 14.0))
-                        .child(text("Slide up to lock").text_size(px(font::CAPTION)))
-                })),
-        )
+                .gap_1()
+                .text_color(move || c::muted_fg())
+                .child(view().style_with(|st| st.rotate(deg(90.0))).child(icon(Icon::ChevronDown, 16.0)))
+                .child(text("Slide to cancel").text_size(px(font::SMALL)))
+        }))
+        .child(when(held, || {
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .pl_2()
+                .pr_4()
+                .text_color(move || c::muted_fg())
+                .child(icon(Icon::Lock, 14.0))
+                .child(text("Slide up to lock").text_size(px(font::CAPTION)))
+        }))
         .child(when(move || !held(), move || {
             pressable()
                 .on_press(move || send_recording(cv))
                 .accessibility_label("Send voice message")
-                .size(px(bar_height()))
-                .rounded_full()
+                .size(px(h))
                 .items_center()
                 .justify_center()
-                .bg(move || c::primary())
-                .text_color(move || c::on_primary())
-                .child(icon(Icon::Send, 22.0))
+                .cursor_pointer()
+                .active(|st| if motion::reduced() { st.opacity(0.85) } else { st.scale(motion::ICON_PRESS_SCALE) })
+                .focus_visible(|st| st.outline(px(2.0)).outline_offset(px(-2.0)).outline_color(move || c::ring()))
+                .child(
+                    view()
+                        .size(px(h - 8.0))
+                        .rounded_full()
+                        .items_center()
+                        .justify_center()
+                        .bg(move || c::primary())
+                        .text_color(move || c::on_primary())
+                        .child(icon(Icon::Send, 18.0)),
+                )
         }))
 }

@@ -12,10 +12,10 @@ use crate::{
 };
 
 /// Every glyph of [`Icon`], in its declaration order.
-pub const ALL_ICONS: [Icon; 110] = {
+pub const ALL_ICONS: [Icon; 111] = {
     use Icon::*;
     [
-        Chats, Calls, Communities, You, Search, Plus, Close, Back, Forward, ChevronRight, ChevronDown, More,
+        Chats, Calls, Communities, Spaces, You, Search, Plus, Close, Back, Forward, ChevronRight, ChevronDown, More,
         MoreHorizontal, Send, Mic, MicOff, Camera, Video, VideoOff, Phone, PhoneIncoming, PhoneOutgoing,
         PhoneMissed, PhoneOff, Paperclip, Smile, Image, File, MapPin, Contact, Poll, Calendar, Sticker, Lock,
         Unlock, Shield, ShieldCheck, Key, Eye, EyeOff, Bell, BellOff, Pin, Archive, Star, Trash, Edit, Copy,
@@ -33,7 +33,7 @@ pub const ALL_ICONS: [Icon; 110] = {
 fn every_icon_is_listed(i: Icon) {
     use Icon::*;
     match i {
-        Chats | Calls | Communities | You | Search | Plus | Close | Back | Forward | ChevronRight | ChevronDown
+        Chats | Calls | Communities | Spaces | You | Search | Plus | Close | Back | Forward | ChevronRight | ChevronDown
         | More | MoreHorizontal | Send | Mic | MicOff | Camera | Video | VideoOff | Phone | PhoneIncoming
         | PhoneOutgoing | PhoneMissed | PhoneOff | Paperclip | Smile | Image | File | MapPin | Contact | Poll
         | Calendar | Sticker | Lock | Unlock | Shield | ShieldCheck | Key | Eye | EyeOff | Bell | BellOff | Pin

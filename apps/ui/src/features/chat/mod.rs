@@ -1,10 +1,13 @@
 //! A5: the conversation — bubbles of every type, ticks, replies,
 //! reactions, composer, voice notes, message info, chat info.
 //!
-//! - `header`: back, avatar, title and subtitle, calls, the More menu,
-//!   search in chat.
-//! - `list`: the virtualized messages (date separators, sender runs,
-//!   swipe to reply, typing dots, jump to latest).
+//! - `header`: the floating capsules: back (phones), the chat's avatar,
+//!   name and subtitle, calls, the More menu; or the search capsule.
+//! - `list`: the virtualized messages (time labels, sender runs, the
+//!   status under the user's latest message, swipe to reply, typing
+//!   dots, jump to latest).
+//! - `theme`: per-chat themes (canvas and bubble colours) and their
+//!   picker.
 //! - `bubbles`: one look per `Body` variant.
 //! - `voice`: voice-note playback and the recorder's clock.
 //! - `composer`: the input, attachments, recording and the bars that
@@ -23,6 +26,7 @@ mod list;
 pub(crate) mod logic;
 mod message_info;
 mod sheets;
+pub(crate) mod theme;
 mod voice;
 
 use std::time::Duration;
@@ -37,6 +41,7 @@ use crate::{
 
 pub use info::chat_info;
 pub use message_info::message_info;
+pub use theme::{theme_row, theme_sheet};
 
 /// Opens a chat: the detail pane on desktop, a pushed page on phones.
 pub fn open(chat: ChatId) {
@@ -215,6 +220,15 @@ pub(crate) struct Conv {
     pub held_press: Signal<bool>,
     pub voice: voice::Player,
     pub shake: Motion,
+    /// The chat's theme under the user's appearance choice.
+    pub look: Memo<theme::Look>,
+    /// The user's latest message that went out: the only one with a
+    /// status line under it.
+    pub latest_own: Memo<Option<MsgId>>,
+    /// How far the floating header and composer reach into the canvas
+    /// (their measured frames): the list keeps its content clear of them.
+    pub top_inset: Signal<f32>,
+    pub bottom_inset: Signal<f32>,
 }
 
 impl Conv {
@@ -257,7 +271,16 @@ impl Conv {
             held_press: signal(false),
             voice: voice::Player::new(),
             shake: motion(),
+            look: theme::Look::of(chat),
+            latest_own: computed(move || s.latest_own(chat)),
+            top_inset: signal(0.0),
+            bottom_inset: signal(0.0),
         }
+    }
+
+    /// The conversation's canvas (its theme's background).
+    pub fn canvas(self) -> AdaptiveColor {
+        self.look.get().canvas()
     }
 
     /// A group, community or channel (sender names, receipts per member).
@@ -449,6 +472,15 @@ impl Conv {
     }
 }
 
+/// Writes a measured inset when it moved by a whole point or more (frames
+/// settle in fractions; the list's padding shouldn't churn on them).
+fn set_if_changed(at: Signal<f32>, to: f32) {
+    let to = to.ceil();
+    if (at.get_untracked() - to).abs() >= 1.0 {
+        at.set(to);
+    }
+}
+
 /// Watches the chat while it is open: counts what arrives while the
 /// reader is scrolled up, marks the chat read, shakes on a nudge.
 fn watch(cv: Conv) {
@@ -506,6 +538,35 @@ fn keys(cv: Conv) {
     });
 }
 
+/// How far a scroll-edge fade reaches past the capsule it sits behind.
+const SCRIM_TAIL: f32 = 24.0;
+
+/// A scroll-edge fade at the top (under the header) or the bottom (under
+/// the composer), as tall as that layer's measured frame plus a tail. The
+/// canvas colour is solid behind the capsule and clears over the tail, so
+/// the first and last lines of a message fade rather than slice.
+fn edge_scrim(cv: Conv, top: bool) -> View {
+    let inset = if top { cv.top_inset } else { cv.bottom_inset };
+    // The solid part ends where the capsule's own band ends.
+    let solid = move || {
+        let h = inset.get();
+        if h <= 0.0 { 0.0 } else { (h / (h + SCRIM_TAIL)).clamp(0.0, 1.0) }
+    };
+    let v = view()
+        .absolute()
+        .left_0()
+        .right_0()
+        .h(move || px(inset.get() + SCRIM_TAIL))
+        .z_index(1)
+        .pointer_events(PointerEvents::None)
+        .accessibility_elements_hidden(true);
+    let v = if top { v.top_0().bg_linear_to_b() } else { v.bottom_0().bg_linear_to_t() };
+    v.gradient_from(move || cv.canvas())
+        .gradient_via(move || cv.canvas().opacity(0.92))
+        .gradient_via_position(move || Percentage(solid()))
+        .gradient_to(move || cv.canvas().opacity(0.0))
+}
+
 /// The conversation with its own header, composer and overlays.
 pub fn conversation(chat: ChatId) -> AnyElement {
     let s = store();
@@ -523,22 +584,54 @@ pub fn conversation(chat: ChatId) -> AnyElement {
     voice::install(cv);
     composer::install_recorder(cv);
     let title = s.chat(chat).map(|c| c.title).unwrap_or_default();
+    // The canvas fills the pane it is given. The messages run under the
+    // floating header and composer (REDESIGN.md "Content floats"), which
+    // are measured so the list keeps its first and last messages clear of
+    // them. A theme change cross-fades the canvas (a colour fade, kept
+    // with reduced motion).
     let root = view()
         .flex_1()
-        .bg(move || c::chat_bg())
+        .w_full()
+        .bg(move || cv.canvas())
+        .transition_colors()
+        .duration(motion::SLOW)
         .pb_keyboard()
         .child(
+            // The stage holds no padding, so its floating layers sit on
+            // the keyboard's edge, not under it.
             view()
                 .flex_1()
+                .overflow_hidden()
                 .bind_motion(&cv.shake)
-                .child(header::header(cv))
+                .child(list::message_list(cv))
+                // Scroll-edge fades: messages dissolve under the floating
+                // header and composer instead of being cut at the pane's
+                // edge. Solid in the canvas colour behind each capsule,
+                // clear a little past it; they never take a press.
+                .child(edge_scrim(cv, true))
+                .child(edge_scrim(cv, false))
+                .child(list::jump_button(cv))
                 .child(
                     view()
-                        .flex_1()
-                        .child(list::message_list(cv))
-                        .child(list::jump_button(cv)),
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        // Above the scroll-edge fades (z 1).
+                        .z_index(2)
+                        .on_layout(move |b: &Bounds<Points>| set_if_changed(cv.top_inset, b.size.height.0))
+                        .child(header::header(cv)),
                 )
-                .child(composer::bottom(cv)),
+                .child(
+                    view()
+                        .absolute()
+                        .bottom_0()
+                        .left_0()
+                        .right_0()
+                        .z_index(2)
+                        .on_layout(move |b: &Bounds<Points>| set_if_changed(cv.bottom_inset, b.size.height.0))
+                        .child(composer::bottom(cv)),
+                ),
         )
         .child(sheets::all(cv))
         .child(actions::overlay_menu(cv));

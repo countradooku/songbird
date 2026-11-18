@@ -8,6 +8,7 @@ use nsh_core::prelude::*;
 
 use super::{
     button::icon_btn,
+    floating,
     icons::{Icon, icon},
     parts::{hairline, wide},
     skin::{Elevation, FULL, Skin, TitleType, spec},
@@ -323,7 +324,9 @@ pub fn segmented<T: Copy + PartialEq + 'static>(
 // ---------------------------------------------------------------- pages
 
 /// A pushed page: the system header on iOS and Android, the app's header
-/// on desktops. `right` holds header actions.
+/// on desktops. `right` holds header actions. On wide windows it sits in a
+/// floating pane (the conversation pane, or the info pane), on its
+/// surface.
 pub fn page(title: impl Into<SharedString>, content: impl IntoElement) -> Screen {
     page_with(title, None, content)
 }
@@ -342,7 +345,7 @@ pub fn page_with(
         .child(
             view()
                 .flex_1()
-                .bg(move || c::background())
+                .bg(move || if wide() { c::pane() } else { c::background() })
                 .child(content),
         )
 }
@@ -377,40 +380,104 @@ pub(crate) fn glass_capsule(content: impl IntoElement) -> View {
         .child(content)
 }
 
+/// A section root's title in a wide window's list pane (`REDESIGN.md`:
+/// the destination's title at 20pt): semibold on every skin, so the pane
+/// keeps to two weights. Apple tightens it as its 20pt titles are.
+fn pane_title_type() -> TitleType {
+    let tracking = if spec().skin == Skin::Apple { -0.2 } else { 0.0 };
+    TitleType { size: font::HEADING, weight: FontWeight::SEMIBOLD, tracking }
+}
+
 /// The header the app draws: back, title, actions, in the skin's shape.
-/// A section root (`back` false) gets the large title where the platform
-/// has one: Apple's 34pt bold under a glass toolbar on phones, Material's
-/// expressive headline under its top app bar, Fluent's 28pt page title;
-/// Adwaita draws a header bar with the title centred.
+///
+/// - A section root (`back` false) in a wide window is the list pane's
+///   header row: on the pane's surface, no rule, the 20pt title on the
+///   16pt gutter and the actions on a capsule ([`floating::action_capsule`])
+///   8pt from the pane's edge, in the band the conversation's header
+///   capsule floats in ([`floating::header_band`]), so the two pane tops
+///   read as one line.
+/// - A section root on a phone gets the large title where the platform
+///   has one (Apple's 34pt bold under its glass toolbar, Material's
+///   expressive headline under its top app bar, Fluent's 28pt page title;
+///   Adwaita draws a header bar with the title centred), its actions on
+///   the skin's capsule as everywhere in the Floating design.
+/// - A pushed page gets the skin's page header. Built for the info pane
+///   ([`crate::nav::in_info_pane`]) its back becomes a close (×) that
+///   closes the pane.
 pub fn app_header(title: impl Into<SharedString>, back: bool, right: Option<AnyElement>) -> View {
     let title: SharedString = title.into();
     let sp = spec();
     let is_wide = wide();
+    let in_info = back && crate::nav::in_info_pane();
     let large = !back && sp.large_title_now(is_wide);
     let centred = !large && sp.centred_now(is_wide);
     let apple = sp.skin == Skin::Apple;
     let adwaita = sp.skin == Skin::Adwaita;
     let back_glyph = if sp.back_arrow { Icon::ArrowLeft } else { Icon::Back };
-    // Apple groups header controls on glass (iOS 26 / macOS 26 toolbars).
-    let right = right.map(|r| if apple { glass_capsule(r).into_element() } else { r });
     let back_btn = back.then(|| {
-        let b = icon_btn(back_glyph, "Back", crate::nav::pop);
+        let b = if in_info {
+            icon_btn(Icon::Close, "Close info", crate::nav::close_info)
+        } else {
+            icon_btn(back_glyph, "Back", crate::nav::pop)
+        };
+        // Apple groups header controls on glass (iOS 26 / macOS 26 toolbars).
         if apple { glass_capsule(b).into_element() } else { b.into_element() }
+    });
+
+    if !back && is_wide {
+        // The list pane's header row: the 8pt inset, then a capsule-tall
+        // row. The title centres on the same line as the conversation's
+        // header capsule; the actions' capsule ends 8pt from the pane's
+        // edge, as the capsules over the conversation do.
+        return view()
+            .bg(move || c::pane())
+            .z_index(1)
+            .pt(px(floating::CAPSULE_INSET))
+            .child(
+                view()
+                    .h(px(floating::capsule_height()))
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .pl_4()
+                    .pr(px(floating::CAPSULE_INSET))
+                    .child(title_text(title, pane_title_type()).flex_1())
+                    .child(right.map(floating::action_capsule)),
+            );
+    }
+
+    // A section root's actions float on the skin's capsule; a pushed
+    // page's stay as the platform draws them (Apple: on glass).
+    let right = right.map(|r| {
+        if !back {
+            floating::action_capsule(r).into_element()
+        } else if apple {
+            glass_capsule(r).into_element()
+        } else {
+            r
+        }
     });
     let type_ = if large {
         sp.large_title
     } else if back {
         sp.page_title
+    } else if is_wide {
+        pane_title_type()
     } else {
-        match sp.skin {
-            // A list pane's title on a Mac: the toolbar's title.
-            Skin::Apple => TitleType { size: 20.0, weight: FontWeight::BOLD, tracking: -0.2 },
-            _ => sp.page_title,
-        }
+        sp.page_title
     };
     // Header bars that are a surface of their own: Adwaita's (lighter
-    // than the window, with a shade under it). The others sit on the page.
-    let bar_bg = move || if adwaita { c::card() } else { c::background() };
+    // than the window, with a shade under it). The others sit on the page,
+    // which on wide windows is a pane.
+    let bar_bg = move || {
+        if adwaita {
+            c::card()
+        } else if wide() {
+            c::pane()
+        } else {
+            c::background()
+        }
+    };
     let base = view()
         .bg(bar_bg)
         .z_index(1)

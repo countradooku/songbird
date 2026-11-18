@@ -1,17 +1,25 @@
 //! The two layouts. Phones: a native stack whose root page holds the four
-//! tabs (kept mounted, so each keeps its scroll) over a bottom tab bar.
-//! Wide windows: a rail of the sections, the section's list pane, and a
-//! detail pane with its own stack (the open chat, and what features push).
+//! destinations (kept mounted, so each keeps its scroll) over the
+//! platform's tab bar. Wide windows (`REDESIGN.md`, Floating): on a quiet
+//! canvas, a floating list pane (the destination's content over a
+//! destination bar), a floating conversation pane with its own stack (the
+//! open chat, and what features push), and a floating info pane while a
+//! chat's info is open.
 
 use nsh_base::{button, nav_page, nav_stack};
-use nsh_core::{element::AnyElement, prelude::*};
+use nsh_core::{
+    desktop::{TitleBarOptions, TitleBarStyle, WindowAttributes},
+    element::{AnyElement, desktop::current_window, layout_rtl},
+    prelude::*,
+};
 
 use crate::{
     features,
     nav::{self, Route, Tab},
     store::store,
     ui::{
-        skin::{self, NavChrome, Sidebar},
+        floating::{self, GAP, INFO_W, LIST_W, MARGIN},
+        skin::{self, FULL, NavChrome},
         *,
     },
 };
@@ -56,7 +64,7 @@ fn glyph(tab: Tab) -> Icon {
     match tab {
         Tab::Chats => Icon::Chats,
         Tab::Calls => Icon::Calls,
-        Tab::Communities => Icon::Communities,
+        Tab::Spaces => Icon::Spaces,
         Tab::You => Icon::You,
     }
 }
@@ -66,20 +74,33 @@ fn tab_content(tab: Tab) -> AnyElement {
     match tab {
         Tab::Chats => features::chats::chats_tab(),
         Tab::Calls => features::calls::calls_tab(),
-        Tab::Communities => features::groups::communities_tab(),
+        Tab::Spaces => features::groups::spaces_tab(),
         Tab::You => features::settings::you_tab(),
     }
 }
 
-/// The four tabs stacked, only the selected one shown.
-fn tab_panels() -> View {
+/// The four destinations stacked, only the selected one shown. Phones
+/// switch at once, as their tab bars do. Wide windows fade the chosen one
+/// in (`FAST`, ease-out: sibling sections cross-fade rather than slide;
+/// an opacity fade stays with reduced motion), while the one left is
+/// hidden at once, so two lists never show through each other.
+fn tab_panels(fade: bool) -> View {
     let current = nav::tab();
     view().flex_1().children(Tab::ALL.into_iter().map(move |tab| {
-        view()
-            .absolute()
-            .inset_0()
-            .style_when(move || current.get() != tab, |s| s.hidden())
-            .child(tab_content(tab))
+        let shown = move || current.get() == tab;
+        let panel = view().absolute().inset_0();
+        let panel = if fade {
+            panel
+                .opacity(move || if shown() { 1.0_f32 } else { 0.0 })
+                .style_when(move || !shown(), |st| st.invisible())
+                .accessibility_elements_hidden(move || !shown())
+                .transition_opacity()
+                .duration(motion::FAST)
+                .ease_out()
+        } else {
+            panel.style_when(move || !shown(), |st| st.hidden())
+        };
+        panel.child(tab_content(tab))
     }))
 }
 
@@ -115,7 +136,7 @@ fn sf_symbol(tab: Tab) -> &'static str {
     match tab {
         Tab::Chats => "bubble.left.and.bubble.right",
         Tab::Calls => "phone",
-        Tab::Communities => "person.3",
+        Tab::Spaces => "circle.grid.2x2",
         Tab::You => "person.crop.circle",
     }
 }
@@ -367,7 +388,7 @@ fn phone_layout() -> AnyElement {
                         .flex_1()
                         .bg(move || c::background())
                         .pt_safe_area()
-                        .child(tab_panels())
+                        .child(tab_panels(false))
                         .child(tab_bar()),
                 ),
         )
@@ -375,266 +396,165 @@ fn phone_layout() -> AnyElement {
         .into_element()
 }
 
-/// The wide window's section navigation, in the skin's shape.
-fn sidebar() -> View {
-    match spec().sidebar {
-        Sidebar::Rail => rail(),
-        _ => side_list(),
+// ---------------------------------------------------------------- wide
+
+/// Chooses a destination from the destination bar: the conversation
+/// pane's pushed pages belong to the destination left, so they go.
+fn choose_wide(tab: Tab) {
+    nav::pop_to_root();
+    nav::tab().set(tab);
+}
+
+/// The destination bar's item height and the corner of its selection,
+/// per skin: Apple's capsule, Material's 56×32 pill (M3's rail
+/// indicator), Fluent's 4pt control corner, Adwaita's 6pt button corner.
+fn destination_corner() -> f32 {
+    match spec().skin {
+        Skin::Apple | Skin::Material => FULL,
+        Skin::Fluent => 4.0,
+        Skin::Adwaita => 6.0,
     }
 }
 
-/// Material 3: the navigation rail, icon in a pill over its label.
-fn rail() -> View {
+/// The destination bar's one selection, sliding under the chosen item
+/// (`BASE`, ease-in-out; it jumps with reduced motion). Each skin draws
+/// it as its own selected navigation item: a neutral capsule (Apple), the
+/// secondary-container pill (Material), a subtle fill with the 16×3
+/// accent pill under the glyph (Fluent), a 6pt neutral fill (Adwaita).
+/// The chosen glyph also turns from muted to full ink, so shape and
+/// weight mark the selection, not colour alone.
+fn destination_indicator() -> View {
     let current = nav::tab();
-    let w = spec().sidebar_w;
-    // The logo's centre sits on the list pane header's centre line, so
-    // the rail and the panes share one top band.
-    view()
-        .w(px(w))
-        .bg(move || c::sidebar())
-        .items_center()
-        .pt_3()
-        .pb_4()
-        .gap_3()
-        .role(AccessibilityRole::Tablist)
-        .child(
-            view()
-                .size(px(40.0))
-                .mb_4()
-                .rounded(px(12.0))
-                .bg(move || c::primary())
-                .items_center()
-                .justify_center()
-                .text_color(move || c::on_primary())
-                .child(icon(Icon::Feather, 22.0)),
-        )
-        .children(Tab::ALL.into_iter().map(move |tab| {
-            let selected = move || current.get() == tab;
-            button()
-                .selected(selected)
-                .accessibility_label(tab.label())
-                .on_press(move || {
-                    nav::pop_to_root();
-                    current.set(tab);
-                })
-                .w(px(w - 8.0))
-                .items_center()
-                .gap_1()
-                .cursor_pointer()
-                .focus_visible(|st| st.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
-                .child(
-                    view()
-                        .w(px(56.0))
-                        .h(px(32.0))
-                        .rounded_full()
-                        .items_center()
-                        .justify_center()
-                        .bg(move || if selected() { c::sidebar_accent() } else { AdaptiveColor::TRANSPARENT })
-                        .transition_colors()
-                        .duration(motion::BASE)
-                        .hover(|st| st.bg(move || c::foreground().opacity(0.08)))
-                        .active(|st| st.bg(move || c::foreground().opacity(0.12)))
-                        .text_color(move || if selected() { c::on_accent() } else { c::muted_fg() })
-                        .child(icon(glyph(tab), 24.0))
-                        .child((tab == Tab::Chats).then(|| tab_badge((56.0, 32.0), 24.0, c::sidebar))),
-                )
-                .child(
-                    text(tab.label())
-                        .number_of_lines(1)
-                        .text_size(px(12.0))
-                        .line_height(px(16.0))
-                        .font_weight(FontWeight::MEDIUM)
-                        .style_when(selected, |st| st.font_weight(FontWeight::BOLD))
-                        .text_color(move || if selected() { c::foreground() } else { c::muted_fg() }),
-                )
-        }))
-        .child(view().flex_1())
-        .child(profile_button(c::sidebar))
-}
-
-/// The user's avatar, which opens You.
-fn profile_button(surface: fn() -> AdaptiveColor) -> nsh_base::ButtonElement {
-    let current = nav::tab();
-    let me = store().me.get_untracked();
+    let sk = spec().skin;
+    let corner = destination_corner();
     let reduced = motion::reduced();
-    button()
-        .accessibility_label("Your profile")
-        .on_press(move || {
-            nav::pop_to_root();
-            current.set(Tab::You);
-        })
-        .rounded_full()
-        .cursor_pointer()
-        .transition()
-        .duration(motion::FAST)
-        .hover(|st| st.opacity(0.9))
-        .active(move |st| if reduced { st.opacity(0.8) } else { st.scale(motion::ICON_PRESS_SCALE) })
-        .focus_visible(|st| st.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
-        .child(avatar_presence_on(me.name, me.seed, 36.0, || true, surface))
+    // A fraction of its own width (a quarter of the bar): no pixel sums to
+    // drift from the items' flex layout. Right to left mirrors the row,
+    // so it moves the other way.
+    let step = if layout_rtl() { -1.0 } else { 1.0 };
+    let at = move || Tab::ALL.iter().position(|t| *t == current.get()).unwrap_or(0) as f32;
+    let mark = match sk {
+        Skin::Material => view()
+            .w(px(56.0))
+            .h(px(32.0))
+            .rounded_full()
+            .bg(move || c::sidebar_accent()),
+        Skin::Fluent => view()
+            .absolute()
+            .inset_0()
+            .rounded(px(corner))
+            .bg(move || c::foreground().opacity(0.06))
+            .items_center()
+            .justify_end()
+            .child(view().w(px(16.0)).h(px(3.0)).mb(px(2.0)).rounded_full().bg(move || c::primary())),
+        Skin::Apple | Skin::Adwaita => view()
+            .absolute()
+            .inset_0()
+            .rounded(px(corner))
+            .bg(move || c::foreground().opacity(if sk == Skin::Apple { 0.07 } else { 0.08 })),
+    };
+    view()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .w(relative(0.25))
+        .items_center()
+        .justify_center()
+        .pointer_events(PointerEvents::None)
+        .accessibility_elements_hidden(true)
+        .translate_x(move || relative(at() * step))
+        .when(!reduced, |v| v.transition_transform().duration(motion::BASE).ease_in_out())
+        .child(mark)
 }
 
-/// A sidebar of rows (Apple's source list on the sidebar material,
-/// Fluent's NavigationView pane, Adwaita's flat sidebar): glyph and label
-/// side by side, the unread count at the end, the chosen row filled.
-/// Fluent adds its 3×16 accent pill at the row's leading edge.
-fn side_list() -> View {
+/// One destination: its glyph (the user's avatar for You) centred in a
+/// fixed 28×24 slot, so every glyph's optical centre sits on the item's
+/// centre line whatever its drawn width; the Chats unread badge over the
+/// slot's corner; the label as a hint on hover and keyboard focus (and to
+/// screen readers).
+fn destination_item(tab: Tab) -> View {
     let current = nav::tab();
     let s = store();
-    let sp = spec();
-    let kind = sp.sidebar;
-    let mac_material = kind == Sidebar::SourceList && os() == Os::MacOs;
-    let (row_h, glyph_size, label_size, corner) = match kind {
-        Sidebar::SourceList => (30.0, 17.0, 13.0, 8.0),
-        Sidebar::NavigationView => (36.0, 16.0, 14.0, 4.0),
-        _ => (38.0, 16.0, 14.0, 6.0),
+    let sk = spec().skin;
+    let selected = move || current.get() == tab;
+    let corner = destination_corner();
+    let (slot_w, slot_h, glyph_size) = (28.0, 24.0, 20.0);
+    let ink = move || match (sk, selected()) {
+        (Skin::Material, true) => c::on_accent(),
+        (_, true) => c::foreground(),
+        (_, false) => c::muted_fg(),
     };
-    let me = s.me.get_untracked();
-    let me_name = me.name.clone();
-    view()
-        .w(px(sp.sidebar_w))
-        // macOS: the window's sidebar material (vibrancy) shows through;
-        // elsewhere the sidebar colour.
-        .bg(move || if mac_material { c::sidebar().opacity(0.55) } else { c::sidebar() })
-        .when(mac_material, |v| {
-            let mut b = MacOsBackdrop::default();
-            b.material = MacOsBackdropMaterial::Sidebar;
-            b.blending = MacOsBackdropBlending::BehindWindow;
-            v.macos_backdrop(Some(b))
+    let glyph: AnyElement = if tab == Tab::You {
+        // The person, not a glyph: their avatar at the glyphs' optical
+        // size (a filled disc reads larger than a 2pt outline, so 20 not 24).
+        dynamic(move || {
+            let me = s.me.get();
+            untracked(|| avatar(me.name, me.seed, glyph_size))
         })
-        .when(kind == Sidebar::Flat, |v| v.border_r(hairline()).border_color(move || c::border()))
-        .when(kind == Sidebar::SourceList, |v| v.border_r(hairline()).border_color(move || c::border()))
-        .role(AccessibilityRole::Tablist)
-        // The brand: the feather and the name, where each platform puts the
-        // app's title (Adwaita: centred in the sidebar's header bar).
+        .into_element()
+    } else {
+        icon(glyph(tab), glyph_size).into_element()
+    };
+    // The hint sits on a wrapper: buttons take no tooltip of their own.
+    let item = button()
+        .flex_1()
+        .selected(selected)
+        .accessibility_label(tab.label())
+        .on_press(move || choose_wide(tab))
+        .cursor_pointer()
+        .items_center()
+        .justify_center()
+        .rounded(px(corner))
+        .transition_colors()
+        .duration(motion::INSTANT)
+        // The hover wash is a step under the selection's, so hovering the
+        // chosen item still reads as chosen.
+        .hover(|st| st.bg(move || c::foreground().opacity(0.04)))
+        .active(move |st| match sk {
+            Skin::Apple => st.opacity(0.6),
+            _ => st.bg(move || c::foreground().opacity(0.08)),
+        })
+        .focus_visible(|st| st.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
         .child(
             view()
-                .h(px(if kind == Sidebar::Flat { sp.header_h } else { 52.0 }))
-                .flex_row()
+                .w(px(slot_w))
+                .h(px(slot_h))
                 .items_center()
-                .gap_2()
-                .px(px(if kind == Sidebar::NavigationView { 14.0 } else { 14.0 }))
-                .when(kind == Sidebar::Flat, |v| v.justify_center().border_b(hairline()).border_color(move || c::border()))
-                .child(
-                    view()
-                        .size(px(24.0))
-                        .rounded(px(if kind == Sidebar::NavigationView { 4.0 } else { 7.0 }))
-                        .bg(move || c::primary())
-                        .items_center()
-                        .justify_center()
-                        .text_color(move || c::on_primary())
-                        .child(icon(Icon::Feather, 15.0)),
-                )
-                .child(
-                    text("Songbird")
-                        .text_size(px(match kind {
-                            Sidebar::NavigationView => 12.0,
-                            Sidebar::Flat => 15.0,
-                            _ => 13.0,
-                        }))
-                        .font_weight(if kind == Sidebar::NavigationView { FontWeight::NORMAL } else { FontWeight::BOLD })
-                        .text_color(move || c::foreground()),
-                ),
-        )
-        .child(
-            view().px(px(if kind == Sidebar::NavigationView { 4.0 } else { 8.0 })).pt_2().gap(px(2.0)).children(Tab::ALL.into_iter().map(
-                move |tab| {
-                    let selected = move || current.get() == tab;
-                    button()
-                        .selected(selected)
-                        .accessibility_label(tab.label())
-                        .on_press(move || {
-                            nav::pop_to_root();
-                            current.set(tab);
-                        })
-                        .h(px(row_h))
-                        .flex_row()
-                        .items_center()
-                        .gap(px(10.0))
-                        .px(px(if kind == Sidebar::NavigationView { 14.0 } else { 8.0 }))
-                        .rounded(px(corner))
-                        .cursor_pointer()
-                        .bg(move || match (selected(), kind) {
-                            (false, _) => AdaptiveColor::TRANSPARENT,
-                            (true, Sidebar::NavigationView) => c::foreground().opacity(0.06),
-                            (true, Sidebar::SourceList) => c::foreground().opacity(0.09),
-                            (true, _) => c::sidebar_accent(),
-                        })
-                        .transition_colors()
-                        .duration(motion::INSTANT)
-                        .hover(|st| st.bg(move || c::foreground().opacity(0.05)))
-                        .active(|st| st.bg(move || c::foreground().opacity(0.03)))
-                        .focus_visible(|st| st.outline(px(2.0)).outline_offset(px(-2.0)).outline_color(move || c::ring()))
-                        .child((kind == Sidebar::NavigationView).then(|| {
-                            view()
-                                .absolute()
-                                .left(px(0.0))
-                                .top(px((row_h - 16.0) / 2.0))
-                                .w(px(3.0))
-                                .h(px(16.0))
-                                .rounded_full()
-                                .bg(move || if selected() { c::primary() } else { AdaptiveColor::TRANSPARENT })
-                        }))
-                        .child(
-                            icon(glyph(tab), glyph_size).text_color(move || match kind {
-                                // macOS tints sidebar glyphs; Fluent and
-                                // Adwaita draw them in the text colour.
-                                Sidebar::SourceList => c::primary(),
-                                _ if selected() => c::primary(),
-                                _ => c::foreground(),
-                            }),
-                        )
-                        .child(
-                            text(tab.label())
-                                .flex_1()
-                                .number_of_lines(1)
-                                .text_size(px(label_size))
-                                .font_weight(FontWeight::NORMAL)
-                                .style_when(move || selected() && kind != Sidebar::SourceList, |st| st.font_weight(FontWeight::SEMIBOLD))
-                                .text_color(move || c::foreground()),
-                        )
-                        .child((tab == Tab::Chats).then(|| {
-                            let count = move || s.total_unread();
-                            match kind {
-                                // macOS: the count as plain secondary text.
-                                Sidebar::SourceList => text(move || count().to_string())
-                                    .text_size(px(12.0))
-                                    .tabular_nums()
-                                    .text_color(move || c::muted_fg())
-                                    .style_when(move || count() == 0, |st| st.hidden())
-                                    .into_element(),
-                                // Fluent's InfoBadge, Adwaita's pill.
-                                _ => view()
-                                    .style_when(move || count() == 0, |st| st.hidden())
-                                    .child(unread_badge(count, || false))
-                                    .into_element(),
-                            }
-                        }))
-                },
-            )),
-        )
-        .child(view().flex_1())
+                .justify_center()
+                .text_color(ink)
+                .transition_colors()
+                .duration(motion::BASE)
+                .child(glyph)
+                .child((tab == Tab::Chats).then(|| tab_badge((slot_w, slot_h), glyph_size, c::pane))),
+        );
+    view().flex_1().h_full().tooltip(hint(tab.label())).child(item)
+}
+
+/// The destination bar at the bottom of the list pane (it replaces the
+/// rail): Chats, Calls, Spaces and You as 20pt glyphs on equal quarters,
+/// 8pt in from the pane's edges like the capsules, a hairline over it
+/// where the list scrolls beneath (Material: tone and spacing only).
+fn destination_bar() -> View {
+    let sk = spec().skin;
+    view()
+        .flex_none()
+        .p_2()
+        .when(sk != Skin::Material, |v| v.border_t(hairline()).border_color(move || c::border()))
         .child(
             view()
                 .flex_row()
-                .items_center()
-                .gap_2()
-                .p_3()
-                .child(profile_button(c::sidebar))
-                .child(
-                    text(me_name)
-                        .flex_1()
-                        .number_of_lines(1)
-                        .text_size(px(label_size))
-                        .text_color(move || c::foreground()),
-                ),
+                .h(px(40.0))
+                .role(AccessibilityRole::Tablist)
+                .child(destination_indicator())
+                .children(Tab::ALL.into_iter().map(destination_item)),
         )
 }
 
-/// The detail pane when no chat is open.
+/// The conversation pane when no chat is open: the calm welcome.
 fn welcome_pane() -> AnyElement {
     view()
         .flex_1()
-        .bg(move || c::chat_bg())
         .child(empty_state(
             Icon::Lock,
             "Songbird for desktop",
@@ -644,25 +564,22 @@ fn welcome_pane() -> AnyElement {
         .into_element()
 }
 
-/// The detail pane of a section other than Chats, before something in its
-/// list is chosen: what to do there, with the section's own mark.
+/// The conversation pane of a destination other than Chats, before
+/// something in its list is chosen: what to do there, with its own mark.
 fn section_pane(tab: Tab) -> AnyElement {
     let (glyph, title, message) = match tab {
         Tab::Calls => (Icon::Calls, "Calls", "Choose a call to see its details, or start one."),
-        Tab::Communities => (Icon::Communities, "Communities", "Choose a community or channel."),
+        Tab::Spaces => (Icon::Spaces, "Spaces", "Choose a space or a channel."),
         Tab::You | Tab::Chats => (Icon::Settings, "Settings", "Choose a setting."),
     };
-    view()
-        .flex_1()
-        .bg(move || c::chat_bg())
-        .child(empty_state(glyph, title, message, None))
-        .into_element()
+    view().flex_1().child(empty_state(glyph, title, message, None)).into_element()
 }
 
-/// The detail pane's root: the open chat (or the welcome) on Chats, the
-/// section's own empty state on the others. The chat stays mounted while
-/// another section shows, so going back to Chats returns to it as it was
-/// (scroll, draft).
+/// The conversation pane's root: the open chat (or the welcome) on Chats,
+/// the destination's own empty state on the others. The chat stays
+/// mounted while another destination shows, so going back to Chats
+/// returns to it as it was (scroll, draft). The conversation paints its
+/// own per-chat canvas over the pane.
 fn detail_root() -> View {
     let open = nav::open_chat();
     let current = nav::tab();
@@ -681,7 +598,7 @@ fn detail_root() -> View {
                     })
                 })),
         )
-        .children([Tab::Calls, Tab::Communities, Tab::You].into_iter().map(move |tab| {
+        .children([Tab::Calls, Tab::Spaces, Tab::You].into_iter().map(move |tab| {
             view()
                 .absolute()
                 .inset_0()
@@ -690,9 +607,66 @@ fn detail_root() -> View {
         }))
 }
 
-/// Wide windows: sidebar, list pane, detail pane. Built again when the
+/// The info pane: a third floating card beside the conversation while a
+/// chat's info is open (`nav::show_info`). Its page is built as the info
+/// pane's, so its header closes the pane; what it pushes (media, starred)
+/// opens in the conversation pane, where there is room for it. Gone, gap
+/// and all, while closed.
+fn info_slot() -> View {
+    let info = nav::info_pane();
+    let key = computed(move || info.with(|p| p.0.as_ref().map(|r| r.key.clone())));
+    view()
+        .w(px(INFO_W))
+        .flex_shrink_0()
+        .style_when(move || key.with(Option::is_none), |st| st.hidden())
+        .child(dynamic(move || {
+            let _ = key.get();
+            untracked(move || {
+                info.with(|p| p.0.clone()).map(|route| {
+                    floating::pane()
+                        .flex_1()
+                        .child(nav_stack().flex_1().child(nav::build_info(&route)))
+                })
+            })
+        }))
+}
+
+/// macOS: the window's title bar goes and the traffic lights sit on the
+/// canvas, their top-leading corner at the window margin (on the list
+/// pane's leading edge). The bar's reported height is then the margin, the
+/// lights and the margin again, so the panes start exactly one margin
+/// under them (`floating::pane_top`). The system's bar comes back when
+/// the wide layout goes (a narrow window's phone layout keeps it).
+fn adopt_title_bar() {
+    if os() != Os::MacOs {
+        return;
+    }
+    let window = current_window();
+    let set = move |style: TitleBarStyle| {
+        let mut bar = TitleBarOptions::default();
+        bar.style = style;
+        if style == TitleBarStyle::Hidden {
+            bar.controls_offset = Some(Point { x: px(MARGIN), y: px(MARGIN) });
+        }
+        let mut attributes = WindowAttributes::default();
+        attributes.title_bar = Some(bar);
+        window.set(attributes);
+    };
+    set(TitleBarStyle::Hidden);
+    let window = current_window();
+    cleanup(move || {
+        let mut attributes = WindowAttributes::default();
+        attributes.title_bar = Some(TitleBarOptions::default());
+        window.set(attributes);
+    });
+}
+
+/// Wide windows: the canvas and its floating panes. Built again when the
 /// skin changes (debug).
 pub fn desktop() -> AnyElement {
+    adopt_title_bar();
+    // Info belongs to the chat and the destination it was opened from.
+    cleanup(nav::close_info);
     dynamic(move || {
         let _ = skin::tracked_skin();
         untracked(desktop_layout)
@@ -703,47 +677,72 @@ pub fn desktop() -> AnyElement {
 fn desktop_layout() -> AnyElement {
     let open = nav::open_chat();
     let current = nav::tab();
-    // A chat opened from another section (a call's "Message", contact
-    // info) shows on Chats: the detail pane belongs to the selected
-    // section, so the section follows the chat. Only a change counts, not
-    // the chat already open when this layout mounts.
+    // A chat opened from another destination (a call's "Message", contact
+    // info) shows on Chats: the conversation pane belongs to the selected
+    // destination, so the destination follows the chat. Only a change
+    // counts, not the chat already open when this layout mounts. Another
+    // chat, or another destination, closes the info pane.
     let seen = stored(open.get_untracked());
     effect(move || {
         let now = open.get();
-        if seen.replace(now) != now && now.0.is_some() && current.get_untracked() != Tab::Chats {
-            current.set(Tab::Chats);
+        if seen.replace(now) != now {
+            nav::close_info();
+            if now.0.is_some() && current.get_untracked() != Tab::Chats {
+                current.set(Tab::Chats);
+            }
         }
     });
-    let sp = spec();
-    // Fluent's NavigationView: the content is a layer on the window, its
-    // top-leading corner rounded (8) and outlined by the card stroke.
-    let layer = sp.sidebar == Sidebar::NavigationView;
-    let panes = view()
-        .flex_1()
-        .flex_row()
-        .overflow_hidden()
-        .when(layer, |v| {
-            v.rounded_tl(px(8.0)).border_l_1().border_t_1().border_color(move || c::border()).mt(px(8.0))
-        })
-        .child(
-            view()
-                .w(px(360.0))
-                .border_r(if layer { px(1.0) } else { hairline() })
-                .border_color(move || c::border())
-                .bg(move || c::background())
-                .child(tab_panels()),
-        )
-        .child(
-            nav_stack()
-                .flex_1()
-                .child(nav_page().key("detail").header_visible(false).child(detail_root()))
-                .child(pushed()),
-        );
+    let seen_tab = stored(current.get_untracked());
+    effect(move || {
+        let now = current.get();
+        if seen_tab.replace(now) != now {
+            nav::close_info();
+        }
+    });
+    // Narrowed past room for three panes, the info page moves over the
+    // conversation rather than squeezing it.
+    effect(move || {
+        if !floating::fits_info_pane() {
+            untracked(nav::fold_info);
+        }
+    });
+    let mac = os() == Os::MacOs;
+    let list = floating::pane()
+        .w(px(LIST_W))
+        .flex_shrink_0()
+        .child(view().flex_1().child(tab_panels(true)))
+        .child(destination_bar());
+    let conversation = floating::pane().flex_1().min_w_0().child(
+        nav_stack()
+            .flex_1()
+            .child(nav_page().key("detail").header_visible(false).child(detail_root()))
+            .child(pushed()),
+    );
     view()
         .flex_1()
-        .flex_row()
-        .bg(move || if layer { c::sidebar() } else { c::background() })
-        .child(sidebar())
-        .child(panes)
+        .bg(move || floating::canvas())
+        // The traffic lights' band: the canvas there moves the window.
+        .child(mac.then(|| {
+            view()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(move || px(floating::pane_top()))
+                .window_drag(true)
+                .accessibility_elements_hidden(true)
+        }))
+        .child(
+            view()
+                .flex_1()
+                .flex_row()
+                .gap(px(GAP))
+                .pt(move || px(floating::pane_top()))
+                .px(px(MARGIN))
+                .pb(px(MARGIN))
+                .child(list)
+                .child(conversation)
+                .child(info_slot()),
+        )
         .into_element()
 }

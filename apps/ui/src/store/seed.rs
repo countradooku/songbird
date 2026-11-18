@@ -86,6 +86,7 @@ pub fn chat(id: ChatId, kind: ChatKind, title: &str) -> Chat {
             Some(contact) => contact,
             None => id,
         },
+        theme: ChatTheme::default(),
     }
 }
 
@@ -217,6 +218,7 @@ pub fn seed() -> Seed {
     // 2: Family group, pinned, with mentions.
     {
         let mut c = chat(2, ChatKind::Group, "Familia 🏡");
+        c.theme = ChatTheme::Rose;
         c.pinned = true;
         c.unread = 5;
         c.mentions = 1;
@@ -258,6 +260,7 @@ pub fn seed() -> Seed {
     // 4: Work group with join requests, admin.
     {
         let mut c = chat(4, ChatKind::Group, "Design team");
+        c.theme = ChatTheme::Slate;
         c.unread = 12;
         c.muted = true;
         c.lists = vec!["Work".into()];
@@ -321,6 +324,7 @@ pub fn seed() -> Seed {
         t.text(Some(1), -60 * 6, "Gym is closed on Sunday for route setting 🧗");
         put(&mut chats, a, t);
         let mut g = chat(9, ChatKind::Group, "Weekend trips");
+        g.theme = ChatTheme::Moss;
         g.community = Some(7);
         g.unread = 3;
         g.members = vec![Member { contact: None, role: Role::Member }, Member { contact: Some(13), role: Role::Admin }, Member { contact: Some(7), role: Role::Member }];

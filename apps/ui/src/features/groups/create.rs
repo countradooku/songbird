@@ -1,5 +1,5 @@
 //! Creating: the new group flow (members → name and settings → share the
-//! invite → the group) and a new community.
+//! invite → the group) and a new space.
 
 use nsh_core::prelude::*;
 
@@ -33,7 +33,7 @@ pub(crate) fn matches(c: &Contact, query: &str) -> bool {
     q.is_empty() || c.name.to_lowercase().contains(&q) || c.username.to_lowercase().contains(&q)
 }
 
-/// Starts the flow. `community`: the group joins it once made.
+/// Starts the flow. `community`: the space the group joins once made.
 pub(crate) fn new_group_flow(community: Option<ChatId>) {
     let base = nav::depth();
     nav::push("new-group", move || {
@@ -433,7 +433,8 @@ fn finish(base: usize, id: ChatId) {
     });
 }
 
-/// A new community: a name and a description, then its home.
+/// A new space: a name and a description, then its home.
+/// (`new_community` keeps the store's name for it.)
 pub fn new_community() {
     let base = nav::depth();
     nav::push("new-community", move || {
@@ -450,7 +451,7 @@ pub fn new_community() {
             community_home(id);
         };
         page(
-            "New community",
+            "New space",
             view()
                 .flex_1()
                 .child(page_scroll(
@@ -458,27 +459,27 @@ pub fn new_community() {
                         .px_4()
                         .pt_5()
                         .gap_4()
-                        .child(muted("Bring related groups together, like a school's classes or a building's neighbours. Everyone in the community gets your announcements."))
+                        .child(muted("Bring related groups together, like a school's classes or a building's neighbours. Everyone in the space gets your announcements."))
                         .child(labelled_field(
-                            "Community name",
-                            field("Community name", name).max_length(100_u32).auto_focus(true),
+                            "Space name",
+                            field("Space name", name).max_length(100_u32).auto_focus(true),
                             "Members see this name.",
                             || false,
                         ))
                         .child(labelled_field(
                             "Description",
                             field("What's it for?", about).multiline(true).h(px(96.0)).py_2(),
-                            "Optional. Shown on the community's home.",
+                            "Optional. Shown on the space's home.",
                             || false,
                         ))
                         .child(banner(
                             Tone::Secure,
                             Icon::Lock,
-                            "The community's name and description are end-to-end encrypted. Songbird's servers only see which groups belong together.",
+                            "The space's name and description are end-to-end encrypted. Songbird's servers only see which groups belong together.",
                         )),
                 ))
                 .child(bottom_bar(
-                    btn("Create community", Variant::Primary, BtnSize::Lg, create)
+                    btn("Create space", Variant::Primary, BtnSize::Lg, create)
                         .disabled(move || name.with(|n| n.trim().is_empty())),
                 )),
         )

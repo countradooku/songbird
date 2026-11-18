@@ -183,3 +183,26 @@ explicit; none affects existing accounts or messages.
 - After a registry restore: devices removed after the backup are back and enabled. Clients
   refuse the restored list as a rollback. Tell affected primaries to sign a new list, which
   removes those devices again.
+
+## Registry busy: write conflicts outlasting the retry budget (D-0093)
+
+- Detection: `songbird_registry_busy_total` grows on `api`, `worker`, `push` or `delivery`; their
+  logs say "registry busy: write conflicts outlasted the retry budget" (no identifiers); `api`
+  answers 503 on the affected endpoints. `songbird_registry_conflict_retries_total` rising on its
+  own is normal: SurrealDB is optimistic, and racing changes of one account lose and retry.
+- Impact: the refused call wrote nothing (the transaction lost and was not committed); the caller
+  may retry, and apps do on 503. Limits (devices, passkeys, invites, group rosters) stay exact:
+  every change that a limit guards writes one row per account, so two racing changes can never
+  both commit.
+- Causes and actions:
+  1. **One account hammered** (many concurrent changes to the same account, group or community):
+     busy answers while SurrealDB's disk and CPU are normal, usually with an endpoint's throttle
+     counters rising too (`api_device_throttled` for devices). The counters carry no endpoint or
+     account (invariant 6): the 503s in `api`'s access metrics show which endpoint. The
+     per-account throttles bound it; lower that endpoint's burst if it persists.
+  2. **SurrealDB slow to commit** (busy across many endpoints at once): every commit waits for its
+     fsync (`sync=every`), and SurrealKV counts commits still in flight or awaiting their fsync as
+     conflicts (D-0093), so a slow disk turns one winner into several losses for each waiting
+     writer. Check the SurrealDB host's disk latency and CPU (`process_cpu_seconds`,
+     node metrics), then "Directory reload failing" and backup jobs competing for the disk.
+- Verification: `songbird_registry_busy_total` flat; 503s from `api` back to their baseline.

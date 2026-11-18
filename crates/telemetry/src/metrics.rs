@@ -53,6 +53,25 @@ impl Metrics {
         Ok(())
     }
 
+    /// Registers a counter whose value `read` returns at each scrape: for counts kept by a
+    /// library that does not depend on this crate (an atomic it increments).
+    ///
+    /// # Errors
+    /// [`TelemetryError::SensitiveMetricName`] if the name matches the redaction rules.
+    pub fn register_counter_fn(
+        &mut self,
+        name: &'static str,
+        help: &'static str,
+        read: fn() -> u64,
+    ) -> Result<(), TelemetryError> {
+        if is_sensitive(name) {
+            return Err(TelemetryError::SensitiveMetricName(name.to_owned()));
+        }
+        self.registry
+            .register_collector(Box::new(CounterFn { name, help, read }));
+        Ok(())
+    }
+
     /// Registers the telemetry self-metrics (dropped log lines, refused callsites).
     pub fn register_self_metrics(&mut self, dropped: Option<ErrorCounter>) {
         self.registry
@@ -67,6 +86,21 @@ impl Metrics {
         let mut out = String::with_capacity(4096);
         prometheus_client::encoding::text::encode(&mut out, &self.registry)?;
         Ok(out)
+    }
+}
+
+/// A counter read at scrape time ([`Metrics::register_counter_fn`]).
+#[derive(Debug)]
+struct CounterFn {
+    name: &'static str,
+    help: &'static str,
+    read: fn() -> u64,
+}
+
+impl Collector for CounterFn {
+    fn encode(&self, mut encoder: DescriptorEncoder<'_>) -> Result<(), std::fmt::Error> {
+        let c = ConstCounter::new((self.read)());
+        c.encode(encoder.encode_descriptor(self.name, self.help, None, c.metric_type())?)
     }
 }
 
@@ -249,6 +283,21 @@ mod tests {
             m.register("device_id_seen", "x", Counter::<u64>::default())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn counter_fns_are_read_at_scrape_and_checked_like_any_name() {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let mut m = Metrics::new("test", "0.0.0");
+        m.register_counter_fn("lost_races", "Races lost", || {
+            N.load(std::sync::atomic::Ordering::Relaxed)
+        })
+        .unwrap();
+        N.store(7, std::sync::atomic::Ordering::Relaxed);
+        let text = m.encode().unwrap();
+        assert!(text.contains("songbird_lost_races_total 7"), "{text}");
+        assert_eq!(audit_exposition(&text), Vec::<String>::new());
+        assert!(m.register_counter_fn("device_id_seen", "x", || 0).is_err());
     }
 
     #[test]

@@ -337,6 +337,11 @@ pub enum RegistryError {
     /// No such community (Prompt 5, M4).
     #[error("not found")]
     NotFound,
+    /// The transaction kept losing write conflicts to concurrent changes of the same rows for
+    /// longer than the retry budget (D-0093). Nothing was written; the caller may retry later
+    /// (the API answers 503).
+    #[error("busy: concurrent changes, retry later")]
+    Busy,
 }
 
 /// One device's stored keys (opaque stored forms, `songbird_proto::keys`).
@@ -445,8 +450,86 @@ pub struct NewAccount {
     pub allowance: u32,
 }
 
-/// How many times a statement that conflicts with a concurrent transaction is retried.
-const CONFLICT_RETRIES: u32 = 8;
+/// How many times a transaction that lost a write conflict is retried, at most (D-0093).
+const CONFLICT_RETRIES: u32 = 20;
+
+/// How long one call may spend retrying lost write conflicts before it answers
+/// [`RegistryError::Busy`] (D-0093).
+const CONFLICT_BUDGET: Duration = Duration::from_millis(1500);
+
+/// Lost write conflicts retried, process-wide: aggregates only, no labels (invariant 6).
+static CONFLICT_RETRIED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Calls answered [`RegistryError::Busy`], process-wide.
+static CONFLICT_BUSY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A process-wide counter a service exports: (name, help, its value at scrape).
+pub type CounterSpec = (&'static str, &'static str, fn() -> u64);
+
+/// The registry's conflict counters, for a service to export (`songbird_registry_*`, runbook
+/// "Registry busy" in `docs/RUNBOOKS/jobs-push-api-worker.md`): (name, help, read at scrape).
+pub const METRICS: [CounterSpec; 2] = [
+    (
+        "registry_conflict_retries",
+        "Registry transactions retried after losing a write conflict",
+        || CONFLICT_RETRIED.load(std::sync::atomic::Ordering::Relaxed),
+    ),
+    (
+        "registry_busy",
+        "Registry calls answered busy: write conflicts outlasted the retry budget",
+        || CONFLICT_BUSY.load(std::sync::atomic::Ordering::Relaxed),
+    ),
+];
+
+/// Backoff between retries of a transaction that lost a write conflict (D-0093): full jitter
+/// (a uniformly random wait up to an exponentially growing cap, 2 ms doubling to 128 ms), bounded
+/// by [`CONFLICT_RETRIES`] attempts and [`CONFLICT_BUDGET`] of time. Without the jitter, racing
+/// writers that lost to the same commit all wake at the same instant and collide again, round
+/// after round, until one of them runs out of attempts. How often a call loses is not bounded by
+/// the number of competing winners: `SurrealKV` counts commits still in flight or awaiting their
+/// fsync as conflicts, so the bound is a time budget (D-0093).
+pub(crate) struct Backoff {
+    attempt: u32,
+    started: std::time::Instant,
+}
+
+impl Backoff {
+    pub(crate) fn new() -> Self {
+        Self {
+            attempt: 0,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    /// The upper bound of the wait before retry `attempt` (1-based).
+    fn cap(attempt: u32) -> Duration {
+        Duration::from_millis(1u64 << attempt.clamp(1, 7))
+    }
+
+    /// Waits before the next attempt after a lost conflict; [`RegistryError::Busy`] once the
+    /// attempts or the time budget are spent.
+    pub(crate) async fn conflicted(&mut self) -> Result<(), RegistryError> {
+        if self.attempt >= CONFLICT_RETRIES || self.started.elapsed() >= CONFLICT_BUDGET {
+            CONFLICT_BUSY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                attempts = self.attempt,
+                "registry busy: write conflicts outlasted the retry budget"
+            );
+            return Err(RegistryError::Busy);
+        }
+        CONFLICT_RETRIED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.attempt += 1;
+        let cap = u64::try_from(Self::cap(self.attempt).as_micros()).unwrap_or(u64::MAX);
+        let mut r = [0u8; 8];
+        // No randomness only loses the jitter, never the bound.
+        let wait = if getrandom::fill(&mut r).is_ok() {
+            u64::from_le_bytes(r) % (cap + 1)
+        } else {
+            cap
+        };
+        tokio::time::sleep(Duration::from_micros(wait)).await;
+        Ok(())
+    }
+}
 
 /// Whether a failure is SurrealDB's "transaction conflict, retry" (as a statement kind or an RPC
 /// error code; which one depends on where the conflict is detected).
@@ -698,7 +781,7 @@ impl Registry {
                 var("code", bytes(invite.map_or(&[0u8; 32][..], |c| &c[..]))),
             ]
         };
-        let mut attempt = 0;
+        let mut backoff = Backoff::new();
         loop {
             match self.db.query(&sql, vars()).await {
                 Ok(_) => return Ok(()),
@@ -708,10 +791,7 @@ impl Registry {
                 Err(DbError::Statement(kind)) if kind.contains("AlreadyExists") => {
                     return Err(RegistryError::Exists);
                 }
-                Err(e) if is_conflict(&e) && attempt < CONFLICT_RETRIES => {
-                    attempt += 1;
-                    tokio::time::sleep(Duration::from_millis(2u64 << attempt.min(6))).await;
-                }
+                Err(e) if is_conflict(&e) => backoff.conflicted().await?,
                 Err(e) => return Err(e.into()),
             }
         }
@@ -741,7 +821,7 @@ impl Registry {
                 var("ttl", int(expires_in.as_secs())),
             ]
         };
-        let mut attempt = 0;
+        let mut backoff = Backoff::new();
         loop {
             match self.db.query(sql, vars()).await {
                 Ok(_) => return Ok(()),
@@ -751,10 +831,7 @@ impl Registry {
                 Err(DbError::Statement(kind)) if kind.contains("AlreadyExists") => {
                     return Err(RegistryError::Exists);
                 }
-                Err(e) if is_conflict(&e) && attempt < CONFLICT_RETRIES => {
-                    attempt += 1;
-                    tokio::time::sleep(Duration::from_millis(2u64 << attempt.min(6))).await;
-                }
+                Err(e) if is_conflict(&e) => backoff.conflicted().await?,
                 Err(e) => return Err(e.into()),
             }
         }
@@ -1127,17 +1204,14 @@ impl Registry {
         sql: &str,
         vars: impl Fn() -> Vec<(String, Value)>,
     ) -> Result<(), RegistryError> {
-        let mut attempt = 0;
+        let mut backoff = Backoff::new();
         loop {
             match self.db.query(sql, vars()).await {
                 Ok(_) => return Ok(()),
                 Err(DbError::Statement(kind)) if kind == "Thrown" => {
                     return Err(RegistryError::Invite);
                 }
-                Err(e) if is_conflict(&e) && attempt < CONFLICT_RETRIES => {
-                    attempt += 1;
-                    tokio::time::sleep(Duration::from_millis(2u64 << attempt.min(6))).await;
-                }
+                Err(e) if is_conflict(&e) => backoff.conflicted().await?,
                 Err(e) => return Err(e.into()),
             }
         }
@@ -1220,7 +1294,7 @@ impl Registry {
              FOR $k IN $kem { CREATE otkem:[$d, $k[0]] SET device = $d, blob = $k[1] RETURN NONE; };
              COMMIT TRANSACTION;",
         );
-        let mut attempt = 0;
+        let mut backoff = Backoff::new();
         loop {
             match self.db.query(&sql, vars.clone()).await {
                 Ok(_) => return Ok(()),
@@ -1229,10 +1303,7 @@ impl Registry {
                     "Thrown:full" => return Err(RegistryError::Full),
                     "Thrown:incomplete" => return Err(RegistryError::Incomplete),
                     k if k.contains("AlreadyExists") => return Err(RegistryError::Duplicate),
-                    k if k == db::TRANSACTION_CONFLICT && attempt < CONFLICT_RETRIES => {
-                        attempt += 1;
-                        tokio::time::sleep(Duration::from_millis(2u64 << attempt.min(6))).await;
-                    }
+                    k if k == db::TRANSACTION_CONFLICT => backoff.conflicted().await?,
                     _ => return Err(DbError::Statement(kind).into()),
                 },
                 Err(e) => return Err(e.into()),
@@ -1458,17 +1529,14 @@ impl Registry {
              };
              COMMIT TRANSACTION;",
         );
-        let mut attempt = 0;
+        let mut backoff = Backoff::new();
         loop {
             match self.db.query(&sql, vars.clone()).await {
                 Ok(_) => return Ok(()),
                 Err(DbError::Statement(kind)) => match kind.as_str() {
                     "Thrown:full" => return Err(RegistryError::Full),
                     k if k.contains("AlreadyExists") => return Err(RegistryError::Duplicate),
-                    k if k == db::TRANSACTION_CONFLICT && attempt < CONFLICT_RETRIES => {
-                        attempt += 1;
-                        tokio::time::sleep(Duration::from_millis(2u64 << attempt.min(6))).await;
-                    }
+                    k if k == db::TRANSACTION_CONFLICT => backoff.conflicted().await?,
                     _ => return Err(DbError::Statement(kind).into()),
                 },
                 Err(e) => return Err(e.into()),
@@ -2426,4 +2494,52 @@ pub fn push_index(secret: &[u8; 32], device: &DeviceId) -> [u8; 32] {
         out.copy_from_slice(t);
     }
     out
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    #![allow(clippy::unwrap_used, reason = "tests")]
+
+    use std::time::{Duration, Instant};
+
+    use super::{Backoff, CONFLICT_BUDGET, CONFLICT_RETRIES, RegistryError};
+
+    #[test]
+    fn the_cap_doubles_from_2_ms_to_128_ms() {
+        let caps: Vec<u64> = (1..=9)
+            .map(|a| u64::try_from(Backoff::cap(a).as_millis()).unwrap())
+            .collect();
+        assert_eq!(caps, [2, 4, 8, 16, 32, 64, 128, 128, 128]);
+    }
+
+    #[tokio::test]
+    async fn retries_end_in_busy_within_the_budget_plus_one_wait() {
+        let start = Instant::now();
+        let mut b = Backoff::new();
+        let mut retries = 0;
+        while b.conflicted().await.is_ok() {
+            retries += 1;
+        }
+        assert!(retries <= CONFLICT_RETRIES);
+        // The budget is checked before each wait, and one wait is at most the largest cap.
+        assert!(start.elapsed() < CONFLICT_BUDGET + Backoff::cap(7) + Duration::from_millis(250));
+    }
+
+    #[tokio::test]
+    async fn the_attempt_limit_ends_retries_even_with_time_left() {
+        let mut b = Backoff::new();
+        b.attempt = CONFLICT_RETRIES;
+        assert!(matches!(b.conflicted().await, Err(RegistryError::Busy)));
+    }
+
+    #[tokio::test]
+    async fn the_time_budget_ends_retries_even_with_attempts_left() {
+        let busy = || (super::METRICS[1].2)();
+        let before = busy();
+        let mut b = Backoff::new();
+        b.started = Instant::now().checked_sub(CONFLICT_BUDGET).unwrap();
+        assert!(matches!(b.conflicted().await, Err(RegistryError::Busy)));
+        // Counted for the runbook's alert (process-wide; other tests may add to it too).
+        assert!(busy() > before);
+    }
 }

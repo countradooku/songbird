@@ -302,6 +302,10 @@ impl Service for WorkerService {
     type Config = WorkerConfig;
 
     fn new(config: WorkerConfig, metrics: &mut Metrics) -> Result<Self, BoxError> {
+        // The registry's write-conflict retries and busy answers (D-0093).
+        for (name, help, read) in songbird_accounts::METRICS {
+            metrics.register_counter_fn(name, help, read)?;
+        }
         let m = WorkerMetrics::default();
         m.register(metrics)?;
         Ok(Self {

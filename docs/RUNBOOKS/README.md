@@ -11,7 +11,7 @@ Every degraded mode is explicit, tested and has a runbook (constitution, invaria
 | Secret exposure, rotation, people changes | [secrets-rotation.md](secrets-rotation.md) | not yet |
 | Provider loss, rebuild at the second provider | [provider-switch.md](provider-switch.md) | not yet (Prompt 1 gate drill) |
 | Delivery: overload, slow consumers, store unavailable, auth failures, deploy drain | [delivery.md](delivery.md) | load-generator runs and e2e tests (P02-M1) |
-| Jobs, push, attachments, account deletion | [jobs-push-api-worker.md](jobs-push-api-worker.md) | live tests and M5 gate tests only |
+| Jobs, push, attachments, account deletion, registry busy | [jobs-push-api-worker.md](jobs-push-api-worker.md) | live tests and M5 gate tests only |
 | Media: GIF provider outage, uploads failing, storage growth, download abuse | [media.md](media.md) | live tests only (`media_live`, `gate_p06`) |
 | Calls: a LiveKit node or its Valkey down, TURN over TLS failing, webhooks failing, rotating the LiveKit secret | [calls.md](calls.md) | live tests (`gate_p07`), the E2EE harness (`tools/calls-harness`) |
 | Registry loss or corruption, mailbox loss, backups or verification failing, compromise | [backup-and-restore.md](backup-and-restore.md) | 2026-11-13: restore under load on compose ([drills.md](drills.md)); off-site path not yet (needs the Scaleway project) |

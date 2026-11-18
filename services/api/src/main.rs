@@ -469,6 +469,10 @@ impl Service for Api {
     type Config = ApiConfig;
 
     fn new(config: ApiConfig, metrics: &mut Metrics) -> Result<Self, BoxError> {
+        // The registry's write-conflict retries and busy answers (D-0093).
+        for (name, help, read) in songbird_accounts::METRICS {
+            metrics.register_counter_fn(name, help, read)?;
+        }
         let tls = config
             .api
             .as_ref()

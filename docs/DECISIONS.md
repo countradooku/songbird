@@ -167,6 +167,34 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0111 — Camera, milestone 1: one interface, newest-wins mailboxes, real QR codes, strict code formats
+
+- Date: 2026-11-18
+- Status: accepted by the agent within the approved plan (D-0110); report `docs/reports/CAM-M1.md`
+- Decided by: agent
+- Context: M1 of the camera plan: the interface, fakes and QR, before any platform code.
+- Decision:
+  1. `apps/camera` (`songbird-camera`) holds the interface (`Backend`, `Capture`, `Sink`) and
+     everything shared (mailboxes, frames, QR decoding, the JPEG filter, `FakeCamera`), each
+     module `#![forbid(unsafe_code)]`; the crate denies `unsafe` and only platform modules (M2–M4)
+     will allow it. `apps/ui` forbids `unsafe`.
+  2. Camera threads reach the app through bounded mailboxes where the newest wins (32 events,
+     2 frames): a stalled reader drops the oldest and never blocks the camera. No `futures` or
+     channel crate: a mutex, a queue and a waker.
+  3. Sessions run only while their screen shows them, the app is not in the background (a call
+     on a desktop excepted) and access is granted; the system prompt only on a press.
+  4. Codes: `SONGBIRD:LINK:<hex>:<hex>` and `SONGBIRD:SAFETY:<60 digits>`, upper case for QR's
+     alphanumeric mode, parsed case-insensitively and strictly in `features::devices::codes`;
+     link codes only from the live camera, with a confirmation before linking. The typed
+     fallback on the new device is removed.
+  5. `qrcode` 0.14.1 draws every code (one SVG path, light plate, 4-module quiet zone,
+     error correction M); `rqrr` 0.11.0 decodes, frames capped at 1280×720 and 8192 a side.
+  6. Stills are filtered to their image and orientation (a fresh 36-byte EXIF holding only the
+     orientation, when not upright); everything after EOI is dropped.
+- Consequences: Prompt 9's `link.rs` (PR #67) moves to `codes::link_code` and `codes::parse`.
+  Platform code (M2–M4) implements `Backend` and `Capture` and is tested through the same
+  screens. New dependencies: `rqrr` (with `g2p`, `lru`), `qrcode`.
+
 ## D-0110 — The native camera module: the plan, and the owner's decisions it needs
 
 - Date: 2026-11-18

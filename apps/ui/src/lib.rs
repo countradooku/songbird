@@ -4,8 +4,13 @@
 //! - `store`: the UI's view of app-core and its intents (mocked until A2).
 //! - `nav` and `shell`: navigation and the phone and desktop layouts.
 //! - `features`: the screens, one module per area of the prompt set.
+//! - `camera`: the camera's sessions and states (D-0110); its platform code, and all `unsafe`,
+//!   live in `songbird-camera`, so the app forbids `unsafe`.
+
+#![forbid(unsafe_code)]
 
 pub mod backend;
+pub mod camera;
 pub mod features;
 pub mod nav;
 pub mod shell;
@@ -53,6 +58,7 @@ fn native(registry: &mut Registry) {
 pub fn App() -> impl IntoElement {
     let s = Store::new();
     store::install(s);
+    camera::install_for_app();
     backend::restore();
     theming::follow_settings(s);
     features::desktop::install_shortcuts();

@@ -9,44 +9,10 @@ use super::{
     icons::{Icon, icon},
     tokens::{c, font, motion, radius},
 };
-use crate::store::ext_onboarding::qr_modules;
 
 /// The monospace family for keys, codes and numbers that are read aloud
 /// or compared (the platform's own monospace).
 pub const MONO: &str = "monospace";
-
-/// A decorative code derived from `data`: what a real QR code will look
-/// like. Always dark modules on a light plate, in both themes (an
-/// inverted code does not scan), and drawn at a whole number of points
-/// per module so no module edge falls between pixels. Hidden from screen
-/// readers; the caller says what it is for.
-pub fn qr_code(data: &str, size: f32) -> View {
-    const N: usize = 25;
-    let modules = qr_modules(data, N);
-    let mut rects = String::new();
-    for r in 0..N {
-        for col in 0..N {
-            if modules[r * N + col] {
-                rects.push_str(&format!(r#"<rect x="{col}" y="{r}" width="1" height="1"/>"#));
-            }
-        }
-    }
-    let markup = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {N} {N}" fill="currentColor" shape-rendering="crispEdges">{rects}</svg>"#
-    );
-    let src = nsh_core::element::ImageSrc::svg_markup(&markup);
-    let side = (size / N as f32).round().max(4.0) * N as f32;
-    view()
-        .p_3()
-        .rounded(move || radius::lg())
-        // Always dark modules on a light plate, so it scans in dark mode.
-        .bg(move || c::on_call())
-        .border(super::parts::hairline())
-        .border_color(move || c::border())
-        .self_center()
-        .accessibility_elements_hidden(true)
-        .child(svg(src).size(px(side)).text_color(move || c::call_bg()))
-}
 
 /// The camera view of a scanner (mocked): a dark frame, four corner
 /// brackets and a line sweeping down, which rests with reduced motion.

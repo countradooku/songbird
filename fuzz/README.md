@@ -28,6 +28,8 @@ every decoder). The crate is outside the main workspace because it needs nightly
 | `media_url` | signed media URL queries; `Range` headers (Prompt 6) | `songbird-api` |
 | `pack_manifest` | pack manifests: length prefix, padding, bounds (Prompt 6) | `songbird-content` |
 | `gif_proxy` | GIF requests, the provider's answers, media tokens (Prompt 6) | `songbird-api` |
+| `qr_decode` | QR codes in camera frames, any shape and stride (D-0110) | `songbird-camera` |
+| `jpeg_strip` | a still's metadata filter: segments, EXIF orientation, scans (D-0110) | `songbird-camera` |
 
 ```bash
 cargo xtask fuzz --secs 60            # every target, 60 s each (CI fast checks do not fuzz)

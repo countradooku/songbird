@@ -13,6 +13,7 @@ pub mod icons;
 pub mod onboarding_kit;
 pub mod parts;
 pub mod portrait;
+pub mod qr;
 pub mod settings_controls;
 pub mod skin;
 pub mod tokens;
@@ -36,9 +37,10 @@ pub use parts::{
 };
 pub use onboarding_kit::{
     MONO, StatusTone, busy_bar, code_cells, flow_layout, flow_lead, flow_title, hero_icon, key_blocks,
-    numbered_step, numeric_code, page_dots, progress_bar, qr_code, scanner, status_line, step_segments,
+    numbered_step, numeric_code, page_dots, progress_bar, scanner, status_line, step_segments,
 };
 pub use settings_controls::{callout, expander, option_pill, radio_row, swatch, tile};
+pub use qr::{qr_code, qr_code_live};
 pub use skin::{Skin, SkinSpec, skin, spec, with_skin};
 pub use tokens::{TOUCH, c, font, motion, radius};
 

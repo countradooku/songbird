@@ -1,0 +1,23 @@
+[package]
+name = "songbird-camera"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Songbird's camera: one interface over AVFoundation, CameraX, Media Foundation and PipeWire (D-0110)"
+
+# Its own workspace, as apps/ui: the app's crates are outside the server workspace.
+[workspace]
+
+[dependencies]
+# On-device QR decoding where the OS has none (Android, Windows, Linux) and as
+# the fallback on Apple (D-0110). No `img`: frames come as grey bytes.
+rqrr = { version = "0.11.0", default-features = false }
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"

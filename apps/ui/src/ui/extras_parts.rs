@@ -3,7 +3,7 @@
 //! surface. Built from tokens only, like the rest of `ui`.
 
 use nsh_base::{button, theme};
-use nsh_core::{element::ImageSrc, prelude::*};
+use nsh_core::prelude::*;
 
 use super::{
     icons::{Icon, icon},
@@ -130,71 +130,6 @@ pub fn key_combo(shown: &str) -> View {
         }))
 }
 
-/// A QR code for `data`, drawn as modules on the card colour.
-///
-/// mock: the pattern is a deterministic stand-in with the three finder
-/// squares; app-core will hand the real QR matrix (a `qrcode` crate
-/// encoding of `data`).
-pub fn qr_code(data: &str, side: f32, label: impl Into<SharedString>) -> View {
-    let markup = qr_markup(data);
-    view()
-        .size(px(side))
-        .p_3()
-        .rounded(move || radius::lg())
-        .bg(move || c::card())
-        .border(super::parts::hairline())
-        .border_color(move || c::border())
-        .role(AccessibilityRole::Image)
-        .label(label.into())
-        .child(
-            svg(ImageSrc::svg_markup(&markup))
-                .flex_1()
-                .w_full()
-                .text_color(move || c::foreground()),
-        )
-}
-
-/// The QR stand-in's SVG: 25 × 25 modules.
-pub fn qr_markup(data: &str) -> String {
-    const N: usize = 25;
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in data.bytes() {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x0100_0000_01b3);
-    }
-    let finder = |x: usize, y: usize| -> Option<bool> {
-        for (fx, fy) in [(0, 0), (N - 7, 0), (0, N - 7)] {
-            if x >= fx && x < fx + 7 && y >= fy && y < fy + 7 {
-                let (dx, dy) = (x - fx, y - fy);
-                let ring = dx == 0 || dy == 0 || dx == 6 || dy == 6;
-                let core = (2..=4).contains(&dx) && (2..=4).contains(&dy);
-                return Some(ring || core);
-            }
-            // The quiet separator around each finder.
-            if x + 1 >= fx && x <= fx + 7 && y + 1 >= fy && y <= fy + 7 {
-                return Some(false);
-            }
-        }
-        None
-    };
-    let mut rects = String::new();
-    for y in 0..N {
-        for x in 0..N {
-            let on = finder(x, y).unwrap_or_else(|| {
-                h ^= h << 13;
-                h ^= h >> 7;
-                h ^= h << 17;
-                h & 1 == 1
-            });
-            if on {
-                rects.push_str(&format!(r#"<rect x="{x}" y="{y}" width="1.02" height="1.02"/>"#));
-            }
-        }
-    }
-    format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {N} {N}" fill="currentColor" shape-rendering="crispEdges">{rects}</svg>"#
-    )
-}
 
 /// A selectable card: a plan, a provider. `selected` draws the primary
 /// ring (and the caller says it in words too).
@@ -210,17 +145,6 @@ pub fn select_card(selected: impl Fn() -> bool + Copy + 'static) -> View {
         .gap_2()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::qr_markup;
-
-    #[test]
-    fn qr_is_stable_and_differs_by_data() {
-        assert_eq!(qr_markup("a"), qr_markup("a"));
-        assert_ne!(qr_markup("a"), qr_markup("b"));
-        assert!(qr_markup("a").starts_with("<svg"));
-    }
-}
 
 #[cfg(test)]
 mod key_tests {

@@ -21,6 +21,10 @@ songbird-pow = { path = "../../crates/pow" }
 songbird-keys = { path = "../../crates/keys" }
 songbird-client = { path = "../../crates/client" }
 aws-lc-rs = { version = "1.19.0", default-features = false, features = ["aws-lc-sys"] }
+# The camera (D-0110): one interface over each platform's camera; all `unsafe` lives there.
+songbird-camera = { path = "../camera" }
+# Real QR codes (D-0110): the link code, invites, safety numbers. No `image`/`svg`: no deps.
+qrcode = { version = "0.14.1", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nsh-platform-linux = { version = "0.6.0", default-features = false, features = ["shader", "editor", "emoji-picker", "highlight", "math", "plot", "rich-editor", "term"] }

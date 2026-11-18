@@ -154,6 +154,42 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0099 — Prompt 8, milestones 4 and 5 (first part): the iOS notification extension and on-device checks; what waits for the owner
+
+- Date: 2026-11-18
+- Status: in progress; reports `docs/reports/P08-M4.md`, `docs/reports/P08-M5.md`
+- Decided by: agent, with the owner's go-ahead to download the iOS tooling and use the local
+  Android SDK (2026-11-18)
+- Built:
+  - `apps/ios/NotifyRules` (Swift package, 6 tests): what the Notification Service Extension
+    shows, from the user's preferences in the App Group, the same rules as
+    `apps/ui/src/features/notify.rs`.
+  - `apps/ios/NotificationService`: the extension (`chat.songbird.app.notify`), and
+    `apps/ios/build-simulator.sh`, which builds the app with `nsh package --target
+    ios-simulator`, compiles the extension for the simulator, puts it in the app and signs both
+    ad hoc (no Apple account needed).
+  - Preview builds (debug, or `SONGBIRD_PREVIEW_BUILD`) show the Calls tab's test rows and honour
+    `SONGBIRD_DEMO_ARRIVALS`, to exercise notifications on devices; release builds never do.
+- Checked on devices:
+  - **iOS Simulator** (iPhone 18 Pro Max, iOS 27.2): `simctl push` of the exact payload our APNs
+    client sends is delivered as a banner (authorization granted); the extension is installed
+    and registered, but the simulator does not start service extensions for `simctl push`, so
+    the extension runs only with a real APNs delivery (needs the registered bundle ID).
+  - **Android emulator** (Pixel, Android 36, Google APIs): the app's notifier posts "Ana Popescu ·
+    Incoming voice call" (tag `chat:1`, importance high) for a test call, read back with
+    `dumpsys notification` and seen in the shade.
+  - **macOS**: the notifier fires for a message and a call while the window is closed to the
+    tray, and NSH hands both to the system, which refuses them: "Notifications are not allowed
+    for this application" (an ad hoc signed build that was never granted permission). Allowing
+    Songbird in System Settings › Notifications, or a signed build, shows them.
+- Not built yet, and why:
+  - The Xcode and Gradle **host projects** that register for remote pushes (APNs token, PushKit
+    with CallKit, FCM, UnifiedPush, ConnectionService) and send the token to `PUT /v1/push`: a
+    packaged NSH app cannot hold them (D-0094 finding 7). Real APNs needs the bundle IDs and a
+    provisioning profile, FCM the Android app in Firebase `songbird-6fab1`
+    (`google-services.json`): the owner's steps (D-0094 §2, §5).
+  - VoIP and CallKit: PushKit does not deliver to the Simulator; needs a physical iPhone.
+
 ## D-0098 — Prompt 8, milestone 6: desktop notifications decided on the device; close to the tray; the real login item
 
 - Date: 2026-11-18

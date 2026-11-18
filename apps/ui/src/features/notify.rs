@@ -158,12 +158,22 @@ fn watch(
 }
 
 /// Preview builds only (debug, or `SONGBIRD_PREVIEW_BUILD` at compile time):
-/// `SONGBIRD_DEMO_ARRIVALS=<seconds>` hides the window as closing it to the
+/// `SONGBIRD_DEMO_ARRIVALS=<seconds>` (or that number in a
+/// `songbird-demo-arrivals` file in the app's data folder) hides the window as closing it to the
 /// tray would, then has the first direct contact write and, later, call: to
 /// see the notifications on screen without driving the UI (D-0098).
 pub fn demo_from_env() {
     let preview = cfg!(debug_assertions) || option_env!("SONGBIRD_PREVIEW_BUILD").is_some();
-    let Some(secs) = std::env::var("SONGBIRD_DEMO_ARRIVALS").ok().and_then(|v| v.parse::<u64>().ok()) else {
+    // The environment, or (emulators and devices, which pass none through) a
+    // `songbird-demo-arrivals` file in the app's data folder.
+    let from_file = || {
+        data_dir().and_then(|d| std::fs::read_to_string(d.join("songbird-demo-arrivals")).ok())
+    };
+    let Some(secs) = std::env::var("SONGBIRD_DEMO_ARRIVALS")
+        .ok()
+        .or_else(from_file)
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    else {
         return;
     };
     if !preview {

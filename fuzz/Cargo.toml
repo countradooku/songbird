@@ -24,6 +24,8 @@ songbird-groups = { path = "../crates/groups" }
 songbird-calls = { path = "../services/calls" }
 songbird-groups-harness = { path = "../tests/groups" }
 songbird-send = { path = "../crates/send" }
+# The app's camera (D-0110): QR decoding and the still metadata filter.
+songbird-camera = { path = "../apps/camera" }
 akd = { version = "=0.13.0", default-features = false, features = ["whatsapp_v1", "serde_serialization", "public_auditing"] }
 bytes = "1"
 prost = "0.14"
@@ -238,6 +240,20 @@ bench = false
 [[bin]]
 name = "call_records"
 path = "fuzz_targets/call_records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qr_decode"
+path = "fuzz_targets/qr_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jpeg_strip"
+path = "fuzz_targets/jpeg_strip.rs"
 test = false
 doc = false
 bench = false

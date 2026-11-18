@@ -19,6 +19,7 @@ pub(crate) fn all(cv: Conv) -> AnyElement {
         .child(event_sheet(cv))
         .child(contact_sheet(cv))
         .child(sticker_sheet(cv))
+        .child(camera_sheet(cv))
         .child(forward_sheet(cv))
         .child(delete_sheet(cv))
         .child(reactions_sheet(cv))
@@ -135,16 +136,7 @@ fn attach_sheet(cv: Conv) -> AnyElement {
                     hd: cv.s.settings.with_untracked(|x| x.hd_uploads),
                 })
             })),
-            // mock: the camera.
-            tile(Icon::Camera, "Camera", then(|cv| {
-                cv.send_body(Body::Image {
-                    caption: String::new(),
-                    alt: "A photo you just took: a cup of coffee on a wooden table".into(),
-                    w: 3,
-                    h: 4,
-                    hd: false,
-                })
-            })),
+            tile(Icon::Camera, "Camera", then(|cv| cv.camera_open.set(true))),
             // mock: the document picker.
             tile(Icon::File, "Document", then(|cv| {
                 cv.send_body(Body::File { name: "Meeting notes.pdf".into(), size: "312 KB".into(), kind: "PDF".into() })
@@ -335,6 +327,70 @@ fn contact_sheet(cv: Conv) -> AnyElement {
                 })
                 .build()
         }))),
+    )
+    .into_element()
+}
+
+/// The camera (D-0110): the live preview, flip and the shutter. The photo comes back as a JPEG
+/// in memory with its metadata already stripped, and is never written to the photo library.
+fn camera_sheet(cv: Conv) -> AnyElement {
+    let open = cv.camera_open;
+    let busy = signal(false);
+    app_sheet(
+        open,
+        "Camera",
+        view().px_4().pb_4().gap_4().items_center().child(dynamic(move || {
+            let is_open = open.get();
+            untracked(move || {
+                if !is_open {
+                    busy.set(false);
+                    return view().into_element();
+                }
+                let session = crate::camera::use_session(songbird_camera::Purpose::Photo, || true, |_| {});
+                let shown = session.shown;
+                let running = move || matches!(shown.get(), crate::camera::Shown::Running(_));
+                let (flip, shoot) = (session.clone(), session.clone());
+                view()
+                    .gap_4()
+                    .items_center()
+                    .child(crate::camera::camera_view(&session, 280.0, ""))
+                    .child(when(running, move || {
+                        let (flip, shoot) = (flip.clone(), shoot.clone());
+                        view()
+                            .flex_row()
+                            .gap_3()
+                            .child(btn_with_icon("Flip", Some(Icon::FlipCamera), Variant::Ghost, BtnSize::Md, move || {
+                                flip.flip();
+                            }))
+                            .child(
+                                btn_with_icon("Take photo", Some(Icon::Camera), Variant::Primary, BtnSize::Md, move || {
+                                    busy.set(true);
+                                    shoot.take_photo(move |result| {
+                                        let _ = busy.try_set(false);
+                                        match result {
+                                            Ok(still) => {
+                                                open.set(false);
+                                                // mock: app-core encrypts the JPEG with the attachment
+                                                // format (Prompt 6) and uploads it; until then only its
+                                                // size reaches the message, and the bytes are dropped.
+                                                cv.send_body(Body::Image {
+                                                    caption: String::new(),
+                                                    alt: "A photo you took".into(),
+                                                    w: still.width.max(1),
+                                                    h: still.height.max(1),
+                                                    hd: false,
+                                                });
+                                            }
+                                            Err(_) => toast("The photo couldn't be taken"),
+                                        }
+                                    });
+                                })
+                                .disabled(move || busy.get()),
+                            )
+                    }))
+                    .into_element()
+            })
+        })),
     )
     .into_element()
 }

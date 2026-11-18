@@ -8,7 +8,7 @@ use nsh_core::prelude::*;
 use super::{Flow, Step, finish};
 use crate::{
     features::backups,
-    store::{Store, ext_onboarding::pairing_code},
+    store::Store,
     ui::*,
 };
 
@@ -62,8 +62,9 @@ pub(super) fn link_device(s: Store, f: Flow) -> View {
             let _ = linked.try_set(true);
         }
     });
-    let seed = "link-this-device";
-    let code = pairing_code(seed);
+    // mock: the channel and provisioning key come from `POST /v1/provisioning` and a fresh
+    // X25519 key (Prompt 9's `backend::link::open_channel`).
+    let link = crate::features::devices::codes::link_code(&[0x5B; 16], &[0xC3; 32]);
     view().flex_1().child(
         when(
             move || linked.get(),
@@ -87,7 +88,6 @@ pub(super) fn link_device(s: Store, f: Flow) -> View {
             },
         )
         .otherwise(move || {
-            let code = code.clone();
             flow_layout(
                 view()
                     .gap_4()
@@ -96,7 +96,7 @@ pub(super) fn link_device(s: Store, f: Flow) -> View {
                         view()
                             .role(AccessibilityRole::Image)
                             .label("Code for your phone to scan")
-                            .child(qr_code(seed, 184.0)),
+                            .child(qr_code(&link, 184.0)),
                     )
                     .child(
                         view()
@@ -104,13 +104,6 @@ pub(super) fn link_device(s: Store, f: Flow) -> View {
                             .child(numbered_step(1, "Open Songbird on your phone."))
                             .child(numbered_step(2, "Go to You → Linked devices → Link a device."))
                             .child(numbered_step(3, "Point your phone at this code.")),
-                    )
-                    .child(
-                        card()
-                            .gap_1()
-                            .items_center()
-                            .child(muted("Can't scan? Type this code on your phone.").text_center())
-                            .child(numeric_code(code)),
                     )
                     .child(muted("Your phone may ask for your two-step PIN.").text_center()),
                 view().gap_2().child(busy_bar("Waiting for your phone")).child(

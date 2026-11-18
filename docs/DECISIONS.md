@@ -20,6 +20,16 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Native camera module (`CAM-plan.md`, D-0110): **approved by the owner on 2026-11-18**
+  ("approve all on the camera plan", relayed by the Prompt 9 session), every recommendation:
+  the minimal Android host now (its push parts stay deferred), "connect a camera" for a
+  primary without one, video clips on Windows and Linux later, portal then V4L2 on Linux,
+  `unsafe` in `songbird-camera`'s platform modules only, link codes only from the live camera.
+  Still the owner's: a physical iPhone and the personal team for the iOS checks (question 4).
+- Camera gate (`CAM-gate.md`, D-0111 to D-0117; PR #68): **approved by the owner on 2026-11-18**
+  ("Approve both"): M1–M5 and the security review's fixes, with the gate's open items left open;
+  the IJG licence for `jpeg-encoder` only (D-0117). Still the owner's: a physical iPhone and the
+  personal team for the iOS camera check.
 - Prompt 8, M4 and M5 rest (D-0099): **deferred by the owner on 2026-11-18 until the whole app
   is built** ("lets do this after we have the whole app built"): the Xcode and Gradle host
   projects (APNs token, PushKit with CallKit, FCM, UnifiedPush, ConnectionService), the Apple
@@ -160,6 +170,206 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0118 — Camera: the `unsafe` exception marked for Semgrep, as D-0033's
+
+- Date: 2026-11-18
+- Status: accepted by the agent, following D-0033's precedent for an approved exception
+- Decided by: agent
+- Context: CI's Semgrep failed PR #68 with 55 blocking findings: `songbird-no-unsafe-allow` on
+  the three platform modules' `#![allow(unsafe_code)]`, the registry's `unsafe-usage` on each
+  `unsafe` block in them, and `args` on the probe's `std::env::args`.
+- Decision: as `crates/alloc-count` does (D-0033), each module's allow carries a `reason` naming
+  the owner's approval (D-0110 §5) and the review (D-0116), and each reviewed `unsafe` line its
+  `// nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage` (62 lines in `apple.rs`,
+  `android.rs`, `windows.rs`, each beside its `SAFETY:` comment). The probe's arguments choose
+  its mode only (`// nosemgrep: rust.lang.security.args.args`). No rule was changed or
+  disabled; any new `unsafe` still fails until it is reviewed and marked.
+- Evidence: Semgrep 1.185.0 (CI's image, by digest) with `p/rust`, `p/secrets` and
+  `.semgrep/` on everything PR #68 touches: 0 findings.
+
+## D-0117 — The camera gate approved; the IJG licence for `jpeg-encoder` only
+
+- Date: 2026-11-18
+- Status: accepted (owner, 2026-11-18, "Approve both")
+- Decided by: owner, on `docs/reports/CAM-gate.md`
+- Decision:
+  1. The camera gate: M1–M5 (D-0111 to D-0115) and the security review's fixes (D-0116). The
+     gate's "Not done" items stay open: the iOS check on a physical iPhone, the Android scan on a
+     device, Linux's portal and PipeWire, the app build on Windows ARM64, video clips, CI for the
+     app workspaces and a pinned Gradle wrapper.
+  2. `deny.toml` allows IJG as a per-crate exception for `jpeg-encoder` (desktop stills, pure
+     Rust). IJG is permissive and asks for an acknowledgement in documentation; it is on the
+     app's licences page (You › Help › App version and licences), with the camera's other new
+     open-source parts.
+- Consequences: no other crate may bring IJG without its own entry.
+
+## D-0116 — Camera: the security review's fixes
+
+- Date: 2026-11-18
+- Status: accepted (owner, with the camera gate, 2026-11-18); `docs/reports/CAM-gate.md`, "Security review"
+- Decided by: agent, on an independent read-only review of the whole camera diff
+- Context: no high findings; three medium, three low, informational notes.
+- Decision:
+  1. Scanner and desktop reading threads are never joined on the UI thread: they end after
+     their current frame or read, and publish nothing once stopped. QR decoding is capped at
+     640×480; the `qr_decode` fuzz target reaches large, repeated patterns.
+  2. V4L2 reads time out every 500 ms; Linux frame sizes are capped at 8192 and lengths checked
+     before allocation.
+  3. Apple: interruption, its end and runtime errors are observed and reported; a photo needs an
+     active video connection (else `NotRunning`, never an Objective-C exception).
+  4. Android: each session unbinds only its own use cases; the activity's stop closes every
+     camera; the torch answer reflects the camera.
+- Open: CI for the app workspaces (test, clippy, deny, audit); a pinned Gradle wrapper; Apple
+  reconfiguration on the session queue; `jpeg-encoder`'s IJG licence (owner).
+
+## D-0115 — Camera, milestone 5: photos in chat, the camera in calls
+
+- Date: 2026-11-18
+- Status: accepted by the agent within the approved plan (D-0110); report `docs/reports/CAM-M5.md`
+- Decided by: agent
+- Decision: the chat's camera sheet takes a photo through the session (stripped JPEG in memory,
+  sent as an image message, bytes never on disk); a call's self-view shows the live camera while
+  video is on and flips lenses. Sending the bytes and call frames wait for app-core (marked mock).
+- Open: video clips (with the microphone module and encryption as they are written).
+
+## D-0114 — Camera, milestone 4: Windows (Media Foundation) and Linux (V4L2)
+
+- Date: 2026-11-18
+- Status: accepted by the agent within the approved plan (D-0110); report `docs/reports/CAM-M4.md`
+- Decided by: agent
+- Decision:
+  1. One shared desktop core (`desktop.rs`, no `unsafe`): a reading thread per capture, a pump
+     routing frames, preview images with watchers, stills encoded in pure Rust
+     (`jpeg-encoder`) and filtered.
+  2. Windows: access from the camera consent store (no prompt exists for desktop apps),
+     Media Foundation's source reader in NV12, a Direct2D preview.
+  3. Linux: V4L2 through `v4l`'s safe API, a GTK picture preview.
+- Evidence: Linux on a `v4l2loopback` camera: 1280×720 at the feed's rate, a clean JPEG, the
+  link code read; tests and clippy clean on macOS, Ubuntu and Windows.
+- Open: **Linux's camera portal with PipeWire** is not built. A Flatpak build needs it; native
+  packages do not (the portal grants unsandboxed apps). Build it before a Flatpak exists. The
+  full app was not built on Windows ARM64 (`aws-lc-sys` needs `clang-cl` in the VM).
+
+## D-0113 — Camera, milestone 3: Songbird's Android host with CameraX
+
+- Date: 2026-11-18
+- Status: accepted by the agent within the approved plan (D-0110, question 1); report
+  `docs/reports/CAM-M3.md`
+- Decided by: agent
+- Context: Android components are Java objects on `NshView`, and a packaged NSH app declares no
+  permissions (D-0110 finding 2). The owner approved building the host's camera part now.
+- Decision:
+  1. `apps/android`: one Gradle module compiling NSH's Java sources from the `nsh-platform-android`
+     the app resolves, Songbird's activity (NSH's `AppActivity` plus the camera) and the camera,
+     with the Rust library and assets from `nsh package --target android` (`build.sh`).
+  2. Java, not Kotlin; CameraX 1.6.2; no Play Services or ML Kit; QR decoded in Rust from the
+     analysis frames' Y plane.
+  3. A small shim in NSH's package reaches its three package-private activity helpers, so
+     NSH's behaviour is used, not copied.
+  4. Gradle dependency verification, strict, SHA-256 for all 272 components.
+  5. No Google cloud backup or device transfer of the app's data (`allowBackup="false"`,
+     data-extraction rules excluding every domain).
+- Evidence: lint 0 errors; the six JNI entry points exported; on the emulator (Android 16): the
+  explanation, the prompt only on "Continue", "No camera found", the live preview, the camera
+  indicator.
+- Consequences: the Gradle host exists before the rest of D-0099 (push) joins it. Scanning
+  through the JNI frame path is still to be checked on a phone or an emulator with a camera
+  macOS lets it use.
+
+## D-0112 — Camera, milestone 2: AVFoundation from Rust on macOS and iOS
+
+- Date: 2026-11-18
+- Status: accepted by the agent within the approved plan (D-0110); report `docs/reports/CAM-M2.md`
+- Decided by: agent
+- Context: M2 of the camera plan. NSH 0.6 registers `#[native_components(ios)]` in the packaged
+  app (D-0110 finding 1), so one Rust module serves both Apple platforms.
+- Decision:
+  1. `apps/camera/src/apple.rs`, the only module allowed `unsafe` so far: `objc2` bindings of
+     AVFoundation, Core Media and Core Video, a `SAFETY:` comment on every block.
+  2. One `AVCaptureSession` per capture, started and stopped on its own serial queue (both
+     block); a registry by preview id lets the `songbird/camera` component attach a preview
+     layer on the main thread.
+  3. QR through `AVCaptureMetadataOutput` only when the device lists the QR type; otherwise NV12
+     frames to the `rqrr` scanner (the built-in camera of this Mac lists none).
+  4. Photo delegates are held by the capture until called; stills go through the M1 filter.
+  5. Purpose strings in `nsh.json` `ios.infoPlist` and `macos.infoPlist`; the
+     `com.apple.security.device.camera` entitlement on macOS.
+- Evidence: the on-device probe on this Mac: 1080p NV12 at 30.6 frames/s, a 1920×1080 JPEG with
+  no EXIF or GPS, a link code read once through Continuity Camera.
+- Consequences: the iOS camera check needs a physical iPhone (the Simulator has none); the
+  probe documents how to run without the app (inside a bundle with a purpose string).
+
+## D-0111 — Camera, milestone 1: one interface, newest-wins mailboxes, real QR codes, strict code formats
+
+- Date: 2026-11-18
+- Status: accepted by the agent within the approved plan (D-0110); report `docs/reports/CAM-M1.md`
+- Decided by: agent
+- Context: M1 of the camera plan: the interface, fakes and QR, before any platform code.
+- Decision:
+  1. `apps/camera` (`songbird-camera`) holds the interface (`Backend`, `Capture`, `Sink`) and
+     everything shared (mailboxes, frames, QR decoding, the JPEG filter, `FakeCamera`), each
+     module `#![forbid(unsafe_code)]`; the crate denies `unsafe` and only platform modules (M2–M4)
+     will allow it. `apps/ui` forbids `unsafe`.
+  2. Camera threads reach the app through bounded mailboxes where the newest wins (32 events,
+     2 frames): a stalled reader drops the oldest and never blocks the camera. No `futures` or
+     channel crate: a mutex, a queue and a waker.
+  3. Sessions run only while their screen shows them, the app is not in the background (a call
+     on a desktop excepted) and access is granted; the system prompt only on a press.
+  4. Codes: `SONGBIRD:LINK:<hex>:<hex>` and `SONGBIRD:SAFETY:<60 digits>`, upper case for QR's
+     alphanumeric mode, parsed case-insensitively and strictly in `features::devices::codes`;
+     link codes only from the live camera, with a confirmation before linking. The typed
+     fallback on the new device is removed.
+  5. `qrcode` 0.14.1 draws every code (one SVG path, light plate, 4-module quiet zone,
+     error correction M); `rqrr` 0.11.0 decodes, frames capped at 1280×720 and 8192 a side.
+  6. Stills are filtered to their image and orientation (a fresh 36-byte EXIF holding only the
+     orientation, when not upright); everything after EOI is dropped.
+- Consequences: Prompt 9's `link.rs` (PR #67) moves to `codes::link_code` and `codes::parse`.
+  Platform code (M2–M4) implements `Backend` and `Capture` and is tested through the same
+  screens. New dependencies: `rqrr` (with `g2p`, `lru`), `qrcode`.
+
+## D-0110 — The native camera module: the plan, and the owner's decisions it needs
+
+- Date: 2026-11-18
+- Status: accepted (owner, 2026-11-18, "approve all on the camera plan": every recommendation).
+  D-0101 to D-0109 are left to Prompt 9 (PR #67).
+- Decided by: owner, on the agent's plan `docs/reports/CAM-plan.md`
+- Context: the owner rejected linking a device by pasting a text code and asked for native
+  camera code on each platform, since the camera also serves photos and videos in chat and
+  video calls. NSH 0.6 has no camera API (`nsh-core` and `nsh-base` have only the system
+  photo picker), and every scanner, preview and QR code in `apps/ui` is a mock.
+- Findings (read in the NSH 0.6 sources, cited in the plan):
+  - `#[native_components(ios)]` exists, and the iOS runner `nsh package` generates registers
+    it; `nsh.json`'s `apple.infoPlist` takes the purpose string. So the iOS camera can be Rust
+    in the packaged app, and Prompt 8's finding 7 is corrected for iOS components (not for the
+    extension, PushKit or CallKit).
+  - Android components are Java objects registered on `NshView`; the packaged `AppActivity`
+    is `final` and the manifest takes no permissions. The Android camera needs Songbird's
+    Gradle host.
+  - Windows components draw into Direct2D (no child window); macOS gives an `NSView`, Linux a
+    `gtk::Widget`.
+- Options considered: Swift and Kotlin modules in both host projects (the brief) vs Rust
+  everywhere NSH lets Rust register components (macOS, iOS, Windows, Linux) and Kotlin only
+  on Android; Apple's metadata output vs a Rust decoder on Apple; `qrcode` vs `qrcodegen` vs
+  `fast_qr` to encode; `rqrr` vs `rxing` vs `quircs` to decode; Media Foundation vs WinRT
+  `MediaCapture`; the camera portal with PipeWire vs V4L2 on Linux.
+- Recommendation (each for the owner):
+  1. One crate `apps/camera` (`songbird-camera`) with one interface (`Camera`, `Session`,
+     states for access denied, restricted and unavailable, a bounded newest-wins frame
+     receiver) and a `FakeCamera` for headless tests; `apps/ui` keeps no `unsafe`.
+  2. AVFoundation in Rust (`objc2-av-foundation`) for macOS and iOS with
+     `AVCaptureMetadataOutput` for QR; CameraX in a minimal `apps/android` host now, with QR
+     decoded in Rust (`rqrr`) and no Google service; Media Foundation on Windows; the camera
+     portal and PipeWire on Linux, V4L2 without a portal.
+  3. `qrcode` 0.14.1 without default features to draw real codes; the link code upper case
+     (alphanumeric mode, version 5).
+  4. Link codes read only from the live camera, a link scheme distinct from invites, and a
+     confirmation naming what linking gives (the 2025 phishing of Signal's linking).
+  5. `unsafe` allowed in `songbird-camera`'s platform modules only, as a recorded exception.
+- Consequences: the Android host is built before the rest of D-0099's deferred work; the iOS
+  host stays deferred. iOS checks need a physical iPhone. Nothing changes on the server or in
+  THREAT_MODEL §1. Calls get the local preview now and send frames once app-core (A2) and
+  LiveKit are in the app.
 
 ## D-0100 — Prompt 8: the security review's fixes
 

@@ -415,6 +415,30 @@ pub async fn unsigned_full(
     exchange_full(addr, b, Bytes::new()).await
 }
 
+/// An unsigned request with a body and extra headers (sealed sends and sealed presence, which
+/// carry no device signature): the status and the body.
+///
+/// # Errors
+/// Connection or protocol failure.
+pub async fn unsigned_body(
+    addr: SocketAddr,
+    server_name: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, String)],
+    body: Bytes,
+) -> Result<Reply, hyper::Error> {
+    let mut b = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", server_name);
+    for (n, v) in headers {
+        b = b.header(*n, v.as_str());
+    }
+    let (status, _, body) = exchange_full(addr, b, body).await?;
+    Ok((status, body))
+}
+
 /// As [`unsigned_full`], from a chosen local address (tests: two recipients on 127.0.0.1 and
 /// 127.0.0.2 are two sources).
 ///

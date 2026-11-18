@@ -60,6 +60,10 @@ pub trait Gate: Send + Sync + 'static {
 
     /// A send to an open account: [`Admit::Drop`] if it blocked `sender`, else allowed.
     fn blocked<'a>(&'a self, sender: &'a AccountId, recipient: &'a AccountId) -> GateFuture<'a>;
+
+    /// An attention event (a nudge, Prompt 9, D-0104) from `sender` to `recipient`: budgets per
+    /// pair and per sender, then [`Admit::Drop`] if the recipient blocked the sender.
+    fn attention<'a>(&'a self, sender: &'a AccountId, recipient: &'a AccountId) -> GateFuture<'a>;
 }
 
 /// The budgets (`[…send.requests]`). Defaults: a stranger may start 20 requests an hour (burst
@@ -91,6 +95,14 @@ pub struct RequestLimits {
     pub channel_per_sec: u32,
     /// Burst of the above.
     pub channel_burst: u32,
+    /// Nudges per hour per (sender, recipient) (Prompt 9, D-0104).
+    pub attention_pair_hour: u32,
+    /// Burst of the above.
+    pub attention_pair_burst: u32,
+    /// Nudges per hour per sender account.
+    pub attention_sender_hour: u32,
+    /// Burst of the above.
+    pub attention_sender_burst: u32,
 }
 
 impl Default for RequestLimits {
@@ -107,6 +119,10 @@ impl Default for RequestLimits {
             max_broadcast_accounts: 256,
             channel_per_sec: 1,
             channel_burst: 10,
+            attention_pair_hour: 30,
+            attention_pair_burst: 3,
+            attention_sender_hour: 300,
+            attention_sender_burst: 20,
         }
     }
 }
@@ -122,6 +138,10 @@ impl songbird_types::config::Validate for RequestLimits {
             ("per_recipient_burst", self.per_recipient_burst),
             ("broadcast_accounts_hour", self.broadcast_accounts_hour),
             ("broadcast_burst", self.broadcast_burst),
+            ("attention_pair_hour", self.attention_pair_hour),
+            ("attention_pair_burst", self.attention_pair_burst),
+            ("attention_sender_hour", self.attention_sender_hour),
+            ("attention_sender_burst", self.attention_sender_burst),
         ] {
             v.check((1..=1_000_000).contains(&n), name, "must be in 1..=1000000");
         }
@@ -300,6 +320,49 @@ impl Gate for RegistryGate {
         })
     }
 
+    fn attention<'a>(&'a self, sender: &'a AccountId, recipient: &'a AccountId) -> GateFuture<'a> {
+        Box::pin(async move {
+            let l = &self.limits;
+            let (s, r) = (
+                sender.as_bytes().as_slice(),
+                recipient.as_bytes().as_slice(),
+            );
+            // `q:n:` per pair, `q:m:` per sender: keyed hashes, no account in Valkey.
+            for (kind, subject, per_hour, burst) in [
+                (
+                    "n",
+                    vec![s, r],
+                    l.attention_pair_hour,
+                    l.attention_pair_burst,
+                ),
+                (
+                    "m",
+                    vec![s],
+                    l.attention_sender_hour,
+                    l.attention_sender_burst,
+                ),
+            ] {
+                match self
+                    .spend(&self.keys.record(kind, &subject), per_hour, burst, 1)
+                    .await
+                {
+                    Ok(0) => {}
+                    Ok(wait) => return Admit::Limited(wait_ms(wait)),
+                    Err(()) => return Admit::Unavailable,
+                }
+            }
+            match self
+                .registry
+                .is_blocked(&self.keys.pair(recipient, sender))
+                .await
+            {
+                Ok(true) => Admit::Drop,
+                Ok(false) => Admit::Allow,
+                Err(_) => Admit::Unavailable,
+            }
+        })
+    }
+
     fn channel<'a>(&'a self, group: &'a [u8; 16]) -> GateFuture<'a> {
         Box::pin(async move {
             // `q:c:<keyed hash of the group>`: Valkey never sees the group ID.
@@ -407,6 +470,31 @@ impl Gate for MemoryGate {
             Admit::Limited(1_000)
         } else {
             *n += accounts;
+            Admit::Allow
+        };
+        Box::pin(std::future::ready(out))
+    }
+
+    fn attention<'a>(&'a self, sender: &'a AccountId, recipient: &'a AccountId) -> GateFuture<'a> {
+        let l = self.limits;
+        let mut st = self.lock();
+        let mut over = false;
+        for (k, a, b, max) in [
+            ('n', *sender, *recipient, l.attention_pair_burst),
+            ('m', *sender, *sender, l.attention_sender_burst),
+        ] {
+            let n = st.spent.entry((k, a, b)).or_default();
+            if *n >= max {
+                over = true;
+                break;
+            }
+            *n += 1;
+        }
+        let out = if over {
+            Admit::Limited(1_000)
+        } else if st.blocks.contains(&(*recipient, *sender)) {
+            Admit::Drop
+        } else {
             Admit::Allow
         };
         Box::pin(std::future::ready(out))

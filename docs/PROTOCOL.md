@@ -24,6 +24,7 @@ Implemented in `crates/proto` (shared by server and clients); decisions D-0019, 
 | `0x01` | C→S | `Send` | `req_id u32`, `idempotency_key [16]`, `flags u8`, [if flag `0x01`: `group [16]`, `epoch u64`], [if `0x04`: `access_key [16]`], [if `0x10`: `commitment [32]`], [if `0x20`: `expire_after_s u32`], [if `0x40`: `group [16]`], `count u16` (≥ 1; 0 with `0x40`), then per device (no flag `0x02`) `count ×` (`device_id [16]`, `len u32` (≥ 1), `envelope [len]`), or shared (flag `0x02`) `count × device_id [16]`, `len u32` (≥ 1), `body [len]` |
 | `0x02` | C→S | `Ack` | `up_to_seq u64` |
 | `0x03` | C→S | `Ephemeral` | `to [16]`, `payload` (≥ 1 byte) |
+| `0x04` | C→S | `Attention` | `to [16]`, `payload` (≥ 1 byte): a nudge, routed as `Ephemeral` within budgets per pair of accounts (§10.5); the recipient gets `0x83` |
 | `0x10` | C→S | `Auth` | protobuf `Auth` (§2) |
 | `0x81` | S→C | `Deliver` | `seq u64`, `envelope` (≥ 1 byte) |
 | `0x82` | S→C | `SendResult` | `req_id u32`, `status u8`; status 0 accepted; 1 rejected: `reason u16`, `retry_after_ms u32`; 2 device mismatch: protobuf `DeviceMismatch` |
@@ -2178,6 +2179,47 @@ bound in, so an old profile cannot be served under a newer version.
 - **A status** stops showing at its expiry on every reader, with no further message.
 - **After any change** the app sends its contacts `Content.profile_changed {version}`: sealed,
   stored, `SILENT` (no wake-up). They fetch the profile again if the version is newer.
+
+### 10.5 Presence, last seen and nudges (M3, D-0104)
+
+The server never reveals connection state: no answer, header or timing tells a sender whether a
+recipient is online. Apps tell their allowed contacts themselves (`songbird_content::presence`).
+
+**Presence** (`Content.presence`: online, away, busy, or offline with `last_seen_ms` to the
+minute; `wants_reply` when just come online) goes **sealed**, in one batch to every allowed
+contact's devices:
+
+```text
+PUT /v1/ephemeral/sealed   (no device signature)
+Unidentified-Access-Key: hex(16)   the XOR of the access keys of every addressed account that is not open
+body: version u8 (1) | n u16 (1..=1024) | (device [16] | len u16 (1..=4096) | payload) * n   (at most 512 KiB)
+```
+
+- The server maps devices to accounts from its directory snapshot, recomputes the combined key
+  and compares it in constant time: "contacts only" is enforced cryptographically, and a stranger
+  cannot probe anyone. A wrong key refuses the whole batch (401); devices that are not listed are
+  left out.
+- Throttle: per IP range, counted per device addressed (1,000,000 an hour, burst 20,000).
+- Never stored; routed to connected devices only; the answer is always 204 with no body.
+- The server learns who receives presence and when, never who sent it, beyond correlating the
+  request's address and time with the sender's own connection (sealed sender's known limit).
+
+**The sender's rules** (`Presencer`): at most one batch per 5 s, the latest state wins and is
+always sent after the debounce; the same state is not sent twice; going background sends
+"offline" with last seen (if shared); contacts that asked get one reply each, at most once a
+minute; **invisible sends nothing at all**, and neither does "Nobody" for both online and last
+seen. A contact who was offline all along keeps the last value it saw, or shows "last seen
+recently": the server keeps no presence state. Reciprocity: a user who shares last seen with
+nobody sees nobody's.
+
+**Nudges** (`Content.attention {NUDGE}`) go identified on the WebSocket in the attention frame
+(`0x04`): the connection's ephemeral bucket, then budgets in `valkey-hot` per (sender,
+recipient) account pair (30 an hour, burst 3) and per sender (300 an hour, burst 20), under keyed
+names `q:n:` and `q:m:`, then the recipient's blocks. Over a budget, blocked, offline or the store
+down: dropped silently, like any ephemeral event (fail closed). The server learns that a nudge
+happened between two accounts, never its content. A nudge to an offline contact is lost. The
+receiving app shakes the window (desktop) or vibrates, unless nudges are off, globally or for
+that contact. The stored `DataMessage.nudge` kind is superseded and never sent.
 
 ## 11. Backup format and vault access (Prompt 10)
 

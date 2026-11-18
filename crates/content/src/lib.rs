@@ -22,6 +22,7 @@
 pub mod attachment;
 pub mod call;
 pub mod pack;
+pub mod presence;
 pub mod profile;
 pub mod schema;
 pub mod state;

@@ -561,7 +561,39 @@ impl<M: Mailbox, R: Router> Session<M, R> {
                 }
                 Ok(())
             }
+            ClientFrame::Attention { to, payload } => {
+                self.attention(to, payload, now).await;
+                Ok(())
+            }
             ClientFrame::Auth(_) => Err(Exit::Close(CloseCode::ProtocolError, None)),
+        }
+    }
+
+    /// An attention event (a nudge, Prompt 9, D-0104): the connection's ephemeral bucket, then
+    /// the cluster-wide budgets per (sender, recipient) account pair and per sender, and the
+    /// recipient's blocks. Dropped silently otherwise, like any ephemeral event: the sender
+    /// learns nothing about the recipient. Fails closed without the gate.
+    async fn attention(&mut self, to: DeviceId, payload: Bytes, now: std::time::Instant) {
+        let m = &self.shared.metrics;
+        if self.ephemerals.take(now).is_err() {
+            m.attention_dropped.inc();
+            return;
+        }
+        let accounts = {
+            let dir = self.shared.directory.load();
+            dir.listed_account(&self.device)
+                .zip(dir.listed_account(&to))
+        };
+        let admitted = match (accounts, self.shared.policy.gate.as_ref()) {
+            (Some((from, dest)), Some(gate)) => {
+                gate.attention(&from, &dest).await == songbird_send::Admit::Allow
+            }
+            _ => false,
+        };
+        if admitted && self.shared.router.route_ephemeral(&to, payload).await == Routed::Queued {
+            m.attention_routed.inc();
+        } else {
+            m.attention_dropped.inc();
         }
     }
 

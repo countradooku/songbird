@@ -154,6 +154,8 @@ async fn stack() -> Option<Stack> {
                     sealed_per_hour: 3_600,
                     sealed_per_account_hour: 3_600,
                     sealed_burst: 200,
+                    presence_per_hour: 1_000_000,
+                    presence_burst: 20_000,
                     ipv4_prefix: 24,
                     ipv6_prefix: 48,
                 },

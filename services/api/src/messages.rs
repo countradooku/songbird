@@ -65,6 +65,14 @@ pub trait Submit: Send + Sync + 'static {
 
     /// The current directory snapshot.
     fn directory(&self) -> Arc<songbird_send::Directory>;
+
+    /// Routes never-stored events to whichever of `events`' devices are connected (sealed
+    /// presence, Prompt 9). Returns how many were queued (for metrics only; never told to the
+    /// sender).
+    fn ephemeral<'a>(
+        &'a self,
+        events: Vec<(DeviceId, bytes::Bytes)>,
+    ) -> Pin<Box<dyn Future<Output = usize> + Send + 'a>>;
 }
 
 /// What the send path needs, owned.
@@ -90,6 +98,21 @@ impl<M, R> std::fmt::Debug for SendStack<M, R> {
 }
 
 impl<M: StoreSend, R: Router> Submit for SendStack<M, R> {
+    fn ephemeral<'a>(
+        &'a self,
+        events: Vec<(DeviceId, bytes::Bytes)>,
+    ) -> Pin<Box<dyn Future<Output = usize> + Send + 'a>> {
+        Box::pin(async move {
+            let mut queued = 0;
+            for (d, p) in events {
+                if self.router.route_ephemeral(&d, p).await == songbird_router::Routed::Queued {
+                    queued += 1;
+                }
+            }
+            queued
+        })
+    }
+
     fn submit<'a>(
         &'a self,
         sender: &'a DeviceId,

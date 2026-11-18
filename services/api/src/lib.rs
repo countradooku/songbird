@@ -374,6 +374,7 @@ impl App {
             }
             (_, p)
                 if p == "/v1/messages/sealed"
+                    || p == "/v1/ephemeral/sealed"
                     || p == "/v1/certificate"
                     || p == "/v1/profile"
                     || p.starts_with("/v1/profile/") =>
@@ -480,14 +481,7 @@ impl App {
                     .get::<registration::Peer>()
                     .map(|x| x.0)
                     .ok_or_else(unavailable)?;
-                let key = req
-                    .headers()
-                    .get("unidentified-access-key")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| {
-                        let mut k = [0u8; 16];
-                        hex::decode_to_slice(v, &mut k).ok().map(|()| k)
-                    });
+                let key = header_key(&req, "unidentified-access-key");
                 let max = self
                     .messages
                     .as_ref()
@@ -502,6 +496,17 @@ impl App {
                     body,
                 )
                 .await
+            }
+            (&Method::PUT, "/v1/ephemeral/sealed") => {
+                let peer = req
+                    .extensions()
+                    .get::<registration::Peer>()
+                    .map(|x| x.0)
+                    .ok_or_else(unavailable)?;
+                let key = header_key(&req, "unidentified-access-key");
+                let body = bounded_body(req, songbird_proto::ephemeral::MAX_BODY).await?;
+                p.sealed_presence(&self.hot, self.messages.as_ref(), peer, key, &body)
+                    .await
             }
             (&Method::GET, "/v1/certificate") => {
                 let (device, _) = self.authenticate_json(req).await?;
@@ -720,14 +725,7 @@ impl App {
         let path = req.uri().path().to_owned();
         // Prompt 9 (D-0103): proof that the committer is a contact of every added account that
         // takes group adds from contacts only.
-        let add_key = req
-            .headers()
-            .get("group-add-access-key")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| {
-                let mut k = [0u8; 16];
-                hex::decode_to_slice(v, &mut k).ok().map(|()| k)
-            });
+        let add_key = header_key(&req, "group-add-access-key");
         let (device, body) = self.authenticate_body(req, groups::MAX_BODY).await?;
         let row = self
             .registry
@@ -1587,6 +1585,17 @@ fn profile_outcome(o: profiles::Outcome) -> Response<Body> {
         }
         Outcome::Unavailable => empty(StatusCode::SERVICE_UNAVAILABLE),
     }
+}
+
+/// A 16-byte key in a header, as 32 hex characters.
+fn header_key(req: &Request<Incoming>, name: &str) -> Option<[u8; 16]> {
+    req.headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            let mut k = [0u8; 16];
+            hex::decode_to_slice(v, &mut k).ok().map(|()| k)
+        })
 }
 
 /// 403 for an account-wide change from a pending device (D-0052).

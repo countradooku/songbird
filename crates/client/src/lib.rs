@@ -205,6 +205,11 @@ enum Command {
         to: DeviceId,
         payload: Bytes,
     },
+    /// Send an attention event (a nudge).
+    Attention {
+        to: DeviceId,
+        payload: Bytes,
+    },
     Ack(u64),
     /// The message's end-to-end delivery receipt arrived.
     Confirm([u8; 16]),
@@ -352,6 +357,18 @@ impl Client {
     pub async fn ephemeral(&self, to: DeviceId, payload: Bytes) -> Result<(), ClientError> {
         self.cmds
             .send(Command::Ephemeral { to, payload })
+            .await
+            .map_err(|_| ClientError::Stopped)
+    }
+
+    /// Sends an attention event, a nudge (Prompt 9): best effort, within the server's budgets
+    /// per pair of accounts; dropped if not connected.
+    ///
+    /// # Errors
+    /// [`ClientError::Stopped`].
+    pub async fn attention(&self, to: DeviceId, payload: Bytes) -> Result<(), ClientError> {
+        self.cmds
+            .send(Command::Attention { to, payload })
             .await
             .map_err(|_| ClientError::Stopped)
     }
@@ -617,7 +634,9 @@ impl Task {
                     }
                     Some(Command::Ack(seq)) => self.record_ack(seq),
                     Some(Command::Confirm(key)) => self.log.confirm(key),
-                    Some(Command::Ephemeral { .. } | Command::Abort) => {}
+                    Some(
+                        Command::Ephemeral { .. } | Command::Attention { .. } | Command::Abort,
+                    ) => {}
                 },
             }
         }
@@ -906,6 +925,9 @@ impl Task {
                                 ack_deadline = Some(Instant::now() + self.cfg.ack_delay);
                             }
                             Ok(())
+                        }
+                        Some(Command::Attention { to, payload }) => {
+                            self.write(&mut ws, &ClientFrame::Attention { to, payload }).await
                         }
                         Some(Command::Ephemeral { to, payload }) => {
                             self.write(&mut ws, &ClientFrame::Ephemeral { to, payload }).await

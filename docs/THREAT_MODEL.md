@@ -95,6 +95,8 @@ server in plaintext. Adding to this list requires the owner's approval.
 | Keyed throttle records of the record store (`st:<kind>:<hmac>` in `valkey-hot`, HMAC of the account under the storage secret), with the next allowed time | Hold reads and writes to their budgets | At most the budget's window (an hour) | Prompt 9 (M1), D-0102; keyed form of an ID already listed; **awaiting the owner's approval** |
 | **Discoverable by username** (Prompt 9, D-0103): one bit on the account row (`hidden`) | Answer lookups by username for a hidden account as for an unknown one, except through the account's own link | Until changed; with the account; in registry backups | Prompt 9 (M2), D-0103; **awaiting the owner's approval** |
 | **Group adds from contacts only** (Prompt 9, D-0103): one bit on the account row (`grp_contacts`), in the directory snapshot of `api` and `delivery`; at a commit, whether the adder proved contact (the access key, already listed, compared and dropped) | Refuse group adds of the account by people who are not its contacts | Until changed; with the account; the comparison in memory only | Prompt 9 (M2), D-0103; **awaiting the owner's approval** |
+| **Sealed presence batches** (Prompt 9, D-0104): which devices (and so accounts) receive presence events, when, the batch's size, and the source IP address of the request; **no sender** | Route presence to the contacts that hold the access keys | Memory only, while routed; never stored or logged; the per-range throttle record is keyed (HMAC of the range) | Prompt 9 (M3), D-0104; **awaiting the owner's approval** |
+| **That a nudge happened between two accounts** (Prompt 9, D-0104): the sending device (its connection) and the recipient device, in memory; keyed budget records in `valkey-hot` (`q:n:` HMAC of the pair, `q:m:` HMAC of the sender) with the next allowed time | Hold nudges to budgets per pair and per sender | Memory only while routed; budget records at most an hour | Prompt 9 (M3), D-0104; **awaiting the owner's approval** |
 
 Prompt 1 adds two operational views, neither of which is user data on the server:
 
@@ -549,6 +551,12 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
 | A stolen linked device opening the account up (discoverable, group adds) | E | Thief of a linked device | Loosening is the primary's, checked in the write's transaction | `a_hidden_account_is_found_only_through_its_own_link` (403 `primary`) |
 | An old profile served under a newer version, or another account's profile swapped in | T | Malicious server | The version is in the profile's AAD; the profile key is per account | `profiles_round_trip_bound_to_their_version` |
 | A status shown after its time | I | — | The expiry is inside the profile; readers stop showing it at that time | `a_status_disappears_at_its_expiry` |
+| Learning who is online from the server (answers, errors, timing) | I | Anyone, a stranger | The server never answers about connection state: sealed batches answer 204 with no body whoever is connected; ephemeral and attention frames get no answer | `presence_reaches_only_contacts_and_invisible_sends_nothing` (same answer with a device offline) |
+| A stranger receiving or probing someone's presence | I, S | Stranger | Presence batches need every addressed closed account's access key (XOR, constant time); a wrong key refuses the whole batch | same test (401, nobody reached) |
+| Presence revealing the contact graph to the server | I | Server, insider | Presence goes sealed: no sender; only IP and timing correlation remain (stated, as for sealed sends) | D-0104; PROTOCOL §10.5 |
+| Invisible mode leaking anything | I | Contacts, server | The rules send nothing at all when invisible (no online, offline or reply) | proptest `invisible_never_sends_anything`; live: the server's count does not move |
+| Presence floods | D | Malicious client | Per-range budget counted per device addressed; batch at most 1,024 devices and 512 KiB; ephemeral inboxes bounded and dropped first | `presence_batch_latency` (the budget refuses after 20,000 devices) |
+| Nudge harassment | D | Contact, stranger | Budgets per pair and per sender in `valkey-hot` (fail closed); blocks drop nudges; recipients can turn nudges off per contact | `nudges_are_held_to_their_budgets_and_blocks_drop_them` |
 
 ## 4. Server-enforced settings
 

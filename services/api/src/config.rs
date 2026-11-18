@@ -407,6 +407,13 @@ pub struct ProfileSettings {
     /// Burst of both.
     #[serde(default = "default_sealed_burst")]
     pub sealed_burst: u32,
+    /// Sealed presence batches per hour per IP range (Prompt 9, D-0104), counted per device
+    /// addressed: a range of many people behind one address shares it.
+    #[serde(default = "default_presence")]
+    pub presence_per_hour: u32,
+    /// Its burst (devices).
+    #[serde(default = "default_presence_burst")]
+    pub presence_burst: u32,
     /// IPv4 prefix length of a range.
     #[serde(default = "default_v4")]
     pub ipv4_prefix: u8,
@@ -415,6 +422,12 @@ pub struct ProfileSettings {
     pub ipv6_prefix: u8,
 }
 
+const fn default_presence() -> u32 {
+    1_000_000
+}
+const fn default_presence_burst() -> u32 {
+    20_000
+}
 const fn default_certificate_hours() -> u64 {
     24
 }
@@ -455,6 +468,8 @@ impl Validate for ProfileSettings {
             ("sealed_per_hour", self.sealed_per_hour),
             ("sealed_per_account_hour", self.sealed_per_account_hour),
             ("sealed_burst", self.sealed_burst),
+            ("presence_per_hour", self.presence_per_hour),
+            ("presence_burst", self.presence_burst),
         ] {
             v.check((1..=3_600_000).contains(&n), name, "must be in 1..=3600000");
         }

@@ -1203,6 +1203,10 @@ impl Gate for DownGate {
         Box::pin(std::future::ready(Admit::Unavailable))
     }
 
+    fn attention<'a>(&'a self, _: &'a AccountId, _: &'a AccountId) -> gate::GateFuture<'a> {
+        Box::pin(std::future::ready(Admit::Unavailable))
+    }
+
     fn channel<'a>(&'a self, _: &'a [u8; 16]) -> gate::GateFuture<'a> {
         if self.hang {
             Box::pin(std::future::pending())

@@ -39,6 +39,8 @@ pub mod ty {
     pub const ACK: u8 = 0x02;
     /// Client → server: ephemeral event for one device.
     pub const EPHEMERAL: u8 = 0x03;
+    /// Client → server: an attention event (a nudge) for one device (Prompt 9).
+    pub const ATTENTION: u8 = 0x04;
     /// Client → server: authentication (protobuf).
     pub const AUTH: u8 = 0x10;
     /// Server → client: one stored envelope.
@@ -352,6 +354,15 @@ pub enum ClientFrame {
         /// Opaque, client-encrypted payload.
         payload: Bytes,
     },
+    /// A never-stored attention event (a nudge, Prompt 9) for one device: routed like
+    /// [`ClientFrame::Ephemeral`], within budgets per (sender, recipient) account pair. The
+    /// recipient gets an ordinary `Ephemeral` frame.
+    Attention {
+        /// Recipient device.
+        to: DeviceId,
+        /// Opaque, client-encrypted payload.
+        payload: Bytes,
+    },
 }
 
 /// Reason codes of a rejected send (`SendResult` status 1).
@@ -627,6 +638,19 @@ impl ClientFrame {
                     payload: msg.slice(r),
                 })
             }
+            ty::ATTENTION => {
+                let mut c = Cursor::new(msg, 1);
+                let to = c.device()?;
+                let r = c.rest();
+                if r.is_empty() {
+                    return Err(FrameError::EmptyPayload);
+                }
+                check_len("ephemeral", r.len(), limits.max_ephemeral_bytes)?;
+                Ok(Self::Attention {
+                    to,
+                    payload: msg.slice(r),
+                })
+            }
             ty::AUTH => decode_control::<control::Auth>(msg, limits, "auth").map(Self::Auth),
             other => Err(FrameError::UnknownType(other)),
         }
@@ -645,6 +669,12 @@ impl ClientFrame {
             Self::Ephemeral { to, payload } => {
                 out.reserve(1 + ID_LEN + payload.len());
                 out.put_u8(ty::EPHEMERAL);
+                out.put_slice(to.as_bytes());
+                out.put_slice(payload);
+            }
+            Self::Attention { to, payload } => {
+                out.reserve(1 + ID_LEN + payload.len());
+                out.put_u8(ty::ATTENTION);
                 out.put_slice(to.as_bytes());
                 out.put_slice(payload);
             }

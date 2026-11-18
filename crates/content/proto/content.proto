@@ -46,7 +46,32 @@ message Content {
     RequestResponse request_response = 14;
     CallMessage call = 15;       // call signalling (Prompt 7, PROTOCOL §8)
     ProfileChanged profile_changed = 16; // fetch my profile again (Prompt 9, PROTOCOL §10.4)
+    Presence presence = 17;    // sealed, never stored (PROTOCOL §10.5)
+    Attention attention = 18;  // the attention class, never stored (PROTOCOL §10.5)
   }
+}
+
+// Presence and last seen, sent sealed to allowed contacts (PROTOCOL §10.5).
+message Presence {
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    STATE_ONLINE = 1;
+    STATE_AWAY = 2;
+    STATE_BUSY = 3;
+    STATE_OFFLINE = 4; // with last_seen_ms (0 when not shared)
+  }
+  State state = 1;
+  uint64 last_seen_ms = 2; // to the minute
+  bool wants_reply = 3;    // just came online: online contacts answer once
+}
+
+// An attention event (Yahoo's buzz), in the server's attention class.
+message Attention {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_NUDGE = 1;
+  }
+  Kind kind = 1;
 }
 
 // Sent sealed, stored and SILENT to contacts after a profile change.
@@ -287,6 +312,7 @@ message TimerChange {
 }
 
 // A nudge (Prompt 9 gives it behaviour). Rate-limited on the client.
+// Superseded by Content.attention (Prompt 9): never sent; kept so old vectors decode.
 message Nudge {}
 
 message CallEvent {

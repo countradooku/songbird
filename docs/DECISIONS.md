@@ -165,6 +165,38 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0104 — Prompt 9, milestone 3: sealed presence batches, nudges in an attention class
+
+- Date: 2026-11-18
+- Status: accepted for the milestone (agent, under the approved plan D-0101); its threat-model rows
+  await the owner
+- Decided by: agent (with owner approval of the plan)
+- Context: encrypted presence and last seen to allowed contacts through the ephemeral lane, a
+  batched fan-out reusing the send path, debouncing and rate limits, invisible sending nothing; a
+  nudge in an attention class rate-limited per pair (D-0101 questions 3 and 4).
+- Options considered: identified presence on the WebSocket (the server would see each user's
+  contact list at every change) or sealed batches over HTTP (chosen, owner's answer to question
+  3); presence budgets per recipient account (one Valkey call per account, 500 per batch) or per IP
+  range counted per device (chosen; the access key already limits who can address whom); last seen
+  stored on the server or carried only in ephemeral presence (chosen, question 4).
+- Evidence: `presence_reaches_only_contacts_and_invisible_sends_nothing` and
+  `nudges_are_held_to_their_budgets_and_blocks_drop_them` (`tests/e2e/tests/gate_p09.rs`, a
+  delivery node, `api`, the registry and `valkey-hot`); proptests `invisible_never_sends_anything`
+  and `sends_are_debounced_and_the_last_state_is_always_sent`; `presence_batch_latency`: a
+  1,024-device batch (205 KiB, 16 devices online) p50 3.2 ms, max 10 ms over 19 runs on an Apple
+  M5 Pro, compose stack, in-process router.
+- Decision:
+  - `PUT /v1/ephemeral/sealed` (`songbird_proto::ephemeral::SealedBatch`) in `api`'s profiles,
+    behind the sealed-sender flag; the directory snapshot for keys; `Submit::ephemeral` routes
+    through the router `api` already has (publish-only Valkey in production).
+  - Client frame `0x04 Attention`; `Gate::attention` (budgets `q:n:` per pair, `q:m:` per
+    sender; blocks); `Client::attention`; metrics `delivery_attention_routed`/`_dropped`.
+  - `Content.presence` (17) and `Content.attention` (18); `songbird_content::presence::Presencer`
+    with a 5 s debounce, reply once per contact per minute, last seen to the minute, invisible
+    silent; the stored `Nudge` kind superseded.
+- Consequences: the app (M6) runs `Presencer` and sends sealed batches with its contacts' keys,
+  and nudges over its connection. Revisit the per-range budget with real NAT sizes.
+
 ## D-0103 — Prompt 9, milestone 2: discoverability, group adds from contacts, the profile's contents
 
 - Date: 2026-11-18

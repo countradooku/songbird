@@ -14,6 +14,8 @@
 //! `unsafe` is allowed in the platform modules only (D-0110 §5); everything here is
 //! `#![forbid(unsafe_code)]` per module.
 
+#[cfg(target_os = "android")]
+pub mod android;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub mod apple;
 pub mod fake;
@@ -103,6 +105,30 @@ impl Lens {
             .iter()
             .find(|l| l.facing == want)
             .or_else(|| lenses.first())
+    }
+
+    /// Lenses from lines of `id \t facing \t name` (facing 0 front, 1 back, else external),
+    /// as Android's host lists them; at most 16, ids of at most 64 bytes.
+    #[must_use]
+    pub fn parse_lines(text: &str) -> Vec<Lens> {
+        text.lines()
+            .take(16)
+            .filter_map(|line| {
+                let mut parts = line.splitn(3, '\t');
+                let id = parts.next()?.trim();
+                let facing = match parts.next()? {
+                    "0" => Facing::Front,
+                    "1" => Facing::Back,
+                    _ => Facing::External,
+                };
+                let name = parts.next().unwrap_or("Camera").to_owned();
+                (!id.is_empty() && id.len() <= 64).then(|| Lens {
+                    id: id.to_owned(),
+                    name,
+                    facing,
+                })
+            })
+            .collect()
     }
 }
 
@@ -307,6 +333,8 @@ impl SeenCodes {
 pub fn platform() -> Option<Arc<dyn Backend>> {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     return Some(Arc::new(apple::AppleCamera));
+    #[cfg(target_os = "android")]
+    return Some(Arc::new(android::AndroidCamera));
     #[allow(unreachable_code)]
     None
 }
@@ -369,6 +397,27 @@ mod tests {
         }];
         assert_eq!(Lens::preferred(&webcam, Purpose::Call).unwrap().id, "w");
         assert!(Lens::preferred(&[], Purpose::Photo).is_none());
+    }
+
+    #[test]
+    fn lens_lines_parse_and_bound() {
+        let l = Lens::parse_lines("0\t1\tBack camera\n1\t0\tFront camera\n\t1\tno id\n5\t9\n");
+        assert_eq!(l.len(), 3);
+        assert_eq!(
+            (l[0].facing, l[1].facing, l[2].facing),
+            (Facing::Back, Facing::Front, Facing::External)
+        );
+        assert_eq!(l[2].name, "Camera");
+        let many = (0..40).fold(String::new(), |mut s, i| {
+            use std::fmt::Write;
+            let _ = writeln!(s, "{i}\t1\tx");
+            s
+        });
+        assert_eq!(Lens::parse_lines(&many).len(), 16);
+        assert_eq!(
+            Lens::parse_lines(&format!("{}\t1\tx", "9".repeat(65))),
+            Vec::new()
+        );
     }
 
     #[test]

@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Songbird's Android host (D-0113). The same as what NSH packaging writes for Android for
+  the app (permissions, the Rust flag, the files provider, the activity's flags), with
+  Songbird's own activity in place of NSH's AppActivity, and the camera.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Scanning link and safety-number codes, photos and videos to send, video calls. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Songbird works without a camera (tablets, Chromebooks): the screens say so. -->
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT" />
+            <data android:mimeType="text/plain" />
+        </intent>
+    </queries>
+
+    <application
+        android:label="Songbird"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:supportsRtl="true"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:enableOnBackInvokedCallback="true">
+
+        <meta-data android:name="com.longbridge.nsh.RUST" android:value="true" />
+
+        <provider
+            android:name="com.longbridge.nsh.FilesProvider"
+            android:authorities="chat.songbird.app.files"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
+        <activity
+            android:name="chat.songbird.app.SongbirdActivity"
+            android:exported="true"
+            android:configChanges="locale|keyboard|keyboardHidden|navigation|orientation|screenLayout|uiMode|screenSize|smallestScreenSize|density|layoutDirection|fontScale"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

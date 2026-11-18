@@ -136,6 +136,61 @@ impl Frame {
     }
 }
 
+/// `height` rows of `width` bytes from a plane whose rows are `stride` apart.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))] // Android's frames; tested everywhere
+pub(crate) fn luma_rows(
+    plane: &[u8],
+    stride: usize,
+    width: usize,
+    height: usize,
+) -> Option<Vec<u8>> {
+    if stride < width {
+        return None;
+    }
+    let mut out = Vec::with_capacity(width.checked_mul(height)?);
+    for row in 0..height {
+        let start = row.checked_mul(stride)?;
+        out.extend_from_slice(plane.get(start..start.checked_add(width)?)?);
+    }
+    Some(out)
+}
+
+/// NV12 from YUV_420_888 planes (any pixel stride), checked against the buffers' lengths.
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))] // Android's frames; tested everywhere
+pub(crate) fn nv12_from_yuv(
+    y: &[u8],
+    y_stride: usize,
+    u: &[u8],
+    v: &[u8],
+    uv_stride: usize,
+    uv_pixel: usize,
+    width: usize,
+    height: usize,
+) -> Option<Pixels> {
+    if width == 0 || height == 0 || y_stride < width || uv_pixel == 0 {
+        return None;
+    }
+    let luma = luma_rows(y, y_stride, width, height)?;
+    let (cw, ch) = (width.div_ceil(2), height.div_ceil(2));
+    let mut uv = Vec::with_capacity(cw * 2 * ch);
+    for row in 0..ch {
+        for col in 0..cw {
+            let at = row
+                .checked_mul(uv_stride)?
+                .checked_add(col.checked_mul(uv_pixel)?)?;
+            uv.push(*u.get(at)?);
+            uv.push(*v.get(at)?);
+        }
+    }
+    Some(Pixels::Nv12 {
+        y: luma,
+        y_stride: width,
+        uv,
+        uv_stride: cw * 2,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +244,27 @@ mod tests {
             ..padded
         };
         assert_eq!(padded.luma(), Some(vec![1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn nv12_from_interleaved_and_planar_chroma() {
+        // 2×2, Y rows 4 apart; chroma interleaved (pixel stride 2) or planar (1).
+        let y = [1, 2, 0, 0, 3, 4, 0, 0];
+        let Some(Pixels::Nv12 { y: luma, uv, .. }) =
+            nv12_from_yuv(&y, 4, &[10, 20], &[11, 21], 4, 2, 2, 2)
+        else {
+            panic!("converted")
+        };
+        assert_eq!((luma, uv), (vec![1, 2, 3, 4], vec![10, 11]));
+        let Some(Pixels::Nv12 { uv, .. }) = nv12_from_yuv(&y, 4, &[10], &[11], 1, 1, 2, 2) else {
+            panic!("converted")
+        };
+        assert_eq!(uv, vec![10, 11]);
+        // Short planes and odd strides are refused, never read past.
+        assert!(nv12_from_yuv(&y[..5], 4, &[10], &[11], 4, 2, 2, 2).is_none());
+        assert!(nv12_from_yuv(&y, 1, &[10], &[11], 4, 2, 2, 2).is_none());
+        assert!(nv12_from_yuv(&y, 4, &[], &[11], 4, 2, 2, 2).is_none());
+        assert!(nv12_from_yuv(&y, usize::MAX, &[10], &[11], 4, 2, 2, 2).is_none());
     }
 
     #[test]

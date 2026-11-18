@@ -167,6 +167,32 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0113 — Camera, milestone 3: Songbird's Android host with CameraX
+
+- Date: 2026-11-18
+- Status: accepted by the agent within the approved plan (D-0110, question 1); report
+  `docs/reports/CAM-M3.md`
+- Decided by: agent
+- Context: Android components are Java objects on `NshView`, and a packaged NSH app declares no
+  permissions (D-0110 finding 2). The owner approved building the host's camera part now.
+- Decision:
+  1. `apps/android`: one Gradle module compiling NSH's Java sources from the `nsh-platform-android`
+     the app resolves, Songbird's activity (NSH's `AppActivity` plus the camera) and the camera,
+     with the Rust library and assets from `nsh package --target android` (`build.sh`).
+  2. Java, not Kotlin; CameraX 1.6.2; no Play Services or ML Kit; QR decoded in Rust from the
+     analysis frames' Y plane.
+  3. A small shim in NSH's package reaches its three package-private activity helpers, so
+     NSH's behaviour is used, not copied.
+  4. Gradle dependency verification, strict, SHA-256 for all 272 components.
+  5. No Google cloud backup or device transfer of the app's data (`allowBackup="false"`,
+     data-extraction rules excluding every domain).
+- Evidence: lint 0 errors; the six JNI entry points exported; on the emulator (Android 16): the
+  explanation, the prompt only on "Continue", "No camera found", the live preview, the camera
+  indicator.
+- Consequences: the Gradle host exists before the rest of D-0099 (push) joins it. Scanning
+  through the JNI frame path is still to be checked on a phone or an emulator with a camera
+  macOS lets it use.
+
 ## D-0112 — Camera, milestone 2: AVFoundation from Rust on macOS and iOS
 
 - Date: 2026-11-18

@@ -137,7 +137,7 @@ from nothing.
   Non-urgent envelopes are stored and delivered as usual and enqueue no push. It is never
   stored or logged.
 - **Token database (if question 3 is yes):** the `push` SurrealDB database, its three users,
-  a migration that moves existing rows, and the M6 backups changed to skip it.
+  a migration that moves existing rows, and the backups (Prompt 2, M6, D-0040) changed to skip it.
 - **The app (if question 5 is yes):**
   - `apps/ios`: an Xcode host embedding `NativeShell.xcframework`, plus a Notification Service
     Extension target and an App Group.

@@ -6,11 +6,7 @@ use std::{rc::Rc, time::Duration};
 use nsh_core::prelude::*;
 
 use super::{Flow, Step, finish};
-use crate::{
-    features::backups,
-    store::Store,
-    ui::*,
-};
+use crate::{features::backups, store::Store, ui::*};
 
 pub(super) fn returning(f: Flow) -> View {
     flow_layout(
@@ -56,18 +52,49 @@ pub(super) fn restore(s: Store, f: Flow) -> View {
 
 pub(super) fn link_device(s: Store, f: Flow) -> View {
     let linked = signal(false);
-    // mock: the phone scans this code and approves (app-core `link_as_secondary`).
-    set_timeout(Duration::from_millis(4500), move || {
-        if f.history
-            .try_get()
-            .is_some_and(|h| h.last() == Some(&Step::LinkDevice))
-        {
-            let _ = linked.try_set(true);
-        }
-    });
-    // mock: the channel and provisioning key come from `POST /v1/provisioning` and a fresh
-    // X25519 key (Prompt 9's `backend::link::open_channel`).
-    let link = crate::features::devices::codes::link_code(&[0x5B; 16], &[0xC3; 32]);
+    // The code this device shows; a problem replaces the wait.
+    let link = signal(String::new());
+    let failed = signal(None::<String>);
+    // The real backend: a provisioning channel and a fresh X25519 key; the phone
+    // scans the code and sends the account sealed to that key.
+    let attempt = move || {
+        failed.set(None);
+        link.set(String::new());
+        spawn(async move {
+            let result = match crate::backend::link::open_channel().await {
+                Ok(w) => {
+                    let _ = link.try_set(w.code());
+                    crate::backend::link::complete(w).await
+                }
+                Err(p) => Err(p),
+            };
+            match result {
+                Ok(()) => {
+                    let _ = linked.try_set(true);
+                }
+                Err(p) => {
+                    let _ = failed.try_set(Some(p.to_string()));
+                }
+            }
+        });
+    };
+    if crate::backend::is_live() && !crate::backend::registered() {
+        attempt();
+    } else {
+        // mock: the phone scans this code and approves after a moment.
+        set_timeout(Duration::from_millis(4500), move || {
+            if f.history
+                .try_get()
+                .is_some_and(|h| h.last() == Some(&Step::LinkDevice))
+            {
+                let _ = linked.try_set(true);
+            }
+        });
+        link.set(crate::features::devices::codes::link_code(
+            &[0x5B; 16],
+            &[0xC3; 32],
+        ));
+    }
     view().flex_1().child(
         when(
             move || linked.get(),
@@ -99,7 +126,19 @@ pub(super) fn link_device(s: Store, f: Flow) -> View {
                         view()
                             .role(AccessibilityRole::Image)
                             .label("Code for your phone to scan")
-                            .child(qr_code(&link, 184.0)),
+                            .min_h(px(184.0))
+                            .items_center()
+                            .justify_center()
+                            .child(dynamic(move || {
+                                let code = link.get();
+                                untracked(move || {
+                                    if code.is_empty() {
+                                        busy_bar("Making a code").into_element()
+                                    } else {
+                                        qr_code(&code, 184.0).into_element()
+                                    }
+                                })
+                            })),
                     )
                     .child(
                         view()
@@ -109,8 +148,26 @@ pub(super) fn link_device(s: Store, f: Flow) -> View {
                             .child(numbered_step(3, "Point your phone at this code.")),
                     )
                     .child(muted("Your phone may ask for your two-step PIN.").text_center()),
-                view().gap_2().child(busy_bar("Waiting for your phone")).child(
-                    muted("Waiting for your phone…").text_center(),
+                view().gap_2().child(
+                    when(
+                        move || failed.get().is_none(),
+                        || {
+                            view()
+                                .gap_2()
+                                .child(busy_bar("Waiting for your phone"))
+                                .child(muted("Waiting for your phone…").text_center())
+                        },
+                    )
+                    .otherwise(move || {
+                        view()
+                            .gap_2()
+                            .child(status_line(
+                                || StatusTone::Problem,
+                                || Icon::Alert,
+                                move || failed.get().unwrap_or_default().into(),
+                            ))
+                            .child(btn("Show a new code", Variant::Primary, BtnSize::Lg, attempt).w_full())
+                    }),
                 ),
             )
         }),

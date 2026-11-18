@@ -318,6 +318,9 @@ struct Engine {
     last: Vec<(&'static str, String)>,
     syncing: bool,
     again: bool,
+    /// A key from the main phone that arrived while a sync held the
+    /// replica: a fresh replica under it replaces the old one on return.
+    next_key: Option<StorageKey>,
 }
 
 thread_local! {
@@ -397,6 +400,7 @@ pub fn restore(store: Store) {
             last,
             syncing: false,
             again: false,
+            next_key: None,
         });
     });
     store.reload_records();
@@ -582,8 +586,18 @@ async fn run_sync() -> Result<Vec<String>, SyncError> {
         return Ok(Vec::new());
     };
     let result = songbird_sync::sync(&mut replica, &Api, now_ms()).await;
+    give_back(replica);
+    result
+}
+
+/// Returns the replica to the engine with the edits queued meanwhile, or
+/// replaces it with a fresh one when a new key arrived meanwhile.
+fn give_back(mut replica: Replica) {
     ENGINE.with(|e| {
         if let Some(engine) = e.borrow_mut().as_mut() {
+            if let Some(key) = engine.next_key.take() {
+                replica = fresh(key);
+            }
             for (k, v) in std::mem::take(&mut engine.queued) {
                 let _ = match v {
                     Some(v) => replica.set(&k, v.into_bytes(), now_ms()),
@@ -595,6 +609,105 @@ async fn run_sync() -> Result<Vec<String>, SyncError> {
             engine.replica = Some(replica);
         }
     });
+}
+
+/// An empty replica under `key`. Empty, not this device's settings
+/// re-keyed: a device that just linked has only defaults, stamped now, and
+/// they would overwrite the account's real settings on the first sync. The
+/// first sync reads the store from scratch and applies what it holds.
+fn fresh(key: StorageKey) -> Replica {
+    Replica::new(key, super::wire::random())
+}
+
+// ---------------------------------------------------------------- the storage key
+
+/// The account's storage key, as the main phone sends it to a device it
+/// links (provisioning v2, PROTOCOL §4.6). `None` before `restore`.
+#[must_use]
+pub fn storage_key() -> Option<[u8; 32]> {
+    ENGINE
+        .with(|e| {
+            let e = e.borrow();
+            let engine = e.as_ref()?;
+            match &engine.next_key {
+                Some(k) => Some(*k.as_bytes()),
+                None => engine.replica.as_ref().map(|r| *r.key().as_bytes()),
+            }
+        })
+        .or_else(|| {
+            // A sync holds the replica: the saved copy has the same key.
+            Storage::get_item(K_STATE)
+                .and_then(|h| super::wire::unhex(&h))
+                .and_then(|b| Replica::load(&b).ok())
+                .map(|r| *r.key().as_bytes())
+        })
+}
+
+/// On a device that just linked: the account's storage key from the
+/// provisioning message. The device's own replica (defaults under a key
+/// nobody else has) is dropped for an empty one under the account's key.
+pub fn adopt_key(key: [u8; 32]) {
+    let key = StorageKey::from_bytes(key);
+    let replaced = ENGINE.with(|e| {
+        let mut e = e.borrow_mut();
+        let engine = e.as_mut()?;
+        if engine.replica.is_some() {
+            let r = fresh(key.clone());
+            save(&r);
+            engine.replica = Some(r);
+        } else {
+            engine.next_key = Some(key.clone());
+        }
+        Some(())
+    });
+    if replaced.is_none() {
+        // Before `restore`: saved, and loaded by it.
+        save(&fresh(key));
+    }
+}
+
+/// On the main phone, when it is the account's only device again: a new
+/// storage key, every record rewritten under it in one write, so a device
+/// that was logged out can't read what comes next. Waits for a sync in
+/// flight. (With other devices still linked the new key would have to
+/// reach them end to end, which app-core's sync messages do (A2); until
+/// then the key stays, D-0106.)
+///
+/// # Errors
+/// [`SyncError`] from the store; the old key stays in use.
+pub async fn rotate_key() -> Result<(), SyncError> {
+    let mut replica = None;
+    for _ in 0..600 {
+        replica = ENGINE.with(|e| {
+            let mut e = e.borrow_mut();
+            let engine = e.as_mut()?;
+            if engine.syncing {
+                return None;
+            }
+            let r = engine.replica.take()?;
+            engine.syncing = true;
+            Some(r)
+        });
+        if replica.is_some() {
+            break;
+        }
+        nsh_core::prelude::timer(std::time::Duration::from_millis(100)).await;
+    }
+    let Some(mut replica) = replica else {
+        return Err(SyncError::Busy);
+    };
+    let key = StorageKey::from_bytes(super::wire::random());
+    let result = songbird_sync::rotate(&mut replica, &Api, key, now_ms()).await;
+    give_back(replica);
+    let again = ENGINE.with(|e| {
+        e.borrow_mut().as_mut().is_some_and(|engine| {
+            engine.syncing = false;
+            std::mem::take(&mut engine.again)
+        })
+    });
+    if again {
+        schedule(crate::store::store());
+    }
     result
 }
 
@@ -793,6 +906,39 @@ mod tests {
         let (p, l) = (show(&phone), show(&laptop));
         assert_eq!(p, l);
         assert_eq!((p.theme, p.read_receipts), (ThemeChoice::Light, false));
+        Ok(())
+    }
+
+    /// A device that just linked takes the account's settings, not its own
+    /// defaults: it adopts the key with an empty replica, so its defaults
+    /// (stamped later than the phone's choices) never overwrite them; and a
+    /// rotation leaves the old key unable to read the store.
+    #[test]
+    fn a_linked_device_reads_the_account_settings_and_a_rotation_shuts_out_the_old_key()
+    -> Result<(), SyncError> {
+        let server = MemoryServer::new();
+        let key = StorageKey::from_bytes([7; 32]);
+        let mut phone = Replica::new(key.clone(), [1; 16]);
+        phone.set("s/theme", b"dark".to_vec(), 1_000)?;
+        phone.set("s/read_receipts", b"0".to_vec(), 1_000)?;
+        block_on(songbird_sync::sync(&mut phone, &server, 1_000))?;
+        // The new device's first run wrote its defaults, later, under a key of its own.
+        let (s, x) = defaults();
+        let mut laptop = Replica::new(StorageKey::from_bytes([8; 32]), [2; 16]);
+        for (k, v) in encode(&s, &x) {
+            laptop.set(k, v.into_bytes(), 5_000)?;
+        }
+        let mut laptop = fresh(StorageKey::from_bytes(*key.as_bytes()));
+        block_on(songbird_sync::sync(&mut laptop, &server, 6_000))?;
+        assert_eq!(laptop.get("s/theme"), Some(&b"dark"[..]));
+        assert_eq!(laptop.get("s/read_receipts"), Some(&b"0"[..]));
+        // The laptop is logged out; the phone, alone, rotates.
+        let fresh_key = StorageKey::from_bytes([9; 32]);
+        block_on(songbird_sync::rotate(&mut phone, &server, fresh_key, 7_000))?;
+        phone.set("s/theme", b"light".to_vec(), 8_000)?;
+        block_on(songbird_sync::sync(&mut phone, &server, 8_000))?;
+        assert!(block_on(songbird_sync::sync(&mut laptop, &server, 9_000)).is_err());
+        assert_eq!(laptop.get("s/theme"), Some(&b"dark"[..]));
         Ok(())
     }
 

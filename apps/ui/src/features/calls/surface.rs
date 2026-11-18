@@ -540,10 +540,15 @@ fn self_view(s: Store) -> View {
     let me = s.me.get_untracked();
     let video = field(|c| c.video, false);
     let front = field(|c| c.front_camera, true);
-    let (w, h) = if is_desktop() { (180.0, 112.0) } else { (104.0, 150.0) };
+    let (w, h) = if is_desktop() {
+        (180.0, 112.0)
+    } else {
+        (104.0, 150.0)
+    };
     // The camera runs while the user's video is on, and stops with it and with the call
     // (D-0110). A demo or test camera has no live picture: the portrait stands in.
-    let session = crate::camera::use_session(songbird_camera::Purpose::Call, move || video.get(), |_| {});
+    let session =
+        crate::camera::use_session(songbird_camera::Purpose::Call, move || video.get(), |_| {});
     let live = crate::camera::has_live_preview();
     let flip = session.clone();
     arrive(0.9, 8.0, motion::BASE)
@@ -556,35 +561,69 @@ fn self_view(s: Store) -> View {
         .overflow_hidden()
         .border_2()
         .border_color(move || c::on_call().opacity(0.3))
-        .bg(move || if video.get() && !crate::ui::portrait::has_photo(me.seed) { c::avatar(me.seed) } else { c::call_bg() })
-        .items_center()
-        .justify_center()
-        .label(move || if video.get() { "Your camera" } else { "Your camera is off" })
-        // The same picture as the user's tile and their row in the
-        // participants sheet (mock: the portrait stands for the camera).
-        .child(when(move || video.get() && live, move || crate::camera::preview_fill(&session)))
-        .child(when(move || video.get() && !live, {
-            let n = me.name.clone();
-            move || match feed(me.seed, false) {
-                Some(f) => f.into_element(),
-                None => text(initials(&n)).text_size(px(font::HEADING)).font_weight(FontWeight::SEMIBOLD).text_color(move || c::on_avatar()).into_element(),
+        .bg(move || {
+            if video.get() && !crate::ui::portrait::has_photo(me.seed) {
+                c::avatar(me.seed)
+            } else {
+                c::call_bg()
             }
         })
-        .otherwise(|| view().into_element()))
-        .child(when(move || !video.get(), || icon(Icon::VideoOff, 22.0).text_color(move || c::on_call().opacity(0.7))))
+        .items_center()
+        .justify_center()
+        .label(move || {
+            if video.get() {
+                "Your camera"
+            } else {
+                "Your camera is off"
+            }
+        })
+        // The same picture as the user's tile and their row in the
+        // participants sheet (mock: the portrait stands for the camera).
+        .child(when(
+            move || video.get() && live,
+            move || crate::camera::preview_fill(&session),
+        ))
+        .child(
+            when(move || video.get() && !live, {
+                let n = me.name.clone();
+                move || match feed(me.seed, false) {
+                    Some(f) => f.into_element(),
+                    None => text(initials(&n))
+                        .text_size(px(font::HEADING))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(move || c::on_avatar())
+                        .into_element(),
+                }
+            })
+            .otherwise(|| view().into_element()),
+        )
+        .child(when(
+            move || !video.get(),
+            || icon(Icon::VideoOff, 22.0).text_color(move || c::on_call().opacity(0.7)),
+        ))
         .child((!is_desktop()).then(|| {
-            view().absolute().top(px(4.0)).right(px(4.0)).child(call_btn(
-                || Icon::FlipCamera,
-                move || if front.get() { "Flip to back camera".into() } else { "Flip to front camera".into() },
-                CallTone::Neutral,
-                || false,
-                36.0,
-                false,
-                move || {
-                    with_call(|c| c.front_camera = !c.front_camera);
-                    flip.flip();
-                },
-            ))
+            view()
+                .absolute()
+                .top(px(4.0))
+                .right(px(4.0))
+                .child(call_btn(
+                    || Icon::FlipCamera,
+                    move || {
+                        if front.get() {
+                            "Flip to back camera".into()
+                        } else {
+                            "Flip to front camera".into()
+                        }
+                    },
+                    CallTone::Neutral,
+                    || false,
+                    36.0,
+                    false,
+                    move || {
+                        with_call(|c| c.front_camera = !c.front_camera);
+                        flip.flip();
+                    },
+                ))
         }))
 }
 

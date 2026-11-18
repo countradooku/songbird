@@ -23,6 +23,7 @@
 //!   devices and seals for them.
 
 pub mod account;
+pub mod link;
 pub mod lock;
 pub mod nudge;
 pub mod presence;

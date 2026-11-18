@@ -67,15 +67,18 @@ pub fn safety_matches(scanned: &str, number: &str) -> bool {
 
 fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
     let head = text.get(..prefix.len())?;
-    head.eq_ignore_ascii_case(prefix).then(|| &text[prefix.len()..])
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &text[prefix.len()..])
 }
 
 fn hex_upper(bytes: &[u8]) -> String {
     use std::fmt::Write;
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-        let _ = write!(s, "{b:02X}");
-        s
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02X}");
+            s
+        })
 }
 
 fn unhex(text: &str) -> Option<Vec<u8>> {
@@ -99,7 +102,10 @@ mod tests {
         let channel = [0xAB; 16];
         let key = [0x3C; 32];
         let code = link_code(&channel, &key);
-        assert_eq!(code, format!("SONGBIRD:LINK:{}:{}", "AB".repeat(16), "3C".repeat(32)));
+        assert_eq!(
+            code,
+            format!("SONGBIRD:LINK:{}:{}", "AB".repeat(16), "3C".repeat(32))
+        );
         let want = Some(Scanned::Link {
             channel: channel.to_vec(),
             key,
@@ -113,14 +119,14 @@ mod tests {
     fn anything_else_is_not_a_link() {
         let key = "3C".repeat(32);
         for bad in [
-            format!("SONGBIRD:LINK::{key}"),                               // no channel
-            format!("SONGBIRD:LINK:ABC:{key}"),                            // odd hex
-            format!("SONGBIRD:LINK:AB:{}", "3C".repeat(31)),               // short key
-            format!("SONGBIRD:LINK:AB:{key}00"),                           // long key
-            format!("SONGBIRD:LINK:{}:{key}", "AB".repeat(65)),            // long channel
-            format!("SONGBIRD:LINK:AB:{key}:extra"),                       // a third field
-            format!("SONGBIRD:LINK:ZZ:{key}"),                             // not hex
-            format!("songbird-link:ab:{}", key.to_lowercase()),            // the old scheme
+            format!("SONGBIRD:LINK::{key}"),                    // no channel
+            format!("SONGBIRD:LINK:ABC:{key}"),                 // odd hex
+            format!("SONGBIRD:LINK:AB:{}", "3C".repeat(31)),    // short key
+            format!("SONGBIRD:LINK:AB:{key}00"),                // long key
+            format!("SONGBIRD:LINK:{}:{key}", "AB".repeat(65)), // long channel
+            format!("SONGBIRD:LINK:AB:{key}:extra"),            // a third field
+            format!("SONGBIRD:LINK:ZZ:{key}"),                  // not hex
+            format!("songbird-link:ab:{}", key.to_lowercase()), // the old scheme
             format!("https://songbird.chat/g/abc#SONGBIRD:LINK:AB:{key}"), // a link around it
             "SONGBIRD:LINK:".to_string(),
             "SONGBIRD:LIN".to_string(),

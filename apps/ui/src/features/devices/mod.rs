@@ -173,7 +173,13 @@ fn safety_body(contact: ContactId) -> AnyElement {
     view()
         .flex_1()
         .child(page_scroll(content))
-        .child(scan_sheet(s, contact, scanning, first, person.safety_number.clone()))
+        .child(scan_sheet(
+            s,
+            contact,
+            scanning,
+            first,
+            person.safety_number.clone(),
+        ))
         .into_element()
 }
 
@@ -407,6 +413,8 @@ fn devices_body() -> AnyElement {
 /// (D-0110): never from a photo, a pasted text or a link.
 fn link_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
     let found = signal(None::<String>);
+    // The main phone is sealing and waiting for the new device.
+    let linking = signal(false);
     app_sheet(
         open,
         "Link a device",
@@ -438,7 +446,7 @@ fn link_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
                     let code = found.get();
                     let session = session.clone();
                     untracked(move || match code {
-                        Some(_code) => view()
+                        Some(code) => view()
                             .gap_4()
                             .items_center()
                             .child(hero_icon(Icon::Laptop))
@@ -460,13 +468,34 @@ fn link_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
                                     .flex_row()
                                     .gap_2()
                                     .child(btn("Cancel", Variant::Ghost, BtnSize::Md, move || open.set(false)))
-                                    .child(btn("Link device", Variant::Primary, BtnSize::Md, move || {
-                                        // mock: app-core links with the scanned code (Prompt 9's
-                                        // `backend::link::link_from_code`).
-                                        let name = s.link_scanned_device();
-                                        open.set(false);
-                                        toast(format!("{name} is linked"));
-                                    })),
+                                    .child(
+                                        btn("Link device", Variant::Primary, BtnSize::Md, move || {
+                                            if !(crate::backend::is_live() && crate::backend::registered()) {
+                                                // mock: the preview's device list.
+                                                let name = s.link_scanned_device();
+                                                open.set(false);
+                                                toast(format!("{name} is linked"));
+                                                return;
+                                            }
+                                            linking.set(true);
+                                            let code = code.clone();
+                                            spawn(async move {
+                                                // Seals the account and the storage key to the
+                                                // new device, then names it in a signed list once
+                                                // its keys prove the confirmation key.
+                                                let result = crate::backend::link::link_from_code(&code).await;
+                                                let _ = linking.try_set(false);
+                                                match result {
+                                                    Ok(()) => {
+                                                        let _ = open.try_set(false);
+                                                        toast("Your new device is linked");
+                                                    }
+                                                    Err(p) => toast(p.to_string()),
+                                                }
+                                            });
+                                        })
+                                        .disabled(move || linking.get()),
+                                    ),
                             )
                             .into_element(),
                         None => view()
@@ -587,15 +616,23 @@ mod camera_flow {
         crate::camera::install(Some(Arc::new(CAM.clone())), false);
         let open = signal(true);
         view()
-            .child(text(move || format!("devices: {}", s.devices.with(Vec::len))))
+            .child(text(move || {
+                format!("devices: {}", s.devices.with(Vec::len))
+            }))
             .child(link_sheet(s, open))
     }
 
     #[test]
     fn a_link_code_asks_first_and_anything_else_is_ignored() -> Result<(), String> {
-        let mut app = Headless::start(EngineConfig::new(Root::of::<LinkProbe>())).map_err(|e| e.to_string())?;
+        let mut app = Headless::start(EngineConfig::new(Root::of::<LinkProbe>()))
+            .map_err(|e| e.to_string())?;
         app.wait_for("Looking for a code…")?;
-        let before = app.screen().texts().iter().find(|t| t.starts_with("devices: ")).map(ToString::to_string);
+        let before = app
+            .screen()
+            .texts()
+            .iter()
+            .find(|t| t.starts_with("devices: "))
+            .map(ToString::to_string);
         // A group invite link and garbage: nothing happens.
         CAM.show_code("https://songbird.chat/g/0123456789abcdef#k=abc");
         CAM.show_code("hello");
@@ -607,11 +644,21 @@ mod camera_flow {
         app.wait_for("Link a new device?")?;
         app.wait_for("text:/read and send all your messages/")?;
         assert_eq!(CAM.running(), 0, "{:?}", CAM.log());
-        let after_scan = app.screen().texts().iter().find(|t| t.starts_with("devices: ")).map(ToString::to_string);
+        let after_scan = app
+            .screen()
+            .texts()
+            .iter()
+            .find(|t| t.starts_with("devices: "))
+            .map(ToString::to_string);
         assert_eq!(before, after_scan, "nothing is linked before the press");
         app.press("Link device")?;
         app.wait_for_gone("Link a new device?", std::time::Duration::from_secs(2))?;
-        let after = app.screen().texts().iter().find(|t| t.starts_with("devices: ")).map(ToString::to_string);
+        let after = app
+            .screen()
+            .texts()
+            .iter()
+            .find(|t| t.starts_with("devices: "))
+            .map(ToString::to_string);
         assert_ne!(before, after, "linked after the press");
         Ok(())
     }

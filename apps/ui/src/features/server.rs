@@ -205,7 +205,32 @@ fn body() -> impl IntoElement {
                                 if d.this_device { words.push("This device"); }
                                 if d.primary { words.push("Main"); }
                                 if d.pending { words.push("Waiting for approval"); }
-                                Row::new(short(&d.id)).subtitle(words.join(" · ")).build()
+                                let row = Row::new(short(&d.id)).subtitle(words.join(" · "));
+                                if d.this_device {
+                                    return row.build();
+                                }
+                                // The main phone logs another device out: a signed list
+                                // without it (and a new storage key once it is alone).
+                                let id = d.id.clone();
+                                row.chevron()
+                                    .on_press(move || {
+                                        let id = id.clone();
+                                        confirm(
+                                            format!("Log out device {}?", short(&id)),
+                                            "It stops getting messages, and can't read your settings from now on.",
+                                            "Log out",
+                                            move || {
+                                                let id = id.clone();
+                                                backend::run(async move {
+                                                    backend::link::remove(&id).await?;
+                                                    devices.set(backend::devices().await?);
+                                                    toast("The device was logged out");
+                                                    Ok(())
+                                                });
+                                            },
+                                        )
+                                    })
+                                    .build()
                             }))
                             .into_element()
                         }))

@@ -278,7 +278,6 @@ pub fn hash(text: &str) -> u64 {
     })
 }
 
-
 /// A short numeric code to type when a QR code can't be scanned
 /// ("482 913").
 pub fn pairing_code(seed: &str) -> String {
@@ -781,7 +780,6 @@ mod tests {
         assert_eq!(g.len(), 12);
         assert!(g.iter().all(|x| x.len() == 5));
     }
-
 
     #[test]
     fn numbers_and_progress() {

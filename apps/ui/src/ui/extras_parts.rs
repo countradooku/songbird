@@ -151,7 +151,6 @@ pub fn key_combo(shown: &str) -> View {
         }))
 }
 
-
 /// A selectable card: a plan, a provider. `selected` draws the primary
 /// ring (and the caller says it in words too).
 pub fn select_card(selected: impl Fn() -> bool + Copy + 'static) -> View {
@@ -171,7 +170,6 @@ pub fn select_card(selected: impl Fn() -> bool + Copy + 'static) -> View {
         .p_4()
         .gap_2()
 }
-
 
 #[cfg(test)]
 mod key_tests {

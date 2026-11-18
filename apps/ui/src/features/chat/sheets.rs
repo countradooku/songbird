@@ -145,15 +145,19 @@ fn attach_sheet(cv: Conv) -> AnyElement {
     let tiles = move || {
         let tiles = vec![
             // mock: the system photo picker; app-core encrypts and uploads.
-            tile(Icon::Image, "Photos", then(|cv| {
-                cv.send_body(Body::Image {
-                    caption: String::new(),
-                    alt: "A photo from your library: a street in the old town at dusk".into(),
-                    w: 4,
-                    h: 3,
-                    hd: cv.s.settings.with_untracked(|x| x.hd_uploads),
-                })
-            })),
+            tile(
+                Icon::Image,
+                "Photos",
+                then(|cv| {
+                    cv.send_body(Body::Image {
+                        caption: String::new(),
+                        alt: "A photo from your library: a street in the old town at dusk".into(),
+                        w: 4,
+                        h: 3,
+                        hd: cv.s.settings.with_untracked(|x| x.hd_uploads),
+                    })
+                }),
+            ),
             tile(Icon::Camera, "Camera", then(|cv| cv.camera_open.set(true))),
             // mock: the document picker.
             tile(
@@ -444,63 +448,86 @@ fn camera_sheet(cv: Conv) -> AnyElement {
     app_sheet(
         open,
         "Camera",
-        view().px_4().pb_4().gap_4().items_center().child(dynamic(move || {
-            let is_open = open.get();
-            untracked(move || {
-                if !is_open {
-                    busy.set(false);
-                    return view().into_element();
-                }
-                let session = crate::camera::use_session(songbird_camera::Purpose::Photo, || true, |_| {});
-                let shown = session.shown;
-                let running = move || matches!(shown.get(), crate::camera::Shown::Running(_));
-                let (flip, shoot) = (session.clone(), session.clone());
-                view()
-                    .gap_4()
-                    .items_center()
-                    .child(crate::camera::camera_view(&session, 280.0, ""))
-                    .child(when(running, move || {
-                        let (flip, shoot) = (flip.clone(), shoot.clone());
-                        view()
-                            .flex_row()
-                            .gap_3()
-                            .child(btn_with_icon("Flip", Some(Icon::FlipCamera), Variant::Ghost, BtnSize::Md, move || {
-                                flip.flip();
-                            }))
-                            .child(
-                                btn_with_icon("Take photo", Some(Icon::Camera), Variant::Primary, BtnSize::Md, move || {
-                                    busy.set(true);
-                                    shoot.take_photo(move |result| {
-                                        let _ = busy.try_set(false);
-                                        match result {
-                                            Ok(still) => {
-                                                open.set(false);
-                                                // mock: app-core encrypts the JPEG with the attachment
-                                                // format (Prompt 6) and uploads it; until then only its
-                                                // size reaches the message, and the bytes are dropped.
-                                                cv.send_body(Body::Image {
-                                                    caption: String::new(),
-                                                    alt: "A photo you took".into(),
-                                                    w: still.width.max(1),
-                                                    h: still.height.max(1),
-                                                    hd: false,
-                                                });
-                                            }
-                                            Err(_) => toast("The photo couldn't be taken"),
-                                        }
-                                    });
-                                })
-                                .disabled(move || busy.get()),
-                            )
-                    }))
-                    .into_element()
-            })
-        })),
+        view()
+            .px_4()
+            .pb_4()
+            .gap_4()
+            .items_center()
+            .child(dynamic(move || {
+                let is_open = open.get();
+                untracked(move || {
+                    if !is_open {
+                        busy.set(false);
+                        return view().into_element();
+                    }
+                    let session = crate::camera::use_session(
+                        songbird_camera::Purpose::Photo,
+                        || true,
+                        |_| {},
+                    );
+                    let shown = session.shown;
+                    let running = move || matches!(shown.get(), crate::camera::Shown::Running(_));
+                    let (flip, shoot) = (session.clone(), session.clone());
+                    view()
+                        .gap_4()
+                        .items_center()
+                        .child(crate::camera::camera_view(&session, 280.0, ""))
+                        .child(when(running, move || {
+                            let (flip, shoot) = (flip.clone(), shoot.clone());
+                            view()
+                                .flex_row()
+                                .gap_3()
+                                .child(btn_with_icon(
+                                    "Flip",
+                                    Some(Icon::FlipCamera),
+                                    Variant::Ghost,
+                                    BtnSize::Md,
+                                    move || {
+                                        flip.flip();
+                                    },
+                                ))
+                                .child(
+                                    btn_with_icon(
+                                        "Take photo",
+                                        Some(Icon::Camera),
+                                        Variant::Primary,
+                                        BtnSize::Md,
+                                        move || {
+                                            busy.set(true);
+                                            shoot.take_photo(move |result| {
+                                                let _ = busy.try_set(false);
+                                                match result {
+                                                    Ok(still) => {
+                                                        open.set(false);
+                                                        // mock: app-core encrypts the JPEG with the attachment
+                                                        // format (Prompt 6) and uploads it; until then only its
+                                                        // size reaches the message, and the bytes are dropped.
+                                                        cv.send_body(Body::Image {
+                                                            caption: String::new(),
+                                                            alt: "A photo you took".into(),
+                                                            w: still.width.max(1),
+                                                            h: still.height.max(1),
+                                                            hd: false,
+                                                        });
+                                                    }
+                                                    Err(_) => toast("The photo couldn't be taken"),
+                                                }
+                                            });
+                                        },
+                                    )
+                                    .disabled(move || busy.get()),
+                                )
+                        }))
+                        .into_element()
+                })
+            })),
     )
     .into_element()
 }
 
-const STICKERS: [&str; 12] = ["🦉", "🐦", "🦊", "🐻", "🐼", "🐸", "🌻", "🍀", "🎈", "🧁", "☕", "🚲"];
+const STICKERS: [&str; 12] = [
+    "🦉", "🐦", "🦊", "🐻", "🐼", "🐸", "🌻", "🍀", "🎈", "🧁", "☕", "🚲",
+];
 
 fn sticker_sheet(cv: Conv) -> AnyElement {
     let open = cv.sticker_open;

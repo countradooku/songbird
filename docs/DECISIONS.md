@@ -20,6 +20,10 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Native camera module (`CAM-plan.md`, D-0102): **waiting for the owner**: the plan and its
+  seven questions (the Android host now, a primary with no camera, the first build's scope, a
+  physical iPhone, Linux packaging, `unsafe` in `songbird-camera`, link codes only from the
+  live camera).
 - Prompt 8, M4 and M5 rest (D-0099): **deferred by the owner on 2026-11-18 until the whole app
   is built** ("lets do this after we have the whole app built"): the Xcode and Gradle host
   projects (APNs token, PushKit with CallKit, FCM, UnifiedPush, ConnectionService), the Apple
@@ -160,6 +164,48 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0102 — The native camera module: the plan, and the owner's decisions it needs
+
+- Date: 2026-11-18
+- Status: proposed (waiting for the owner). D-0101 is Prompt 9's plan (PR #67).
+- Decided by: owner, on the agent's plan `docs/reports/CAM-plan.md`
+- Context: the owner rejected linking a device by pasting a text code and asked for native
+  camera code on each platform, since the camera also serves photos and videos in chat and
+  video calls. NSH 0.6 has no camera API (`nsh-core` and `nsh-base` have only the system
+  photo picker), and every scanner, preview and QR code in `apps/ui` is a mock.
+- Findings (read in the NSH 0.6 sources, cited in the plan):
+  - `#[native_components(ios)]` exists, and the iOS runner `nsh package` generates registers
+    it; `nsh.json`'s `apple.infoPlist` takes the purpose string. So the iOS camera can be Rust
+    in the packaged app, and Prompt 8's finding 7 is corrected for iOS components (not for the
+    extension, PushKit or CallKit).
+  - Android components are Java objects registered on `NshView`; the packaged `AppActivity`
+    is `final` and the manifest takes no permissions. The Android camera needs Songbird's
+    Gradle host.
+  - Windows components draw into Direct2D (no child window); macOS gives an `NSView`, Linux a
+    `gtk::Widget`.
+- Options considered: Swift and Kotlin modules in both host projects (the brief) vs Rust
+  everywhere NSH lets Rust register components (macOS, iOS, Windows, Linux) and Kotlin only
+  on Android; Apple's metadata output vs a Rust decoder on Apple; `qrcode` vs `qrcodegen` vs
+  `fast_qr` to encode; `rqrr` vs `rxing` vs `quircs` to decode; Media Foundation vs WinRT
+  `MediaCapture`; the camera portal with PipeWire vs V4L2 on Linux.
+- Recommendation (each for the owner):
+  1. One crate `apps/camera` (`songbird-camera`) with one interface (`Camera`, `Session`,
+     states for access denied, restricted and unavailable, a bounded newest-wins frame
+     receiver) and a `FakeCamera` for headless tests; `apps/ui` keeps no `unsafe`.
+  2. AVFoundation in Rust (`objc2-av-foundation`) for macOS and iOS with
+     `AVCaptureMetadataOutput` for QR; CameraX in a minimal `apps/android` host now, with QR
+     decoded in Rust (`rqrr`) and no Google service; Media Foundation on Windows; the camera
+     portal and PipeWire on Linux, V4L2 without a portal.
+  3. `qrcode` 0.14.1 without default features to draw real codes; the link code upper case
+     (alphanumeric mode, version 5).
+  4. Link codes read only from the live camera, a link scheme distinct from invites, and a
+     confirmation naming what linking gives (the 2025 phishing of Signal's linking).
+  5. `unsafe` allowed in `songbird-camera`'s platform modules only, as a recorded exception.
+- Consequences: the Android host is built before the rest of D-0099's deferred work; the iOS
+  host stays deferred. iOS checks need a physical iPhone. Nothing changes on the server or in
+  THREAT_MODEL §1. Calls get the local preview now and send frames once app-core (A2) and
+  LiveKit are in the app.
 
 ## D-0100 — Prompt 8: the security review's fixes
 

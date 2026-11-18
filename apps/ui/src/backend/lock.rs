@@ -12,6 +12,9 @@ use nsh_core::{prelude::*, storage::Storage};
 use super::wire;
 
 const K_PASSCODE: &str = "sb.app_lock";
+/// Wrong guesses since the last right one, and when the next guess may
+/// come (`n:until_ms`): saved, so closing the app doesn't reset the wait.
+const K_FAILS: &str = "sb.app_lock_fails";
 const ROUNDS: u32 = 600_000;
 /// Wrong guesses allowed before the first wait.
 pub const FREE_TRIES: u32 = 5;
@@ -63,6 +66,33 @@ pub async fn set(code: String) -> bool {
 /// Forgets the passcode (the lock is off).
 pub fn clear() {
     Storage::remove_item(K_PASSCODE);
+    Storage::remove_item(K_FAILS);
+}
+
+/// Wrong guesses so far and the time (ms) before which no guess is taken.
+#[must_use]
+pub fn failures() -> (u32, f64) {
+    Storage::get_item(K_FAILS)
+        .and_then(|v| {
+            let (n, until) = v.split_once(':')?;
+            Some((n.parse().ok()?, until.parse().ok()?))
+        })
+        .unwrap_or((0, 0.0))
+}
+
+/// Counts a wrong guess at `now_ms`; returns the new count and the wait's end.
+pub fn record_failure(now_ms: f64) -> (u32, f64) {
+    let n = failures().0.saturating_add(1);
+    let until = now_ms + wait_after(n).as_millis() as f64;
+    if let Err(e) = Storage::set_item(K_FAILS, &format!("{n}:{until}")) {
+        log::warn!("app lock storage: {e}");
+    }
+    (n, until)
+}
+
+/// A right guess clears the count.
+pub fn reset_failures() {
+    Storage::remove_item(K_FAILS);
 }
 
 /// Checks a passcode, on a blocking thread.

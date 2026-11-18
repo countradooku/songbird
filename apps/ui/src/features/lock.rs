@@ -70,8 +70,13 @@ pub fn layer() -> AnyElement {
 
 fn lock_screen() -> AnyElement {
     let code = signal(String::new());
-    let wrong = signal(0_u32);
-    let wait_until = signal(0.0_f64);
+    // Saved on the device: closing the app doesn't reset the count or the wait.
+    let (fails, until) = lock::failures();
+    let wrong = signal(fails);
+    let wait_until = signal(until);
+    if until > unix_ms() {
+        tick_until(wait_until);
+    }
     let checking = signal(false);
     let shake = signal(false);
     let message = move || {
@@ -98,15 +103,15 @@ fn lock_screen() -> AnyElement {
             checking.set(false);
             code.set(String::new());
             if ok {
+                lock::reset_failures();
                 wrong.set(0);
                 locked().set(Locked(false));
             } else {
-                let n = wrong.get_untracked() + 1;
+                let (n, until) = lock::record_failure(unix_ms());
                 wrong.set(n);
                 shake.set(true);
-                let wait = lock::wait_after(n);
-                if !wait.is_zero() {
-                    wait_until.set(unix_ms() + wait.as_millis() as f64);
+                if until > unix_ms() {
+                    wait_until.set(until);
                     // The countdown's sentence follows the clock.
                     tick_until(wait_until);
                 }
@@ -357,6 +362,33 @@ mod headless {
             std::time::Duration::from_secs(10),
         )?;
         app.wait_for("text:the app")?;
+        Ok(())
+    }
+
+    /// A wait earned before the app was closed still holds when it opens.
+    #[test]
+    fn closing_the_app_does_not_reset_the_wait() -> Result<(), String> {
+        let until = nsh_core::time::unix_ms() + 600_000.0;
+        let storage = nsh_testing::MemoryStorage::new([
+            (
+                "sb.app_lock".to_string(),
+                crate::backend::lock::stored_form("246810", [3; 16]),
+            ),
+            (
+                "sb.device_settings".to_string(),
+                r#"{"app_lock":"1"}"#.to_string(),
+            ),
+            ("sb.app_lock_fails".to_string(), format!("5:{until}")),
+        ]);
+        let mut config = nsh_engine::EngineConfig::new(nsh_engine::Root::of::<LockProbe>());
+        config.storage = Some(storage);
+        let mut app = nsh_testing::Headless::start(config).map_err(|e| e.to_string())?;
+        app.wait_for("text:Songbird is locked")?;
+        app.wait_for("text:/^Too many tries/")?;
+        // The right passcode is not even checked during the wait.
+        app.type_text("Passcode", "246810")?;
+        app.wait_for("text:Songbird is locked")?;
+        app.wait_for("text:/^Too many tries/")?;
         Ok(())
     }
 }

@@ -105,6 +105,22 @@ from nothing.
      secrets only in `push`.
 
    Production keys are created at deployment, straight into SOPS, never on a laptop.
+10. **Desktop needs no push service, and NSH already has what it needs.** macOS can use APNs,
+    but that puts Apple in the loop for a device that is almost always running anyway. Windows'
+    only push service is Microsoft's WNS: it needs an MSIX package registered in Microsoft's
+    Partner Center, and Microsoft would see every wake-up. Linux has no system push service.
+    Signal Desktop uses none of them: it stays connected while running. NSH 0.6 already offers
+    the parts for that (read in `nsh-core-0.6.0/src/desktop.rs` and `notifications.rs`):
+    - a tray icon (`DesktopCommand::SetTray`);
+    - an app that keeps running with its window hidden;
+    - a launch-at-login item (`LoginItemBackend`);
+    - local notifications and the badge.
+
+    So desktop devices keep their delivery connection in the background and notify locally.
+    A fully quit desktop finds its messages in the mailbox (up to 30 days) at the next start,
+    and the user's phone, always linked, is still woken. UnifiedPush on Linux (KUnifiedPush,
+    ntfy) needs nothing new on the server (Web Push exists). It is recorded as future work, not
+    built.
 
 ## Architecture changes
 
@@ -132,6 +148,15 @@ from nothing.
     the API already defines.
   - Mute and preferences stay in the app's settings store. The extension reads them from the
     App Group and decides what to show.
+- **Desktop (macOS, Windows, Linux), in `apps/ui` only:**
+  - closing the window hides it, and the app stays in the tray (menu bar on macOS), still
+    connected;
+  - "Open at login", off by default;
+  - new messages and incoming calls raise local notifications through NSH;
+  - one notify-or-not function decides, shared with the mobile builds: muted chat, settings
+    off, chat already open and focused.
+  - No push registration: a desktop device has no row in the token store, and its push jobs
+    end as "no registration", as today.
 
 ## Milestones and gates
 
@@ -142,10 +167,12 @@ from nothing.
 | **M3** | **Credentials and operations:** Ansible and SOPS for the push host only; the three credential checks (finding 9); alert rules (dead letters, breaker open, push failures, dropped wake-ups, registry busy) with `promtool` tests; Prometheus and Alertmanager (Q4); runbooks. | The rendering test fails if a provider secret is referenced anywhere but push; `promtool test rules` passes in CI; the post-deploy check is scripted. |
 | **M4** | **The app on iOS** (Q2, Q5): the Xcode host, APNs registration to `PUT /v1/push`, the NSE showing the generic text and honouring mute from the App Group (with the entitlement), PushKit reported to CallKit and joined to the existing ringing screen. | **An offline iOS Simulator receives a real APNs sandbox wake-up end to end** (compose stack → `push` → Apple → Simulator), the app reconnects and the envelope count rises; NSE unit tests; one VoIP ring on a physical iPhone, recorded. |
 | **M5** | **The app on Android:** the Gradle host, FCM registration (Play build), UnifiedPush (no-Google build), high-priority wake to a foreground fetch, `ConnectionService` ring. | **An offline Android emulator receives a real FCM wake-up end to end**; UnifiedPush through a self-hosted distributor (ntfy) in compose. |
-| **M6** | **The gate:** GDPR for the moved token store; the security review of the whole diff; `P08-gate.md`. | The prompt's gate item by item: an offline device wakes end to end in the integration environment, provider outage and recovery tested, credentials provably only in push. |
+| **M6** | **The app on desktop** (finding 10): tray and hidden-window lifecycle, "Open at login", local notifications for messages and calls, the shared notify-or-not rules wired to the notifications settings screen. | Headless tests of the notify-or-not rules (muted, off, focused, call versus message) and of the tray and login settings; on macOS, Windows and Linux, a message arriving with the window closed raises a notification, recorded with screenshots; a quit desktop fetches its waiting messages at start. |
+| **M7** | **The gate:** GDPR for the moved token store; the security review of the whole diff; `P08-gate.md`. | The prompt's gate item by item: an offline device wakes end to end in the integration environment, provider outage and recovery tested, credentials provably only in push. |
 
 Order: M1 first; M2 needs M1. M3 can run beside M1 and M2. M4 and M5 need the owner's Apple and
-Firebase steps (questions 2 and 5) and M1's API. M6 needs everything.
+Firebase steps (questions 2 and 5) and M1's API. M6 needs nothing from the server and can run
+beside M1 to M3. M7 needs everything.
 
 ## Threat-model rows this plan will propose
 
@@ -196,4 +223,6 @@ you can take.
    - the three credential checks (finding 9);
    - real-provider tests read the key paths from the environment (`SONGBIRD_APNS_KEY`,
      `SONGBIRD_FCM_ACCOUNT`) and skip when they are unset, so CI never holds them;
+   - desktop without any push service: background connection, tray, local notifications
+     (finding 10); Linux UnifiedPush recorded as future work;
    - one branch and one PR for every milestone.

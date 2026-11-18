@@ -22,7 +22,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 - Prompt 8 plan (`P08-plan.md`, D-0094): **awaiting the owner**: five questions (silent sends,
   Apple bundle IDs and the filtering entitlement, the token database, alerting and where alerts
-  go, the app's Xcode and Gradle hosts) and the agent decisions in its last item.
+  go, the app's Xcode and Gradle hosts) and the agent decisions in its last item (desktop without
+  a push service among them).
 - App UI and A1 design (D-0092, `apps/ui`, `docs/design/`): the four-tab IA without Status, the brand
   (feather mark, Dusk violet palette, system fonts), and the mock-first plan; usability tests still to run.
 - Prompt 7 gate (`P07-gate.md`, D-0086 to D-0091; PR #62): **approved by the owner on 2026-11-17**
@@ -165,7 +166,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   - nothing alerts on dead letters;
   - nothing deploys or proves where the push credentials are;
   - no numbers or outage simulation exist;
-  - the NSH app cannot receive remote pushes as packaged (NSH 0.6 has local notifications only).
+  - the NSH app cannot receive remote pushes as packaged (NSH 0.6 has local notifications only);
+  - desktop has no notifications while the window is closed.
 - Options considered and evidence: in the plan ("What Prompt 8 starts from", "Findings").
 - Decisions asked of the owner (recommendations first):
   1. an `urgent` flag on sends, so receipts and sync wake nobody (one bit per send, never stored);
@@ -185,6 +187,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   - the debounce stays per process;
   - two new mock behaviours;
   - three checks that prove the credentials are only in `push`;
+  - desktop uses no push service (no APNs on macOS, no WNS on Windows): the app stays connected
+    in the tray and notifies locally, through NSH 0.6's tray, hidden window, login item and
+    notifications; Linux UnifiedPush is future work;
   - real-provider tests read key paths from the environment and skip without them;
   - one branch and one PR for every milestone.
 - Consequences: no milestone starts before the owner answers. M4 and M5 also wait for the

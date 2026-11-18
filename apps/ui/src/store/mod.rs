@@ -116,6 +116,13 @@ pub fn presence_label(p: &Presence) -> String {
     }
 }
 
+/// A message from someone else or an incoming call, for the notifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Arrival {
+    Message { chat: ChatId, sender: Option<String>, preview: String },
+    Call { chat: ChatId, video: bool },
+}
+
 /// The store. `Copy`: closures and rows capture it like a signal.
 #[derive(Clone, Copy)]
 pub struct Store {
@@ -129,11 +136,10 @@ pub struct Store {
     pub devices: Signal<Vec<Device>>,
     pub settings: Signal<Settings>,
     pub session: Signal<Session>,
-    /// The latest message from someone else: its chat, its sender's name and
-    /// a one-line preview (the notifier reads it, D-0098).
-    pub incoming: Signal<Option<(ChatId, Option<String>, String)>>,
-    /// The latest incoming call: its chat and whether it is video.
-    pub ringing: Signal<Option<(ChatId, bool)>>,
+    /// Who hears of messages from others and incoming calls (the notifier,
+    /// D-0098): called at once, so it decides with the chat and settings as
+    /// they are when the message arrives.
+    on_arrival: Stored<Option<std::rc::Rc<dyn Fn(Store, Arrival)>>>,
     next_id: Stored<u64>,
 }
 
@@ -186,8 +192,7 @@ impl Store {
             devices: signal(seed.devices),
             settings: signal(seed.settings),
             session: signal(Session { onboarded, ..seed.session }),
-            incoming: signal(None),
-            ringing: signal(None),
+            on_arrival: stored(None),
             next_id: stored(100_000),
         }
     }
@@ -258,7 +263,7 @@ impl Store {
 
     // ------------------------------------------------------------ chat intents
 
-    fn edit_chat(&self, id: ChatId, f: impl FnOnce(&mut Chat)) {
+    pub(crate) fn edit_chat(&self, id: ChatId, f: impl FnOnce(&mut Chat)) {
         self.chats.update(|cs| {
             if let Some(c) = cs.iter_mut().find(|c| c.id == id) {
                 f(c);
@@ -367,9 +372,21 @@ impl Store {
         self.messages.update(|m| m.entry(chat).or_default().push(msg));
         if let Some((preview, Some(from))) = incoming {
             let sender = self.contact(from).map(|c| c.name);
-            self.incoming.set(Some((chat, sender, preview)));
+            self.arrive(Arrival::Message { chat, sender, preview });
         }
         id
+    }
+
+    /// Tells the notifier, if one listens.
+    pub fn arrive(&self, a: Arrival) {
+        if let Some(f) = self.on_arrival.with(|f| f.clone()) {
+            f(*self, a);
+        }
+    }
+
+    /// Sets who hears of arrivals (one listener: the notifier).
+    pub fn on_arrival(&self, f: impl Fn(Store, Arrival) + 'static) {
+        self.on_arrival.with(|slot| *slot = Some(std::rc::Rc::new(f)));
     }
 
     fn edit_message(&self, chat: ChatId, id: MsgId, f: impl FnOnce(&mut Message)) {

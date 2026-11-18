@@ -32,6 +32,7 @@ pub fn App() -> impl IntoElement {
     backend::restore();
     theming::follow_settings(s);
     features::desktop::install_shortcuts();
+    features::notify::install(features::desktop::current_chat);
     let onboarded = move || s.session.with(|x| x.onboarded);
     view()
         .flex_1()

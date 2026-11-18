@@ -30,3 +30,8 @@ nsh-platform-macos = { version = "0.6.0", default-features = false, features = [
 
 [target.'cfg(target_os = "windows")'.dependencies]
 nsh-platform-windows = { version = "0.6.0", default-features = false, features = ["shader", "editor", "emoji-picker", "highlight", "math", "plot", "rich-editor", "term"] }
+
+[dev-dependencies]
+# The real engine, headless, for tests of the reactive wiring (NSH testing guide).
+nsh-engine = { version = "0.6.0", default-features = false }
+nsh-testing = { version = "0.6.0", default-features = false }

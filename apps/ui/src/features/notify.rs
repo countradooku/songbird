@@ -9,7 +9,7 @@
 
 use nsh_core::{notifications::Notification, prelude::*};
 
-use crate::store::{Chat, ChatKind, Settings, Store, store};
+use crate::store::{Arrival, Chat, ChatKind, Settings, Store, store};
 
 /// Something that may deserve a notification.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,41 +120,48 @@ pub fn install(focus_of: impl Fn() -> Option<u64> + 'static) {
             let _ = request_notification_permission().await;
         }
     });
-    // New messages from others.
-    let focus_of = std::rc::Rc::new(focus_of);
-    let f2 = focus_of.clone();
-    effect(move || {
-        let Some((chat, sender, preview)) = s.incoming.get() else { return };
-        let focus = Focus { app_focused: focused.get_untracked().0, open_chat: f2() };
-        untracked(|| notify(s, chat, &Event::Message { sender, preview }, focus));
-    });
-    // Incoming calls.
-    effect(move || {
-        let Some((chat, video)) = s.ringing.get() else { return };
-        let focus = Focus { app_focused: focused.get_untracked().0, open_chat: focus_of() };
-        untracked(|| notify(s, chat, &Event::Call { video }, focus));
+    watch(s, focused, focus_of, |n: Notice| {
+        let notification = Notification::new(n.id, n.title, n.body).silent(n.silent);
+        spawn(async move {
+            let _ = show_notification(notification).await;
+        });
     });
     // A pressed notification opens its chat (and the window).
     spawn(async move {
         loop {
             let id = next_notification_press().await;
             if let Some(chat) = id.strip_prefix("chat:").and_then(|c| c.parse().ok()) {
-                let w = nsh_core::element::desktop::main_window();
-                w.show();
-                w.focus();
+                crate::features::desktop::show_main_window();
                 crate::features::chat::open(chat);
             }
         }
     });
 }
 
-fn notify(s: Store, chat: u64, event: &Event, focus: Focus) {
-    let Some(c) = s.chat(chat) else { return };
-    let Some(n) = s.settings.with_untracked(|st| decide(event, &c, st, focus)) else { return };
-    let notification = Notification::new(n.id, n.title, n.body).silent(n.silent);
-    spawn(async move {
-        let _ = show_notification(notification).await;
+/// The store's half of the notifier: new messages and incoming calls,
+/// decided by [`decide`], handed to `sink` (the system's notifications in
+/// the app; a list in tests).
+fn watch(
+    s: Store,
+    focused: Signal<AppFocused>,
+    focus_of: impl Fn() -> Option<u64> + 'static,
+    sink: impl Fn(Notice) + 'static,
+) {
+    s.on_arrival(move |s, a| {
+        let focus = Focus { app_focused: focused.get_untracked().0, open_chat: focus_of() };
+        let (chat, event) = match a {
+            Arrival::Message { chat, sender, preview } => (chat, Event::Message { sender, preview }),
+            Arrival::Call { chat, video } => (chat, Event::Call { video }),
+        };
+        notify(s, chat, &event, focus, &sink);
     });
+}
+
+fn notify(s: Store, chat: u64, event: &Event, focus: Focus, sink: &dyn Fn(Notice)) {
+    let Some(c) = s.chat(chat) else { return };
+    if let Some(n) = s.settings.with_untracked(|st| decide(event, &c, st, focus)) {
+        sink(n);
+    }
 }
 
 #[cfg(test)]
@@ -252,5 +259,66 @@ mod tests {
         assert!(!decide(&msg("x"), &c, &s, AWAY).unwrap().silent);
         s.notify_sound = false;
         assert!(decide(&msg("x"), &c, &s, AWAY).unwrap().silent);
+    }
+
+    static SHOWN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    /// A root that runs the notifier on a fresh store and drives it: a
+    /// message from someone else, the user's own, one in a muted chat, two
+    /// in one batch, one in the chat being read, and a ring.
+    #[component]
+    fn NotifyProbe() -> impl IntoElement {
+        let s = Store::new();
+        crate::store::install(s);
+        let focused = signal(AppFocused(false));
+        let open = signal(None::<u64>);
+        let count = signal(0_u32);
+        watch(s, focused, move || open.get_untracked(), move |n: Notice| {
+            SHOWN.lock().unwrap().push(n.body);
+            count.update(|c| *c += 1);
+        });
+        let (chat, peer) = s
+            .chats
+            .get_untracked()
+            .iter()
+            .find_map(|c| match c.kind {
+                ChatKind::Direct(p) => Some((c.id, p)),
+                _ => None,
+            })
+            .expect("a direct chat");
+        set_timeout(std::time::Duration::from_millis(20), move || {
+            let text = |t: &str| crate::store::Body::Text(t.into());
+            s.push_message(chat, Some(peer), text("hello"));
+            s.push_message(chat, None, text("mine"));
+            s.edit_chat(chat, |c| c.muted = true);
+            s.push_message(chat, Some(peer), text("muted"));
+            s.edit_chat(chat, |c| c.muted = false);
+            batch(|| {
+                s.push_message(chat, Some(peer), text("first of two"));
+                s.push_message(chat, Some(peer), text("second of two"));
+            });
+        });
+        set_timeout(std::time::Duration::from_millis(60), move || {
+            focused.set(AppFocused(true));
+            open.set(Some(chat));
+            s.push_message(chat, Some(peer), crate::store::Body::Text("reading".into()));
+            s.arrive(Arrival::Call { chat, video: true });
+        });
+        text(move || format!("shown: {}", count.get()))
+    }
+
+    /// The wiring on the real engine, headless.
+    #[test]
+    fn the_store_s_events_reach_the_notifier() -> Result<(), String> {
+        let mut app = nsh_testing::Headless::start(nsh_engine::EngineConfig::new(
+            nsh_engine::Root::of::<NotifyProbe>(),
+        ))
+        .map_err(|e| e.to_string())?;
+        app.wait_for("text:shown: 4")?;
+        assert_eq!(
+            *SHOWN.lock().unwrap(),
+            ["hello", "first of two", "second of two", "Incoming video call"]
+        );
+        Ok(())
     }
 }

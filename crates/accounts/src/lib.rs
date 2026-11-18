@@ -451,17 +451,42 @@ pub struct NewAccount {
 }
 
 /// How many times a transaction that lost a write conflict is retried, at most (D-0093).
-const CONFLICT_RETRIES: u32 = 24;
+const CONFLICT_RETRIES: u32 = 20;
 
 /// How long one call may spend retrying lost write conflicts before it answers
 /// [`RegistryError::Busy`] (D-0093).
-const CONFLICT_BUDGET: Duration = Duration::from_secs(4);
+const CONFLICT_BUDGET: Duration = Duration::from_millis(1500);
+
+/// Lost write conflicts retried, process-wide: aggregates only, no labels (invariant 6).
+static CONFLICT_RETRIED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Calls answered [`RegistryError::Busy`], process-wide.
+static CONFLICT_BUSY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A process-wide counter a service exports: (name, help, its value at scrape).
+pub type CounterSpec = (&'static str, &'static str, fn() -> u64);
+
+/// The registry's conflict counters, for a service to export (`songbird_registry_*`, runbook
+/// "Registry busy" in `docs/RUNBOOKS/jobs-push-api-worker.md`): (name, help, read at scrape).
+pub const METRICS: [CounterSpec; 2] = [
+    (
+        "registry_conflict_retries",
+        "Registry transactions retried after losing a write conflict",
+        || CONFLICT_RETRIED.load(std::sync::atomic::Ordering::Relaxed),
+    ),
+    (
+        "registry_busy",
+        "Registry calls answered busy: write conflicts outlasted the retry budget",
+        || CONFLICT_BUSY.load(std::sync::atomic::Ordering::Relaxed),
+    ),
+];
 
 /// Backoff between retries of a transaction that lost a write conflict (D-0093): full jitter
 /// (a uniformly random wait up to an exponentially growing cap, 2 ms doubling to 128 ms), bounded
 /// by [`CONFLICT_RETRIES`] attempts and [`CONFLICT_BUDGET`] of time. Without the jitter, racing
 /// writers that lost to the same commit all wake at the same instant and collide again, round
-/// after round, until one of them runs out of attempts.
+/// after round, until one of them runs out of attempts. How often a call loses is not bounded by
+/// the number of competing winners: SurrealKV counts commits still in flight or awaiting their
+/// fsync as conflicts, so the bound is a time budget (D-0093).
 pub(crate) struct Backoff {
     attempt: u32,
     started: std::time::Instant,
@@ -484,8 +509,14 @@ impl Backoff {
     /// attempts or the time budget are spent.
     pub(crate) async fn conflicted(&mut self) -> Result<(), RegistryError> {
         if self.attempt >= CONFLICT_RETRIES || self.started.elapsed() >= CONFLICT_BUDGET {
+            CONFLICT_BUSY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                attempts = self.attempt,
+                "registry busy: write conflicts outlasted the retry budget"
+            );
             return Err(RegistryError::Busy);
         }
+        CONFLICT_RETRIED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.attempt += 1;
         let cap = u64::try_from(Self::cap(self.attempt).as_micros()).unwrap_or(u64::MAX);
         let mut r = [0u8; 8];
@@ -2482,21 +2513,33 @@ mod backoff_tests {
     }
 
     #[tokio::test]
-    async fn retries_are_bounded_in_attempts_and_time_then_busy() {
+    async fn retries_end_in_busy_within_the_budget_plus_one_wait() {
         let start = Instant::now();
         let mut b = Backoff::new();
-        for _ in 0..CONFLICT_RETRIES {
-            b.conflicted().await.unwrap();
+        let mut retries = 0;
+        while b.conflicted().await.is_ok() {
+            retries += 1;
         }
+        assert!(retries <= CONFLICT_RETRIES);
+        // The budget is checked before each wait, and one wait is at most the largest cap.
+        assert!(start.elapsed() < CONFLICT_BUDGET + Backoff::cap(7) + Duration::from_millis(250));
+    }
+
+    #[tokio::test]
+    async fn the_attempt_limit_ends_retries_even_with_time_left() {
+        let mut b = Backoff::new();
+        b.attempt = CONFLICT_RETRIES;
         assert!(matches!(b.conflicted().await, Err(RegistryError::Busy)));
-        // Every wait is at most its cap: the attempts end well inside the budget.
-        assert!(start.elapsed() < CONFLICT_BUDGET + Duration::from_millis(500));
     }
 
     #[tokio::test]
     async fn the_time_budget_ends_retries_even_with_attempts_left() {
+        let busy = || (super::METRICS[1].2)();
+        let before = busy();
         let mut b = Backoff::new();
         b.started = Instant::now().checked_sub(CONFLICT_BUDGET).unwrap();
         assert!(matches!(b.conflicted().await, Err(RegistryError::Busy)));
+        // Counted for the runbook's alert (process-wide; other tests may add to it too).
+        assert!(busy() > before);
     }
 }

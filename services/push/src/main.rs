@@ -56,6 +56,10 @@ impl Service for Push {
     type Config = PushConfig;
 
     fn new(config: PushConfig, metrics: &mut Metrics) -> Result<Self, BoxError> {
+        // The registry's write-conflict retries and busy answers (D-0093).
+        for (name, help, read) in songbird_accounts::METRICS {
+            metrics.register_counter_fn(name, help, read)?;
+        }
         let resolved = config.push.as_ref().map(resolve).transpose()?;
         // Fail at startup, not at the first job, if the key is wrong.
         if let Some(r) = &resolved {

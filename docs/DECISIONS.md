@@ -155,35 +155,55 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   that loses a SurrealDB write conflict was retried **at most 8 times with a fixed backoff**
   (4, 8, 16, 32, 64, 128, 128, 128 ms: about 0.5 s), copied into nine loops. The failing request
   lost 9 times in a row.
+- Why a call can lose more often than its competitors commit (source of SurrealKV 1.2.0, the
+  version SurrealDB v4.0.1's `Cargo.lock` pins, crate checksum `bb696686…f8264e` verified):
+  - At commit, `ring::pipeline::validate` checks each written key (and locked read) against every
+    commit entry with a lower ring sequence that wrote it and that the transaction's snapshot
+    does not see (`ring::index::WriteIndex::conflicts`). An entry is ignored only once it has
+    **aborted** or is visible to the snapshot (`CommitEntry::is_ignorable_at`): entries **in
+    flight** (still validating; they may yet abort) and **accepted but not yet durable** (waiting
+    for the group commit's fsync, `sync=every`) count as conflicts.
+  - So a transaction can lose to another loser, and a retry that starts while the winner waits
+    for its fsync takes a snapshot that still does not see it and loses to it again. Losses per
+    call grow with commit latency (disk, CPU), not with the number of winners.
+  - The same rule is what keeps limits exact: two racing grants both write the account row
+    (`dgen`), so the later to claim a sequence finds the earlier one (in flight, accepted or
+    committed after its snapshot) and aborts. It may abort both, never admit both.
 - Evidence (Apple M5 Pro, macOS 27.2.1; compose SurrealDB v4.0.1 on SurrealKV `sync=every` under
-  podman; a temporary probe counting conflicts per call, not committed):
+  podman; a temporary probe, not committed):
   - Refused requests write nothing: after the race the account's `dgen` grew by exactly 5 (the
-    grants), so the 35 refusals (`THROW` in the transaction) cancel and commit nothing.
-  - **Lost conflicts per call are not bounded by the competitors' commits.** With the VM's CPUs
-    saturated (32 busy loops; CI runs ~200 tests and SurrealDB on four cores), 80 races of the
-    fixed code had calls losing **6** times with only 5 competing commits; unloaded, the old code
-    lost at most 4. How many times a call loses depends on scheduling, so any small fixed count
-    can run out; CI's slower runner reached 9.
-  - The fixed backoff had no jitter: requests that lose to the same commit wake together and
-    collide again.
+    grants); the 35 refusals (`THROW` in the transaction) cancel and never reach the commit ring.
+  - With the VM's CPUs saturated (32 busy loops), calls lost **6** times against 5 winners;
+    unloaded, the old code lost at most 4. CI's slower runner reached 9.
+  - Per-call latency to an answer under that load (80 races, 3,200 calls): slowest 337 ms with a
+    4 s budget, 506 ms with the final 1.5 s budget; never `Busy`.
 - Decision:
   - One `Backoff` for every registry retry loop (`crates/accounts/src/lib.rs`): **full jitter**
-    (a uniform wait up to a cap of 2 ms doubling to 128 ms), **at most 24 attempts and 4 s**.
+    (a uniform wait up to a cap of 2 ms doubling to 128 ms), **at most 20 attempts and 1.5 s**
+    (about 4.5 times the slowest call measured under CPU starvation, 3 times what CI ran out of).
+    A smaller budget bounds the extra load retries put on SurrealDB under contention.
   - When the budget is spent the call answers **`RegistryError::Busy`** instead of a raw
     database error: nothing was written and the caller may retry. The API already answers every
     registry database failure with 503, so clients see no change.
-  - The correctness argument is unchanged: every transaction that changes an account's devices
-    writes the account row, so two racing grants conflict and the limit stays exact. Retrying a
-    lost transaction re-runs its checks from a fresh snapshot.
+  - **Degraded mode made explicit** (invariant 8): `songbird_registry_conflict_retries_total`
+    and `songbird_registry_busy_total` (process-wide counters, no labels) on `api`, `worker`,
+    `push` and `delivery`, through a new `Metrics::register_counter_fn` (names checked against
+    the redaction rules like any other); a warning log without identifiers on each `Busy`; the
+    runbook "Registry busy" in `docs/RUNBOOKS/jobs-push-api-worker.md`.
   - Rejected: mapping the first conflict to an API error (pushes a normal outcome of optimistic
     concurrency onto clients, who would retry less well); loosening the test (it must keep
     asserting exactly 5 grants and no other error); serialising per account in the process (does
-    not hold across `api` instances).
-- Evidence for the fix: unit tests `backoff_tests` (caps, attempt and time bounds); the
-  `devices_live` suite 60 of 60 runs; the whole `songbird-accounts` crate 10 of 10 runs with the
-  VM's CPUs saturated; 80 starved races all granted exactly 5.
-- Consequences: a call under heavy contention can take up to ~4 s before `Busy` (was ~0.5 s
-  before an error). The mailbox's own retry loops (D-0027) are unchanged.
+    not hold across `api` instances); reordering the account-row write after the checks (measured
+    to change nothing: refused transactions never commit).
+- Evidence for the fix: unit tests `backoff_tests` (caps; attempt limit; time limit; ends in
+  `Busy` within the budget plus one wait, counted) and the telemetry test for counters read at
+  scrape; the `devices_live` suite 60 of 60 runs; the whole `songbird-accounts` crate 10 of 10
+  runs with the VM's CPUs saturated; 80 starved races all granted exactly 5.
+- Consequences: a call under heavy contention takes at most ~1.6 s before `Busy` (was ~0.5 s
+  before an error). The per-account throttles in `api` (for example `tokens_per_hour`,
+  `token_burst` for link tokens) keep one account from reaching this in production. The
+  mailbox's own retry loops (D-0027) are unchanged. Revisit the budget if
+  `songbird_registry_busy_total` moves in production, or when the registry moves to TiKV.
 
 ## D-0091 — Prompt 7: the security review's fixes
 

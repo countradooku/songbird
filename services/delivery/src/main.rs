@@ -224,6 +224,10 @@ impl Service for Delivery {
     type Config = DeliveryConfig;
 
     fn new(config: DeliveryConfig, metrics: &mut Metrics) -> Result<Self, BoxError> {
+        // The registry's write-conflict retries and busy answers (D-0093).
+        for (name, help, read) in songbird_accounts::METRICS {
+            metrics.register_counter_fn(name, help, read)?;
+        }
         let d = config.delivery;
         let directory = match &d.directory.file {
             Some(path) => Directory::load(path)?,

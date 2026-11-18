@@ -2,7 +2,9 @@
 
 - Date: 2026-11-18
 - Prompt: [08-push.md](../prompts/08-push.md)
-- Status: **awaiting the owner's approval** (D-0094). No milestone starts before it.
+- Status: **approved by the owner on 2026-11-18** ("Approve all"), every recommendation (D-0094).
+  Still the owner's: where alerts go (question 4); the Apple steps (question 2) and the Firebase
+  Android app (question 5) before M4 and M5.
 - Base: `main` at `2836b4a` (Prompt 7 done, PR #62; the app, PR #63; the registry fix, PR #64).
 - Way of working (as Prompt 7): one branch and one PR (`claude/p08-push`). Each milestone gets
   its own commit, tests, report `docs/reports/P08-Mn.md`, decision record (D-0095 onward) and

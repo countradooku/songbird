@@ -20,10 +20,12 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
-- Prompt 8 plan (`P08-plan.md`, D-0094): **awaiting the owner**: five questions (silent sends,
-  Apple bundle IDs and the filtering entitlement, the token database, alerting and where alerts
-  go, the app's Xcode and Gradle hosts) and the agent decisions in its last item (desktop without
-  a push service among them).
+- Prompt 8 plan (`P08-plan.md`, D-0094): **approved by the owner on 2026-11-18** ("Approve
+  all"), every recommendation, desktop without a push service included. Still the owner's: where
+  alerts go (email, ntfy or Matrix; M3 builds with the receiver left to configure); before M4,
+  the bundle IDs `chat.songbird.app` and `chat.songbird.app.notify`, the App Group and the
+  filtering entitlement request (and whether to enrol an organisation first); before M5, the
+  Android app in Firebase `songbird-6fab1`.
 - App UI and A1 design (D-0092, `apps/ui`, `docs/design/`): the four-tab IA without Status, the brand
   (feather mark, Dusk violet palette, system fonts), and the mock-first plan; usability tests still to run.
 - Prompt 7 gate (`P07-gate.md`, D-0086 to D-0091; PR #62): **approved by the owner on 2026-11-17**
@@ -152,7 +154,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0094 — Prompt 8: the plan, and the owner's decisions it needs
 
 - Date: 2026-11-18
-- Status: proposed (awaiting the owner)
+- Status: accepted (owner, 2026-11-18, "Approve all": every recommendation)
 - Decided by: owner, on the agent's plan `docs/reports/P08-plan.md`
 - Context: Prompt 2, milestone 5 (D-0036) already built `services/push` and
   `crates/push-providers`: sealed jobs, sealed and keyed-hashed tokens, APNs (alert and VoIP), FCM
@@ -192,8 +194,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
     notifications; Linux UnifiedPush is future work;
   - real-provider tests read key paths from the environment and skip without them;
   - one branch and one PR for every milestone.
-- Consequences: no milestone starts before the owner answers. M4 and M5 also wait for the
-  owner's Apple and Firebase steps. Production provider keys are created at deployment, straight
+- Consequences: M1 starts. M4 and M5 also wait for the owner's Apple and Firebase steps; M3
+  leaves the alert receiver to configure until the owner chooses it. Production provider keys are created at deployment, straight
   into SOPS.
 
 ## D-0093 — Registry write conflicts: jittered retries within a time budget, then `Busy`

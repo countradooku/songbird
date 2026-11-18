@@ -20,6 +20,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 8 plan (`P08-plan.md`, D-0094): **awaiting the owner**: five questions (silent sends,
+  Apple bundle IDs and the filtering entitlement, the token database, alerting and where alerts
+  go, the app's Xcode and Gradle hosts) and the agent decisions in its last item.
 - App UI and A1 design (D-0092, `apps/ui`, `docs/design/`): the four-tab IA without Status, the brand
   (feather mark, Dusk violet palette, system fonts), and the mock-first plan; usability tests still to run.
 - Prompt 7 gate (`P07-gate.md`, D-0086 to D-0091; PR #62): **approved by the owner on 2026-11-17**
@@ -144,6 +147,49 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0094 — Prompt 8: the plan, and the owner's decisions it needs
+
+- Date: 2026-11-18
+- Status: proposed (awaiting the owner)
+- Decided by: owner, on the agent's plan `docs/reports/P08-plan.md`
+- Context: Prompt 2, milestone 5 (D-0036) already built `services/push` and
+  `crates/push-providers`: sealed jobs, sealed and keyed-hashed tokens, APNs (alert and VoIP), FCM
+  HTTP v1, Web Push with RFC 8291 and VAPID, collapse IDs, a breaker per provider, pooled HTTP/2,
+  dead letters. Prompt 8 closes the gaps the plan lists:
+  - calls queue behind message wake-ups on one stream;
+  - the leading-edge debounce can leave a stored message without a wake-up;
+  - every stored envelope wakes the device, receipts included;
+  - mute on iOS needs Apple's filtering entitlement;
+  - tokens sit in the registry's database;
+  - nothing alerts on dead letters;
+  - nothing deploys or proves where the push credentials are;
+  - no numbers or outage simulation exist;
+  - the NSH app cannot receive remote pushes as packaged (NSH 0.6 has local notifications only).
+- Options considered and evidence: in the plan ("What Prompt 8 starts from", "Findings").
+- Decisions asked of the owner (recommendations first):
+  1. an `urgent` flag on sends, so receipts and sync wake nobody (one bit per send, never stored);
+  2. register the bundle IDs `chat.songbird.app`, `chat.songbird.app.notify` and the App Group,
+     then request `com.apple.developer.usernotifications.filtering` (the account is an Individual
+     enrolment: the owner's name goes on the app);
+  3. a SurrealDB database of its own for push tokens, a credential per service, left out of
+     backups;
+  4. Prometheus and Alertmanager on the bastion with CI-tested rules, and where alerts go;
+  5. the app embedded in Songbird's own Xcode and Gradle hosts (`apps/ios`, `apps/android`) for the
+     notification extension, PushKit with CallKit, FCM, UnifiedPush and ConnectionService; the
+     Android app registered in Firebase `songbird-6fab1`.
+- Agent decisions, unless the owner objects:
+  - `j:push-call` with a 30 s life;
+  - leading and trailing coalescing;
+  - call pushes identical to message pushes on FCM and Web Push;
+  - the debounce stays per process;
+  - two new mock behaviours;
+  - three checks that prove the credentials are only in `push`;
+  - real-provider tests read key paths from the environment and skip without them;
+  - one branch and one PR for every milestone.
+- Consequences: no milestone starts before the owner answers. M4 and M5 also wait for the
+  owner's Apple and Firebase steps. Production provider keys are created at deployment, straight
+  into SOPS.
 
 ## D-0093 — Registry write conflicts: jittered retries within a time budget, then `Busy`
 

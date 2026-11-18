@@ -124,6 +124,7 @@ fn contact_info(chat: ChatId) -> AnyElement {
     let first = move || name().split_whitespace().next().unwrap_or_default().to_string();
     let seed = info.with_untracked(|c| c.as_ref().map_or(0, |c| c.seed));
     let timer_open = signal(false);
+    let theme_open = signal(false);
     // The strip shows what the count counts: photos and videos first,
     // then documents and links.
     let media_count = s.media_of(chat).len() + s.docs_of(chat).len() + s.links_of(chat).len();
@@ -223,11 +224,7 @@ fn contact_info(chat: ChatId) -> AnyElement {
                 s.toggle_mute(chat)
             }))
             .build(),
-        Row::new("Chat theme")
-            .icon(Icon::Palette)
-            .value("Default")
-            .on_press(|| toast("Chat themes are coming soon"))
-            .build(),
+        super::theme::theme_row(chat, theme_open),
         Row::new("Disappearing messages")
             .icon(Icon::Timer)
             .trailing(
@@ -350,6 +347,7 @@ fn contact_info(chat: ChatId) -> AnyElement {
             ),
         )
         .child(sheets::timer_sheet(s, chat, timer_open))
+        .child(super::theme::theme_sheet(chat, theme_open))
         .into_element()
 }
 

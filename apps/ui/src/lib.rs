@@ -43,6 +43,7 @@ pub fn App() -> impl IntoElement {
             when(onboarded, || when(ui::wide, shell::desktop).otherwise(shell::phone))
                 .otherwise(features::onboarding::flow),
         )
+        .child(features::desktop::jump::layer())
         .child(features::calls::call_layer())
         .child(ui::toast_layer())
 }

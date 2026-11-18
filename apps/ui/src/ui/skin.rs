@@ -119,6 +119,9 @@ pub struct Radii {
     pub dialog: f32,
     /// Chat bubbles.
     pub bubble: f32,
+    /// A floating pane of the wide window (list, conversation, info), as
+    /// the platform rounds a window-level surface (`REDESIGN.md`, Skins).
+    pub pane: f32,
     /// The floating action button.
     pub fab: f32,
     /// The search field.
@@ -310,6 +313,7 @@ pub const APPLE: SkinSpec = SkinSpec {
         sheet: 28.0,
         dialog: 24.0,
         bubble: 18.0,
+        pane: 16.0,
         fab: FULL,
         search: FULL,
     },
@@ -360,6 +364,7 @@ pub const MATERIAL: SkinSpec = SkinSpec {
         sheet: 28.0,
         dialog: 28.0,
         bubble: 20.0,
+        pane: 24.0,
         fab: 16.0,
         search: FULL,
     },
@@ -410,6 +415,7 @@ pub const FLUENT: SkinSpec = SkinSpec {
         sheet: 8.0,
         dialog: 8.0,
         bubble: 8.0,
+        pane: 8.0,
         fab: 4.0,
         search: 4.0,
     },
@@ -460,6 +466,7 @@ pub const ADWAITA: SkinSpec = SkinSpec {
         sheet: 14.0,
         dialog: 14.0,
         bubble: 14.0,
+        pane: 12.0,
         fab: 6.0,
         search: 6.0,
     },
@@ -723,6 +730,16 @@ mod tests {
             assert!(w.inset_off + w.thumb_off + w.inset_on <= w.track_w, "{s:?} off fits");
             assert!(w.travel() >= w.thumb_off * 0.6, "{s:?} the move reads");
         }
+    }
+
+    /// `REDESIGN.md`, Skins: the floating panes' corners.
+    #[test]
+    fn panes_round_as_each_platform_does() {
+        let r = |s: Skin| s.spec().radius.pane;
+        assert_eq!(
+            (r(Skin::Apple), r(Skin::Material), r(Skin::Fluent), r(Skin::Adwaita)),
+            (16.0, 24.0, 8.0, 12.0)
+        );
     }
 
     #[test]

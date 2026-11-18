@@ -52,6 +52,27 @@ pub fn hairline() -> Points {
     px(1.0 / pixel_ratio().max(1.0))
 }
 
+/// The hint an icon-only control shows on desktops while the pointer
+/// rests on it or the keyboard focuses it (`.tooltip(hint("Calls"))`):
+/// the toast's inverted surface at caption size, the popup radius.
+pub fn hint(label: impl Into<SharedString>) -> nsh_base::TooltipElement {
+    nsh_base::tooltip().child(
+        view()
+            .px_2()
+            .py_1()
+            .rounded(move || radius::control())
+            .bg(move || c::foreground())
+            .shadow_md()
+            .child(
+                text(label.into())
+                    .number_of_lines(1)
+                    .text_size(px(font::CAPTION))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(move || c::background()),
+            ),
+    )
+}
+
 /// A thin rule (a hairline).
 pub fn separator() -> View {
     view().h(hairline()).bg(move || c::border())

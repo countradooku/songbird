@@ -119,6 +119,48 @@ impl Disappear {
     }
 }
 
+/// A conversation's own look (REDESIGN.md "Per-chat themes"): it tints
+/// the canvas and the user's bubbles. Synced with the chat as an
+/// encrypted setting (A2); the colours live in the UI
+/// (`features::chat::theme`), since they are presentation, not data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ChatTheme {
+    #[default]
+    Dusk,
+    Rose,
+    Sea,
+    Moss,
+    Sand,
+    Slate,
+    Night,
+}
+
+impl ChatTheme {
+    /// Every theme, in the picker's order: the default first, then warm
+    /// to cool, the darkest last.
+    pub const ALL: [ChatTheme; 7] = [
+        ChatTheme::Dusk,
+        ChatTheme::Rose,
+        ChatTheme::Sand,
+        ChatTheme::Moss,
+        ChatTheme::Sea,
+        ChatTheme::Slate,
+        ChatTheme::Night,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ChatTheme::Dusk => "Dusk",
+            ChatTheme::Rose => "Rose",
+            ChatTheme::Sea => "Sea",
+            ChatTheme::Moss => "Moss",
+            ChatTheme::Sand => "Sand",
+            ChatTheme::Slate => "Slate",
+            ChatTheme::Night => "Night",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chat {
     pub id: ChatId,
@@ -149,6 +191,8 @@ pub struct Chat {
     /// Custom chat lists it belongs to ("Family", "Work").
     pub lists: Vec<String>,
     pub seed: u64,
+    /// The conversation's canvas and bubble colours.
+    pub theme: ChatTheme,
 }
 
 #[derive(Debug, Clone, PartialEq)]

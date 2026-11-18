@@ -17,7 +17,7 @@ async function run(layout: "desktop" | "phone", scheme: "light" | "dark") {
   else await app.setViewport(1180, 780);
   await pause(500);
   const tag = `${layout}-${scheme}`;
-  for (const t of ["Chats", "Calls", "Communities", "You"]) {
+  for (const t of ["Chats", "Calls", "Spaces", "You"]) {
     await app.press(`label:${t} >> nth=0`);
     await pause(450);
     await app.screenshot(`shots/polish-core-${tag}-tab-${t.toLowerCase()}.png`);

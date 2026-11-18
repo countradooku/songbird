@@ -10,18 +10,18 @@ async function tour(w: number, h: number, tag: string) {
   await app.setViewport(w, h);
   await pause(500);
   await app.screenshot(`shots/app-${tag}-chats.png`);
-  await app.press("Ana Popescu >> nth=0");
+  await app.press("label:/^Ana Popescu,/");
   await pause(600);
   await app.screenshot(`shots/app-${tag}-chat.png`);
-  await app.press("Ana Popescu, chat info >> nth=0").catch(() => {});
+  await app.press("label:/^Ana Popescu, .*chat info$/").catch(() => {});
   await pause(500);
   await app.screenshot(`shots/app-${tag}-chat-info.png`);
   // Back to the tabs (phones pushed the chat over them).
-  while (!app.texts().includes("Communities")) {
+  while (!app.texts().includes("Spaces") && !app.texts().includes("All")) {
     await app.press("Back >> nth=0");
     await pause(300);
   }
-  for (const t of ["Calls", "Communities", "You"]) {
+  for (const t of ["Calls", "Spaces", "You"]) {
     await app.press(`${t} >> nth=0`);
     await pause(300);
     await app.screenshot(`shots/app-${tag}-${t.toLowerCase()}.png`);

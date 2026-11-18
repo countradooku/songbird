@@ -3,7 +3,7 @@
 
 use nsh_core::{element::Position, prelude::*};
 
-use super::{ChatFilter, animate_change, filter, list_names, model, row};
+use super::{animate_change, filter, list_names, model, row};
 use crate::{
     features, nav,
     store::{Store, store},
@@ -327,7 +327,7 @@ fn lists() -> impl IntoElement {
                         .icon(Icon::Layers)
                         .subtitle(if n == 1 { "1 chat".to_string() } else { format!("{n} chats") })
                         .on_press(move || {
-                            f.set(ChatFilter(model::Filter::List(shown.clone())));
+                            f.update(|x| x.list = model::Filter::List(shown.clone()));
                             nav::pop();
                         })
                         .trailing(icon_btn(Icon::Trash, format!("Delete list {name}"), move || {
@@ -359,7 +359,7 @@ fn lists() -> impl IntoElement {
                     ),
             )
             .child(footnote(
-                "Lists sort your chats into chips above the chat list. Only you see your lists.",
+                "Your lists show above your chats, beside All. Only you see them.",
             )),
     )
 }

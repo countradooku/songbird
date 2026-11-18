@@ -54,6 +54,7 @@ fn group_page(s: Store, chat: ChatId) -> Screen {
     let edit_open = signal(false);
     let add_open = signal(false);
     let timer_open = signal(false);
+    let theme_open = signal(false);
     let crypto_open = signal(false);
     let member_open = signal(false);
     let member = signal(None::<ContactId>);
@@ -133,6 +134,9 @@ fn group_page(s: Store, chat: ChatId) -> Screen {
                             move || ch.with(|c| c.as_ref().is_some_and(|c| c.muted)),
                             move |_| s.toggle_mute(chat),
                         ),
+                        // The chat's own canvas and bubble colour, as in a
+                        // one-to-one chat's info (REDESIGN.md "Per-chat themes").
+                        crate::features::chat::theme_row(chat, theme_open),
                         view()
                             .child(dynamic(move || {
                                 let t = ch.with(|c| c.as_ref().and_then(|c| c.disappearing));
@@ -177,6 +181,7 @@ fn group_page(s: Store, chat: ChatId) -> Screen {
             .child(app_sheet(edit_open, "Edit group info", edit_sheet(s, chat, edit_open)))
             .child(app_sheet(add_open, "Add members", add_sheet(s, chat, add_open)))
             .child(app_sheet(timer_open, "Disappearing messages", timer_sheet(s, chat, ch, timer_open)))
+            .child(crate::features::chat::theme_sheet(chat, theme_open))
             .child(app_sheet(crypto_open, "Encryption", crypto_sheet(s, chat)))
             .child(app_sheet(member_open, "Group member", member_sheet(s, chat, ch, member, member_open))),
     )

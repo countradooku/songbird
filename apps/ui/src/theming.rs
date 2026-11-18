@@ -37,6 +37,14 @@ const HIGH_CONTRAST_LIGHT: &[(&str, &str)] = &[
     ("bubble-meta", "#262626"),
     ("tick-read", "#2A1F8A"),
     ("link", "#2A1F8A"),
+    // Floating panes: the pane is the page's own white, so content made
+    // for `background` sits in it seamlessly; the canvas a clear grey step
+    // under it, and the strong border carries every pane's edge.
+    ("canvas", "#E6E6E6"),
+    ("pane", "#FFFFFF"),
+    ("pane-border", "#4A4A4A"),
+    ("capsule", "#FFFFFF"),
+    ("capsule-border", "#4A4A4A"),
 ];
 
 const HIGH_CONTRAST_DARK: &[(&str, &str)] = &[
@@ -59,6 +67,13 @@ const HIGH_CONTRAST_DARK: &[(&str, &str)] = &[
     ("bubble-meta", "#E0E0E0"),
     ("tick-read", "#D6CEFF"),
     ("link", "#D6CEFF"),
+    // Nothing is darker than the black page, so the canvas steps up
+    // instead; the light border, not the fill, makes each pane's edge.
+    ("canvas", "#1A1A1A"),
+    ("pane", "#000000"),
+    ("pane-border", "#BDBDBD"),
+    ("capsule", "#0A0A0A"),
+    ("capsule-border", "#BDBDBD"),
 ];
 
 fn vars(theme: &mut Value, mode: &str) -> Map<String, Value> {
@@ -127,16 +142,67 @@ pub fn follow_settings(s: Store) {
             return;
         }
         applied.with(|a| *a = Some(next));
-        match nsh_base::tokens_of(Some(&theme_json_for(next.0, next.1))) {
+        let json = theme_json_for(next.0, next.1);
+        // The app's own copy first, so views that re-read on the token
+        // change below already find the new values (`ui::tokens::role`).
+        remember_custom(&json);
+        match nsh_base::tokens_of(Some(&json)) {
             Ok(tokens) => set_tokens(tokens),
             Err(e) => log::warn!("theme: {e}"),
         }
     });
 }
 
+thread_local! {
+    /// Every colour token of the theme last applied, by name: the fallback
+    /// for custom names a runtime drops (`ui::tokens::role`).
+    static CUSTOM: std::cell::RefCell<std::collections::HashMap<String, AdaptiveColor>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// The colour token `name` of the theme last applied, from the app's own
+/// copy of it.
+pub fn custom_color(name: &str) -> Option<AdaptiveColor> {
+    CUSTOM.with_borrow(|m| m.get(name).copied())
+}
+
+/// `#RRGGBB` or `#RRGGBBAA` as one mode's colour.
+fn parse_hex(s: &str) -> Option<Hsla> {
+    let h = s.strip_prefix('#')?;
+    let (rgb, alpha) = match h.len() {
+        6 => (u32::from_str_radix(h, 16).ok()?, 1.0),
+        8 => (u32::from_str_radix(&h[..6], 16).ok()?, u8::from_str_radix(&h[6..], 16).ok()? as f32 / 255.0),
+        _ => return None,
+    };
+    Some(AdaptiveColor::rgb(rgb, rgb).light.opacity(alpha))
+}
+
+/// Keeps every colour of the theme file `json` (its light and dark lists).
+fn remember_custom(json: &str) {
+    let Ok(v) = serde_json::from_str::<Value>(json) else { return };
+    let (light, dark) = (&v["cssVars"]["light"], &v["cssVars"]["dark"]);
+    let mut map = std::collections::HashMap::new();
+    for (k, l) in light.as_object().into_iter().flatten() {
+        let d = dark.get(k).unwrap_or(l);
+        if let (Some(l), Some(d)) = (l.as_str().and_then(parse_hex), d.as_str().and_then(parse_hex)) {
+            map.insert(k.clone(), AdaptiveColor::new(l, d));
+        }
+    }
+    CUSTOM.with_borrow_mut(|m| *m = map);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_apps_copy_of_the_tokens_answers_custom_names() {
+        remember_custom(&theme_json_for(ThemeChoice::System, Skin::Apple));
+        for name in ["raised", "capsule", "capsule-border", "canvas", "pane", "chat-bg", "overlay"] {
+            assert!(custom_color(name).is_some(), "{name}");
+        }
+        assert!(parse_hex("#0F0D1A80").is_some_and(|c| (c.a - 128.0 / 255.0).abs() < 0.01));
+    }
 
     #[test]
     fn every_skin_overrides_known_tokens_only() {
@@ -163,6 +229,23 @@ mod tests {
         assert_eq!(hc["cssVars"]["dark"]["background"], "#000000", "high contrast wins over the skin");
     }
 
+    /// Content built for `background` sits straight in a pane, so in every
+    /// skin and choice the two are the same colour, and the canvas differs.
+    #[test]
+    fn panes_are_the_page_surface_on_a_distinct_canvas() {
+        for (choice, skin) in [ThemeChoice::System, ThemeChoice::HighContrast]
+            .into_iter()
+            .flat_map(|c| Skin::ALL.map(move |s| (c, s)))
+        {
+            let t: Value = serde_json::from_str(&theme_json_for(choice, skin)).unwrap();
+            for mode in ["light", "dark"] {
+                let v = &t["cssVars"][mode];
+                assert_eq!(v["pane"], v["background"], "{choice:?} {skin:?} {mode}: pane is the page");
+                assert_ne!(v["canvas"], v["pane"], "{choice:?} {skin:?} {mode}: the canvas shows");
+            }
+        }
+    }
+
     #[test]
     fn every_theme_variant_parses_with_its_custom_tokens() {
         for (choice, skin) in [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark, ThemeChoice::HighContrast]
@@ -172,7 +255,8 @@ mod tests {
             let tokens = nsh_base::tokens_of(Some(&theme_json_for(choice, skin))).expect("theme parses");
             for name in [
                 "chat-bg", "bubble-out", "bubble-in", "tick-read", "avatar-1", "danger-bg", "primary", "switch-thumb",
-                "switch-track", "switch-on", "raised", "control",
+                "switch-track", "switch-on", "raised", "control", "canvas", "pane", "pane-border", "capsule",
+                "capsule-border",
             ] {
                 assert!(tokens.color(name).is_some(), "{name} missing in {choice:?}");
             }

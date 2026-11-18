@@ -1,8 +1,9 @@
-//! A13 desktop: keyboard shortcuts, the cheat sheet, native menus, the
-//! tray / menu bar icon with the unread count, chats in their own window,
-//! dropping files, and the desktop settings. Everything here runs only on
+//! A13 desktop: keyboard shortcuts, ⌘K jump-to (`jump`), the cheat sheet,
+//! native menus, the tray / menu bar icon with the unread count, chats in
+//! their own window, dropping files, and the desktop settings. Everything here runs only on
 //! desktops (`is_desktop()`); what NSH lacks is in `DESKTOP_GAPS.md`.
 
+pub mod jump;
 pub mod keys;
 
 use nsh_core::{
@@ -25,7 +26,7 @@ use crate::{
 
 use keys::{Command, EXTRA, GROUPS, SHORTCUTS, keys_for};
 
-/// Bumped when the user asks to search (⌘K / ⌘F, the View menu). The chat
+/// Bumped when the user asks to search the chat list (⌘F, the View menu). The chat
 /// list watches it and focuses its search field:
 /// `effect(move || if global::<SearchFocus>().get().0 > 0 { search.focus() })`.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -47,6 +48,7 @@ pub fn current_chat() -> Option<ChatId> {
 /// Runs a shortcut's command (keys, menus and the tray share it).
 fn run(s: Store, command: Command) {
     match command {
+        Command::JumpTo => jump::toggle(),
         Command::Search => {
             nav::pop_to_root();
             nav::tab().set(Tab::Chats);
@@ -275,9 +277,10 @@ pub fn desktop_menus() {
         [
             item("Chats", Command::Tab(0)),
             item("Calls", Command::Tab(1)),
-            item("Communities", Command::Tab(2)),
+            item("Spaces", Command::Tab(2)),
             item("You", Command::Tab(3)),
             MenuItem::separator(),
+            item("Jump to…", Command::JumpTo),
             item("Search chats", Command::Search),
             MenuItem::separator(),
             MenuItem::role(MenuRole::ToggleFullScreen),

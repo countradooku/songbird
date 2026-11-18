@@ -6,7 +6,7 @@ const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const pages = ["Profile", "Privacy", "What Songbird can see", "Chats", "Appearance", "Notifications", "Parental controls"];
 const sel = (p: string, desktop: boolean) =>
-  p === "Profile" ? "Your profile, Radu" : p === "Chats" ? `Chats >> nth=${desktop ? 1 : 0}` : p === "What Songbird can see" ? `${p} >> nth=0` : p;
+  p === "Profile" ? "Your profile, Radu" : p === "Chats" ? "Chats >> nth=0" : p === "What Songbird can see" ? `${p} >> nth=0` : p;
 const file = (name: string) => name.toLowerCase().replace(/[^a-z]+/g, "-");
 
 async function start(scheme: "light" | "dark") {

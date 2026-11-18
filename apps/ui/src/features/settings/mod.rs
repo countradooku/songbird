@@ -207,6 +207,59 @@ pub(crate) fn presence_mark(label: &'static str, size: f32) -> AnyElement {
     }
 }
 
+// ---------------------------------------------------------------- jump-to
+
+/// A settings page as the desktop's ⌘K jump-to lists it.
+pub struct JumpPage {
+    /// What the row says: "Settings: Privacy", or the page's own name
+    /// for places that read as destinations ("Linked devices").
+    pub label: String,
+    /// More words that find it ("dark", "blocked").
+    pub keywords: &'static str,
+    pub glyph: Icon,
+    /// The You row's title, for [`open_page`].
+    pub title: &'static str,
+}
+
+/// Pages people go to rather than settings they change: their name alone
+/// says it, so they skip the "Settings:" prefix.
+const DESTINATIONS: &[&str] = &[
+    "Linked devices",
+    "Broadcast lists",
+    "Starred messages",
+    "WhatsApp chats",
+    "Subscription",
+    "Help and feedback",
+    "Invite a friend",
+    "What Songbird can see",
+    "Chat backup",
+    "Server connection",
+];
+
+/// Every settings page, for jump-to. Keyboard shortcuts is left to the
+/// desktop's own list, which shows its key.
+pub fn jump_pages() -> Vec<JumpPage> {
+    entries()
+        .into_iter()
+        .filter(|e| e.title != "Keyboard shortcuts")
+        .map(|e| JumpPage {
+            label: if DESTINATIONS.contains(&e.title) { e.title.to_string() } else { format!("Settings: {}", e.title) },
+            keywords: e.keywords,
+            glyph: e.glyph,
+            title: e.title,
+        })
+        .collect()
+}
+
+/// Opens the settings page `title` (a [`JumpPage::title`]) from anywhere:
+/// the You tab comes forward and, on desktop, its row shows selected.
+pub fn open_page(title: &str) {
+    let Some(e) = entries().into_iter().find(|e| e.title == title) else { return };
+    nav::pop_to_root();
+    nav::tab().set(nav::Tab::You);
+    open_from(e.title, e.open);
+}
+
 // ---------------------------------------------------------------- the You tab
 
 /// One row of the You list, also what the settings search finds.
@@ -238,7 +291,7 @@ fn entries() -> Vec<Entry> {
         e("Help and feedback", "support contact faq crash reports", Icon::HelpCircle, links::help),
         e("Invite a friend", "share invite code", Icon::Heart, links::invite_friend),
         e("What Songbird can see", "privacy centre server data encryption threat model eu", Icon::ShieldCheck, privacy_centre),
-        e("Read receipts", "privacy blue ticks seen", Icon::Check, privacy::privacy),
+        e("Read receipts", "privacy ticks seen read status", Icon::Check, privacy::privacy),
         e("Last seen and online", "privacy presence", Icon::Eye, privacy::last_seen),
         e("Blocked contacts", "privacy block unblock", Icon::Ban, privacy::blocked),
         e("App lock", "face id fingerprint pin privacy", Icon::Lock, privacy::app_lock),

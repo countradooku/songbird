@@ -9,12 +9,15 @@ use crate::{
     ui::Tick,
 };
 
-/// The filter chips above the list.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Which chats the list shows: All, or one of the user's lists in the
+/// Lists capsule. Favourites, Groups and Channels stay as views the list
+/// menu offers (the capsule shows the one chosen beside All); WhatsApp is a
+/// segment of its own while the user keeps those chats apart (A15). Unread
+/// is not a view but a toggle over any of them (`ChatFilter::unread`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum Filter {
     #[default]
     All,
-    Unread,
     Favourites,
     Groups,
     Channels,
@@ -28,7 +31,6 @@ impl Filter {
     pub fn label(&self) -> String {
         match self {
             Filter::All => "All".into(),
-            Filter::Unread => "Unread".into(),
             Filter::Favourites => "Favourites".into(),
             Filter::Groups => "Groups".into(),
             Filter::Channels => "Channels".into(),
@@ -37,10 +39,15 @@ impl Filter {
         }
     }
 
+    /// One of the views the list menu offers (not a list of the user's,
+    /// not All): the capsule shows it as a segment only while it is chosen.
+    pub fn from_menu(&self) -> bool {
+        matches!(self, Filter::Favourites | Filter::Groups | Filter::Channels)
+    }
+
     fn matches(&self, c: &Chat) -> bool {
         match self {
             Filter::All => true,
-            Filter::Unread => c.unread > 0 || c.marked_unread,
             Filter::Favourites => c.favourite,
             Filter::Groups => c.kind == ChatKind::Group,
             Filter::Channels => matches!(c.kind, ChatKind::Channel { .. }),
@@ -49,14 +56,23 @@ impl Filter {
         }
     }
 
-    /// The empty state's title and sentence for this filter.
-    pub fn empty_copy(&self) -> (String, String) {
+    /// The empty state's title and sentence for this view, with the Unread
+    /// toggle `unread` on or off.
+    pub fn empty_copy(&self, unread: bool) -> (String, String) {
+        if unread {
+            return match self {
+                Filter::All => ("You're all caught up".into(), "Chats with new messages show here.".into()),
+                other => (
+                    format!("Nothing unread in {}", other.label()),
+                    "Turn off Unread to see every chat here.".into(),
+                ),
+            };
+        }
         match self {
             Filter::All => (
                 "No chats yet".into(),
                 "Start a chat with someone in your contacts, or invite a friend to Songbird.".into(),
             ),
-            Filter::Unread => ("You're all caught up".into(), "Chats with unread messages show here.".into()),
             Filter::Favourites => (
                 "No favourites yet".into(),
                 "Add a chat to favourites from its menu to find it here quickly.".into(),
@@ -105,7 +121,8 @@ pub enum Preview {
     /// The user's unsent draft.
     Draft(String),
     /// The last message, with the sender's first name in groups and the
-    /// status when it is the user's.
+    /// status when it is the user's. A row draws only a failed status
+    /// (the conversation shows the rest once, under the latest message).
     Message { sender: Option<String>, text: String, tick: Option<Tick> },
 }
 
@@ -151,6 +168,9 @@ pub struct ChatRow {
     pub latest: Preview,
     /// The last message is a voice note (a mic leads its preview).
     pub voice: bool,
+    /// The last message is someone else's (not the user's, not a system
+    /// line): the chat may be waiting for the user.
+    pub theirs: bool,
     pub when: String,
     pub at: Option<i64>,
     pub unread: u32,
@@ -169,6 +189,18 @@ impl ChatRow {
     /// Unread at all (a count, or marked unread).
     pub fn is_unread(&self) -> bool {
         self.unread > 0 || self.marked_unread
+    }
+
+    /// Waiting for the user (desktop's "Needs a reply"): someone else
+    /// wrote last and it is unread in a chat that is not muted, or the user
+    /// was mentioned and has not read it.
+    pub fn needs_reply(&self) -> bool {
+        (self.theirs && self.unread > 0 && !self.muted) || self.mention
+    }
+
+    /// The last message the user sent did not go out.
+    pub fn failed(&self) -> bool {
+        matches!(self.preview, Preview::Message { tick: Some(Tick::Failed), .. })
     }
 
     /// The preview as one plain string (prefix and text).
@@ -209,8 +241,10 @@ impl ChatRow {
         if !text.is_empty() {
             parts.push(format!("{prefix}{text}"));
         }
-        if let Preview::Message { tick: Some(t), .. } = &self.preview {
-            parts.push(t.label().to_lowercase());
+        // Only a failed send is said (and drawn): delivery states live in
+        // the conversation, once, under the latest message.
+        if self.failed() {
+            parts.push(Tick::Failed.label().to_lowercase());
         }
         if !self.when.is_empty() {
             parts.push(self.when.clone());
@@ -282,6 +316,7 @@ pub fn row(c: &Chat, messages: &HashMap<ChatId, Vec<Message>>, contacts: &[Conta
         preview,
         latest,
         voice: last.is_some_and(|m| matches!(m.body, Body::Voice { .. })),
+        theirs: last.is_some_and(|m| !m.mine() && !matches!(m.body, Body::System(_))),
         when: last.map(|m| when_label(m.at)).unwrap_or_default(),
         at: last.map(|m| m.at),
         unread: c.unread,
@@ -323,6 +358,65 @@ pub fn rows(
 pub fn count(chats: &[Chat], scope: ListScope) -> (usize, usize) {
     let inside = chats.iter().filter(|c| scope.includes(c));
     inside.fold((0, 0), |(n, u), c| (n + 1, u + usize::from(c.unread > 0 || c.marked_unread)))
+}
+
+/// The most pinned people above the list (two rows of four); more pinned
+/// chats stay in the list, first.
+pub const MAX_PINNED: usize = 8;
+/// "Needs a reply" shows this many until "Show all".
+pub const MAX_NEEDS: usize = 5;
+
+/// The Chats tab's list, split into its parts.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Inbox {
+    /// Pinned people, in the order of the user's chats (stable: they do
+    /// not reshuffle when a message arrives).
+    pub pinned: Vec<ChatRow>,
+    /// "Needs a reply" (desktop), newest first, cut at [`MAX_NEEDS`]
+    /// unless shown all.
+    pub needs: Vec<ChatRow>,
+    /// How many more need a reply than `needs` holds.
+    pub more_needs: usize,
+    /// Everything else, newest first ("Recent" on desktop; the whole list
+    /// on phones).
+    pub recent: Vec<ChatRow>,
+}
+
+impl Inbox {
+    pub fn is_empty(&self) -> bool {
+        self.pinned.is_empty() && self.needs.is_empty() && self.recent.is_empty()
+    }
+}
+
+/// Splits `rows` (as [`rows`] orders them) into the inbox's parts.
+/// `order` is the user's chats in the store's order (the pinned people's
+/// order); `unread` keeps only unread chats; `triage` makes "Needs a reply"
+/// (desktop); `show_all` lifts its cut.
+pub fn inbox(rows: Vec<ChatRow>, order: &[ChatId], unread: bool, triage: bool, show_all: bool) -> Inbox {
+    let rows: Vec<ChatRow> = rows.into_iter().filter(|r| !unread || r.is_unread()).collect();
+    let place = |id: ChatId| order.iter().position(|&o| o == id).unwrap_or(usize::MAX);
+    let mut pinned: Vec<ChatRow> = rows.iter().filter(|r| r.pinned).cloned().collect();
+    pinned.sort_by_key(|r| place(r.id));
+    pinned.truncate(MAX_PINNED);
+    let mut out = Inbox::default();
+    let mut needs = Vec::new();
+    for r in rows {
+        if pinned.iter().any(|p| p.id == r.id) {
+            continue;
+        }
+        if triage && r.needs_reply() {
+            needs.push(r);
+        } else {
+            out.recent.push(r);
+        }
+    }
+    if !show_all && needs.len() > MAX_NEEDS {
+        out.more_needs = needs.len() - MAX_NEEDS;
+        needs.truncate(MAX_NEEDS);
+    }
+    out.pinned = pinned;
+    out.needs = needs;
+    out
 }
 
 /// The custom list names: the user's own order first, then any a chat
@@ -584,8 +678,6 @@ mod tests {
     #[test]
     fn filters_pick_their_chats() {
         let (chats, m, ct) = data();
-        let unread = rows(&chats, &m, &ct, ListScope::Inbox, &Filter::Unread);
-        assert!(unread.iter().all(ChatRow::is_unread) && !unread.is_empty());
         let groups = rows(&chats, &m, &ct, ListScope::Inbox, &Filter::Groups);
         assert!(groups.iter().all(|r| r.group && !r.channel));
         let channels = rows(&chats, &m, &ct, ListScope::Inbox, &Filter::Channels);
@@ -622,6 +714,7 @@ mod tests {
         assert!(matches!(andrei.preview, Preview::Draft(_)));
         let mihai = row(chats.iter().find(|c| c.id == 3).unwrap(), &m, &ct);
         assert!(matches!(mihai.preview, Preview::Message { tick: Some(Tick::Failed), sender: None, .. }));
+        assert!(mihai.failed() && mihai.spoken().contains("not sent"));
         chats.iter_mut().find(|c| c.id == 3).unwrap().typing = Some("typing…".into());
         let typing = row(chats.iter().find(|c| c.id == 3).unwrap(), &m, &ct);
         assert_eq!(typing.preview, Preview::Typing("typing…".into()));
@@ -706,5 +799,82 @@ mod tests {
         let names = list_names(&["Family".into(), "Work".into(), "Friends".into(), "Gym".into()], &chats);
         assert_eq!(names, vec!["Family", "Work", "Friends", "Gym"]);
         assert_eq!(list_names(&[], &chats), vec!["Work", "Family", "Friends"]);
+    }
+
+    #[test]
+    fn pinned_people_leave_the_list_in_the_users_order() {
+        let (chats, m, ct) = data();
+        let order: Vec<ChatId> = chats.iter().map(|c| c.id).collect();
+        let all = rows(&chats, &m, &ct, ListScope::Inbox, &Filter::All);
+        let n = all.len();
+        let inbox = inbox(all, &order, false, false, false);
+        assert_eq!(inbox.pinned.iter().map(|r| r.id).collect::<Vec<_>>(), vec![1, 2]);
+        assert!(inbox.needs.is_empty(), "phones have no triage");
+        assert!(inbox.recent.iter().all(|r| !r.pinned));
+        assert_eq!(inbox.pinned.len() + inbox.recent.len(), n);
+    }
+
+    #[test]
+    fn more_than_eight_pins_stay_in_the_list() {
+        let (mut chats, m, ct) = data();
+        for c in chats.iter_mut().filter(|c| !c.request && !c.archived) {
+            c.pinned = true;
+        }
+        let order: Vec<ChatId> = chats.iter().map(|c| c.id).collect();
+        let all = rows(&chats, &m, &ct, ListScope::Inbox, &Filter::All);
+        let inbox = inbox(all, &order, false, false, false);
+        assert_eq!(inbox.pinned.len(), MAX_PINNED);
+        assert!(inbox.recent.iter().any(|r| r.pinned));
+    }
+
+    #[test]
+    fn needs_a_reply_is_theirs_unread_and_loud_or_a_mention() {
+        let (chats, m, ct) = data();
+        let order: Vec<ChatId> = chats.iter().map(|c| c.id).collect();
+        let all = rows(&chats, &m, &ct, ListScope::Inbox, &Filter::All);
+        let inbox = inbox(all, &order, false, true, false);
+        assert!(inbox.needs.iter().all(ChatRow::needs_reply));
+        assert!(inbox.recent.iter().all(|r| !r.needs_reply()));
+        assert!(!inbox.needs.iter().any(|r| r.id == 4), "a muted chat never needs a reply");
+        assert!(inbox.needs.len() <= MAX_NEEDS);
+        let at: Vec<i64> = inbox.needs.iter().filter_map(|r| r.at).collect();
+        assert!(at.windows(2).all(|w| w[0] >= w[1]));
+    }
+
+    #[test]
+    fn needs_a_reply_cuts_at_five_until_show_all() {
+        let (mut chats, mut m, ct) = data();
+        // Every chat unread, with someone else's message last.
+        for c in chats.iter_mut() {
+            c.unread = 1;
+            c.muted = false;
+            c.pinned = false;
+        }
+        for thread in m.values_mut() {
+            if let Some(last) = thread.last_mut() {
+                last.from = Some(1);
+                last.body = Body::Text("hi".into());
+            }
+        }
+        let order: Vec<ChatId> = chats.iter().map(|c| c.id).collect();
+        let all = rows(&chats, &m, &ct, ListScope::Inbox, &Filter::All);
+        let cut = inbox(all.clone(), &order, false, true, false);
+        assert_eq!(cut.needs.len(), MAX_NEEDS);
+        assert!(cut.more_needs > 0);
+        let full = inbox(all, &order, false, true, true);
+        assert_eq!(full.needs.len(), MAX_NEEDS + cut.more_needs);
+        assert_eq!(full.more_needs, 0);
+    }
+
+    #[test]
+    fn unread_keeps_only_unread_chats_pinned_included() {
+        let (chats, m, ct) = data();
+        let order: Vec<ChatId> = chats.iter().map(|c| c.id).collect();
+        let all = rows(&chats, &m, &ct, ListScope::Inbox, &Filter::All);
+        let inbox = inbox(all, &order, true, false, false);
+        assert!(!inbox.is_empty());
+        assert!(inbox.pinned.iter().chain(&inbox.recent).all(ChatRow::is_unread));
+        let (title, _) = Filter::List("Work".into()).empty_copy(true);
+        assert_eq!(title, "Nothing unread in Work");
     }
 }

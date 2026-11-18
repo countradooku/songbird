@@ -771,6 +771,17 @@ mod tests {
     }
 
     #[test]
+    fn chats_keep_their_themes() {
+        let s = seed::seed();
+        let theme = |id: ChatId| s.chats.iter().find(|c| c.id == id).map(|c| c.theme);
+        assert_eq!(theme(2), Some(ChatTheme::Rose), "Familia");
+        assert_eq!(theme(4), Some(ChatTheme::Slate), "Design team");
+        assert_eq!(theme(9), Some(ChatTheme::Moss), "Weekend trips");
+        assert_eq!(theme(1), Some(ChatTheme::Dusk), "everything else");
+        assert_eq!(seed::chat(99, ChatKind::Group, "New").theme, ChatTheme::Dusk);
+    }
+
+    #[test]
     fn previews_are_one_line() {
         assert_eq!(Body::Text("a\nb".into()).preview(), "a");
         assert_eq!(Body::Voice { secs: 75, played: false }.preview(), "Voice message (1:15)");

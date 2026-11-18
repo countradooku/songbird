@@ -224,7 +224,7 @@ const PAGES = [
 ];
 const DESKTOP_ONLY = ["Desktop", "Keyboard shortcuts"];
 const sel = (p: string, desktop: boolean) =>
-  p === "Profile" ? "Your profile, Radu" : p === "Chats" ? `Chats >> nth=${desktop ? 1 : 0}` : p === "What Songbird can see" ? `${p} >> nth=0` : `${p} >> nth=0`;
+  p === "Profile" ? "Your profile, Radu" : p === "Chats" ? "Chats >> nth=0" : p === "What Songbird can see" ? `${p} >> nth=0` : `${p} >> nth=0`;
 const file = (name: string) => name.toLowerCase().replace(/[^a-z]+/g, "-");
 
 {

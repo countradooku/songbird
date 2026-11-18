@@ -4,6 +4,7 @@
 
 pub mod button;
 pub mod extras_parts;
+pub mod floating;
 pub mod groups_press;
 pub mod calls_controls;
 pub mod chat_menu;
@@ -29,7 +30,7 @@ pub use icons::{Icon, icon};
 pub use parts::{
     EDGE_FADE, ICON_TILE, INSET_AVATAR, INSET_ICON, INSET_PLAIN, Leading, Photo, Row, Tick, Tone, Trailing, avatar, avatar_of,
     avatar_presence, avatar_presence_on, banner, body, card, chip, chip_scroller, edge_fade, empty_state, footnote,
-    group, group_avatar, group_plain, group_with_inset, hairline, heading, icon_tile, initials, muted, page_scroll,
+    group, group_avatar, group_plain, group_with_inset, hairline, heading, hint, icon_tile, initials, muted, page_scroll,
     section_title, separator, separator_inset, skeleton, skeleton_row, tag, ticks, unread_badge, unread_badge_on,
     wide,
 };

@@ -1,4 +1,6 @@
-//! A community's home, adding groups to it, and Find channels.
+//! A space's home, adding groups to it, and Find channels. In the store a
+//! space is still a `ChatKind::Community`; every word the user reads says
+//! "space".
 
 use nsh_core::prelude::*;
 
@@ -13,7 +15,7 @@ use crate::{
     ui::*,
 };
 
-/// The community's page: header, Announcements pinned, its groups, Add
+/// The space's page: header, Announcements pinned, its groups, Add
 /// group for admins, members, the invite link, leaving.
 pub(super) fn home_page(chat: ChatId) -> Screen {
     let s = store();
@@ -21,7 +23,7 @@ pub(super) fn home_page(chat: ChatId) -> Screen {
     let manage = move || ch.with(|c| c.as_ref().is_some_and(can_manage));
     let add_open = signal(false);
     let c0 = s.chat(chat);
-    let title = c0.as_ref().map(|c| c.title.clone()).unwrap_or_else(|| "Community".into());
+    let title = c0.as_ref().map(|c| c.title.clone()).unwrap_or_else(|| "Space".into());
     page(
         title,
         view()
@@ -47,7 +49,7 @@ pub(super) fn home_page(chat: ChatId) -> Screen {
                             .child(muted(move || {
                                 let n = ch.with(|c| c.as_ref().map_or(0, |c| c.members.len()));
                                 let g = s.community_groups(chat).len();
-                                format!("Community · {n} members · {g} groups")
+                                format!("Space · {} · {}", count(n, "member"), count(g, "group"))
                             }))
                             .child(
                                 text(move || ch.with(|c| c.as_ref().map(|c| c.about.clone()).unwrap_or_default()))
@@ -79,8 +81,8 @@ pub(super) fn home_page(chat: ChatId) -> Screen {
                             view()
                                 .child(section_title("Announcements").pt_1())
                                 .child(list_card(ann.iter().map(|g| group_row(s, g))))
-                                .child(footnote("Everyone in the community gets announcements. Only admins post."))
-                                .child(section_title("Groups in this community"))
+                                .child(footnote("Everyone in the space gets announcements. Only admins post."))
+                                .child(section_title("Groups in this space"))
                                 .child(if rows.is_empty() {
                                     footnote("No other groups yet.").pt_0().into_element()
                                 } else {
@@ -95,7 +97,7 @@ pub(super) fn home_page(chat: ChatId) -> Screen {
                         list_row(
                             square_tile(Icon::Link),
                             "Invite members",
-                            Some("Share a link to the community".into()),
+                            Some("Share a link to the space".into()),
                             Some(trailing_value(None)),
                             move || invite_link_page(chat),
                         )
@@ -118,8 +120,8 @@ pub(super) fn home_page(chat: ChatId) -> Screen {
                     ]))
                     .child(list_card([view()
                         .child(
-                            press_surface(Press::Row, move || exit_community(s, chat))
-                                .accessibility_label("Exit community")
+                            press_surface(Press::Row, move || leave_space(s, chat))
+                                .accessibility_label("Leave space")
                                 .child(
                                     view()
                                         .flex_row()
@@ -136,7 +138,7 @@ pub(super) fn home_page(chat: ChatId) -> Screen {
                                                 .child(icon(Icon::LogOut, 20.0)),
                                         )
                                         .child(
-                                            text("Exit community")
+                                            text("Leave space")
                                                 .text_size(px(font::body()))
                                                 .text_color(move || c::destructive()),
                                         ),
@@ -144,11 +146,16 @@ pub(super) fn home_page(chat: ChatId) -> Screen {
                         )
                         .into_element()]))
                     .child(footnote(
-                        "The community's name and its list of groups are end-to-end encrypted. Members of one group can't see the messages of another.",
+                        "The space's name and its list of groups are end-to-end encrypted. Members of one group can't see the messages of another.",
                     )),
             ))
             .child(app_sheet(add_open, "Add group", add_group_sheet(s, chat, add_open))),
     )
+}
+
+/// "1 member", "9 members": a count with its noun, singular for one.
+fn count(n: usize, noun: &str) -> String {
+    if n == 1 { format!("1 {noun}") } else { format!("{n} {noun}s") }
 }
 
 /// A row's trailing value (muted, tabular) and chevron.
@@ -187,7 +194,7 @@ fn add_group_sheet(s: Store, community: ChatId, open: Signal<bool>) -> View {
             let list = candidates();
             untracked(move || {
                 if list.is_empty() {
-                    return footnote("Groups you admin that aren't in a community show here.").into_element();
+                    return footnote("Groups you admin that aren't in a space show here.").into_element();
                 }
                 group(list.iter().map(|g| {
                     let id = g.id;
@@ -230,12 +237,12 @@ fn members_page(chat: ChatId) {
     });
 }
 
-fn exit_community(s: Store, chat: ChatId) {
+fn leave_space(s: Store, chat: ChatId) {
     let title = s.chat(chat).map(|c| c.title).unwrap_or_default();
     confirm(
-        format!("Exit “{title}”?"),
-        "You'll leave the community and all of its groups you're in. Members will see that you left.",
-        "Exit community",
+        format!("Leave “{title}”?"),
+        "You'll leave the space and every group in it you're in. Members will see that you left.",
+        "Leave space",
         move || {
             for g in s.community_groups(chat) {
                 if my_role(&g).is_some() {
@@ -277,7 +284,7 @@ pub fn find_channels() {
                             .gap_3()
                             .px_4()
                             .py_3()
-                            // A channel's picture, as in the Communities tab.
+                            // A channel's picture, as in the Spaces tab.
                             .child(dynamic(move || {
                                 let (n, seed) = (name(), seed());
                                 untracked(move || group_avatar(n, seed, LANE))

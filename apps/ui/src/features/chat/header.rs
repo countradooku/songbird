@@ -2,14 +2,14 @@
 //! (presence, typing, members, followers, a custom status), verified and
 //! WhatsApp marks, calls, and the More menu; or the search bar.
 
-use nsh_core::prelude::*;
+use nsh_core::{element::input, prelude::*};
 
 use super::{Conv, list, logic};
 use crate::{
     features::calls,
     nav,
     store::{ChatKind, presence_label},
-    ui::*,
+    ui::{floating, *},
 };
 
 /// Followers as people read them: 18,420.
@@ -23,6 +23,13 @@ pub(crate) fn thousands(n: u32) -> String {
         out.push(ch);
     }
     out
+}
+
+/// A group's subtitle: "5 people · 2 online" ("5 people" when nobody
+/// else is online).
+pub(crate) fn people_line(people: usize, online: usize) -> String {
+    let people = if people == 1 { "1 person".to_string() } else { format!("{people} people") };
+    if online == 0 { people } else { format!("{people} · {online} online") }
 }
 
 /// What shows under the title.
@@ -51,15 +58,10 @@ fn subtitle(cv: Conv) -> impl Fn() -> (String, bool) + Copy + 'static {
                 }
                 None => String::new(),
             },
+            // How many, never who: names belong in the group's info.
             ChatKind::Group | ChatKind::Community => {
-                let mut names: Vec<String> = c
-                    .members
-                    .iter()
-                    .filter_map(|m| m.contact)
-                    .map(|id| s.contact_name(Some(id)).split_whitespace().next().unwrap_or_default().to_string())
-                    .collect();
-                names.push("You".into());
-                names.join(", ")
+                let (people, online) = s.people_online(chat);
+                people_line(people, online)
             }
             ChatKind::Channel { followers, .. } => format!("Channel · {} followers", thousands(followers)),
         };
@@ -67,109 +69,174 @@ fn subtitle(cv: Conv) -> impl Fn() -> (String, bool) + Copy + 'static {
     }
 }
 
-/// The header: the normal one, or search in chat.
+/// The header: capsules floating over the canvas (REDESIGN.md "Content
+/// floats"), or the search capsule. The strip itself takes no touches:
+/// the messages under it stay reachable between the capsules.
 pub(crate) fn header(cv: Conv) -> AnyElement {
-    let bar = view()
-        .bg(move || c::background())
-        .border_b_1()
-        .border_color(move || c::border())
-        .when(!cv.wide, |v| v.pt_safe_area());
-    bar.child(when(cv.searching, move || search_bar(cv)).otherwise(move || title_bar(cv))).into_element()
+    // `CAPSULE_INSET` from the pane's top and sides: the same band as the
+    // list pane's header row (`floating::header_band`), so both pane tops
+    // centre on one line.
+    view()
+        .w_full()
+        .px(px(floating::CAPSULE_INSET))
+        .pb(px(floating::CAPSULE_INSET))
+        .when(!cv.wide, |v| v.pt_safe_area_plus(px(floating::CAPSULE_INSET)))
+        .when(cv.wide, |v| v.pt(px(floating::CAPSULE_INSET)))
+        .pointer_events(PointerEvents::BoxNone)
+        .child(when(cv.searching, move || search_bar(cv)).otherwise(move || title_bar(cv)))
+        .into_element()
+}
+
+/// A round capsule holding one icon button, exactly the capsule's height
+/// (back, a call, the jump button's kin).
+pub(crate) fn round(glyph: Icon, label: &'static str, f: impl Fn() + 'static) -> View {
+    let h = floating::capsule_height();
+    floating::capsule(icon_btn(glyph, label, f).size(px(h)).rounded_full())
 }
 
 fn title_bar(cv: Conv) -> View {
     let (s, chat) = (cv.s, cv.chat);
     let info = computed(move || s.chat(chat));
     let peer = computed(move || s.peer(chat));
+    let whatsapp = info.with_untracked(|c| c.as_ref().is_some_and(|c| matches!(c.kind, ChatKind::WhatsApp(_))));
+    let channel = info.with_untracked(|c| c.as_ref().is_some_and(|c| matches!(c.kind, ChatKind::Channel { .. })));
+    let direct = peer.with_untracked(Option::is_some);
+    let calls = (!channel).then(|| {
+        if cv.wide {
+            // Desktops: both calls in one capsule, each button a circle of
+            // the capsule's height.
+            let h = floating::capsule_height();
+            floating::capsule(
+                view()
+                    .flex_row()
+                    .child(icon_btn(Icon::Video, "Video call", move || calls::start_call(chat, true)).size(px(h)).rounded_full())
+                    .child(icon_btn(Icon::Phone, "Voice call", move || calls::start_call(chat, false)).size(px(h)).rounded_full()),
+            )
+        } else {
+            // Phones keep the row for the name: the voice call here, the
+            // video call in More.
+            round(Icon::Phone, "Voice call", move || calls::start_call(chat, false))
+        }
+    });
+    let more = {
+        let h = floating::capsule_height();
+        floating::capsule(view().size(px(h)).items_center().justify_center().child(more_menu(cv, direct && !whatsapp)))
+    };
+    let right = view().flex_row().items_center().gap_2().child(calls).child(more);
+    if cv.wide {
+        // The name capsule sits at the pane's centre: equal columns either
+        // side, the actions in the right one.
+        return view()
+            .w_full()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .pointer_events(PointerEvents::BoxNone)
+            .child(view().flex_1())
+            .child(name_capsule(cv, info, peer).flex_shrink(1.0).max_w(px(420.0)))
+            .child(view().flex_1().flex_row().justify_end().child(right));
+    }
+    view()
+        .w_full()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .pointer_events(PointerEvents::BoxNone)
+        .child(round(Icon::Back, "Back", nav::pop))
+        .child(name_capsule(cv, info, peer).flex_1())
+        .child(right)
+}
+
+/// The chat's capsule: its avatar concentric with the capsule's round
+/// end, then the name and the subtitle, centred. It opens chat info.
+fn name_capsule(cv: Conv, info: Memo<Option<crate::store::Chat>>, peer: Memo<Option<crate::store::Contact>>) -> View {
+    let chat = cv.chat;
+    let h = floating::capsule_height();
+    // 4pt around the avatar: its circle and the capsule's end share a
+    // centre, so the band between them is even all the way round.
+    let side = h - 8.0;
     let title = move || info.with(|c| c.as_ref().map(|c| c.title.clone()).unwrap_or_default());
     let seed = info.with_untracked(|c| c.as_ref().map_or(0, |c| c.seed));
     let verified = move || peer.with(|p| p.as_ref().is_some_and(|p| p.verified));
     let muted = move || info.with(|c| c.as_ref().is_some_and(|c| c.muted));
     let whatsapp = info.with_untracked(|c| c.as_ref().is_some_and(|c| matches!(c.kind, ChatKind::WhatsApp(_))));
-    let channel = info.with_untracked(|c| c.as_ref().is_some_and(|c| matches!(c.kind, ChatKind::Channel { .. })));
     let direct = peer.with_untracked(Option::is_some);
     let online = move || peer.with(|p| p.as_ref().is_some_and(|p| p.presence == crate::store::Presence::Online));
     let timer = move || info.with(|c| c.as_ref().and_then(|c| c.disappearing));
     let sub = subtitle(cv);
-    let size = if cv.wide { 40.0 } else { 38.0 };
-    view()
-        .h(px(if cv.wide { 60.0 } else { 56.0 }))
-        .flex_row()
-        .items_center()
-        .gap_1()
-        .px_2()
-        .child((!cv.wide).then(|| icon_btn(Icon::Back, "Back", nav::pop)))
-        .child(
-            pressable()
-                .flex_1()
-                .min_w(px(0.0))
-                .on_press(move || super::chat_info(chat))
-                .accessibility_label(super::say(move || format!("{}, chat info", title())))
-                .flex_row()
-                .items_center()
-                .gap_3()
-                .px_1()
-                .py_1()
-                .rounded(move || radius::control())
-                .hover(|st| st.bg(move || c::accent()))
-                .child(if direct {
-                    avatar_presence(title(), seed, size, online)
-                } else {
-                    group_avatar(title(), seed, size)
-                })
-                .child(
-                    view()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .gap(px(1.0))
-                        .child(
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .gap_1()
-                                .child(
-                                    text(title)
-                                        .flex_shrink(1.0)
-                                        .number_of_lines(1)
-                                        .text_size(px(font::TITLE))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .role(AccessibilityRole::Header),
-                                )
-                                .child(when(verified, || {
-                                    icon(Icon::ShieldCheck, 15.0).text_color(move || c::primary()).label("Verified")
-                                }))
-                                .child(when(muted, || icon(Icon::BellOff, 14.0).text_color(move || c::muted_fg()).label("Muted")))
-                                .child(whatsapp.then(|| tag("WhatsApp"))),
-                        )
-                        .child(
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .gap_1()
-                                .child(when(move || timer().is_some(), move || {
-                                    view()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(2.0))
-                                        .text_color(move || c::muted_fg())
-                                        .label(move || format!("Disappearing messages: {}", timer().map(|t| t.label()).unwrap_or("")))
-                                        .child(icon(Icon::Timer, 12.0))
-                                        .child(text(move || timer().map(|t| t.label()).unwrap_or("")).text_size(px(font::CAPTION)))
-                                        .child(text("·").text_size(px(font::CAPTION)))
-                                }))
-                                .child(
-                                    text(move || sub().0)
-                                        .flex_shrink(1.0)
-                                        .number_of_lines(1)
-                                        .text_size(px(font::CAPTION))
-                                        .text_color(move || if sub().1 { c::primary() } else { c::muted_fg() }),
-                                ),
-                        ),
-                ),
-        )
-        .child((!channel).then(|| icon_btn(Icon::Video, "Video call", move || calls::start_call(chat, true))))
-        .child((!channel).then(|| icon_btn(Icon::Phone, "Voice call", move || calls::start_call(chat, false))))
-        .child(more_menu(cv, direct && !whatsapp))
+    let reduced = motion::reduced();
+    floating::capsule(
+        pressable()
+            .on_press(move || super::chat_info(chat))
+            .accessibility_label(super::say(move || format!("{}, {}, chat info", title(), sub().0)))
+            .h(px(h))
+            .min_w(px(0.0))
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .pl(px(4.0))
+            // The text ends where the capsule's curve begins, so the
+            // label's right margin matches the avatar's band on the left.
+            .pr(px((h / 2.0 - 4.0).round()))
+            .rounded_full()
+            .cursor_pointer()
+            .transition()
+            .duration(motion::INSTANT)
+            .hover(|st| st.bg(move || c::foreground().opacity(0.05)))
+            .active(move |st| if reduced { st.opacity(0.85) } else { st.bg(move || c::foreground().opacity(0.08)) })
+            .focus_visible(|st| st.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
+            .child(if direct { avatar_presence(title(), seed, side, online) } else { group_avatar(title(), seed, side) })
+            .child(
+                view()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .items_center()
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .justify_center()
+                            .gap_1()
+                            .max_w(relative(1.0))
+                            .child(
+                                text(title)
+                                    .flex_shrink(1.0)
+                                    .number_of_lines(1)
+                                    .text_size(px(font::body()))
+                                    .line_height(px(18.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(move || c::foreground())
+                                    .role(AccessibilityRole::Header),
+                            )
+                            .child(when(verified, || {
+                                icon(Icon::ShieldCheck, 13.0).text_color(move || c::primary()).label("Verified")
+                            }))
+                            .child(when(muted, || icon(Icon::BellOff, 12.0).text_color(move || c::muted_fg()).label("Muted")))
+                            .child(whatsapp.then(|| tag("WhatsApp"))),
+                    )
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .justify_center()
+                            .gap_1()
+                            .max_w(relative(1.0))
+                            .child(when(move || timer().is_some(), move || {
+                                icon(Icon::Timer, 11.0)
+                                    .text_color(move || c::muted_fg())
+                                    .label(move || format!("Disappearing messages: {}", timer().map(|t| t.label()).unwrap_or("")))
+                            }))
+                            .child(
+                                text(move || sub().0)
+                                    .flex_shrink(1.0)
+                                    .number_of_lines(1)
+                                    .text_size(px(font::CAPTION))
+                                    .line_height(px(15.0))
+                                    .text_color(move || if sub().1 { c::primary() } else { c::muted_fg() }),
+                            ),
+                    ),
+            ),
+    )
 }
 
 /// Search in chat, Mute, Disappearing messages, Chat info, Select,
@@ -179,7 +246,13 @@ fn more_menu(cv: Conv, nudge: bool) -> AnyElement {
     let peer = s.peer(chat);
     let group = peer.is_none();
     let muted = move || s.chat(chat).is_some_and(|c| c.muted);
-    let mut items = vec![
+    let channel = s.chat(chat).is_some_and(|c| matches!(c.kind, ChatKind::Channel { .. }));
+    let mut items = Vec::new();
+    // Phones show one call in the header; the other is here.
+    if !cv.wide && !channel {
+        items.push(menu_entry(Icon::Video, "Video call", false, move || calls::start_call(chat, true)));
+    }
+    items.extend([
         menu_entry(Icon::Search, "Search", false, move || {
             batch(|| {
                 cv.query.set(String::new());
@@ -194,7 +267,7 @@ fn more_menu(cv: Conv, nudge: bool) -> AnyElement {
             toast(if muted() { "Notifications muted" } else { "Notifications on" });
         }),
         menu_entry(Icon::Timer, "Disappearing messages", false, move || cv.timer_open.set(true)),
-    ];
+    ]);
     if nudge {
         items.push(menu_entry(Icon::Zap, "Send a nudge", false, move || s.nudge_with_echo(chat)));
     }
@@ -277,51 +350,81 @@ fn search_bar(cv: Conv) -> View {
             query.set(String::new());
         });
     };
+    let h = floating::capsule_height();
     view()
-        .h(px(if cv.wide { 60.0 } else { 56.0 }))
+        .w_full()
         .flex_row()
         .items_center()
-        .gap_1()
-        .px_2()
-        .child(icon_btn(Icon::Close, "Close search", close))
+        .gap_2()
+        .pointer_events(PointerEvents::BoxNone)
+        .child(round(Icon::Close, "Close search", close))
         .child(
-            view().flex_1().child(
-                search_field("Search this chat", query),
-            ),
+            floating::capsule(
+                view()
+                    .h(px(h))
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .pl(px(14.0))
+                    .child(icon(Icon::Search, 16.0).text_color(move || c::muted_fg()))
+                    .child(
+                        input()
+                            .flex_1()
+                            .value(move || query.get())
+                            .on_change(move |t: &str| query.set(t.to_owned()))
+                            .auto_focus(true)
+                            .placeholder("Search this chat".to_string())
+                            .label("Search this chat")
+                            .placeholder_color(|| color(c::muted_fg()))
+                            .caret_color(|| color(c::primary()))
+                            .selection_color(|| color(c::accent()))
+                            .px_1()
+                            .text_size(px(font::body()))
+                            .text_color(move || c::foreground()),
+                    )
+                    .child(
+                        text(move || {
+                            let n = hits.with(Vec::len);
+                            if query.with(|q| q.trim().chars().count() < 2) {
+                                String::new()
+                            } else if n == 0 {
+                                "No results".into()
+                            } else {
+                                format!("{} of {}", cv.hit.get().min(n - 1) + 1, n)
+                            }
+                        })
+                        .px_1()
+                        .text_size(px(font::SMALL))
+                        .tabular_nums()
+                        .text_color(move || c::muted_fg()),
+                    )
+                    .child(
+                        view()
+                            .style_with(|st| st.rotate(deg(180.0)))
+                            .child(icon_btn(Icon::ChevronDown, "Older match", move || {
+                                let n = hits.with_untracked(Vec::len);
+                                if n > 0 {
+                                    show((cv.hit.get_untracked() + 1).min(n - 1));
+                                }
+                            }).size(px(h)).rounded_full()),
+                    )
+                    .child(icon_btn(Icon::ChevronDown, "Newer match", move || {
+                        show(cv.hit.get_untracked().saturating_sub(1));
+                    }).size(px(h)).rounded_full()),
+            )
+            .flex_1(),
         )
-        .child(
-            text(move || {
-                let n = hits.with(Vec::len);
-                if query.with(|q| q.trim().chars().count() < 2) {
-                    String::new()
-                } else if n == 0 {
-                    "No results".into()
-                } else {
-                    format!("{} of {}", cv.hit.get().min(n - 1) + 1, n)
-                }
-            })
-            .px_1()
-            .text_size(px(font::SMALL))
-            .tabular_nums()
-            .text_color(move || c::muted_fg()),
-        )
-        .child(
-            view()
-                .style_with(|st| st.rotate(deg(180.0)))
-                .child(icon_btn(Icon::ChevronDown, "Older match", move || {
-                    let n = hits.with_untracked(Vec::len);
-                    if n > 0 {
-                        show((cv.hit.get_untracked() + 1).min(n - 1));
-                    }
-                })),
-        )
-        .child(icon_btn(Icon::ChevronDown, "Newer match", move || {
-            show(cv.hit.get_untracked().saturating_sub(1));
-        }))
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn groups_count_people_not_names() {
+        assert_eq!(super::people_line(5, 2), "5 people · 2 online");
+        assert_eq!(super::people_line(3, 0), "3 people");
+        assert_eq!(super::people_line(1, 0), "1 person");
+    }
+
     #[test]
     fn followers_have_separators() {
         assert_eq!(super::thousands(18_420), "18,420");

@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use nsh_core::prelude::*;
 
-use super::{BackupDestination, DeviceKind, Store, clock, NOW};
+use super::{BackupDestination, DeviceKind, NOW, Store, clock};
 
 // ---------------------------------------------------------------- invite codes
 
@@ -125,7 +125,10 @@ pub fn username_format(name: &str) -> Option<UsernameCheck> {
     if n == 0 {
         return Some(UsernameCheck::Empty);
     }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_') {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+    {
         return Some(UsernameCheck::BadChars);
     }
     if !name.starts_with(|c: char| c.is_ascii_alphabetic()) {
@@ -150,7 +153,9 @@ impl UsernameCheck {
     /// The inline status line, plain words.
     pub fn message(&self, name: &str) -> String {
         match self {
-            UsernameCheck::Empty => "3 to 32 letters, numbers, dots or underscores, starting with a letter.".into(),
+            UsernameCheck::Empty => {
+                "3 to 32 letters, numbers, dots or underscores, starting with a letter.".into()
+            }
             UsernameCheck::TooShort => "Use at least 3 characters.".into(),
             UsernameCheck::TooLong => "Use at most 32 characters.".into(),
             UsernameCheck::BadStart => "Start with a letter.".into(),
@@ -178,7 +183,11 @@ fn suggestion_stem(base: &str) -> String {
     while out.ends_with('.') {
         out.pop();
     }
-    if out.is_empty() { "songbird.user".to_string() } else { out }
+    if out.is_empty() {
+        "songbird.user".to_string()
+    } else {
+        out
+    }
 }
 
 /// Up to three free names close to `base`, for the chips under a taken
@@ -208,12 +217,18 @@ pub fn username_suggestions(base: &str, available: impl Fn(&str) -> bool) -> Vec
 
 /// The key's groups, as shown ("SB4K", "7Q2M", …).
 pub fn key_groups(key: &str) -> Vec<String> {
-    key.split(['-', ' ']).filter(|g| !g.is_empty()).map(|g| g.to_ascii_uppercase()).collect()
+    key.split(['-', ' '])
+        .filter(|g| !g.is_empty())
+        .map(|g| g.to_ascii_uppercase())
+        .collect()
 }
 
 /// The key's characters without separators.
 fn key_chars(key: &str) -> String {
-    key.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).collect()
+    key.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
 }
 
 /// Whether `typed` is the key's last four characters (any case, spaces
@@ -226,7 +241,9 @@ pub fn key_tail_matches(key: &str, typed: &str) -> bool {
 
 /// Whether `typed` is the key's last group.
 pub fn key_last_group_matches(key: &str, typed: &str) -> bool {
-    key_groups(key).last().is_some_and(|g| *g == key_chars(typed))
+    key_groups(key)
+        .last()
+        .is_some_and(|g| *g == key_chars(typed))
 }
 
 /// Whether `typed` is a whole recovery key in its format (8 groups of 4),
@@ -239,7 +256,11 @@ pub fn key_well_formed(typed: &str) -> bool {
 /// Formats a key as it is typed: groups of four joined by dashes.
 pub fn format_key_input(raw: &str) -> String {
     let chars: Vec<char> = key_chars(raw).chars().take(32).collect();
-    chars.chunks(4).map(|c| c.iter().collect::<String>()).collect::<Vec<_>>().join("-")
+    chars
+        .chunks(4)
+        .map(|c| c.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 // ---------------------------------------------------------------- safety numbers and codes
@@ -252,7 +273,9 @@ pub fn safety_groups(number: &str) -> Vec<String> {
 
 /// A stable 64-bit hash (FNV-1a) of `text`, to derive decorative codes.
 pub fn hash(text: &str) -> u64 {
-    text.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// The modules of a decorative QR-like code, `n` × `n`, row by row, with
@@ -427,7 +450,11 @@ impl Default for AccountExtra {
         Self {
             username_link: "https://songbird.chat/u/radu#7Fq2-xN8p".into(),
             passkeys: Vec::new(),
-            others: vec![AccountEntry { name: "Radu (Work)".into(), username: "radu.work".into(), seed: 5 }],
+            others: vec![AccountEntry {
+                name: "Radu (Work)".into(),
+                username: "radu.work".into(),
+                seed: 5,
+            }],
             report: None,
         }
     }
@@ -466,14 +493,20 @@ impl Store {
     pub fn create_account(&self, username: String) {
         self.profile_update(|p| p.username = username.clone());
         self.account_extra().update(|a| {
-            a.username_link = format!("https://songbird.chat/u/{username}#{:x}", hash(&username) & 0xffff_ff);
+            a.username_link = format!(
+                "https://songbird.chat/u/{username}#{:x}",
+                hash(&username) & 0xffff_ff
+            );
         });
     }
 
     /// Mock: a fresh invite link to share (app-core `create_invite`).
     pub fn invite_link(&self) -> String {
         let me = self.me.with_untracked(|m| m.username.clone());
-        format!("https://songbird.chat/i/{:x}", hash(&format!("invite-{me}")) & 0xffff_ffff)
+        format!(
+            "https://songbird.chat/i/{:x}",
+            hash(&format!("invite-{me}")) & 0xffff_ffff
+        )
     }
 
     /// Mock: a new username link; the old one stops working.
@@ -517,8 +550,13 @@ impl Store {
 
     /// Mock: a passkey made by the platform (app-core `add_passkey`).
     pub fn add_passkey(&self) {
-        let name = if is_desktop() { "Passkey on this computer" } else { "Passkey on this phone" };
-        self.account_extra().update(|a| a.passkeys.push(name.into()));
+        let name = if is_desktop() {
+            "Passkey on this computer"
+        } else {
+            "Passkey on this phone"
+        };
+        self.account_extra()
+            .update(|a| a.passkeys.push(name.into()));
         self.settings_update(|s| s.passkey = true);
     }
 
@@ -528,7 +566,9 @@ impl Store {
                 a.passkeys.remove(index);
             }
         });
-        let none = self.account_extra().with_untracked(|a| a.passkeys.is_empty());
+        let none = self
+            .account_extra()
+            .with_untracked(|a| a.passkeys.is_empty());
         if none {
             self.settings_update(|s| s.passkey = false);
         }
@@ -546,10 +586,16 @@ impl Store {
     /// store per account).
     pub fn switch_account(&self, index: usize) {
         let extra = self.account_extra();
-        let Some(next) = extra.with_untracked(|a| a.others.get(index).cloned()) else { return };
+        let Some(next) = extra.with_untracked(|a| a.others.get(index).cloned()) else {
+            return;
+        };
         let me = self.me.get_untracked();
         extra.update(|a| {
-            a.others[index] = AccountEntry { name: me.name.clone(), username: me.username.clone(), seed: me.seed };
+            a.others[index] = AccountEntry {
+                name: me.name.clone(),
+                username: me.username.clone(),
+                seed: me.seed,
+            };
         });
         self.profile_update(|p| {
             p.name = next.name;
@@ -604,7 +650,9 @@ impl Store {
                 let p = i as f32 / steps as f32;
                 if p >= 1.0 {
                     extra.update(|b| b.running = None);
-                    store.settings_update(|s| s.backup_last = Some(format!("Today at {}", clock(NOW))));
+                    store.settings_update(|s| {
+                        s.backup_last = Some(format!("Today at {}", clock(NOW)))
+                    });
                 } else {
                     extra.update(|b| b.running = Some(p));
                 }
@@ -638,7 +686,9 @@ impl Store {
                 stage.set(RestoreStage::Restoring(n));
             });
         }
-        later(1700 + 140 * steps + 400, move || stage.set(RestoreStage::Done));
+        later(1700 + 140 * steps + 400, move || {
+            stage.set(RestoreStage::Done)
+        });
     }
 
     pub fn reset_restore(&self) {
@@ -656,7 +706,9 @@ impl Store {
                 stage.set(TransferStage::Moving(i as f32 / steps as f32));
             });
         }
-        later(1200 + 150 * steps + 300, move || stage.set(TransferStage::Done));
+        later(1200 + 150 * steps + 300, move || {
+            stage.set(TransferStage::Done)
+        });
     }
 
     pub fn reset_transfer(&self) {
@@ -685,11 +737,17 @@ mod tests {
         let pasted = "k7p2-qx9m-ab3d-eh4j-nr5s-tv6w";
         assert_eq!(normalize_invite(pasted).len(), INVITE_LEN);
         assert_eq!(format_invite(pasted), "K7P2-QX9M-AB3D-EH4J-NR5S-TV6W");
-        assert_eq!(normalize_invite(&format!("{pasted}-EXTRA")).len(), INVITE_LEN);
+        assert_eq!(
+            normalize_invite(&format!("{pasted}-EXTRA")).len(),
+            INVITE_LEN
+        );
         assert!(invite_complete(pasted));
         assert!(!invite_complete("K7P2QX9M"));
         assert_eq!(check_invite("abc"), InviteCheck::Incomplete);
-        assert_eq!(check_invite("0000-QX9M-AB3D-EH4J-NR5S-TV6W"), InviteCheck::Refused);
+        assert_eq!(
+            check_invite("0000-QX9M-AB3D-EH4J-NR5S-TV6W"),
+            InviteCheck::Refused
+        );
         assert_eq!(check_invite(pasted), InviteCheck::Valid);
     }
 
@@ -706,7 +764,10 @@ mod tests {
         assert_eq!(username_format("ana-p"), Some(UsernameCheck::BadChars));
         assert_eq!(username_format("ana..p"), Some(UsernameCheck::DoubleDot));
         assert_eq!(username_format("ana.p."), Some(UsernameCheck::TrailingDot));
-        assert_eq!(username_format(&"a".repeat(33)), Some(UsernameCheck::TooLong));
+        assert_eq!(
+            username_format(&"a".repeat(33)),
+            Some(UsernameCheck::TooLong)
+        );
         assert_eq!(username_format(&"a".repeat(32)), None);
         assert_eq!(username_format("Ana.P_2"), None);
         assert_eq!(username_format("ana_"), None);
@@ -720,11 +781,18 @@ mod tests {
         assert!(!s.contains(&"ana.chat".to_string()));
         assert!(s.iter().all(|n| username_format(n).is_none()));
         // Case is kept, and odd input still gives valid names.
-        assert!(username_suggestions("Ana", |_| true).iter().all(|n| n.starts_with("Ana") || n.starts_with("the.Ana")));
+        assert!(
+            username_suggestions("Ana", |_| true)
+                .iter()
+                .all(|n| n.starts_with("Ana") || n.starts_with("the.Ana"))
+        );
         for odd in ["9..ana..", "__", "a.", "...", &"x".repeat(40)] {
             let s = username_suggestions(odd, |_| true);
             assert!(!s.is_empty(), "{odd}");
-            assert!(s.iter().all(|n| username_format(n).is_none()), "{odd}: {s:?}");
+            assert!(
+                s.iter().all(|n| username_format(n).is_none()),
+                "{odd}: {s:?}"
+            );
         }
     }
 

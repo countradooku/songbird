@@ -10,7 +10,10 @@ use nsh_core::{
     desktop::{MenuRole, TrayTitleRun, WindowAttributes},
     element::{
         FileDragEvent, FileDropEvent,
-        desktop::{MenuItem, WindowRef, main_window, open_window, set_application_menu, set_tray, tray, window as new_window},
+        desktop::{
+            MenuItem, WindowRef, main_window, open_window, set_application_menu, set_tray, tray,
+            window as new_window,
+        },
     },
     keymap::When,
     platform::Os,
@@ -39,9 +42,12 @@ pub fn current_chat() -> Option<ChatId> {
         return nav::open_chat().get_untracked().0;
     }
     nav::routes().with_untracked(|r| {
-        r.0.iter()
-            .rev()
-            .find_map(|route| route.key.strip_prefix("chat:").and_then(|id| id.parse().ok()))
+        r.0.iter().rev().find_map(|route| {
+            route
+                .key
+                .strip_prefix("chat:")
+                .and_then(|id| id.parse().ok())
+        })
     })
 }
 
@@ -71,7 +77,8 @@ fn run(s: Store, command: Command) {
             nav::tab().set(Tab::ALL[i.min(3)]);
         }
         Command::Shortcuts => {
-            let open = nav::routes().with_untracked(|r| r.0.last().is_some_and(|x| x.key == SHEET_KEY));
+            let open =
+                nav::routes().with_untracked(|r| r.0.last().is_some_and(|x| x.key == SHEET_KEY));
             if open { nav::pop() } else { shortcuts_sheet() }
         }
         Command::MarkRead => match current_chat() {
@@ -103,8 +110,19 @@ pub fn install_shortcuts() {
     for sc in SHORTCUTS {
         let command = sc.command;
         // Ctrl+Tab moves between chats even while typing in the composer.
-        let when = if sc.keys.contains("tab") { When::Always } else { When::Auto };
-        on_key_with(sc.keys, KeyOptions { when, ..KeyOptions::default() }, move |_| run(s, command));
+        let when = if sc.keys.contains("tab") {
+            When::Always
+        } else {
+            When::Auto
+        };
+        on_key_with(
+            sc.keys,
+            KeyOptions {
+                when,
+                ..KeyOptions::default()
+            },
+            move |_| run(s, command),
+        );
     }
     desktop_menus();
     s.restore_tray_choice();
@@ -202,7 +220,9 @@ fn shortcut_row(label: &'static str, keys: Vec<&'static str>) -> AnyElement {
                         .gap_2()
                         .child(key_combo(&k))
                         .child((i + 1 < n).then(|| {
-                            text("or").text_size(px(font::CAPTION)).text_color(move || c::muted_fg())
+                            text("or")
+                                .text_size(px(font::CAPTION))
+                                .text_color(move || c::muted_fg())
                         }))
                 })),
         )
@@ -297,7 +317,10 @@ pub fn desktop_menus() {
     ));
     menus.push(MenuItem::submenu(
         "Window",
-        [MenuItem::role(MenuRole::Minimize), MenuItem::role(MenuRole::Zoom)],
+        [
+            MenuItem::role(MenuRole::Minimize),
+            MenuItem::role(MenuRole::Zoom),
+        ],
     ));
     menus.push(MenuItem::submenu(
         "Help",
@@ -326,7 +349,11 @@ fn desktop_tray() {
                 set_tray(None);
                 return;
             }
-            let title = if unread > 0 { vec![TrayTitleRun::new(unread.to_string())] } else { Vec::new() };
+            let title = if unread > 0 {
+                vec![TrayTitleRun::new(unread.to_string())]
+            } else {
+                Vec::new()
+            };
             set_tray(
                 tray()
                     .icon(Icon::Feather.src())
@@ -353,7 +380,10 @@ fn desktop_tray() {
 /// Opens `chat` in a window of its own (Yahoo Messenger style), sharing
 /// the app's store. A second call for the same chat focuses its window.
 pub fn pop_out_chat(s: Store, chat: ChatId) -> Option<WindowRef> {
-    let title = s.chat(chat).map(|c| c.title).unwrap_or_else(|| "Chat".into());
+    let title = s
+        .chat(chat)
+        .map(|c| c.title)
+        .unwrap_or_else(|| "Chat".into());
     open_window(
         new_window()
             .id(format!("chat:{chat}"))
@@ -406,7 +436,11 @@ pub fn file_name(uri: &str) -> String {
 /// Makes `target` a drop destination for files (desktops): while files
 /// hover it, a calm overlay says what will happen (`hint`, such as "Drop
 /// to send to Ana"), and `on_drop` gets the files. For the conversation.
-pub fn on_file_drop(target: View, hint: impl Into<SharedString>, on_drop: impl Fn(Vec<DroppedFile>) + 'static) -> View {
+pub fn on_file_drop(
+    target: View,
+    hint: impl Into<SharedString>,
+    on_drop: impl Fn(Vec<DroppedFile>) + 'static,
+) -> View {
     let hint: SharedString = hint.into();
     let over = signal(false);
     let reduced = motion::reduced();
@@ -466,7 +500,11 @@ pub fn desktop_settings() {
         let ext = extras();
         // The system's login item may have changed in its own settings.
         s.refresh_launch_at_login();
-        let tray_name = if os() == Os::MacOs { "Show in menu bar" } else { "Show in system tray" };
+        let tray_name = if os() == Os::MacOs {
+            "Show in menu bar"
+        } else {
+            "Show in system tray"
+        };
         let body = view()
             .w_full()
             .max_w(px(760.0))
@@ -501,7 +539,10 @@ mod tests {
 
     #[test]
     fn file_names_are_decoded() {
-        assert_eq!(file_name("file:///Users/a/Floor%20plan%20v3.pdf"), "Floor plan v3.pdf");
+        assert_eq!(
+            file_name("file:///Users/a/Floor%20plan%20v3.pdf"),
+            "Floor plan v3.pdf"
+        );
         assert_eq!(file_name("file:///tmp/r%C3%A2u.jpg"), "râu.jpg");
         assert_eq!(file_name("file:///tmp/50%"), "50%");
         assert_eq!(file_name("file:///tmp/dir/"), "dir");

@@ -21,17 +21,33 @@ fn at(m: Minutes) -> String {
 
 /// The message info page for message `id` of `chat`.
 pub fn message_info(chat: ChatId, id: MsgId) {
-    nav::push(format!("message-info:{id}"), move || page("Message info", body(chat, id)));
+    nav::push(format!("message-info:{id}"), move || {
+        page("Message info", body(chat, id))
+    });
 }
 
 fn body(chat: ChatId, id: MsgId) -> AnyElement {
     let s = store();
     let Some(m) = s.message(chat, id) else {
-        return empty_state(Icon::Info, "Message not found", "It may have been deleted.", None).into_element();
+        return empty_state(
+            Icon::Info,
+            "Message not found",
+            "It may have been deleted.",
+            None,
+        )
+        .into_element();
     };
     let cv = Conv::new(chat, s);
     let item: ItemMemo = computed(move || {
-        s.message(chat, id).map(|m| Item { m, place: Place { day_break: false, time: false, first: true, last: true } })
+        s.message(chat, id).map(|m| Item {
+            m,
+            place: Place {
+                day_break: false,
+                time: false,
+                first: true,
+                last: true,
+            },
+        })
     });
     // The message on the chat's own canvas (its theme), a hairline under
     // the band (it is close to the page in dark); the bubble's edge on the
@@ -42,24 +58,53 @@ fn body(chat: ChatId, id: MsgId) -> AnyElement {
         .border_color(move || c::border())
         .py_6()
         .items_end()
-        .child(view().w_full().max_w(px(640.0)).px_4().self_center().items_end().child(bubbles::bubble_column(cv, item, false)));
+        .child(
+            view()
+                .w_full()
+                .max_w(px(640.0))
+                .px_4()
+                .self_center()
+                .items_end()
+                .child(bubbles::bubble_column(cv, item, false)),
+        );
     // The tick in an icon tile's width, so the labels sit on the same
     // column as every other card's titles (and its separators).
     let mark = |tick: Tick| view().w(px(30.0)).items_center().child(ticks(move || tick));
-    let sent_row = move || Row::new("Sent").leading(mark(Tick::Sent)).trailing(muted(at(m.at))).build();
+    let sent_row = move || {
+        Row::new("Sent")
+            .leading(mark(Tick::Sent))
+            .trailing(muted(at(m.at)))
+            .build()
+    };
 
     let receipts = if cv.is_group() && !m.receipts.is_empty() {
-        let read: Vec<_> = m.receipts.iter().filter_map(|(who, _, r)| r.map(|r| (*who, r))).collect();
-        let delivered: Vec<_> =
-            m.receipts.iter().filter(|(_, _, r)| r.is_none()).filter_map(|(who, d, _)| d.map(|d| (*who, d))).collect();
-        let waiting: Vec<_> = m.receipts.iter().filter(|(_, d, r)| d.is_none() && r.is_none()).map(|(w, _, _)| *w).collect();
+        let read: Vec<_> = m
+            .receipts
+            .iter()
+            .filter_map(|(who, _, r)| r.map(|r| (*who, r)))
+            .collect();
+        let delivered: Vec<_> = m
+            .receipts
+            .iter()
+            .filter(|(_, _, r)| r.is_none())
+            .filter_map(|(who, d, _)| d.map(|d| (*who, d)))
+            .collect();
+        let waiting: Vec<_> = m
+            .receipts
+            .iter()
+            .filter(|(_, d, r)| d.is_none() && r.is_none())
+            .map(|(w, _, _)| *w)
+            .collect();
         let people = move |list: Vec<(u64, Minutes)>, empty: &'static str| {
             if list.is_empty() {
                 return footnote(empty).into_element();
             }
             group(list.into_iter().map(move |(who, when)| {
                 let name = s.contact_name(Some(who));
-                Row::new(name.clone()).leading(avatar(name, who, 36.0)).trailing(muted(at(when))).build()
+                Row::new(name.clone())
+                    .leading(avatar(name, who, 36.0))
+                    .trailing(muted(at(when)))
+                    .build()
             }))
             .into_element()
         };
@@ -70,10 +115,15 @@ fn body(chat: ChatId, id: MsgId) -> AnyElement {
             .child(section_title("Delivered to"))
             .child(people(delivered, "Everyone who received it has read it."))
             .child((!waiting.is_empty()).then(|| {
-                view().child(section_title("Not delivered yet")).child(group(waiting.into_iter().map(move |who| {
-                    let name = s.contact_name(Some(who));
-                    Row::new(name.clone()).leading(avatar(name, who, 36.0)).subtitle("Their phone may be off").build()
-                })))
+                view()
+                    .child(section_title("Not delivered yet"))
+                    .child(group(waiting.into_iter().map(move |who| {
+                        let name = s.contact_name(Some(who));
+                        Row::new(name.clone())
+                            .leading(avatar(name, who, 36.0))
+                            .subtitle("Their phone may be off")
+                            .build()
+                    })))
             }))
             .into_element()
     } else {
@@ -88,12 +138,21 @@ fn body(chat: ChatId, id: MsgId) -> AnyElement {
                 .trailing(muted(when.unwrap_or_else(|| "Not yet".into())))
                 .build()
         };
-        let mut rows = vec![row("Read", Tick::Read, read), row("Delivered", Tick::Delivered, delivered), sent_row()];
+        let mut rows = vec![
+            row("Read", Tick::Read, read),
+            row("Delivered", Tick::Delivered, delivered),
+            sent_row(),
+        ];
         if played.is_some() {
             rows.insert(0, row("Played", Tick::Played, played));
         }
         if status == Tick::Failed {
-            rows = vec![Row::new("Not sent").leading(mark(Tick::Failed)).subtitle("Tap the message to try again").build()];
+            rows = vec![
+                Row::new("Not sent")
+                    .leading(mark(Tick::Failed))
+                    .subtitle("Tap the message to try again")
+                    .build(),
+            ];
         }
         view().pt_4().child(group(rows)).into_element()
     };

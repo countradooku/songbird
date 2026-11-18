@@ -77,7 +77,10 @@ const HIGH_CONTRAST_DARK: &[(&str, &str)] = &[
 ];
 
 fn vars(theme: &mut Value, mode: &str) -> Map<String, Value> {
-    theme["cssVars"][mode].as_object().cloned().unwrap_or_default()
+    theme["cssVars"][mode]
+        .as_object()
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// The theme JSON for a choice, in the current skin.
@@ -90,9 +93,15 @@ pub fn theme_json(choice: ThemeChoice) -> String {
 pub fn theme_json_for(choice: ThemeChoice, skin: Skin) -> String {
     let mut theme: Value = serde_json::from_str(THEME).expect("theme.json is valid");
     // The skins live beside cssVars; the token reader only knows cssVars.
-    let skins = theme.as_object_mut().and_then(|o| o.remove("skins")).unwrap_or(Value::Null);
+    let skins = theme
+        .as_object_mut()
+        .and_then(|o| o.remove("skins"))
+        .unwrap_or(Value::Null);
     for mode in ["light", "dark"] {
-        if let (Some(over), Some(map)) = (skins[skin.name()][mode].as_object(), theme["cssVars"][mode].as_object_mut()) {
+        if let (Some(over), Some(map)) = (
+            skins[skin.name()][mode].as_object(),
+            theme["cssVars"][mode].as_object_mut(),
+        ) {
             for (k, v) in over {
                 map.insert(k.clone(), v.clone());
             }
@@ -171,7 +180,10 @@ fn parse_hex(s: &str) -> Option<Hsla> {
     let h = s.strip_prefix('#')?;
     let (rgb, alpha) = match h.len() {
         6 => (u32::from_str_radix(h, 16).ok()?, 1.0),
-        8 => (u32::from_str_radix(&h[..6], 16).ok()?, u8::from_str_radix(&h[6..], 16).ok()? as f32 / 255.0),
+        8 => (
+            u32::from_str_radix(&h[..6], 16).ok()?,
+            u8::from_str_radix(&h[6..], 16).ok()? as f32 / 255.0,
+        ),
         _ => return None,
     };
     Some(AdaptiveColor::rgb(rgb, rgb).light.opacity(alpha))
@@ -179,12 +191,17 @@ fn parse_hex(s: &str) -> Option<Hsla> {
 
 /// Keeps every colour of the theme file `json` (its light and dark lists).
 fn remember_custom(json: &str) {
-    let Ok(v) = serde_json::from_str::<Value>(json) else { return };
+    let Ok(v) = serde_json::from_str::<Value>(json) else {
+        return;
+    };
     let (light, dark) = (&v["cssVars"]["light"], &v["cssVars"]["dark"]);
     let mut map = std::collections::HashMap::new();
     for (k, l) in light.as_object().into_iter().flatten() {
         let d = dark.get(k).unwrap_or(l);
-        if let (Some(l), Some(d)) = (l.as_str().and_then(parse_hex), d.as_str().and_then(parse_hex)) {
+        if let (Some(l), Some(d)) = (
+            l.as_str().and_then(parse_hex),
+            d.as_str().and_then(parse_hex),
+        ) {
             map.insert(k.clone(), AdaptiveColor::new(l, d));
         }
     }
@@ -198,7 +215,15 @@ mod tests {
     #[test]
     fn the_apps_copy_of_the_tokens_answers_custom_names() {
         remember_custom(&theme_json_for(ThemeChoice::System, Skin::Apple));
-        for name in ["raised", "capsule", "capsule-border", "canvas", "pane", "chat-bg", "overlay"] {
+        for name in [
+            "raised",
+            "capsule",
+            "capsule-border",
+            "canvas",
+            "pane",
+            "chat-bg",
+            "overlay",
+        ] {
             assert!(custom_color(name).is_some(), "{name}");
         }
         assert!(parse_hex("#0F0D1A80").is_some_and(|c| (c.a - 128.0 / 255.0).abs() < 0.01));
@@ -210,8 +235,16 @@ mod tests {
         let base = theme["cssVars"]["light"].as_object().unwrap();
         for s in Skin::ALL {
             for mode in ["light", "dark"] {
-                for k in theme["skins"][s.name()][mode].as_object().into_iter().flatten().map(|(k, _)| k) {
-                    assert!(base.contains_key(k), "{s:?} {mode} overrides unknown token {k}");
+                for k in theme["skins"][s.name()][mode]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .map(|(k, _)| k)
+                {
+                    assert!(
+                        base.contains_key(k),
+                        "{s:?} {mode} overrides unknown token {k}"
+                    );
                 }
             }
         }
@@ -219,14 +252,27 @@ mod tests {
 
     #[test]
     fn skins_set_their_radius_and_surfaces() {
-        let fluent: Value = serde_json::from_str(&theme_json_for(ThemeChoice::System, Skin::Fluent)).unwrap();
+        let fluent: Value =
+            serde_json::from_str(&theme_json_for(ThemeChoice::System, Skin::Fluent)).unwrap();
         assert_eq!(fluent["cssVars"]["theme"]["radius"], "4px");
         assert_eq!(fluent["cssVars"]["theme"]["radius-lg"], "8px");
-        assert!(fluent.get("skins").is_none(), "skins stay out of the token file");
-        let material: Value = serde_json::from_str(&theme_json_for(ThemeChoice::Dark, Skin::Material)).unwrap();
-        assert_eq!(material["cssVars"]["light"]["background"], "#141318", "forced dark keeps the skin's dark");
-        let hc: Value = serde_json::from_str(&theme_json_for(ThemeChoice::HighContrast, Skin::Adwaita)).unwrap();
-        assert_eq!(hc["cssVars"]["dark"]["background"], "#000000", "high contrast wins over the skin");
+        assert!(
+            fluent.get("skins").is_none(),
+            "skins stay out of the token file"
+        );
+        let material: Value =
+            serde_json::from_str(&theme_json_for(ThemeChoice::Dark, Skin::Material)).unwrap();
+        assert_eq!(
+            material["cssVars"]["light"]["background"], "#141318",
+            "forced dark keeps the skin's dark"
+        );
+        let hc: Value =
+            serde_json::from_str(&theme_json_for(ThemeChoice::HighContrast, Skin::Adwaita))
+                .unwrap();
+        assert_eq!(
+            hc["cssVars"]["dark"]["background"], "#000000",
+            "high contrast wins over the skin"
+        );
     }
 
     /// Content built for `background` sits straight in a pane, so in every
@@ -240,22 +286,48 @@ mod tests {
             let t: Value = serde_json::from_str(&theme_json_for(choice, skin)).unwrap();
             for mode in ["light", "dark"] {
                 let v = &t["cssVars"][mode];
-                assert_eq!(v["pane"], v["background"], "{choice:?} {skin:?} {mode}: pane is the page");
-                assert_ne!(v["canvas"], v["pane"], "{choice:?} {skin:?} {mode}: the canvas shows");
+                assert_eq!(
+                    v["pane"], v["background"],
+                    "{choice:?} {skin:?} {mode}: pane is the page"
+                );
+                assert_ne!(
+                    v["canvas"], v["pane"],
+                    "{choice:?} {skin:?} {mode}: the canvas shows"
+                );
             }
         }
     }
 
     #[test]
     fn every_theme_variant_parses_with_its_custom_tokens() {
-        for (choice, skin) in [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark, ThemeChoice::HighContrast]
-            .into_iter()
-            .flat_map(|c| Skin::ALL.map(move |s| (c, s)))
+        for (choice, skin) in [
+            ThemeChoice::System,
+            ThemeChoice::Light,
+            ThemeChoice::Dark,
+            ThemeChoice::HighContrast,
+        ]
+        .into_iter()
+        .flat_map(|c| Skin::ALL.map(move |s| (c, s)))
         {
-            let tokens = nsh_base::tokens_of(Some(&theme_json_for(choice, skin))).expect("theme parses");
+            let tokens =
+                nsh_base::tokens_of(Some(&theme_json_for(choice, skin))).expect("theme parses");
             for name in [
-                "chat-bg", "bubble-out", "bubble-in", "tick-read", "avatar-1", "danger-bg", "primary", "switch-thumb",
-                "switch-track", "switch-on", "raised", "control", "canvas", "pane", "pane-border", "capsule",
+                "chat-bg",
+                "bubble-out",
+                "bubble-in",
+                "tick-read",
+                "avatar-1",
+                "danger-bg",
+                "primary",
+                "switch-thumb",
+                "switch-track",
+                "switch-on",
+                "raised",
+                "control",
+                "canvas",
+                "pane",
+                "pane-border",
+                "capsule",
                 "capsule-border",
             ] {
                 assert!(tokens.color(name).is_some(), "{name} missing in {choice:?}");

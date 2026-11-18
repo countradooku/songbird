@@ -204,11 +204,13 @@ fn links_section() -> View {
                     let gone = l.clone();
                     Row::new(l.clone())
                         .icon(Icon::Link)
-                        .trailing(icon_btn(Icon::Close, format!("Remove {l}"), move || {
-                            let gone = gone.clone();
-                            s.ext_update(|x| x.links.retain(|x| *x != gone));
-                        })
-                        .text_color(move || c::muted_fg()))
+                        .trailing(
+                            icon_btn(Icon::Close, format!("Remove {l}"), move || {
+                                let gone = gone.clone();
+                                s.ext_update(|x| x.links.retain(|x| *x != gone));
+                            })
+                            .text_color(move || c::muted_fg()),
+                        )
                         .build()
                 }))
                 .style_when(move || ext.with(|x| x.links.is_empty()), |st| st.hidden())
@@ -220,7 +222,12 @@ fn links_section() -> View {
                 .pt_3()
                 .flex_row()
                 .gap_2()
-                .child(field("Add a link", draft).flex_1().auto_capitalize(AutoCapitalize::None).keyboard_type(KeyboardType::Url))
+                .child(
+                    field("Add a link", draft)
+                        .flex_1()
+                        .auto_capitalize(AutoCapitalize::None)
+                        .keyboard_type(KeyboardType::Url),
+                )
                 .child(
                     btn("Add", Variant::Secondary, BtnSize::Md, move || {
                         let l = draft.get_untracked().trim().to_string();

@@ -19,9 +19,21 @@ fn link_label(link: Link) -> (Tone, Icon, String) {
     match link {
         Link::Off => (Tone::Info, Icon::WifiOff, "Not connected".into()),
         Link::Connecting => (Tone::Info, Icon::Refresh, "Connecting…".into()),
-        Link::Connected => (Tone::Secure, Icon::ShieldCheck, "Connected. Signed in with this device's key.".into()),
-        Link::Retrying => (Tone::Warning, Icon::Refresh, "Connection lost. Trying again…".into()),
-        Link::Refused(code) => (Tone::Danger, Icon::Alert, format!("The server refused this device (code {code}).")),
+        Link::Connected => (
+            Tone::Secure,
+            Icon::ShieldCheck,
+            "Connected. Signed in with this device's key.".into(),
+        ),
+        Link::Retrying => (
+            Tone::Warning,
+            Icon::Refresh,
+            "Connection lost. Trying again…".into(),
+        ),
+        Link::Refused(code) => (
+            Tone::Danger,
+            Icon::Alert,
+            format!("The server refused this device (code {code})."),
+        ),
     }
 }
 
@@ -240,14 +252,13 @@ fn run_your_own() -> Option<View> {
     #[cfg(debug_assertions)]
     {
         Some(
-            view()
-                .gap_1()
-                .pt_2()
-                .child(tag("Developer preview"))
-                .child(crate::features::settings::foot(
+            view().gap_1().pt_2().child(tag("Developer preview")).child(
+                crate::features::settings::foot(
                     "From the repository: cargo xtask compose up, then scripts/dev-app-backend.sh. \
                      Mint an invite with scripts/dev-app-backend.sh invite.",
-                ).px_0()),
+                )
+                .px_0(),
+            ),
         )
     }
     #[cfg(not(debug_assertions))]
@@ -258,5 +269,9 @@ fn run_your_own() -> Option<View> {
 
 /// The first 8 hex of an id, for display.
 fn short(id: &str) -> String {
-    if id.len() > 8 { format!("{}…", &id[..8]) } else { id.to_string() }
+    if id.len() > 8 {
+        format!("{}…", &id[..8])
+    } else {
+        id.to_string()
+    }
 }

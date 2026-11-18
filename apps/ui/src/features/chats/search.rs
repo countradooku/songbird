@@ -15,7 +15,10 @@ use crate::{
 pub fn results(s: Store, query: Signal<String>) -> impl IntoElement {
     let found = computed(move || {
         let q = query.get();
-        s.chats.with(|cs| s.messages.with(|m| s.contacts.with(|ct| model::search(&q, cs, m, ct))))
+        s.chats.with(|cs| {
+            s.messages
+                .with(|m| s.contacts.with(|ct| model::search(&q, cs, m, ct)))
+        })
     });
     let chats = move || found.with(|r| r.chats.clone());
     let messages = move || found.with(|r| r.messages.clone());
@@ -75,7 +78,11 @@ pub fn results(s: Store, query: Signal<String>) -> impl IntoElement {
 }
 
 /// A pressable row with the list's hover, press and focus states.
-pub fn pressable(label: String, on_press: impl Fn() + 'static, content: impl IntoElement) -> nsh_base::ButtonElement {
+pub fn pressable(
+    label: String,
+    on_press: impl Fn() + 'static,
+    content: impl IntoElement,
+) -> nsh_base::ButtonElement {
     // The rows' fill: inset and rounded on wide layouts (content keeps the
     // gutter, see `row::fill_inset`).
     let inset = row::fill_inset();
@@ -97,7 +104,10 @@ pub fn pressable(label: String, on_press: impl Fn() + 'static, content: impl Int
 /// with the match highlighted.
 fn message_hit(hit: model::MessageHit) -> impl IntoElement {
     let chat = hit.chat;
-    let spoken = format!("{}, {}, {}{}{}", hit.title, hit.when, hit.before, hit.matched, hit.after);
+    let spoken = format!(
+        "{}, {}, {}{}{}",
+        hit.title, hit.when, hit.before, hit.matched, hit.after
+    );
     pressable(
         spoken,
         // The real app opens the chat at the message (app-core gives the
@@ -110,7 +120,11 @@ fn message_hit(hit: model::MessageHit) -> impl IntoElement {
             .px(px(row::GUTTER - row::fill_inset()))
             .py_2()
             .min_h(px(64.0))
-            .child(avatar(model::letters(&hit.title), hit.seed, row::avatar_size()))
+            .child(avatar(
+                model::letters(&hit.title),
+                hit.seed,
+                row::avatar_size(),
+            ))
             .child(
                 view()
                     .flex_1()
@@ -161,7 +175,12 @@ pub fn contact_row(s: Store, p: Contact, query: Option<Signal<String>>) -> impl 
         .clone()
         .or_else(|| (!p.about.is_empty()).then(|| p.about.clone()))
         .unwrap_or_else(|| format!("@{}", p.username));
-    let spoken = format!("{}{}, {}", p.name, if p.verified { ", verified" } else { "" }, line);
+    let spoken = format!(
+        "{}{}, {}",
+        p.name,
+        if p.verified { ", verified" } else { "" },
+        line
+    );
     pressable(
         spoken,
         move || {
@@ -178,7 +197,11 @@ pub fn contact_row(s: Store, p: Contact, query: Option<Signal<String>>) -> impl 
             .px(px(row::GUTTER - row::fill_inset()))
             .py_2()
             .min_h(px(if is_desktop() { 56.0 } else { 64.0 }))
-            .child(avatar(p.name.clone(), p.id, if is_desktop() { 40.0 } else { 44.0 }))
+            .child(avatar(
+                p.name.clone(),
+                p.id,
+                if is_desktop() { 40.0 } else { 44.0 },
+            ))
             .child(
                 view()
                     .flex_1()
@@ -208,7 +231,9 @@ pub fn contact_row(s: Store, p: Contact, query: Option<Signal<String>>) -> impl 
                                     .text_size(px(font::body()))
                                     .font_weight(FontWeight::MEDIUM)
                             })
-                            .child(p.verified.then(|| icon(Icon::ShieldCheck, 15.0).text_color(move || c::primary()))),
+                            .child(p.verified.then(|| {
+                                icon(Icon::ShieldCheck, 15.0).text_color(move || c::primary())
+                            })),
                     )
                     .child(
                         text(line)

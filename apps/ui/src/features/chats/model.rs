@@ -61,7 +61,10 @@ impl Filter {
     pub fn empty_copy(&self, unread: bool) -> (String, String) {
         if unread {
             return match self {
-                Filter::All => ("You're all caught up".into(), "Chats with new messages show here.".into()),
+                Filter::All => (
+                    "You're all caught up".into(),
+                    "Chats with new messages show here.".into(),
+                ),
                 other => (
                     format!("Nothing unread in {}", other.label()),
                     "Turn off Unread to see every chat here.".into(),
@@ -71,15 +74,22 @@ impl Filter {
         match self {
             Filter::All => (
                 "No chats yet".into(),
-                "Start a chat with someone in your contacts, or invite a friend to Songbird.".into(),
+                "Start a chat with someone in your contacts, or invite a friend to Songbird."
+                    .into(),
             ),
             Filter::Favourites => (
                 "No favourites yet".into(),
                 "Add a chat to favourites from its menu to find it here quickly.".into(),
             ),
             Filter::Groups => ("No groups yet".into(), "Groups you're in show here.".into()),
-            Filter::Channels => ("No channels yet".into(), "Channels you follow show here.".into()),
-            Filter::WhatsApp => ("No WhatsApp chats".into(), "Chats with your WhatsApp contacts show here.".into()),
+            Filter::Channels => (
+                "No channels yet".into(),
+                "Channels you follow show here.".into(),
+            ),
+            Filter::WhatsApp => (
+                "No WhatsApp chats".into(),
+                "Chats with your WhatsApp contacts show here.".into(),
+            ),
             Filter::List(name) => (
                 format!("No chats in {name}"),
                 "Add chats to this list from a chat's menu.".into(),
@@ -123,7 +133,11 @@ pub enum Preview {
     /// The last message, with the sender's first name in groups and the
     /// status when it is the user's. A row draws only a failed status
     /// (the conversation shows the rest once, under the latest message).
-    Message { sender: Option<String>, text: String, tick: Option<Tick> },
+    Message {
+        sender: Option<String>,
+        text: String,
+        tick: Option<Tick>,
+    },
 }
 
 impl Preview {
@@ -133,8 +147,14 @@ impl Preview {
             Preview::None => (String::new(), String::new()),
             Preview::Typing(t) => (String::new(), t.clone()),
             Preview::Draft(d) => ("Draft: ".into(), d.clone()),
-            Preview::Message { sender: Some(s), text, .. } => (format!("{s}: "), text.clone()),
-            Preview::Message { sender: None, text, .. } => (String::new(), text.clone()),
+            Preview::Message {
+                sender: Some(s),
+                text,
+                ..
+            } => (format!("{s}: "), text.clone()),
+            Preview::Message {
+                sender: None, text, ..
+            } => (String::new(), text.clone()),
         }
     }
 }
@@ -147,7 +167,11 @@ pub fn cut_match(name: &str, query: &str) -> Option<(String, String, String)> {
     let at = find(&fold(name), &q)?;
     let chars: Vec<char> = name.chars().collect();
     let part = |a: usize, b: usize| chars[a..b].iter().collect::<String>();
-    Some((part(0, at), part(at, at + q.len()), part(at + q.len(), chars.len())))
+    Some((
+        part(0, at),
+        part(at, at + q.len()),
+        part(at + q.len(), chars.len()),
+    ))
 }
 
 /// One chat row: everything the row shows, as plain data.
@@ -200,7 +224,13 @@ impl ChatRow {
 
     /// The last message the user sent did not go out.
     pub fn failed(&self) -> bool {
-        matches!(self.preview, Preview::Message { tick: Some(Tick::Failed), .. })
+        matches!(
+            self.preview,
+            Preview::Message {
+                tick: Some(Tick::Failed),
+                ..
+            }
+        )
     }
 
     /// The preview as one plain string (prefix and text).
@@ -211,7 +241,11 @@ impl ChatRow {
     /// What the row previews: its draft is left out while its chat is
     /// `open` (the draft is in the composer right there).
     pub fn shown(&self, open: bool) -> &Preview {
-        if open && matches!(self.preview, Preview::Draft(_)) { &self.latest } else { &self.preview }
+        if open && matches!(self.preview, Preview::Draft(_)) {
+            &self.latest
+        } else {
+            &self.preview
+        }
     }
 
     /// What a screen reader says for the row, in reading order.
@@ -230,7 +264,11 @@ impl ChatRow {
             parts.push("muted".into());
         }
         if self.unread > 0 {
-            parts.push(if self.unread == 1 { "1 unread message".into() } else { format!("{} unread messages", self.unread) });
+            parts.push(if self.unread == 1 {
+                "1 unread message".into()
+            } else {
+                format!("{} unread messages", self.unread)
+            });
         } else if self.marked_unread {
             parts.push("marked as unread".into());
         }
@@ -268,7 +306,11 @@ pub fn letters(name: &str) -> String {
         .split_whitespace()
         .filter(|w| w.chars().next().is_some_and(char::is_alphanumeric))
         .collect();
-    if kept.is_empty() { name.to_string() } else { kept.join(" ") }
+    if kept.is_empty() {
+        name.to_string()
+    } else {
+        kept.join(" ")
+    }
 }
 
 fn contact<'a>(contacts: &'a [Contact], id: ContactId) -> Option<&'a Contact> {
@@ -282,7 +324,10 @@ pub fn row(c: &Chat, messages: &HashMap<ChatId, Vec<Message>>, contacts: &[Conta
         ChatKind::Direct(p) | ChatKind::WhatsApp(p) => contact(contacts, p),
         _ => None,
     };
-    let group = matches!(c.kind, ChatKind::Group | ChatKind::Community | ChatKind::Channel { .. });
+    let group = matches!(
+        c.kind,
+        ChatKind::Group | ChatKind::Community | ChatKind::Channel { .. }
+    );
     let latest = match last {
         Some(m) => {
             let system = matches!(m.body, Body::System(_));
@@ -292,8 +337,13 @@ pub fn row(c: &Chat, messages: &HashMap<ChatId, Vec<Message>>, contacts: &[Conta
                 }
                 _ => None,
             };
-            let tick = (m.mine() && !system && !matches!(m.body, Body::Deleted)).then_some(m.status);
-            Preview::Message { sender, text: m.body.preview(), tick }
+            let tick =
+                (m.mine() && !system && !matches!(m.body, Body::Deleted)).then_some(m.status);
+            Preview::Message {
+                sender,
+                text: m.body.preview(),
+                tick,
+            }
         }
         None => Preview::None,
     };
@@ -348,7 +398,11 @@ pub fn rows(
         .collect();
     let pins = scope == ListScope::Inbox;
     out.sort_by(|a, b| {
-        let pin = if pins { b.pinned.cmp(&a.pinned) } else { std::cmp::Ordering::Equal };
+        let pin = if pins {
+            b.pinned.cmp(&a.pinned)
+        } else {
+            std::cmp::Ordering::Equal
+        };
         pin.then(b.at.unwrap_or(i64::MIN).cmp(&a.at.unwrap_or(i64::MIN)))
     });
     out
@@ -357,7 +411,9 @@ pub fn rows(
 /// How many chats are in `scope`, and how many of them are unread.
 pub fn count(chats: &[Chat], scope: ListScope) -> (usize, usize) {
     let inside = chats.iter().filter(|c| scope.includes(c));
-    inside.fold((0, 0), |(n, u), c| (n + 1, u + usize::from(c.unread > 0 || c.marked_unread)))
+    inside.fold((0, 0), |(n, u), c| {
+        (n + 1, u + usize::from(c.unread > 0 || c.marked_unread))
+    })
 }
 
 /// The most pinned people above the list (two rows of four); more pinned
@@ -392,8 +448,17 @@ impl Inbox {
 /// `order` is the user's chats in the store's order (the pinned people's
 /// order); `unread` keeps only unread chats; `triage` makes "Needs a reply"
 /// (desktop); `show_all` lifts its cut.
-pub fn inbox(rows: Vec<ChatRow>, order: &[ChatId], unread: bool, triage: bool, show_all: bool) -> Inbox {
-    let rows: Vec<ChatRow> = rows.into_iter().filter(|r| !unread || r.is_unread()).collect();
+pub fn inbox(
+    rows: Vec<ChatRow>,
+    order: &[ChatId],
+    unread: bool,
+    triage: bool,
+    show_all: bool,
+) -> Inbox {
+    let rows: Vec<ChatRow> = rows
+        .into_iter()
+        .filter(|r| !unread || r.is_unread())
+        .collect();
     let place = |id: ChatId| order.iter().position(|&o| o == id).unwrap_or(usize::MAX);
     let mut pinned: Vec<ChatRow> = rows.iter().filter(|r| r.pinned).cloned().collect();
     pinned.sort_by_key(|r| place(r.id));
@@ -457,14 +522,18 @@ pub fn requests(
         .filter(|c| c.request)
         .map(|c| {
             let thread = messages.get(&c.id).map(Vec::as_slice).unwrap_or_default();
-            let first = thread.iter().find(|m| !m.mine() && !matches!(m.body, Body::System(_)));
+            let first = thread
+                .iter()
+                .find(|m| !m.mine() && !matches!(m.body, Body::System(_)));
             let peer = match c.kind {
                 ChatKind::Direct(p) | ChatKind::WhatsApp(p) => contact(contacts, p),
                 _ => None,
             };
             RequestRow {
                 chat: c.id,
-                name: peer.map(|p| p.name.clone()).unwrap_or_else(|| c.title.clone()),
+                name: peer
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| c.title.clone()),
                 username: peer.map(|p| p.username.clone()).unwrap_or_default(),
                 seed: c.seed,
                 first: first.map(|m| m.body.preview()).unwrap_or_default(),
@@ -490,7 +559,11 @@ pub fn contacts_az(chats: &[Chat], contacts: &[Contact], query: &str) -> Vec<Con
     let mut out: Vec<Contact> = contacts
         .iter()
         .filter(|c| !c.blocked && !strangers.contains(&c.id))
-        .filter(|c| q.is_empty() || find(&fold(&c.name), &q).is_some() || find(&fold(&c.username), &q).is_some())
+        .filter(|c| {
+            q.is_empty()
+                || find(&fold(&c.name), &q).is_some()
+                || find(&fold(&c.username), &q).is_some()
+        })
         .cloned()
         .collect();
     out.sort_by_key(|c| fold(&c.name).into_iter().collect::<String>());
@@ -608,7 +681,9 @@ pub fn search(
 
     let mut hits: Vec<(i64, MessageHit)> = Vec::new();
     for c in &open {
-        let Some(thread) = messages.get(&c.id) else { continue };
+        let Some(thread) = messages.get(&c.id) else {
+            continue;
+        };
         for m in thread.iter().rev() {
             let text = match &m.body {
                 Body::Text(t) => t.as_str(),
@@ -619,7 +694,9 @@ pub fn search(
                 Body::Event { title, .. } => title.as_str(),
                 _ => continue,
             };
-            let Some(at) = find(&fold(text), &q) else { continue };
+            let Some(at) = find(&fold(text), &q) else {
+                continue;
+            };
             let (before, matched, after) = cut(text, at, q.len());
             hits.push((
                 m.at,
@@ -648,7 +725,11 @@ pub fn search(
         .filter(|p| !chat_rows.iter().any(|r| r.peer == Some(p.id)))
         .collect();
 
-    Results { chats: chat_rows, messages: hits.into_iter().map(|(_, h)| h).collect(), contacts: people }
+    Results {
+        chats: chat_rows,
+        messages: hits.into_iter().map(|(_, h)| h).collect(),
+        contacts: people,
+    }
 }
 
 #[cfg(test)]
@@ -669,7 +750,11 @@ mod tests {
         assert!(!r.iter().any(|x| x.id == 15), "requests stay out");
         assert!(!r.iter().any(|x| x.id == 7), "community homes stay out");
         assert!(!r.iter().any(|x| x.id == 18), "locked chats stay out");
-        let unpinned: Vec<i64> = r.iter().filter(|x| !x.pinned).filter_map(|x| x.at).collect();
+        let unpinned: Vec<i64> = r
+            .iter()
+            .filter(|x| !x.pinned)
+            .filter_map(|x| x.at)
+            .collect();
         assert!(unpinned.windows(2).all(|w| w[0] >= w[1]));
         let locked = rows(&chats, &m, &ct, ListScope::Locked, &Filter::All);
         assert_eq!(locked.len(), 1);
@@ -682,8 +767,19 @@ mod tests {
         assert!(groups.iter().all(|r| r.group && !r.channel));
         let channels = rows(&chats, &m, &ct, ListScope::Inbox, &Filter::Channels);
         assert_eq!(channels.len(), 1);
-        let family = rows(&chats, &m, &ct, ListScope::Inbox, &Filter::List("Family".into()));
-        assert!(family.iter().all(|r| r.lists.contains(&"Family".to_string())) && family.len() == 2);
+        let family = rows(
+            &chats,
+            &m,
+            &ct,
+            ListScope::Inbox,
+            &Filter::List("Family".into()),
+        );
+        assert!(
+            family
+                .iter()
+                .all(|r| r.lists.contains(&"Family".to_string()))
+                && family.len() == 2
+        );
         let favs = rows(&chats, &m, &ct, ListScope::Inbox, &Filter::Favourites);
         assert!(favs.iter().all(|r| r.favourite));
     }
@@ -707,13 +803,26 @@ mod tests {
     #[test]
     fn previews_say_who_typing_and_drafts() {
         let (mut chats, m, ct) = data();
-        let fam = rows(&chats, &m, &ct, ListScope::Inbox, &Filter::All).into_iter().find(|r| r.id == 2).unwrap();
-        assert_eq!(fam.preview_text(), ("Elena: ".into(), "Mihai says hi 👋".into()));
+        let fam = rows(&chats, &m, &ct, ListScope::Inbox, &Filter::All)
+            .into_iter()
+            .find(|r| r.id == 2)
+            .unwrap();
+        assert_eq!(
+            fam.preview_text(),
+            ("Elena: ".into(), "Mihai says hi 👋".into())
+        );
         assert!(fam.mention);
         let andrei = row(chats.iter().find(|c| c.id == 13).unwrap(), &m, &ct);
         assert!(matches!(andrei.preview, Preview::Draft(_)));
         let mihai = row(chats.iter().find(|c| c.id == 3).unwrap(), &m, &ct);
-        assert!(matches!(mihai.preview, Preview::Message { tick: Some(Tick::Failed), sender: None, .. }));
+        assert!(matches!(
+            mihai.preview,
+            Preview::Message {
+                tick: Some(Tick::Failed),
+                sender: None,
+                ..
+            }
+        ));
         assert!(mihai.failed() && mihai.spoken().contains("not sent"));
         chats.iter_mut().find(|c| c.id == 3).unwrap().typing = Some("typing…".into());
         let typing = row(chats.iter().find(|c| c.id == 3).unwrap(), &m, &ct);
@@ -722,7 +831,10 @@ mod tests {
         assert!(ana.verified);
         let wa = row(chats.iter().find(|c| c.id == 14).unwrap(), &m, &ct);
         assert!(wa.whatsapp);
-        assert!(ana.spoken().starts_with("Ana Popescu, verified, pinned, 2 unread messages"));
+        assert!(
+            ana.spoken()
+                .starts_with("Ana Popescu, verified, pinned, 2 unread messages")
+        );
     }
 
     #[test]
@@ -739,9 +851,16 @@ mod tests {
     fn search_folds_case_and_diacritics_and_finds_messages() {
         let (chats, m, ct) = data();
         let r = search("stefanescu", &chats, &m, &ct);
-        assert!(r.chats.iter().any(|c| c.title == "Ioana Ștefănescu"), "archived chats are found");
+        assert!(
+            r.chats.iter().any(|c| c.title == "Ioana Ștefănescu"),
+            "archived chats are found"
+        );
         let r = search("BUDGET", &chats, &m, &ct);
-        let hit = r.messages.iter().find(|h| h.chat == 1).expect("Ana's budget message");
+        let hit = r
+            .messages
+            .iter()
+            .find(|h| h.chat == 1)
+            .expect("Ana's budget message");
         assert_eq!(hit.matched, "budget");
         assert!(r.messages.len() <= MAX_MESSAGE_HITS);
         let r = search("free phone", &chats, &m, &ct);
@@ -749,9 +868,16 @@ mod tests {
         assert!(search("   ", &chats, &m, &ct).is_empty());
         assert!(search("zzzz-nothing", &chats, &m, &ct).is_empty());
         let r = search("priya", &chats, &m, &ct);
-        assert!(r.contacts.is_empty(), "a contact with a chat shows as the chat");
+        assert!(
+            r.contacts.is_empty(),
+            "a contact with a chat shows as the chat"
+        );
         let r = search("amélie", &chats, &m, &ct);
-        assert_eq!(r.contacts.len(), 1, "a contact without a chat shows under Contacts");
+        assert_eq!(
+            r.contacts.len(),
+            1,
+            "a contact without a chat shows under Contacts"
+        );
     }
 
     #[test]
@@ -772,7 +898,11 @@ mod tests {
 
     #[test]
     fn cut_keeps_a_short_lead_in() {
-        let (b, m, a) = cut("The quick brown fox jumps over the lazy dog every day", 40, 3);
+        let (b, m, a) = cut(
+            "The quick brown fox jumps over the lazy dog every day",
+            40,
+            3,
+        );
         assert_eq!(m, "dog");
         assert!(b.starts_with('…'));
         assert_eq!(a, " every day");
@@ -786,7 +916,10 @@ mod tests {
         ct.iter_mut().find(|c| c.id == 2).unwrap().blocked = true;
         let az = contacts_az(&chats, &ct, "");
         assert!(!az.iter().any(|c| c.id == 16 || c.id == 2));
-        let names: Vec<String> = az.iter().map(|c| fold(&c.name).into_iter().collect()).collect();
+        let names: Vec<String> = az
+            .iter()
+            .map(|c| fold(&c.name).into_iter().collect())
+            .collect();
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted);
@@ -796,7 +929,15 @@ mod tests {
     #[test]
     fn list_names_keep_the_users_order() {
         let (chats, _, _) = data();
-        let names = list_names(&["Family".into(), "Work".into(), "Friends".into(), "Gym".into()], &chats);
+        let names = list_names(
+            &[
+                "Family".into(),
+                "Work".into(),
+                "Friends".into(),
+                "Gym".into(),
+            ],
+            &chats,
+        );
         assert_eq!(names, vec!["Family", "Work", "Friends", "Gym"]);
         assert_eq!(list_names(&[], &chats), vec!["Work", "Family", "Friends"]);
     }
@@ -808,7 +949,10 @@ mod tests {
         let all = rows(&chats, &m, &ct, ListScope::Inbox, &Filter::All);
         let n = all.len();
         let inbox = inbox(all, &order, false, false, false);
-        assert_eq!(inbox.pinned.iter().map(|r| r.id).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(
+            inbox.pinned.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
         assert!(inbox.needs.is_empty(), "phones have no triage");
         assert!(inbox.recent.iter().all(|r| !r.pinned));
         assert_eq!(inbox.pinned.len() + inbox.recent.len(), n);
@@ -835,7 +979,10 @@ mod tests {
         let inbox = inbox(all, &order, false, true, false);
         assert!(inbox.needs.iter().all(ChatRow::needs_reply));
         assert!(inbox.recent.iter().all(|r| !r.needs_reply()));
-        assert!(!inbox.needs.iter().any(|r| r.id == 4), "a muted chat never needs a reply");
+        assert!(
+            !inbox.needs.iter().any(|r| r.id == 4),
+            "a muted chat never needs a reply"
+        );
         assert!(inbox.needs.len() <= MAX_NEEDS);
         let at: Vec<i64> = inbox.needs.iter().filter_map(|r| r.at).collect();
         assert!(at.windows(2).all(|w| w[0] >= w[1]));
@@ -873,7 +1020,13 @@ mod tests {
         let all = rows(&chats, &m, &ct, ListScope::Inbox, &Filter::All);
         let inbox = inbox(all, &order, true, false, false);
         assert!(!inbox.is_empty());
-        assert!(inbox.pinned.iter().chain(&inbox.recent).all(ChatRow::is_unread));
+        assert!(
+            inbox
+                .pinned
+                .iter()
+                .chain(&inbox.recent)
+                .all(ChatRow::is_unread)
+        );
         let (title, _) = Filter::List("Work".into()).empty_copy(true);
         assert_eq!(title, "Nothing unread in Work");
     }

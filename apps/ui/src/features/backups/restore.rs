@@ -9,7 +9,8 @@ use crate::{
     store::{
         Store,
         ext_onboarding::{
-            BACKUP_CHATS, BACKUP_MESSAGES, RestoreStage, format_key_input, key_well_formed, thousands,
+            BACKUP_CHATS, BACKUP_MESSAGES, RestoreStage, format_key_input, key_well_formed,
+            thousands,
         },
         store,
     },
@@ -27,7 +28,9 @@ enum Phase {
 fn phase(stage: RestoreStage) -> Phase {
     match stage {
         RestoreStage::Idle => Phase::Start,
-        RestoreStage::Finding | RestoreStage::Decrypting | RestoreStage::Restoring(_) => Phase::Running,
+        RestoreStage::Finding | RestoreStage::Decrypting | RestoreStage::Restoring(_) => {
+            Phase::Running
+        }
         RestoreStage::Done => Phase::Done,
         RestoreStage::Failed => Phase::Failed,
     }
@@ -152,7 +155,10 @@ fn start(s: Store, ask_key: bool, key: Signal<String>) -> View {
         content
             .child(flow_title("Restore your backup"))
             .child(flow_lead(move || {
-                let last = s.settings.with(|x| x.backup_last.clone()).unwrap_or_else(|| "your last backup".into());
+                let last = s
+                    .settings
+                    .with(|x| x.backup_last.clone())
+                    .unwrap_or_else(|| "your last backup".into());
                 format!(
                     "This brings back the chats from {}. Messages already on this device are kept.",
                     last.to_lowercase()
@@ -161,9 +167,11 @@ fn start(s: Store, ask_key: bool, key: Signal<String>) -> View {
     };
     flow_layout(
         content,
-        view()
-            .gap_2()
-            .child(btn("Restore", Variant::Primary, BtnSize::Lg, go).w_full().disabled(move || !ready())),
+        view().gap_2().child(
+            btn("Restore", Variant::Primary, BtnSize::Lg, go)
+                .w_full()
+                .disabled(move || !ready()),
+        ),
     )
 }
 
@@ -174,7 +182,10 @@ enum Mark {
     Later,
 }
 
-fn stage_row(label: impl Fn() -> String + 'static, mark: impl Fn() -> Mark + Copy + 'static) -> View {
+fn stage_row(
+    label: impl Fn() -> String + 'static,
+    mark: impl Fn() -> Mark + Copy + 'static,
+) -> View {
     view()
         .flex_row()
         .items_center()
@@ -199,14 +210,23 @@ fn stage_row(label: impl Fn() -> String + 'static, mark: impl Fn() -> Mark + Cop
                 .transition_colors()
                 .duration(motion::BASE)
                 .accessibility_elements_hidden(true)
-                .child(icon(Icon::Check, 13.0).style_when(move || mark() != Mark::Done, |s| s.hidden())),
+                .child(
+                    icon(Icon::Check, 13.0)
+                        .style_when(move || mark() != Mark::Done, |s| s.hidden()),
+                ),
         )
         .child(
             text(label)
                 .flex_1()
                 .text_size(px(font::body()))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(move || if mark() == Mark::Later { c::muted_fg() } else { c::foreground() }),
+                .text_color(move || {
+                    if mark() == Mark::Later {
+                        c::muted_fg()
+                    } else {
+                        c::foreground()
+                    }
+                }),
         )
         .child(
             text(move || match mark() {
@@ -238,26 +258,46 @@ fn running(stage: Signal<RestoreStage>) -> View {
         view()
             .gap_4()
             .child(flow_title("Restoring your chats"))
-            .child(flow_lead("Keep Songbird open. This usually takes a minute or two."))
+            .child(flow_lead(
+                "Keep Songbird open. This usually takes a minute or two.",
+            ))
             .child(progress_bar("Restoring", move || stage.get().fraction()))
             .child(
                 card()
                     .gap_1()
                     .py_3()
                     .child(stage_row(
-                        move || if order() > 0 { "Found your backup".into() } else { "Finding your backup…".into() },
+                        move || {
+                            if order() > 0 {
+                                "Found your backup".into()
+                            } else {
+                                "Finding your backup…".into()
+                            }
+                        },
                         mark(0),
                     ))
                     .child(stage_row(
-                        move || if order() > 1 { "Decrypted".into() } else { "Decrypting…".into() },
+                        move || {
+                            if order() > 1 {
+                                "Decrypted".into()
+                            } else {
+                                "Decrypting…".into()
+                            }
+                        },
                         mark(1),
                     ))
                     .child(stage_row(
                         move || match stage.get() {
                             RestoreStage::Restoring(n) if n < BACKUP_MESSAGES => {
-                                format!("Restoring {} of {} messages", thousands(n), thousands(BACKUP_MESSAGES))
+                                format!(
+                                    "Restoring {} of {} messages",
+                                    thousands(n),
+                                    thousands(BACKUP_MESSAGES)
+                                )
                             }
-                            RestoreStage::Done => format!("Restored {} messages", thousands(BACKUP_MESSAGES)),
+                            RestoreStage::Done => {
+                                format!("Restored {} messages", thousands(BACKUP_MESSAGES))
+                            }
                             _ => format!("Restoring {} messages", thousands(BACKUP_MESSAGES)),
                         },
                         mark(2),

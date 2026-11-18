@@ -6,7 +6,10 @@ use nsh_core::prelude::*;
 use super::{join_link, simulate_in, start_call_in, state};
 use crate::{
     nav,
-    store::{CallDirection, CallLink, CallRecord, ChatKind, Contact, Store, clock, day_label, day_of, store, when_label},
+    store::{
+        CallDirection, CallLink, CallRecord, ChatKind, Contact, Store, clock, day_label, day_of,
+        store, when_label,
+    },
     ui::*,
 };
 
@@ -55,42 +58,82 @@ pub fn calls_tab() -> AnyElement {
     let link_open = signal(false);
     let list = computed(move || {
         let f = filter.get();
-        s.calls.with(|cs| cs.iter().filter(|r| f == Filter::All || r.direction == CallDirection::Missed).cloned().collect::<Vec<_>>())
+        s.calls.with(|cs| {
+            cs.iter()
+                .filter(|r| f == Filter::All || r.direction == CallDirection::Missed)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
     });
     let header = view()
         .pb_1()
-        .child(
-            view().px_4().pt_3().child(segmented(
-                vec![(Filter::All, "All"), (Filter::Missed, "Missed")],
-                move || filter.get(),
-                move |f| filter.set(f),
-            )),
-        )
+        .child(view().px_4().pt_3().child(segmented(
+            vec![(Filter::All, "All"), (Filter::Missed, "Missed")],
+            move || filter.get(),
+            move |f| filter.set(f),
+        )))
         .child(
             view().pt_3().child(group([Row::new("Create call link")
-                .leading(view().size(px(40.0)).rounded_full().items_center().justify_center().bg(move || c::accent()).text_color(move || c::primary()).child(icon(Icon::Link, 20.0)))
+                .leading(
+                    view()
+                        .size(px(40.0))
+                        .rounded_full()
+                        .items_center()
+                        .justify_center()
+                        .bg(move || c::accent())
+                        .text_color(move || c::primary())
+                        .child(icon(Icon::Link, 20.0)),
+                )
                 .subtitle("Anyone with the link can join")
                 .on_press(move || link_open.set(true))
                 .build()])),
         )
-        .child(when(move || s.call_links.with(|l| !l.is_empty()), move || {
-            view().child(section_title("Call links")).child(group_links(s))
-        }))
-        .child(section_title(move || if filter.get() == Filter::Missed { "Missed" } else { "Recent" }));
+        .child(when(
+            move || s.call_links.with(|l| !l.is_empty()),
+            move || {
+                view()
+                    .child(section_title("Call links"))
+                    .child(group_links(s))
+            },
+        ))
+        .child(section_title(move || {
+            if filter.get() == Filter::Missed {
+                "Missed"
+            } else {
+                "Recent"
+            }
+        }));
     let footer = view()
         .pb_safe_area_plus(px(24.0))
-        .child(when(move || list.with(Vec::is_empty), move || {
-            let missed = filter.get_untracked() == Filter::Missed;
-            empty_state(
-                if missed { Icon::PhoneMissed } else { Icon::Calls },
-                if missed { "No missed calls" } else { "No calls yet" },
-                if missed { "Calls you didn't answer show here." } else { "Start a call from a chat, or with New call." },
-                None,
-            )
-            .flex_none()
-            .py_8()
-        }))
-        .child(footnote("Your call history is end-to-end encrypted and synced across your devices."));
+        .child(when(
+            move || list.with(Vec::is_empty),
+            move || {
+                let missed = filter.get_untracked() == Filter::Missed;
+                empty_state(
+                    if missed {
+                        Icon::PhoneMissed
+                    } else {
+                        Icon::Calls
+                    },
+                    if missed {
+                        "No missed calls"
+                    } else {
+                        "No calls yet"
+                    },
+                    if missed {
+                        "Calls you didn't answer show here."
+                    } else {
+                        "Start a call from a chat, or with New call."
+                    },
+                    None,
+                )
+                .flex_none()
+                .py_8()
+            },
+        ))
+        .child(footnote(
+            "Your call history is end-to-end encrypted and synced across your devices.",
+        ));
     // Developer and preview builds only (never a release): rows that make
     // the mock ring, to test calls and their notifications on a device.
     let footer = if crate::PREVIEW_BUILD {
@@ -100,7 +143,11 @@ pub fn calls_tab() -> AnyElement {
     };
     view()
         .flex_1()
-        .child(app_header("Calls", false, Some(icon_btn(Icon::Plus, "New call", move || new_call(s)).into_element())))
+        .child(app_header(
+            "Calls",
+            false,
+            Some(icon_btn(Icon::Plus, "New call", move || new_call(s)).into_element()),
+        ))
         .child(
             virtual_list(
                 move || list.with(Vec::len),
@@ -125,39 +172,67 @@ pub fn calls_tab() -> AnyElement {
 
 /// The user's call links: tap to join (as its admin), copy its link.
 fn group_links(s: Store) -> View {
-    view().mx_4().rounded(move || radius::lg()).overflow_hidden().bg(move || c::card()).border_1().border_color(move || c::border()).child(each(
-        move || s.call_links.get(),
-        |l: &CallLink| l.id,
-        |l, at| {
-            let l = l.get_untracked();
-            let url = l.url.clone();
-            let name = l.name.clone();
-            let lobby = l.lobby;
-            let seed = l.id;
-            // A rule between links, on the text column (16 + 40 + 12).
-            view()
-                .child(when(move || at.get() > 0, || separator_inset(68.0)))
-                .child(view()
-                .flex_row()
-                .items_center()
-                .pr_2()
-                .child(
-                    view().flex_1().child(
-                        Row::new(l.name.clone())
-                            .leading(view().size(px(40.0)).rounded_full().items_center().justify_center().bg(move || c::secondary()).text_color(move || c::on_secondary()).child(icon(Icon::Link, 18.0)))
-                            // One line: who gets in. The link itself is one press away
-                            // (the copy button), so it never wraps here.
-                            .subtitle(if lobby { "Admins admit people" } else { "Anyone with the link joins" })
-                            .on_press(move || join_link(name.clone(), seed, lobby, false))
-                            .build(),
-                    ),
-                )
-                .child(icon_btn(Icon::Copy, format!("Copy link to {}", l.name), move || {
-                    set_clipboard(url.clone());
-                    toast("Link copied");
-                })))
-        },
-    ))
+    view()
+        .mx_4()
+        .rounded(move || radius::lg())
+        .overflow_hidden()
+        .bg(move || c::card())
+        .border_1()
+        .border_color(move || c::border())
+        .child(each(
+            move || s.call_links.get(),
+            |l: &CallLink| l.id,
+            |l, at| {
+                let l = l.get_untracked();
+                let url = l.url.clone();
+                let name = l.name.clone();
+                let lobby = l.lobby;
+                let seed = l.id;
+                // A rule between links, on the text column (16 + 40 + 12).
+                view()
+                    .child(when(move || at.get() > 0, || separator_inset(68.0)))
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .pr_2()
+                            .child(
+                                view().flex_1().child(
+                                    Row::new(l.name.clone())
+                                        .leading(
+                                            view()
+                                                .size(px(40.0))
+                                                .rounded_full()
+                                                .items_center()
+                                                .justify_center()
+                                                .bg(move || c::secondary())
+                                                .text_color(move || c::on_secondary())
+                                                .child(icon(Icon::Link, 18.0)),
+                                        )
+                                        // One line: who gets in. The link itself is one press away
+                                        // (the copy button), so it never wraps here.
+                                        .subtitle(if lobby {
+                                            "Admins admit people"
+                                        } else {
+                                            "Anyone with the link joins"
+                                        })
+                                        .on_press(move || {
+                                            join_link(name.clone(), seed, lobby, false)
+                                        })
+                                        .build(),
+                                ),
+                            )
+                            .child(icon_btn(
+                                Icon::Copy,
+                                format!("Copy link to {}", l.name),
+                                move || {
+                                    set_clipboard(url.clone());
+                                    toast("Link copied");
+                                },
+                            )),
+                    )
+            },
+        ))
 }
 
 /// One call in the list: who, which way, when, and a quick call back.
@@ -167,7 +242,13 @@ fn call_row(s: Store, r: CallRecord) -> View {
     let video = r.video;
     let title = r.title.clone();
     let when = when_label(r.at);
-    let label = format!("{}, {}, {}{}", r.title, kind_line(&r), when, if r.group { ", group call" } else { "" });
+    let label = format!(
+        "{}, {}, {}{}",
+        r.title,
+        kind_line(&r),
+        when,
+        if r.group { ", group call" } else { "" }
+    );
     let rec = r.clone();
     view()
         .flex_row()
@@ -220,26 +301,46 @@ fn call_row(s: Store, r: CallRecord) -> View {
                                         .gap_1()
                                         // Only the glyph and the word turn red for a
                                         // missed call; the name stays in body ink.
-                                        .child(view().flex_row().items_center().gap_1().text_color(move || if missed { c::destructive() } else { c::muted_fg() })
-                                        // One line on one baseline: the direction glyph
-                                        // (centred on the cap height), the word, then when
-                                        // and how long in tabular figures. Voice or video
-                                        // is the call-back button's glyph at the row's end.
-                                        .child(icon(glyph, 14.0))
                                         .child(
-                                            text(word)
-                                                .text_size(px(font::SMALL + 1.0))
-                                                .line_height(px(18.0))
-                                                .font_weight(if missed { FontWeight::MEDIUM } else { FontWeight::NORMAL }),
-                                        ))
+                                            view()
+                                                .flex_row()
+                                                .items_center()
+                                                .gap_1()
+                                                .text_color(move || {
+                                                    if missed {
+                                                        c::destructive()
+                                                    } else {
+                                                        c::muted_fg()
+                                                    }
+                                                })
+                                                // One line on one baseline: the direction glyph
+                                                // (centred on the cap height), the word, then when
+                                                // and how long in tabular figures. Voice or video
+                                                // is the call-back button's glyph at the row's end.
+                                                .child(icon(glyph, 14.0))
+                                                .child(
+                                                    text(word)
+                                                        .text_size(px(font::SMALL + 1.0))
+                                                        .line_height(px(18.0))
+                                                        .font_weight(if missed {
+                                                            FontWeight::MEDIUM
+                                                        } else {
+                                                            FontWeight::NORMAL
+                                                        }),
+                                                ),
+                                        )
                                         .child(
-                                            text(if r.secs > 0 { format!("· {} · {}", when, state::words(r.secs)) } else { format!("· {when}") })
-                                                .flex_shrink(1.0)
-                                                .number_of_lines(1)
-                                                .text_size(px(font::SMALL + 1.0))
-                                                .line_height(px(18.0))
-                                                .tabular_nums()
-                                                .text_color(move || c::muted_fg()),
+                                            text(if r.secs > 0 {
+                                                format!("· {} · {}", when, state::words(r.secs))
+                                            } else {
+                                                format!("· {when}")
+                                            })
+                                            .flex_shrink(1.0)
+                                            .number_of_lines(1)
+                                            .text_size(px(font::SMALL + 1.0))
+                                            .line_height(px(18.0))
+                                            .tabular_nums()
+                                            .text_color(move || c::muted_fg()),
                                         ),
                                 ),
                         ),
@@ -247,7 +348,10 @@ fn call_row(s: Store, r: CallRecord) -> View {
         )
         .child(icon_btn(
             if r.video { Icon::Video } else { Icon::Phone },
-            format!("{} {title}", if video { "Video call" } else { "Voice call" }),
+            format!(
+                "{} {title}",
+                if video { "Video call" } else { "Voice call" }
+            ),
             move || start_call_in(&s, chat, video),
         ))
 }
@@ -258,12 +362,29 @@ fn call_info(s: Store, r: CallRecord) {
     nav::push(key, move || {
         let r = r.clone();
         let day = day_of(r.at);
-        let entries: Vec<CallRecord> = s.calls.with_untracked(|cs| cs.iter().filter(|x| x.chat == r.chat && day_of(x.at) == day).cloned().collect());
+        let entries: Vec<CallRecord> = s.calls.with_untracked(|cs| {
+            cs.iter()
+                .filter(|x| x.chat == r.chat && day_of(x.at) == day)
+                .cloned()
+                .collect()
+        });
         let chat = r.chat;
         let exists = s.chat(chat).is_some();
-        let direct = matches!(s.chat(chat).map(|c| c.kind), Some(ChatKind::Direct(_) | ChatKind::WhatsApp(_)));
+        let direct = matches!(
+            s.chat(chat).map(|c| c.kind),
+            Some(ChatKind::Direct(_) | ChatKind::WhatsApp(_))
+        );
         let action = |glyph: Icon, label: &'static str, f: Box<dyn Fn()>| {
-            view().flex_1().child(btn_with_icon(label, Some(glyph), Variant::Secondary, BtnSize::Md, move || f()).disabled(!exists))
+            view().flex_1().child(
+                btn_with_icon(
+                    label,
+                    Some(glyph),
+                    Variant::Secondary,
+                    BtnSize::Md,
+                    move || f(),
+                )
+                .disabled(!exists),
+            )
         };
         page(
             "Call info",
@@ -328,7 +449,12 @@ fn new_call(s: Store) {
             let q = query.with(|q| q.to_lowercase());
             s.contacts.with(|cs| {
                 cs.iter()
-                    .filter(|c| !c.blocked && (q.is_empty() || c.name.to_lowercase().contains(&q) || c.username.contains(&q)))
+                    .filter(|c| {
+                        !c.blocked
+                            && (q.is_empty()
+                                || c.name.to_lowercase().contains(&q)
+                                || c.username.contains(&q))
+                    })
                     .cloned()
                     .collect::<Vec<_>>()
             })
@@ -350,20 +476,30 @@ fn new_call(s: Store) {
                             let p = computed(move || people.with(|l| l.get(at.index()).cloned()));
                             dynamic(move || {
                                 let p = p.get();
-                                untracked(move || p.map(|p: Contact| {
-                                    let id = p.id;
-                                    Row::new(p.name.clone())
-                                        .leading(avatar(p.name.clone(), p.id, 40.0))
-                                        .subtitle(format!("@{}", p.username))
-                                        .trailing(
-                                            view()
-                                                .flex_row()
-                                                .gap_1()
-                                                .child(icon_btn(Icon::Phone, format!("Voice call {}", p.name), move || call(id, false)))
-                                                .child(icon_btn(Icon::Video, format!("Video call {}", p.name), move || call(id, true))),
-                                        )
-                                        .build()
-                                }))
+                                untracked(move || {
+                                    p.map(|p: Contact| {
+                                        let id = p.id;
+                                        Row::new(p.name.clone())
+                                            .leading(avatar(p.name.clone(), p.id, 40.0))
+                                            .subtitle(format!("@{}", p.username))
+                                            .trailing(
+                                                view()
+                                                    .flex_row()
+                                                    .gap_1()
+                                                    .child(icon_btn(
+                                                        Icon::Phone,
+                                                        format!("Voice call {}", p.name),
+                                                        move || call(id, false),
+                                                    ))
+                                                    .child(icon_btn(
+                                                        Icon::Video,
+                                                        format!("Video call {}", p.name),
+                                                        move || call(id, true),
+                                                    )),
+                                            )
+                                            .build()
+                                    })
+                                })
                             })
                         },
                     )
@@ -372,13 +508,32 @@ fn new_call(s: Store) {
                     .header(
                         view()
                             .pb_2()
-                            .child(view().px_4().pt_3().child(search_field("Search name or username", query)))
-                            .child(view().pt_3().child(group([Row::new("New call link").icon(Icon::Link).on_press(move || link_open.set(true)).build()])))
+                            .child(
+                                view()
+                                    .px_4()
+                                    .pt_3()
+                                    .child(search_field("Search name or username", query)),
+                            )
+                            .child(
+                                view().pt_3().child(group([Row::new("New call link")
+                                    .icon(Icon::Link)
+                                    .on_press(move || link_open.set(true))
+                                    .build()])),
+                            )
                             .child(section_title("Contacts")),
                     )
-                    .footer(view().child(when(move || people.with(Vec::is_empty), || {
-                        empty_state(Icon::Search, "No one found", "Check the spelling, or search by username.", None).flex_none()
-                    })))
+                    .footer(view().child(when(
+                        move || people.with(Vec::is_empty),
+                        || {
+                            empty_state(
+                                Icon::Search,
+                                "No one found",
+                                "Check the spelling, or search by username.",
+                                None,
+                            )
+                            .flex_none()
+                        },
+                    )))
                     .flex_1(),
                 )
                 .child(link_sheet(s, link_open)),
@@ -403,13 +558,19 @@ fn link_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
     });
     let create = move || {
         let n = name.with_untracked(|n| n.trim().to_string());
-        let n = if n.is_empty() { "Songbird call".to_string() } else { n };
+        let n = if n.is_empty() {
+            "Songbird call".to_string()
+        } else {
+            n
+        };
         // mock: app-core creates the link's room and its key; the key
         // travels in the link's fragment, never to the server.
         // One link per name and lobby setting: creating it again (a
         // double press, the same form twice) shows the link you have.
         let lob = lobby.get_untracked();
-        let existing = s.call_links.with_untracked(|ls| ls.iter().find(|l| l.name == n && l.lobby == lob).cloned());
+        let existing = s
+            .call_links
+            .with_untracked(|ls| ls.iter().find(|l| l.name == n && l.lobby == lob).cloned());
         let link = existing.unwrap_or_else(|| s.create_call_link(n, lob));
         announce_for_accessibility("Call link created");
         created.set(Some(link));

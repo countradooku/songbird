@@ -21,7 +21,11 @@ fn archived() -> impl IntoElement {
     let settings_open = signal(false);
     let rows = computed(move || {
         s.chats.with(|cs| {
-            s.messages.with(|m| s.contacts.with(|ct| model::rows(cs, m, ct, model::ListScope::Archived, &model::Filter::All)))
+            s.messages.with(|m| {
+                s.contacts.with(|ct| {
+                    model::rows(cs, m, ct, model::ListScope::Archived, &model::Filter::All)
+                })
+            })
         })
     });
     let keep = move || s.settings.with(|x| x.keep_archived);
@@ -85,7 +89,11 @@ fn button_note(
                     .line_height(px(18.0))
                     .text_center()
                     .text_color(move || c::muted_fg())
-                    .child(text(action).font_weight(FontWeight::SEMIBOLD).text_color(move || c::link())),
+                    .child(
+                        text(action)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(move || c::link()),
+                    ),
             ),
     )
 }
@@ -99,7 +107,10 @@ pub fn open_requests() {
 fn requests() -> impl IntoElement {
     let s = store();
     let rows = computed(move || {
-        s.chats.with(|cs| s.messages.with(|m| s.contacts.with(|ct| model::requests(cs, m, ct))))
+        s.chats.with(|cs| {
+            s.messages
+                .with(|m| s.contacts.with(|ct| model::requests(cs, m, ct)))
+        })
     });
     virtual_list(move || rows.with(Vec::len), move |at: Position| {
         let req = computed(move || rows.with(|r| r.get(at.index()).cloned()));
@@ -123,9 +134,17 @@ fn requests() -> impl IntoElement {
 }
 
 fn request_card(s: Store, req: Memo<Option<model::RequestRow>>) -> impl IntoElement {
-    let get = move |f: fn(&model::RequestRow) -> String| move || req.with(|r| r.as_ref().map(f).unwrap_or_default());
+    let get = move |f: fn(&model::RequestRow) -> String| {
+        move || req.with(|r| r.as_ref().map(f).unwrap_or_default())
+    };
     let chat = move || req.with_untracked(|r| r.as_ref().map(|r| r.chat));
-    let who = move || req.with_untracked(|r| r.as_ref().map(|r| format!("@{}", r.username)).unwrap_or_default());
+    let who = move || {
+        req.with_untracked(|r| {
+            r.as_ref()
+                .map(|r| format!("@{}", r.username))
+                .unwrap_or_default()
+        })
+    };
     let accept = move || {
         if let Some(id) = chat() {
             animate_change();
@@ -231,14 +250,35 @@ fn request_card(s: Store, req: Memo<Option<model::RequestRow>>) -> impl IntoElem
                 }))
                 .text_size(px(font::SMALL))
                 .text_color(move || c::muted_fg())
-                .style_when(move || req.with(|r| r.as_ref().is_none_or(|r| r.more == 0)), |st| st.hidden()),
+                .style_when(
+                    move || req.with(|r| r.as_ref().is_none_or(|r| r.more == 0)),
+                    |st| st.hidden(),
+                ),
             )
             .child(
                 view()
                     .flex_row()
                     .gap_2()
-                    .child(btn_with_icon("Block", Some(Icon::Ban), Variant::Outline, BtnSize::Sm, block).flex_1())
-                    .child(btn_with_icon("Report", Some(Icon::Flag), Variant::Outline, BtnSize::Sm, report).flex_1())
+                    .child(
+                        btn_with_icon(
+                            "Block",
+                            Some(Icon::Ban),
+                            Variant::Outline,
+                            BtnSize::Sm,
+                            block,
+                        )
+                        .flex_1(),
+                    )
+                    .child(
+                        btn_with_icon(
+                            "Report",
+                            Some(Icon::Flag),
+                            Variant::Outline,
+                            BtnSize::Sm,
+                            report,
+                        )
+                        .flex_1(),
+                    )
                     .child(btn("Accept", Variant::Primary, BtnSize::Sm, accept).flex_1()),
             ),
     )
@@ -255,7 +295,11 @@ fn locked() -> impl IntoElement {
     let unlocked = signal(false);
     let rows = computed(move || {
         s.chats.with(|cs| {
-            s.messages.with(|m| s.contacts.with(|ct| model::rows(cs, m, ct, model::ListScope::Locked, &model::Filter::All)))
+            s.messages.with(|m| {
+                s.contacts.with(|ct| {
+                    model::rows(cs, m, ct, model::ListScope::Locked, &model::Filter::All)
+                })
+            })
         })
     });
     view().flex_1().child(
@@ -307,9 +351,17 @@ fn lists() -> impl IntoElement {
         }
         s.create_list(name.clone());
         draft.set(String::new());
-        toast(format!("List {name} created. Add chats to it from a chat's menu."));
+        toast(format!(
+            "List {name} created. Add chats to it from a chat's menu."
+        ));
     };
-    let counts = move |name: &str| s.chats.with(|cs| cs.iter().filter(|c| c.lists.iter().any(|l| l == name)).count());
+    let counts = move |name: &str| {
+        s.chats.with(|cs| {
+            cs.iter()
+                .filter(|c| c.lists.iter().any(|l| l == name))
+                .count()
+        })
+    };
     page_scroll(
         view()
             .gap_1()
@@ -325,22 +377,30 @@ fn lists() -> impl IntoElement {
                     let gone = name.clone();
                     Row::new(name.clone())
                         .icon(Icon::Layers)
-                        .subtitle(if n == 1 { "1 chat".to_string() } else { format!("{n} chats") })
+                        .subtitle(if n == 1 {
+                            "1 chat".to_string()
+                        } else {
+                            format!("{n} chats")
+                        })
                         .on_press(move || {
                             f.update(|x| x.list = model::Filter::List(shown.clone()));
                             nav::pop();
                         })
-                        .trailing(icon_btn(Icon::Trash, format!("Delete list {name}"), move || {
-                            let gone = gone.clone();
-                            confirm(
-                                format!("Delete the list {gone}?"),
-                                "The chats in it stay in your chat list.",
-                                "Delete list",
-                                move || {
-                                    s.delete_list(&gone);
-                                },
-                            );
-                        }))
+                        .trailing(icon_btn(
+                            Icon::Trash,
+                            format!("Delete list {name}"),
+                            move || {
+                                let gone = gone.clone();
+                                confirm(
+                                    format!("Delete the list {gone}?"),
+                                    "The chats in it stay in your chat list.",
+                                    "Delete list",
+                                    move || {
+                                        s.delete_list(&gone);
+                                    },
+                                );
+                            },
+                        ))
                         .build()
                 }))
                 .into_element()
@@ -352,7 +412,11 @@ fn lists() -> impl IntoElement {
                     .items_center()
                     .gap_2()
                     .px_4()
-                    .child(field("List name, like Neighbours", draft).flex_1().on_submit(move |_: &str| create()))
+                    .child(
+                        field("List name, like Neighbours", draft)
+                            .flex_1()
+                            .on_submit(move |_: &str| create()),
+                    )
                     .child(
                         btn("Create", Variant::Primary, BtnSize::Md, create)
                             .disabled(move || draft.with(|d| d.trim().is_empty())),

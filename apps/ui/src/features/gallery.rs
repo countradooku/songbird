@@ -12,18 +12,121 @@ use crate::{
 };
 
 /// Every glyph of [`Icon`], in its declaration order.
-pub const ALL_ICONS: [Icon; 111] = {
+pub const ALL_ICONS: [Icon; 112] = {
     use Icon::*;
     [
-        Chats, Calls, Communities, Spaces, You, Search, Plus, Close, Back, Forward, ChevronRight, ChevronDown, More,
-        MoreHorizontal, Send, Mic, MicOff, Camera, Video, VideoOff, Phone, PhoneIncoming, PhoneOutgoing,
-        PhoneMissed, PhoneOff, Paperclip, Smile, Image, File, MapPin, Contact, Poll, Calendar, Sticker, Lock,
-        Unlock, Shield, ShieldCheck, Key, Eye, EyeOff, Bell, BellOff, Pin, Archive, Star, Trash, Edit, Copy,
-        Reply, Share, Link, QrCode, Scan, Users, UserPlus, User, Settings, Info, Alert, Check, Clock, Timer,
-        Download, Upload, Cloud, HardDrive, Smartphone, Laptop, Globe, Palette, HelpCircle, Heart, Gift,
-        Sparkles, Speaker, ScreenShare, Hand, Grid, Filter, Play, Pause, Megaphone, Flag, Ban, Database, Wifi,
-        WifiOff, Moon, Sun, Zap, Refresh, LogOut, Sliders, Volume, Minimize, Maximize, Keyboard, Feather,
-        Inbox, Layers, Baby, Server, Tablet, FlipCamera, SpeakerView, ChevronUp, ZoomIn, ZoomOut, Compose, ArrowLeft,
+        Chats,
+        Calls,
+        Communities,
+        Spaces,
+        You,
+        Search,
+        Plus,
+        Close,
+        Back,
+        Forward,
+        ChevronRight,
+        ChevronDown,
+        More,
+        MoreHorizontal,
+        Send,
+        Mic,
+        MicOff,
+        Camera,
+        Video,
+        VideoOff,
+        Phone,
+        PhoneIncoming,
+        PhoneOutgoing,
+        PhoneMissed,
+        PhoneOff,
+        Paperclip,
+        Smile,
+        Image,
+        File,
+        MapPin,
+        Contact,
+        Poll,
+        Calendar,
+        Sticker,
+        Lock,
+        Unlock,
+        Shield,
+        ShieldCheck,
+        Key,
+        Eye,
+        EyeOff,
+        Bell,
+        BellOff,
+        Pin,
+        Archive,
+        Star,
+        Trash,
+        Edit,
+        Copy,
+        Reply,
+        Share,
+        Link,
+        QrCode,
+        Scan,
+        Users,
+        UserPlus,
+        User,
+        Settings,
+        Info,
+        Alert,
+        Check,
+        Clock,
+        Timer,
+        Download,
+        Upload,
+        Cloud,
+        HardDrive,
+        Smartphone,
+        Laptop,
+        Globe,
+        Palette,
+        HelpCircle,
+        Heart,
+        Gift,
+        Sparkles,
+        Speaker,
+        ScreenShare,
+        Hand,
+        Grid,
+        Filter,
+        Play,
+        Pause,
+        Megaphone,
+        Flag,
+        Ban,
+        Database,
+        Wifi,
+        WifiOff,
+        Moon,
+        Sun,
+        Zap,
+        Refresh,
+        LogOut,
+        Sliders,
+        Volume,
+        Minimize,
+        Maximize,
+        Keyboard,
+        Feather,
+        Inbox,
+        Layers,
+        Baby,
+        Server,
+        Tablet,
+        FlipCamera,
+        SpeakerView,
+        ChevronUp,
+        ZoomIn,
+        ZoomOut,
+        Compose,
+        ArrowLeft,
+        AtSign,
     ]
 };
 
@@ -33,16 +136,19 @@ pub const ALL_ICONS: [Icon; 111] = {
 fn every_icon_is_listed(i: Icon) {
     use Icon::*;
     match i {
-        Chats | Calls | Communities | Spaces | You | Search | Plus | Close | Back | Forward | ChevronRight | ChevronDown
-        | More | MoreHorizontal | Send | Mic | MicOff | Camera | Video | VideoOff | Phone | PhoneIncoming
-        | PhoneOutgoing | PhoneMissed | PhoneOff | Paperclip | Smile | Image | File | MapPin | Contact | Poll
-        | Calendar | Sticker | Lock | Unlock | Shield | ShieldCheck | Key | Eye | EyeOff | Bell | BellOff | Pin
-        | Archive | Star | Trash | Edit | Copy | Reply | Share | Link | QrCode | Scan | Users | UserPlus | User
-        | Settings | Info | Alert | Check | Clock | Timer | Download | Upload | Cloud | HardDrive | Smartphone
-        | Laptop | Globe | Palette | HelpCircle | Heart | Gift | Sparkles | Speaker | ScreenShare | Hand | Grid
-        | Filter | Play | Pause | Megaphone | Flag | Ban | Database | Wifi | WifiOff | Moon | Sun | Zap
-        | Refresh | LogOut | Sliders | Volume | Minimize | Maximize | Keyboard | Feather | Inbox | Layers
-        | Baby | Server | Tablet | FlipCamera | SpeakerView | ChevronUp | ZoomIn | ZoomOut | Compose | ArrowLeft => {}
+        Chats | Calls | Communities | Spaces | You | Search | Plus | Close | Back | Forward
+        | ChevronRight | ChevronDown | More | MoreHorizontal | Send | Mic | MicOff | Camera
+        | Video | VideoOff | Phone | PhoneIncoming | PhoneOutgoing | PhoneMissed | PhoneOff
+        | Paperclip | Smile | Image | File | MapPin | Contact | Poll | Calendar | Sticker
+        | Lock | Unlock | Shield | ShieldCheck | Key | Eye | EyeOff | Bell | BellOff | Pin
+        | Archive | Star | Trash | Edit | Copy | Reply | Share | Link | QrCode | Scan | Users
+        | UserPlus | User | Settings | Info | Alert | Check | Clock | Timer | Download | Upload
+        | Cloud | HardDrive | Smartphone | Laptop | Globe | Palette | HelpCircle | Heart | Gift
+        | Sparkles | Speaker | ScreenShare | Hand | Grid | Filter | Play | Pause | Megaphone
+        | Flag | Ban | Database | Wifi | WifiOff | Moon | Sun | Zap | Refresh | LogOut
+        | Sliders | Volume | Minimize | Maximize | Keyboard | Feather | Inbox | Layers | Baby
+        | Server | Tablet | FlipCamera | SpeakerView | ChevronUp | ZoomIn | ZoomOut | Compose
+        | ArrowLeft | AtSign => {}
     }
 }
 
@@ -81,7 +187,13 @@ const SWATCHES: &[Pair] = &[
 
 /// WCAG relative luminance of an sRGB colour.
 pub fn luminance(r: f32, g: f32, b: f32) -> f32 {
-    let lin = |v: f32| if v <= 0.040_45 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+    let lin = |v: f32| {
+        if v <= 0.040_45 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
     0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
 }
 
@@ -163,20 +275,18 @@ fn body_text(s: &'static str) -> Text {
 
 /// A titled section of the gallery.
 fn section(title: &'static str, content: impl IntoElement) -> View {
-    view().child(section_title(title)).child(view().px_4().gap_3().child(content))
+    view()
+        .child(section_title(title))
+        .child(view().px_4().gap_3().child(content))
 }
 
 /// A caption under an item.
 fn labelled(label: impl Into<SharedString>, item: impl IntoElement) -> View {
-    view()
-        .items_start()
-        .gap_1()
-        .child(item)
-        .child(
-            text(label.into())
-                .text_size(px(font::CAPTION))
-                .text_color(move || c::muted_fg()),
-        )
+    view().items_start().gap_1().child(item).child(
+        text(label.into())
+            .text_size(px(font::CAPTION))
+            .text_color(move || c::muted_fg()),
+    )
 }
 
 /// A wrapping row of items.
@@ -208,21 +318,38 @@ fn skins() -> View {
                 .bg(move || c::background())
                 .border(hairline())
                 .border_color(move || c::border())
-                .child(text(k.label()).text_size(px(sp.page_title.size)).font_weight(sp.page_title.weight).role(AccessibilityRole::Header))
+                .child(
+                    text(k.label())
+                        .text_size(px(sp.page_title.size))
+                        .font_weight(sp.page_title.weight)
+                        .role(AccessibilityRole::Header),
+                )
                 .child(
                     view()
                         .flex_row()
                         .gap_2()
-                        .child(btn("Send", Variant::Primary, BtnSize::Md, || toast("Pressed")))
-                        .child(btn("Later", Variant::Secondary, BtnSize::Md, || toast("Pressed"))),
+                        .child(btn("Send", Variant::Primary, BtnSize::Md, || {
+                            toast("Pressed")
+                        }))
+                        .child(btn("Later", Variant::Secondary, BtnSize::Md, || {
+                            toast("Pressed")
+                        })),
                 )
                 .child(
                     view()
                         .flex_row()
                         .items_center()
                         .gap_3()
-                        .child(toggle(format!("{} on", k.label()), move || on.get(), move |v| on.set(v)))
-                        .child(toggle(format!("{} off", k.label()), move || off.get(), move |v| off.set(v)))
+                        .child(toggle(
+                            format!("{} on", k.label()),
+                            move || on.get(),
+                            move |v| on.set(v),
+                        ))
+                        .child(toggle(
+                            format!("{} off", k.label()),
+                            move || off.get(),
+                            move |v| off.set(v),
+                        ))
                         .child(icon_btn(Icon::More, "More", || {}))
                         .child(sp.fab.then(|| fab(Icon::Plus, "New chat", || {}))),
                 )
@@ -233,12 +360,26 @@ fn skins() -> View {
                         .child(chip("Unread", || true, || {}))
                         .child(chip("Groups", || false, || {})),
                 )
-                .child(segmented(vec![(0_u8, "Day"), (1, "Week")], move || seg.get(), move |v| seg.set(v)))
+                .child(segmented(
+                    vec![(0_u8, "Day"), (1, "Week")],
+                    move || seg.get(),
+                    move |v| seg.set(v),
+                ))
                 .child(search_field("Search", q))
                 .child(
                     view().mx(px(-16.0)).child(group(vec![
-                        Row::new("Privacy").icon(Icon::Lock).chevron().on_press(|| {}).build(),
-                        toggle_row_icon(Icon::Bell, "Alerts", None, move || on.get(), move |v| on.set(v)),
+                        Row::new("Privacy")
+                            .icon(Icon::Lock)
+                            .chevron()
+                            .on_press(|| {})
+                            .build(),
+                        toggle_row_icon(
+                            Icon::Bell,
+                            "Alerts",
+                            None,
+                            move || on.get(),
+                            move |v| on.set(v),
+                        ),
                     ])),
                 )
         })
@@ -270,7 +411,11 @@ fn buttons() -> View {
         (Variant::Ghost, "Ghost"),
         (Variant::Danger, "Danger"),
     ];
-    let sizes = [(BtnSize::Sm, "small"), (BtnSize::Md, "medium"), (BtnSize::Lg, "large")];
+    let sizes = [
+        (BtnSize::Sm, "small"),
+        (BtnSize::Md, "medium"),
+        (BtnSize::Lg, "large"),
+    ];
     section(
         "Buttons",
         view()
@@ -278,20 +423,38 @@ fn buttons() -> View {
             .children(variants.into_iter().map(move |(v, name)| {
                 line()
                     .children(sizes.into_iter().map(move |(sz, sname)| {
-                        labelled(format!("{name} · {sname}"), btn(name, v, sz, || toast("Pressed")))
+                        labelled(
+                            format!("{name} · {sname}"),
+                            btn(name, v, sz, || toast("Pressed")),
+                        )
                     }))
                     .child(labelled(
                         format!("{name} · with icon"),
                         btn_with_icon(name, Some(Icon::Send), v, BtnSize::Md, || toast("Pressed")),
                     ))
-                    .child(labelled(format!("{name} · disabled"), btn(name, v, BtnSize::Md, || {}).disabled(true)))
+                    .child(labelled(
+                        format!("{name} · disabled"),
+                        btn(name, v, BtnSize::Md, || {}).disabled(true),
+                    ))
             }))
             .child(
                 line()
-                    .child(labelled("Icon button", icon_btn(Icon::Search, "Search", || toast("Search"))))
-                    .child(labelled("Icon button", icon_btn(Icon::More, "More", || toast("More"))))
-                    .child(labelled("Icon button · disabled", icon_btn(Icon::Trash, "Delete", || {}).disabled(true)))
-                    .child(labelled("Floating button", fab(Icon::Plus, "New chat", || toast("New chat"))))
+                    .child(labelled(
+                        "Icon button",
+                        icon_btn(Icon::Search, "Search", || toast("Search")),
+                    ))
+                    .child(labelled(
+                        "Icon button",
+                        icon_btn(Icon::More, "More", || toast("More")),
+                    ))
+                    .child(labelled(
+                        "Icon button · disabled",
+                        icon_btn(Icon::Trash, "Delete", || {}).disabled(true),
+                    ))
+                    .child(labelled(
+                        "Floating button",
+                        fab(Icon::Plus, "New chat", || toast("New chat")),
+                    ))
                     .child(labelled(
                         "Floating button · over a list",
                         view()
@@ -301,7 +464,15 @@ fn buttons() -> View {
                             .bg(move || c::card())
                             .border(hairline())
                             .border_color(move || c::border())
-                            .child(view().absolute().right(px(16.0)).bottom(px(16.0)).child(fab(Icon::Plus, "New chat (floating)", || toast("New chat")))),
+                            .child(
+                                view()
+                                    .absolute()
+                                    .right(px(16.0))
+                                    .bottom(px(16.0))
+                                    .child(fab(Icon::Plus, "New chat (floating)", || {
+                                        toast("New chat")
+                                    })),
+                            ),
                     )),
             ),
     )
@@ -319,15 +490,30 @@ fn selection() -> View {
             .gap_4()
             .child(
                 line()
-                    .child(labelled("Chip · selected", chip("Unread", move || chip_on.get(), move || chip_on.update(|v| *v = !*v))))
-                    .child(labelled("Chip · not selected", chip("Groups", move || chip_off.get(), move || chip_off.update(|v| *v = !*v)))),
+                    .child(labelled(
+                        "Chip · selected",
+                        chip(
+                            "Unread",
+                            move || chip_on.get(),
+                            move || chip_on.update(|v| *v = !*v),
+                        ),
+                    ))
+                    .child(labelled(
+                        "Chip · not selected",
+                        chip(
+                            "Groups",
+                            move || chip_off.get(),
+                            move || chip_off.update(|v| *v = !*v),
+                        ),
+                    )),
             )
             .child(labelled(
                 "Chip strip · fades at the end",
                 view().mx(px(-16.0)).w(px(340.0)).child(chip_scroller(
-                    ["All", "Unread", "Favourites", "Groups", "Channels", "Work"].into_iter().enumerate().map(move |(i, l)| {
-                        chip(l, move || i == 0, || {}).into_element()
-                    }),
+                    ["All", "Unread", "Favourites", "Groups", "Channels", "Work"]
+                        .into_iter()
+                        .enumerate()
+                        .map(move |(i, l)| chip(l, move || i == 0, || {}).into_element()),
                     c::background,
                 )),
             ))
@@ -341,10 +527,22 @@ fn selection() -> View {
             ))
             .child(
                 line()
-                    .child(labelled("Toggle · on", toggle("On", move || t_on.get(), move |v| t_on.set(v))))
-                    .child(labelled("Toggle · off", toggle("Off", move || t_off.get(), move |v| t_off.set(v))))
-                    .child(labelled("Toggle · disabled on", toggle("Disabled", || true, |_| {}).disabled(true)))
-                    .child(labelled("Toggle · disabled off", toggle("Disabled", || false, |_| {}).disabled(true))),
+                    .child(labelled(
+                        "Toggle · on",
+                        toggle("On", move || t_on.get(), move |v| t_on.set(v)),
+                    ))
+                    .child(labelled(
+                        "Toggle · off",
+                        toggle("Off", move || t_off.get(), move |v| t_off.set(v)),
+                    ))
+                    .child(labelled(
+                        "Toggle · disabled on",
+                        toggle("Disabled", || true, |_| {}).disabled(true),
+                    ))
+                    .child(labelled(
+                        "Toggle · disabled off",
+                        toggle("Disabled", || false, |_| {}).disabled(true),
+                    )),
             ),
     )
 }
@@ -358,7 +556,12 @@ fn inputs() -> View {
         view()
             .gap_4()
             .max_w(px(420.0))
-            .child(labelled_field("Name", field("Your name", name), "Shown to your contacts.", || false))
+            .child(labelled_field(
+                "Name",
+                field("Your name", name),
+                "Shown to your contacts.",
+                || false,
+            ))
             .child(labelled_field(
                 "Username",
                 field("Username", bad),
@@ -373,7 +576,11 @@ fn rows() -> View {
     let on = signal(true);
     let on_icon = signal(false);
     let caption = |s: &'static str| {
-        text(s).text_size(px(font::CAPTION)).text_color(move || c::muted_fg()).px_4().pt_2()
+        text(s)
+            .text_size(px(font::CAPTION))
+            .text_color(move || c::muted_fg())
+            .px_4()
+            .pt_2()
     };
     section(
         "Rows and groups",
@@ -381,22 +588,70 @@ fn rows() -> View {
             .mx(px(-16.0))
             .max_w(px(560.0))
             .gap_2()
-            .child(caption("Rows with icon tiles: separators start under the titles"))
+            .child(caption(
+                "Rows with icon tiles: separators start under the titles",
+            ))
             .child(group([
-                Row::new("With icon and subtitle").icon(Icon::Bell).subtitle("A short explanation").build(),
-                Row::new("Chevron").icon(Icon::Lock).chevron().on_press(|| toast("Row pressed")).build(),
-                Row::new("Value").icon(Icon::Globe).value("English").on_press(|| toast("Row pressed")).build(),
-                Row::new("Element").icon(Icon::Star).trailing(tag("New")).build(),
-                toggle_row_icon(Icon::Moon, "Toggle row with icon", None, move || on_icon.get(), move |v| on_icon.set(v)),
-                toggle_row_with(Some(Icon::Bell), "Toggle row · disabled", Some("Turned off by Do not disturb"), || true, |_| {}, || true),
-                Row::new("Danger").icon(Icon::Trash).danger().on_press(|| toast("Row pressed")).build(),
+                Row::new("With icon and subtitle")
+                    .icon(Icon::Bell)
+                    .subtitle("A short explanation")
+                    .build(),
+                Row::new("Chevron")
+                    .icon(Icon::Lock)
+                    .chevron()
+                    .on_press(|| toast("Row pressed"))
+                    .build(),
+                Row::new("Value")
+                    .icon(Icon::Globe)
+                    .value("English")
+                    .on_press(|| toast("Row pressed"))
+                    .build(),
+                Row::new("Element")
+                    .icon(Icon::Star)
+                    .trailing(tag("New"))
+                    .build(),
+                toggle_row_icon(
+                    Icon::Moon,
+                    "Toggle row with icon",
+                    None,
+                    move || on_icon.get(),
+                    move |v| on_icon.set(v),
+                ),
+                toggle_row_with(
+                    Some(Icon::Bell),
+                    "Toggle row · disabled",
+                    Some("Turned off by Do not disturb"),
+                    || true,
+                    |_| {},
+                    || true,
+                ),
+                Row::new("Danger")
+                    .icon(Icon::Trash)
+                    .danger()
+                    .on_press(|| toast("Row pressed"))
+                    .build(),
             ]))
             .child(caption("Rows without a leading icon"))
             .child(group_plain([
                 Row::new("Plain row").build(),
-                Row::new("Plain row with value").value("Off").on_press(|| toast("Row pressed")).build(),
-                toggle_row("Toggle row", Some("Subtitle of a toggle row"), move || on.get(), move |v| on.set(v)),
-                toggle_row_with(None, "Toggle row · disabled off", None, || false, |_| {}, || true),
+                Row::new("Plain row with value")
+                    .value("Off")
+                    .on_press(|| toast("Row pressed"))
+                    .build(),
+                toggle_row(
+                    "Toggle row",
+                    Some("Subtitle of a toggle row"),
+                    move || on.get(),
+                    move |v| on.set(v),
+                ),
+                toggle_row_with(
+                    None,
+                    "Toggle row · disabled off",
+                    None,
+                    || false,
+                    |_| {},
+                    || true,
+                ),
             ]))
             .child(caption("People: separators start under the names"))
             .child(group_with_inset(
@@ -406,7 +661,11 @@ fn rows() -> View {
                         .subtitle("online")
                         .on_press(|| toast("Row pressed"))
                         .build(),
-                    Row::new("Mama").leading(avatar("Mama", 5, 36.0)).subtitle("last seen today at 08:26").chevron().build(),
+                    Row::new("Mama")
+                        .leading(avatar("Mama", 5, 36.0))
+                        .subtitle("last seen today at 08:26")
+                        .chevron()
+                        .build(),
                 ],
                 INSET_AVATAR,
             )),
@@ -421,16 +680,37 @@ fn people() -> View {
             .child(labelled("36", avatar("Mihai Ionescu", 2, 36.0)))
             .child(labelled("48", avatar("Ioana Dobre", 3, 48.0)))
             .child(labelled("64", avatar("Tomás Silva", 4, 64.0)))
-            .children((5..9).map(|seed| labelled(format!("Contact {}", seed - 4), avatar("Songbird User", seed, 40.0))))
+            .children((5..9).map(|seed| {
+                labelled(
+                    format!("Contact {}", seed - 4),
+                    avatar("Songbird User", seed, 40.0),
+                )
+            }))
             .child(labelled("You", avatar("Radu", portrait::ME_SEED, 48.0)))
-            .child(labelled("Online", avatar_presence("Ana Popescu", 1, 48.0, || true)))
-            .child(labelled("Online · 36", avatar_presence("Mihai Ionescu", 2, 36.0, || true)))
-            .child(labelled("Offline", avatar_presence("Ana Popescu", 1, 48.0, || false))),
+            .child(labelled(
+                "Online",
+                avatar_presence("Ana Popescu", 1, 48.0, || true),
+            ))
+            .child(labelled(
+                "Online · 36",
+                avatar_presence("Mihai Ionescu", 2, 36.0, || true),
+            ))
+            .child(labelled(
+                "Offline",
+                avatar_presence("Ana Popescu", 1, 48.0, || false),
+            )),
     )
 }
 
 fn status() -> View {
-    let ticks_all = [Tick::Sending, Tick::Sent, Tick::Delivered, Tick::Read, Tick::Played, Tick::Failed];
+    let ticks_all = [
+        Tick::Sending,
+        Tick::Sent,
+        Tick::Delivered,
+        Tick::Read,
+        Tick::Played,
+        Tick::Failed,
+    ];
     section(
         "Status",
         view()
@@ -451,27 +731,53 @@ fn status() -> View {
                             .bg(move || c::accent())
                             .text_color(move || c::primary())
                             .child(icon(Icon::Chats, 22.0))
-                            .child(view().absolute().left(px(31.0)).top(px(-8.0)).w(px(48.0)).items_start().child(unread_badge_on(|| 11, c::background))),
+                            .child(
+                                view()
+                                    .absolute()
+                                    .left(px(31.0))
+                                    .top(px(-8.0))
+                                    .w(px(48.0))
+                                    .items_start()
+                                    .child(unread_badge_on(|| 11, c::background)),
+                            ),
                     ))
                     .child(labelled("Tag", tag("Admin")))
                     .child(labelled("Tag", tag("Plus"))),
             )
-            .child(
-                line().children(ticks_all.into_iter().map(|t| {
-                    labelled(
-                        t.label(),
-                        view().p_2().rounded(move || radius::sm()).bg(move || c::bubble_out()).child(ticks(move || t)),
-                    )
-                })),
-            )
+            .child(line().children(ticks_all.into_iter().map(|t| {
+                labelled(
+                    t.label(),
+                    view()
+                        .p_2()
+                        .rounded(move || radius::sm())
+                        .bg(move || c::bubble_out())
+                        .child(ticks(move || t)),
+                )
+            })))
             .child(
                 view()
                     .gap_2()
                     .max_w(px(520.0))
-                    .child(banner(Tone::Info, Icon::Info, "Info: you're offline. Messages send when you're back."))
-                    .child(banner(Tone::Secure, Icon::Lock, "Secure: messages and calls are end-to-end encrypted."))
-                    .child(banner(Tone::Warning, Icon::Alert, "Warning: your backup is more than a week old."))
-                    .child(banner(Tone::Danger, Icon::Alert, "Danger: this message wasn't sent. Tap to retry.")),
+                    .child(banner(
+                        Tone::Info,
+                        Icon::Info,
+                        "Info: you're offline. Messages send when you're back.",
+                    ))
+                    .child(banner(
+                        Tone::Secure,
+                        Icon::Lock,
+                        "Secure: messages and calls are end-to-end encrypted.",
+                    ))
+                    .child(banner(
+                        Tone::Warning,
+                        Icon::Alert,
+                        "Warning: your backup is more than a week old.",
+                    ))
+                    .child(banner(
+                        Tone::Danger,
+                        Icon::Alert,
+                        "Danger: this message wasn't sent. Tap to retry.",
+                    )),
             ),
     )
 }
@@ -485,7 +791,11 @@ fn surfaces() -> View {
                 card()
                     .max_w(px(420.0))
                     .gap_1()
-                    .child(text("Card").text_size(px(font::TITLE)).font_weight(FontWeight::SEMIBOLD))
+                    .child(
+                        text("Card")
+                            .text_size(px(font::TITLE))
+                            .font_weight(FontWeight::SEMIBOLD),
+                    )
                     .child(muted("Grouped content that is not a list of rows.")),
             )
             .child(
@@ -498,20 +808,30 @@ fn surfaces() -> View {
                         Icon::Inbox,
                         "Empty state",
                         "An icon, a title, one sentence and an optional action.",
-                        Some(btn("Action", Variant::Secondary, BtnSize::Md, || toast("Action")).into_element()),
+                        Some(
+                            btn("Action", Variant::Secondary, BtnSize::Md, || {
+                                toast("Action")
+                            })
+                            .into_element(),
+                        ),
                     )),
             )
-            .child(
-                labelled(
-                    "Skeletons",
-                    view()
-                        .gap_2()
-                        .child(skeleton(220.0, 12.0))
-                        .child(skeleton(160.0, 10.0))
-                        .child(view().w(px(360.0)).child(skeleton_row())),
-                ),
-            )
-            .child(labelled("Separators", view().w(px(320.0)).gap_3().child(separator()).child(separator_inset(56.0)))),
+            .child(labelled(
+                "Skeletons",
+                view()
+                    .gap_2()
+                    .child(skeleton(220.0, 12.0))
+                    .child(skeleton(160.0, 10.0))
+                    .child(view().w(px(360.0)).child(skeleton_row())),
+            ))
+            .child(labelled(
+                "Separators",
+                view()
+                    .w(px(320.0))
+                    .gap_3()
+                    .child(separator())
+                    .child(separator_inset(56.0)),
+            )),
     )
 }
 
@@ -519,12 +839,29 @@ fn overlays(sheet_open: Signal<bool>) -> View {
     section(
         "Overlays",
         line()
-            .child(btn("Show toast", Variant::Secondary, BtnSize::Md, || toast("This is a toast")))
-            .child(btn("Open sheet…", Variant::Secondary, BtnSize::Md, move || sheet_open.set(true)))
-            .child(btn("Confirm…", Variant::Secondary, BtnSize::Md, || {
-                confirm("Delete \"Roadmap\"?", "It is removed from this device.", "Delete", || toast("Deleted"))
+            .child(btn("Show toast", Variant::Secondary, BtnSize::Md, || {
+                toast("This is a toast")
             }))
-            .child(btn("Paywall sheet…", Variant::Secondary, BtnSize::Md, || plans::paywall("Chat themes"))),
+            .child(btn(
+                "Open sheet…",
+                Variant::Secondary,
+                BtnSize::Md,
+                move || sheet_open.set(true),
+            ))
+            .child(btn("Confirm…", Variant::Secondary, BtnSize::Md, || {
+                confirm(
+                    "Delete \"Roadmap\"?",
+                    "It is removed from this device.",
+                    "Delete",
+                    || toast("Deleted"),
+                )
+            }))
+            .child(btn(
+                "Paywall sheet…",
+                Variant::Secondary,
+                BtnSize::Md,
+                || plans::paywall("Chat themes"),
+            )),
     )
 }
 
@@ -535,19 +872,55 @@ fn extras() -> View {
             .gap_4()
             .child(
                 line()
-                    .child(labelled("Link", link("songbird.chat", "https://songbird.chat")))
-                    .child(labelled("Key caps", view().flex_row().gap_1().child(key_cap(key_label("mod+k"))).child(key_cap(key_label("mod+shift+u")))))
+                    .child(labelled(
+                        "Link",
+                        link("songbird.chat", "https://songbird.chat"),
+                    ))
+                    .child(labelled(
+                        "Key caps",
+                        view()
+                            .flex_row()
+                            .gap_1()
+                            .child(key_cap(key_label("mod+k")))
+                            .child(key_cap(key_label("mod+shift+u"))),
+                    ))
                     .child(labelled("WhatsApp marker", whatsapp::whatsapp_marker())),
             )
-            .child(view().max_w(px(420.0)).gap_2().child(bullet(Icon::Check, c::primary, "Bullet with a check")).child(bullet(Icon::Ban, c::muted_fg, "Bullet with a ban")))
-            .child(view().max_w(px(420.0)).child(whatsapp::unsupported_note("Polls")))
+            .child(
+                view()
+                    .max_w(px(420.0))
+                    .gap_2()
+                    .child(bullet(Icon::Check, c::primary, "Bullet with a check"))
+                    .child(bullet(Icon::Ban, c::muted_fg, "Bullet with a ban")),
+            )
+            .child(
+                view()
+                    .max_w(px(420.0))
+                    .child(whatsapp::unsupported_note("Polls")),
+            )
             .child(
                 line()
-                    .child(labelled("Select card · selected", select_card(|| true).w(px(200.0)).child(text("Plus"))))
-                    .child(labelled("Select card", select_card(|| false).w(px(200.0)).child(text("Family")))),
+                    .child(labelled(
+                        "Select card · selected",
+                        select_card(|| true).w(px(200.0)).child(text("Plus")),
+                    ))
+                    .child(labelled(
+                        "Select card",
+                        select_card(|| false).w(px(200.0)).child(text("Family")),
+                    )),
             )
-            .child(labelled("QR code", qr_code("https://songbird.chat/i/radu", 140.0).label("QR code sample").role(AccessibilityRole::Image)))
-            .child(view().mx(px(-16.0)).max_w(px(560.0)).child(plans::announcement_card())),
+            .child(labelled(
+                "QR code",
+                qr_code("https://songbird.chat/i/radu", 140.0)
+                    .label("QR code sample")
+                    .role(AccessibilityRole::Image),
+            ))
+            .child(
+                view()
+                    .mx(px(-16.0))
+                    .max_w(px(560.0))
+                    .child(plans::announcement_card()),
+            ),
     )
 }
 
@@ -577,13 +950,22 @@ fn type_and_shape() -> View {
         "Type, radius and motion",
         view()
             .gap_4()
-            .child(view().gap_2().children(sizes.into_iter().map(|(name, size, weight)| {
-                text(name).text_size(px(size)).font_weight(weight)
-            })))
+            .child(
+                view()
+                    .gap_2()
+                    .children(sizes.into_iter().map(|(name, size, weight)| {
+                        text(name).text_size(px(size)).font_weight(weight)
+                    })),
+            )
             .child(line().children(radii.into_iter().map(|(name, r)| {
                 labelled(
                     name,
-                    view().size(px(64.0)).rounded(move || r()).bg(move || c::accent()).border_1().border_color(move || c::border()),
+                    view()
+                        .size(px(64.0))
+                        .rounded(move || r())
+                        .bg(move || c::accent())
+                        .border_1()
+                        .border_color(move || c::border()),
                 )
             })))
             .child(line().children(motions.into_iter().map(|(name, ms)| {
@@ -595,7 +977,11 @@ fn type_and_shape() -> View {
                         .flex_row()
                         .items_center()
                         .gap_2()
-                        .child(icon_btn(Icon::Play, format!("Play {}", name.to_lowercase()), move || on.update(|v| *v = !*v)))
+                        .child(icon_btn(
+                            Icon::Play,
+                            format!("Play {}", name.to_lowercase()),
+                            move || on.update(|v| *v = !*v),
+                        ))
                         .child(
                             view()
                                 .w(px(120.0))
@@ -608,11 +994,24 @@ fn type_and_shape() -> View {
                                         .m(px(4.0))
                                         .rounded_full()
                                         .bg(move || c::primary())
-                                        .translate_x(move || if on.get() && !reduced { px(88.0) } else { px(0.0) })
-                                        .opacity(move || if on.get() && reduced { 0.5_f32 } else { 1.0 })
+                                        .translate_x(move || {
+                                            if on.get() && !reduced {
+                                                px(88.0)
+                                            } else {
+                                                px(0.0)
+                                            }
+                                        })
+                                        .opacity(
+                                            move || if on.get() && reduced { 0.5_f32 } else { 1.0 },
+                                        )
                                         .transition_all()
                                         .duration(ms)
-                                        .ease_bezier(motion::SETTLE.0, motion::SETTLE.1, motion::SETTLE.2, motion::SETTLE.3),
+                                        .ease_bezier(
+                                            motion::SETTLE.0,
+                                            motion::SETTLE.1,
+                                            motion::SETTLE.2,
+                                            motion::SETTLE.3,
+                                        ),
                                 ),
                         ),
                 )
@@ -638,28 +1037,32 @@ fn icon_name(i: Icon) -> String {
 fn icons() -> View {
     section(
         "Icons",
-        view().flex_row().flex_wrap().gap_2().children(ALL_ICONS.into_iter().map(|i| {
-            let name = icon_name(i);
-            view()
-                .w(px(92.0))
-                .h(px(72.0))
-                .items_center()
-                .justify_center()
-                .gap_1()
-                .rounded(move || radius::sm())
-                .bg(move || c::card())
-                .border_1()
-                .border_color(move || c::border())
-                .role(AccessibilityRole::Image)
-                .label(name.clone())
-                .child(icon(i, 22.0))
-                .child(
-                    text(name)
-                        .text_size(px(11.0))
-                        .number_of_lines(1)
-                        .text_color(move || c::muted_fg()),
-                )
-        })),
+        view()
+            .flex_row()
+            .flex_wrap()
+            .gap_2()
+            .children(ALL_ICONS.into_iter().map(|i| {
+                let name = icon_name(i);
+                view()
+                    .w(px(92.0))
+                    .h(px(72.0))
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .rounded(move || radius::sm())
+                    .bg(move || c::card())
+                    .border_1()
+                    .border_color(move || c::border())
+                    .role(AccessibilityRole::Image)
+                    .label(name.clone())
+                    .child(icon(i, 22.0))
+                    .child(
+                        text(name)
+                            .text_size(px(11.0))
+                            .number_of_lines(1)
+                            .text_color(move || c::muted_fg()),
+                    )
+            })),
     )
 }
 
@@ -759,7 +1162,9 @@ pub fn ExtrasPreview() -> impl IntoElement {
         ("open-help", plans::help),
         ("open-contact", plans::contact),
         ("open-licences", plans::licences),
-        ("open-family", || nav::push("plans-family", plans::family_page)),
+        ("open-family", || {
+            nav::push("plans-family", plans::family_page)
+        }),
         ("open-wa-optin", whatsapp::opt_in),
         ("open-wa-settings", whatsapp::whatsapp_settings),
         ("open-shortcuts", features::desktop::shortcuts_sheet),
@@ -783,10 +1188,14 @@ pub fn ExtrasPreview() -> impl IntoElement {
                 .flex_row()
                 .opacity(0.0)
                 .children(entries.into_iter().map(|(label, f)| {
-                    nsh_base::button().accessibility_label(label).size(px(10.0)).bg(move || c::border()).on_press(move || {
-                        nav::pop_to_root();
-                        f()
-                    })
+                    nsh_base::button()
+                        .accessibility_label(label)
+                        .size(px(10.0))
+                        .bg(move || c::border())
+                        .on_press(move || {
+                            nav::pop_to_root();
+                            f()
+                        })
                 })),
         )
 }

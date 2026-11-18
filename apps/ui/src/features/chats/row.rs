@@ -10,8 +10,7 @@ use nsh_core::{
 
 use super::{animate_change, filter, list_names, model::*, pages, surface};
 use crate::{
-    features,
-    nav,
+    features, nav,
     store::{ChatId, Store},
     ui::*,
 };
@@ -23,7 +22,11 @@ pub fn avatar_size() -> f32 {
 
 /// The preview line's text size: a step under the title.
 pub fn preview_size() -> f32 {
-    if is_desktop() { font::SMALL } else { font::BODY_DESKTOP }
+    if is_desktop() {
+        font::SMALL
+    } else {
+        font::BODY_DESKTOP
+    }
 }
 
 /// Each of the row's two lines is this tall, whatever it holds (a badge,
@@ -61,10 +64,16 @@ pub fn hairline() -> f32 {
 
 /// A virtual list of chat rows (`rows` in order), keyed by chat.
 pub fn chat_list(s: Store, rows: Memo<Vec<ChatRow>>, scope: ListScope) -> VirtualList {
-    virtual_list(move || rows.with(Vec::len), move |at: Position| {
-        let row = computed(move || rows.with(|r| r.get(at.index()).cloned()).unwrap_or_default());
-        chat_row(s, row, scope, None)
-    })
+    virtual_list(
+        move || rows.with(Vec::len),
+        move |at: Position| {
+            let row = computed(move || {
+                rows.with(|r| r.get(at.index()).cloned())
+                    .unwrap_or_default()
+            });
+            chat_row(s, row, scope, None)
+        },
+    )
     .keys(move || rows.with(|r| r.iter().map(|x| x.id).collect::<Vec<_>>()))
     .estimated_item_size(px(72.0))
     // No scrollbar drawn over the rows' trailing counts (desktop).
@@ -74,7 +83,11 @@ pub fn chat_list(s: Store, rows: Memo<Vec<ChatRow>>, scope: ListScope) -> Virtua
 
 /// Whether the row's chat has a (mock) photo.
 fn photo_shown(r: &ChatRow) -> bool {
-    if r.group { portrait::has_photo(r.seed + 1000) } else { portrait::has_photo(r.seed) }
+    if r.group {
+        portrait::has_photo(r.seed + 1000)
+    } else {
+        portrait::has_photo(r.seed)
+    }
 }
 
 /// An avatar that follows the row: initials on the chat's hue, and a
@@ -103,7 +116,11 @@ pub fn live_avatar(row: Memo<ChatRow>, size: f32, surface: fn() -> AdaptiveColor
                 .child(
                     image(move || {
                         row.with(|r| {
-                            if r.group { portrait::scenery(r.seed) } else { portrait::portrait(r.seed) }
+                            if r.group {
+                                portrait::scenery(r.seed)
+                            } else {
+                                portrait::portrait(r.seed)
+                            }
                         })
                     })
                     .absolute()
@@ -119,7 +136,10 @@ pub fn live_avatar(row: Memo<ChatRow>, size: f32, surface: fn() -> AdaptiveColor
                         .border_1()
                         .border_color(move || c::border())
                         .opacity(0.6)
-                        .style_when(move || !row.with(|r| photo_shown(r)), |st| st.hidden().border_color(AdaptiveColor::TRANSPARENT)),
+                        .style_when(
+                            move || !row.with(|r| photo_shown(r)),
+                            |st| st.hidden().border_color(AdaptiveColor::TRANSPARENT),
+                        ),
                 ),
         )
         .child(
@@ -143,7 +163,14 @@ pub fn live_avatar(row: Memo<ChatRow>, size: f32, surface: fn() -> AdaptiveColor
                         .text_color(move || c::muted_fg())
                         .child(dynamic(move || {
                             let channel = row.with(|r| r.channel);
-                            icon(if channel { Icon::Megaphone } else { Icon::Users }, 10.0)
+                            icon(
+                                if channel {
+                                    Icon::Megaphone
+                                } else {
+                                    Icon::Users
+                                },
+                                10.0,
+                            )
                         })),
                 ),
         )
@@ -158,7 +185,12 @@ fn mark(glyph: Icon, size: f32, shown: impl Fn() -> bool + 'static) -> Svg {
 
 /// One chat row in a list; in search results (`query`), the part of the
 /// name that matched is highlighted.
-pub fn chat_row(s: Store, row: Memo<ChatRow>, scope: ListScope, query: Option<Signal<String>>) -> impl IntoElement {
+pub fn chat_row(
+    s: Store,
+    row: Memo<ChatRow>,
+    scope: ListScope,
+    query: Option<Signal<String>>,
+) -> impl IntoElement {
     let desktop_layout = wide();
     let open = nav::open_chat();
     let selected = move || desktop_layout && open.with(|o| o.0) == Some(row.with(|r| r.id));
@@ -173,8 +205,19 @@ pub fn chat_row(s: Store, row: Memo<ChatRow>, scope: ListScope, query: Option<Si
         row.with(|r| r.shown(open_here).clone())
     });
     let typing = move || shown.with(|p| matches!(p, Preview::Typing(_)));
-    let failed = move || shown.with(|p| matches!(p, Preview::Message { tick: Some(Tick::Failed), .. }));
-    let voice = move || row.with(|r| r.voice) && shown.with(|p| matches!(p, Preview::Message { .. }));
+    let failed = move || {
+        shown.with(|p| {
+            matches!(
+                p,
+                Preview::Message {
+                    tick: Some(Tick::Failed),
+                    ..
+                }
+            )
+        })
+    };
+    let voice =
+        move || row.with(|r| r.voice) && shown.with(|p| matches!(p, Preview::Message { .. }));
     // The name, cut around the query's match (search results).
     let cut = computed(move || {
         let title = row.with(|r| r.title.clone());
@@ -209,10 +252,11 @@ pub fn chat_row(s: Store, row: Memo<ChatRow>, scope: ListScope, query: Option<Si
                 .style_when(loud, |st| st.font_weight(FontWeight::SEMIBOLD))
                 .text_color(move || c::foreground()),
         )
-        .child(icon(Icon::ShieldCheck, 15.0).text_color(move || c::primary()).style_when(
-            move || !row.with(|r| r.verified),
-            |st| st.hidden(),
-        ))
+        .child(
+            icon(Icon::ShieldCheck, 15.0)
+                .text_color(move || c::primary())
+                .style_when(move || !row.with(|r| r.verified), |st| st.hidden()),
+        )
         .child(mark(Icon::Lock, 15.0, move || row.with(|r| r.locked)))
         // In the tree only for WhatsApp chats: a hidden bordered view still
         // draws a speck of its border on Android.
@@ -268,12 +312,22 @@ pub fn chat_row(s: Store, row: Memo<ChatRow>, scope: ListScope, query: Option<Si
         .line_height(px(line_height()))
         .font_weight(FontWeight::MEDIUM)
         .text_color(move || {
-            if shown.with(|p| matches!(p, Preview::Draft(_))) { c::primary() } else { c::muted_fg() }
+            if shown.with(|p| matches!(p, Preview::Draft(_))) {
+                c::primary()
+            } else {
+                c::muted_fg()
+            }
         })
         .child(
             text(move || shown.with(|p| p.text().1))
                 .font_weight(FontWeight::NORMAL)
-                .text_color(move || if typing() { c::primary() } else { c::muted_fg() }),
+                .text_color(move || {
+                    if typing() {
+                        c::primary()
+                    } else {
+                        c::muted_fg()
+                    }
+                }),
         );
 
     let preview_line = view()
@@ -283,15 +337,23 @@ pub fn chat_row(s: Store, row: Memo<ChatRow>, scope: ListScope, query: Option<Si
         .gap_1()
         // No delivery ticks on rows (the conversation says it once, under
         // the latest message); only a send that failed shows, as a warning.
-        .child(view().style_when(move || !failed(), |st| st.hidden()).child(ticks(|| Tick::Failed)))
+        .child(
+            view()
+                .style_when(move || !failed(), |st| st.hidden())
+                .child(ticks(|| Tick::Failed)),
+        )
         .child(mark(Icon::Mic, MARK, voice))
         .child(preview)
         // Chat state, at the end with mute and pin: disappearing messages.
-        .child(mark(Icon::Timer, MARK, move || row.with(|r| r.disappearing)))
+        .child(mark(Icon::Timer, MARK, move || {
+            row.with(|r| r.disappearing)
+        }))
         .child(mark(Icon::BellOff, MARK, move || row.with(|r| r.muted)))
         // Pinned chats are the people above the list; a pin here is one
         // past the grid's eight.
-        .child(mark(Icon::Pin, MARK, move || row.with(|r| r.pinned) && scope == ListScope::Inbox))
+        .child(mark(Icon::Pin, MARK, move || {
+            row.with(|r| r.pinned) && scope == ListScope::Inbox
+        }))
         .child(
             view()
                 .size(px(20.0))
@@ -304,14 +366,23 @@ pub fn chat_row(s: Store, row: Memo<ChatRow>, scope: ListScope, query: Option<Si
                     text("@")
                         .text_size(px(font::CAPTION))
                         .font_weight(FontWeight::BOLD)
-                        .text_color(move || if loud() { c::on_primary() } else { c::background() }),
+                        .text_color(move || {
+                            if loud() {
+                                c::on_primary()
+                            } else {
+                                c::background()
+                            }
+                        }),
                 ),
         )
         // The count only when it says more than the dot does (> 1).
         .child(
             view()
                 .style_when(move || row.with(|r| r.unread <= 1), |st| st.hidden())
-                .child(unread_badge(move || row.with(|r| r.unread), move || row.with(|r| r.muted))),
+                .child(unread_badge(
+                    move || row.with(|r| r.unread),
+                    move || row.with(|r| r.muted),
+                )),
         );
 
     let body = view()
@@ -340,7 +411,13 @@ pub fn chat_row(s: Store, row: Memo<ChatRow>, scope: ListScope, query: Option<Si
         .mx(px(inset))
         .when(inset > 0.0, |b| b.rounded(move || radius::control()))
         .cursor_pointer()
-        .bg(move || if selected() { c::accent() } else { AdaptiveColor::TRANSPARENT })
+        .bg(move || {
+            if selected() {
+                c::accent()
+            } else {
+                AdaptiveColor::TRANSPARENT
+            }
+        })
         .transition_colors()
         .duration(motion::INSTANT)
         .hover(move |st| st.bg(move || if selected() { c::accent() } else { c::muted() }))
@@ -353,12 +430,21 @@ pub fn chat_row(s: Store, row: Memo<ChatRow>, scope: ListScope, query: Option<Si
 
 /// `trigger` with the chat's menu: a right click on desktops, a held
 /// finger on phones (as a sheet). Rows and pinned people share it.
-pub fn with_menu(s: Store, row: Memo<ChatRow>, scope: ListScope, trigger: impl IntoElement) -> impl IntoElement {
+pub fn with_menu(
+    s: Store,
+    row: Memo<ChatRow>,
+    scope: ListScope,
+    trigger: impl IntoElement,
+) -> impl IntoElement {
     context_menu()
         .popup_style(popup_style)
         .popup_starting_style(|st| {
             let st = st.opacity(0.0);
-            if motion::reduced() { st } else { st.scale(0.97).translate_y(px(-4.0)) }
+            if motion::reduced() {
+                st
+            } else {
+                st.scale(0.97).translate_y(px(-4.0))
+            }
         })
         .popup_ending_style(|st| st.opacity(0.0))
         .backdrop_style(|st| st.bg(c::overlay()))
@@ -399,8 +485,18 @@ fn item_height() -> f32 {
 
 /// A menu row: a glyph, a label (a closure: it may say Pin or Unpin) and
 /// the shared states. `danger` makes it red.
-pub fn menu_row(glyph: Icon, label: impl Fn() -> String + 'static, danger: bool) -> MenuItemElement {
-    let ink = move || if danger { c::destructive() } else { c::foreground() };
+pub fn menu_row(
+    glyph: Icon,
+    label: impl Fn() -> String + 'static,
+    danger: bool,
+) -> MenuItemElement {
+    let ink = move || {
+        if danger {
+            c::destructive()
+        } else {
+            c::foreground()
+        }
+    };
     menu_item()
         .flex_row()
         .items_center()
@@ -413,7 +509,12 @@ pub fn menu_row(glyph: Icon, label: impl Fn() -> String + 'static, danger: bool)
         .focus(|st| st.bg(move || c::accent()))
         .active(|st| st.bg(move || c::accent()))
         .child(icon(glyph, 18.0).text_color(ink))
-        .child(text(label).flex_1().text_size(px(font::body())).text_color(ink))
+        .child(
+            text(label)
+                .flex_1()
+                .text_size(px(font::body()))
+                .text_color(ink),
+        )
 }
 
 /// A focusable icon that opens a menu (menus open from their trigger by
@@ -438,7 +539,11 @@ pub fn icon_trigger(glyph: Icon, label: &'static str) -> View {
 }
 
 pub fn separator_item() -> nsh_base::MenuSeparatorElement {
-    menu_separator().h(px(hairline())).my_1().mx_3().bg(move || c::border())
+    menu_separator()
+        .h(px(hairline()))
+        .my_1()
+        .mx_3()
+        .bg(move || c::border())
 }
 
 /// What a row's menu offers, labels following the chat's state.
@@ -561,7 +666,11 @@ fn lists_submenu(s: Store, row: Memo<ChatRow>) -> impl IntoElement {
                 .px_3()
                 .h(px(item_height()))
                 .child(icon(Icon::Back, 18.0))
-                .child(text("Add to list").text_size(px(font::body())).font_weight(FontWeight::SEMIBOLD)),
+                .child(
+                    text("Add to list")
+                        .text_size(px(font::body()))
+                        .font_weight(FontWeight::SEMIBOLD),
+                ),
         )
         .child(dynamic(move || {
             list_names(s)
@@ -576,7 +685,9 @@ fn lists_submenu(s: Store, row: Memo<ChatRow>) -> impl IntoElement {
                             let id = row.with_untracked(|r| r.id);
                             held.with(|n| s.toggle_in_list(id, n));
                             // Taken out of the list being shown: show all.
-                            let shown = f.with_untracked(|x| held.with(|n| matches!(&x.list, Filter::List(l) if l == n)));
+                            let shown = f.with_untracked(|x| {
+                                held.with(|n| matches!(&x.list, Filter::List(l) if l == n))
+                            });
                             if shown && !inside() {
                                 f.update(|x| x.list = Filter::All);
                             }
@@ -597,17 +708,30 @@ fn lists_submenu(s: Store, row: Memo<ChatRow>) -> impl IntoElement {
                                 .border_2()
                                 .items_center()
                                 .justify_center()
-                                .border_color(move || if inside() { c::primary() } else { c::input() })
-                                .bg(move || if inside() { c::primary() } else { AdaptiveColor::TRANSPARENT })
+                                .border_color(
+                                    move || if inside() { c::primary() } else { c::input() },
+                                )
+                                .bg(move || {
+                                    if inside() {
+                                        c::primary()
+                                    } else {
+                                        AdaptiveColor::TRANSPARENT
+                                    }
+                                })
                                 .text_color(move || c::on_primary())
-                                .child(icon(Icon::Check, 12.0).style_when(move || !inside(), |st| st.hidden().border_color(AdaptiveColor::TRANSPARENT))),
+                                .child(icon(Icon::Check, 12.0).style_when(
+                                    move || !inside(),
+                                    |st| st.hidden().border_color(AdaptiveColor::TRANSPARENT),
+                                )),
                         )
                         .child(text(name).flex_1().text_size(px(font::body())))
                         .into_element()
                 })
                 .chain(std::iter::once(separator_item().into_element()))
                 .chain(std::iter::once(
-                    menu_row(Icon::Plus, || "New list…".into(), false).on_select(pages::open_lists).into_element(),
+                    menu_row(Icon::Plus, || "New list…".into(), false)
+                        .on_select(pages::open_lists)
+                        .into_element(),
                 ))
                 .collect::<Vec<_>>()
         }))

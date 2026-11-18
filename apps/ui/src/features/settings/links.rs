@@ -1,6 +1,5 @@
 //! Where settings rows lead into other features, in one place.
 
-
 use crate::features;
 
 // Entry points that exist (their owners fill them in).

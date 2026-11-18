@@ -57,7 +57,11 @@ fn list_names(s: Store) -> Vec<String> {
 /// layouts, the page on phones. Cut-outs (badge rings, the group mark,
 /// the capsule's edge fade) take its colour.
 fn surface() -> fn() -> AdaptiveColor {
-    if wide() { floating::pane_bg } else { c::background }
+    if wide() {
+        floating::pane_bg
+    } else {
+        c::background
+    }
 }
 
 /// Animates the list's next layout change when it is the user's doing
@@ -87,7 +91,11 @@ pub fn chats_tab() -> AnyElement {
         // Wide layouts: the shell's floating list pane is the card, so the
         // tab paints nothing behind itself. Phones: the page.
         .when(!desktop, |v| v.bg(move || c::background()))
-        .child(app_header("Chats", false, Some(header_actions(desktop).into_element())))
+        .child(app_header(
+            "Chats",
+            false,
+            Some(header_actions(desktop).into_element()),
+        ))
         .child(when(
             move || s.session.with(|x| x.offline),
             || {
@@ -169,7 +177,9 @@ fn header_actions(desktop: bool) -> View {
         .flex_row()
         .items_center()
         .gap_1()
-        .child((desktop || !spec().fab).then(|| icon_btn(spec().compose_icon(), "New chat", new_chat)))
+        .child(
+            (desktop || !spec().fab).then(|| icon_btn(spec().compose_icon(), "New chat", new_chat)),
+        )
         .child(
             menu()
                 .offset(px(4.0))
@@ -179,11 +189,12 @@ fn header_actions(desktop: bool) -> View {
                 .child(item(Icon::Users, "New group", features::groups::new_group))
                 .child(item(Icon::Layers, "Chat lists", pages::open_lists))
                 .child(
-                    row::menu_row(Icon::Check, || "Mark all as read".to_string(), false)
-                        .on_select(move || {
+                    row::menu_row(Icon::Check, || "Mark all as read".to_string(), false).on_select(
+                        move || {
                             s.mark_all_read();
                             toast("All chats marked as read");
-                        }),
+                        },
+                    ),
                 )
                 .child(row::separator_item())
                 .child(view_item(Icon::Heart, Filter::Favourites))
@@ -210,13 +221,23 @@ fn inbox(s: Store) -> VirtualList {
         let unread = f.with(|x| x.unread);
         let rows = s
             .chats
-            .with(|cs| s.messages.with(|m| s.contacts.with(|ct| model::rows(cs, m, ct, ListScope::Inbox, &which))))
+            .with(|cs| {
+                s.messages.with(|m| {
+                    s.contacts
+                        .with(|ct| model::rows(cs, m, ct, ListScope::Inbox, &which))
+                })
+            })
             .into_iter()
             // WhatsApp chats (A15): gone when unlinked; in All only when the
             // user keeps them together, else under their own segment.
-            .filter(|r| !r.whatsapp || (s.whatsapp_linked() && (which != Filter::All || s.whatsapp_in_all())))
+            .filter(|r| {
+                !r.whatsapp
+                    || (s.whatsapp_linked() && (which != Filter::All || s.whatsapp_in_all()))
+            })
             .collect::<Vec<_>>();
-        let order = s.chats.with(|cs| cs.iter().map(|c| c.id).collect::<Vec<_>>());
+        let order = s
+            .chats
+            .with(|cs| cs.iter().map(|c| c.id).collect::<Vec<_>>());
         model::inbox(rows, &order, unread, triage, show_all.get())
     });
     let pinned = computed(move || split.with(|x| x.pinned.clone()));
@@ -235,7 +256,9 @@ fn inbox(s: Store) -> VirtualList {
             view()
                 .child(requests_notice(s))
                 .child(pinned::grid(s, pinned))
-                .child(when(sections, move || needs_section(s, split, needs, show_all)))
+                .child(when(sections, move || {
+                    needs_section(s, split, needs, show_all)
+                }))
                 .child(when(
                     move || sections() && recent.with(|r| !r.is_empty()),
                     || section_label("Recent"),
@@ -316,12 +339,35 @@ fn needs_section(
         ))
         .child(when(expandable, move || {
             quiet_row(
-                move || if show_all.get() { Icon::ChevronUp } else { Icon::ChevronDown },
-                move || (if show_all.get() { "Show less" } else { "Show all" }).to_string(),
-                move || if show_all.get() { String::new() } else { total().to_string() },
+                move || {
+                    if show_all.get() {
+                        Icon::ChevronUp
+                    } else {
+                        Icon::ChevronDown
+                    }
+                },
+                move || {
+                    (if show_all.get() {
+                        "Show less"
+                    } else {
+                        "Show all"
+                    })
+                    .to_string()
+                },
+                move || {
+                    if show_all.get() {
+                        String::new()
+                    } else {
+                        total().to_string()
+                    }
+                },
                 || false,
                 move || {
-                    if show_all.get() { "Show less".to_string() } else { format!("Show all {} chats that need a reply", total()) }
+                    if show_all.get() {
+                        "Show less".to_string()
+                    } else {
+                        format!("Show all {} chats that need a reply", total())
+                    }
                 },
                 move || {
                     animate_change();
@@ -338,7 +384,11 @@ fn requests_notice(s: Store) -> impl IntoElement {
     let count = computed(move || s.chats.with(|cs| cs.iter().filter(|c| c.request).count()));
     let label = move || {
         let n = count.get();
-        if n == 1 { "1 message request".to_string() } else { format!("{n} message requests") }
+        if n == 1 {
+            "1 message request".to_string()
+        } else {
+            format!("{n} message requests")
+        }
     };
     when(
         move || count.get() > 0 && f.with(|x| x.list == Filter::All && !x.unread),
@@ -359,7 +409,11 @@ fn requests_notice(s: Store) -> impl IntoElement {
                     .duration(motion::INSTANT)
                     .hover(|st| st.bg(move || c::muted()))
                     .active(|st| st.bg(move || c::accent()))
-                    .focus_visible(|st| st.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
+                    .focus_visible(|st| {
+                        st.outline(px(2.0))
+                            .outline_offset(px(2.0))
+                            .outline_color(move || c::ring())
+                    })
                     .child(icon(Icon::Inbox, 16.0).text_color(move || c::muted_fg()))
                     .child(
                         text(label)
@@ -408,8 +462,16 @@ fn footer(s: Store) -> View {
                     move || archived.get().1 > 0,
                     move || {
                         let (n, unread) = archived.get();
-                        let chats = if n == 1 { "1 chat".to_string() } else { format!("{n} chats") };
-                        if unread > 0 { format!("Archived, {chats}, {unread} unread") } else { format!("Archived, {chats}") }
+                        let chats = if n == 1 {
+                            "1 chat".to_string()
+                        } else {
+                            format!("{n} chats")
+                        };
+                        if unread > 0 {
+                            format!("Archived, {chats}, {unread} unread")
+                        } else {
+                            format!("Archived, {chats}")
+                        }
                     },
                     pages::open_archived,
                 )
@@ -478,7 +540,7 @@ fn quiet_row(
                         .rounded_full()
                         .bg(move || c::primary())
                         .style_when(move || !dot(), |st| st.hidden()),
-                )
+                ),
         )
 }
 

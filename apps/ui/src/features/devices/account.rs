@@ -104,7 +104,11 @@ fn body() -> AnyElement {
                 }
             },
         ),
-        Row::new("Change PIN").icon(Icon::Key).chevron().on_press(move || pin_open.set(true)).build(),
+        Row::new("Change PIN")
+            .icon(Icon::Key)
+            .chevron()
+            .on_press(move || pin_open.set(true))
+            .build(),
     ]);
 
     let passkeys = dynamic(move || {
@@ -120,9 +124,12 @@ fn body() -> AnyElement {
                         .subtitle("Added today")
                         .trailing(
                             icon_btn(Icon::Trash, "Remove passkey", move || {
-                                confirm("Remove this passkey?", "You can't sign in with it any more.", "Remove", move || {
-                                    s.remove_passkey(i)
-                                })
+                                confirm(
+                                    "Remove this passkey?",
+                                    "You can't sign in with it any more.",
+                                    "Remove",
+                                    move || s.remove_passkey(i),
+                                )
                             })
                             .text_color(move || c::destructive()),
                         )
@@ -130,22 +137,26 @@ fn body() -> AnyElement {
                 })
                 .collect();
             rows.push(
-                Row::new(if busy { "Waiting for your device…" } else { "Add a passkey" })
-                    .icon(Icon::Plus)
-                    .on_press(move || {
-                        if adding_passkey.get_untracked() {
-                            return;
+                Row::new(if busy {
+                    "Waiting for your device…"
+                } else {
+                    "Add a passkey"
+                })
+                .icon(Icon::Plus)
+                .on_press(move || {
+                    if adding_passkey.get_untracked() {
+                        return;
+                    }
+                    adding_passkey.set(true);
+                    // mock: the platform's passkey sheet (app-core `add_passkey`).
+                    set_timeout(Duration::from_millis(1400), move || {
+                        if adding_passkey.try_set(false) {
+                            s.add_passkey();
+                            toast("Passkey added");
                         }
-                        adding_passkey.set(true);
-                        // mock: the platform's passkey sheet (app-core `add_passkey`).
-                        set_timeout(Duration::from_millis(1400), move || {
-                            if adding_passkey.try_set(false) {
-                                s.add_passkey();
-                                toast("Passkey added");
-                            }
-                        });
-                    })
-                    .build(),
+                    });
+                })
+                .build(),
             );
             group(rows).into_element()
         })
@@ -244,18 +255,24 @@ pub fn account_switcher(open: Signal<bool>) -> AnyElement {
             let me = s.me.get();
             let others = extra.with(|a| a.others.clone());
             untracked(move || {
-                let mut rows = vec![Row::new(me.name.clone())
-                    .leading(avatar(me.name.clone(), me.seed, 36.0))
-                    .subtitle(format!("@{}", me.username))
-                    .trailing(
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .gap_1()
-                            .child(icon(Icon::Check, 16.0).text_color(move || c::primary()))
-                            .child(text("Current").text_size(px(font::SMALL)).text_color(move || c::muted_fg())),
-                    )
-                    .build()];
+                let mut rows = vec![
+                    Row::new(me.name.clone())
+                        .leading(avatar(me.name.clone(), me.seed, 36.0))
+                        .subtitle(format!("@{}", me.username))
+                        .trailing(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                .child(icon(Icon::Check, 16.0).text_color(move || c::primary()))
+                                .child(
+                                    text("Current")
+                                        .text_size(px(font::SMALL))
+                                        .text_color(move || c::muted_fg()),
+                                ),
+                        )
+                        .build(),
+                ];
                 for (i, a) in others.into_iter().enumerate() {
                     let name = a.name.clone();
                     rows.push(
@@ -343,7 +360,13 @@ fn pin_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
 fn delete_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
     let typed = signal(String::new());
     let username = move || s.me.with(|m| m.username.clone());
-    let matches = move || typed.with(|t| t.trim().trim_start_matches('@').eq_ignore_ascii_case(&username()));
+    let matches = move || {
+        typed.with(|t| {
+            t.trim()
+                .trim_start_matches('@')
+                .eq_ignore_ascii_case(&username())
+        })
+    };
     app_sheet(
         open,
         "Delete account",

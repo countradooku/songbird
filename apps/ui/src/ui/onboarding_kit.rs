@@ -27,7 +27,9 @@ pub fn qr_code(data: &str, size: f32) -> View {
     for r in 0..N {
         for col in 0..N {
             if modules[r * N + col] {
-                rects.push_str(&format!(r#"<rect x="{col}" y="{r}" width="1" height="1"/>"#));
+                rects.push_str(&format!(
+                    r#"<rect x="{col}" y="{r}" width="1" height="1"/>"#
+                ));
             }
         }
     }
@@ -126,7 +128,9 @@ pub fn progress_bar(label: &'static str, fraction: impl Fn() -> f32 + Copy + 'st
                 .bg(move || c::primary())
                 .origin_left()
                 .scale_x(move || fraction().clamp(0.0, 1.0))
-                .when(!motion::reduced(), |v| v.transition_transform().duration(motion::BASE).ease_out()),
+                .when(!motion::reduced(), |v| {
+                    v.transition_transform().duration(motion::BASE).ease_out()
+                }),
         )
 }
 
@@ -136,8 +140,12 @@ pub fn busy_bar(label: &'static str) -> View {
     let slide = motion();
     if !motion::reduced() {
         let _ = slide.play(
-            MotionSpec::new(KeyframeTiming::new(1200.0).easing(Easing::EaseInOut).infinite())
-                .values(MotionChannel::TranslateX, [-48.0, 320.0]),
+            MotionSpec::new(
+                KeyframeTiming::new(1200.0)
+                    .easing(Easing::EaseInOut)
+                    .infinite(),
+            )
+            .values(MotionChannel::TranslateX, [-48.0, 320.0]),
         );
     }
     // The track is tinted (accent), so the bar reads as working even in
@@ -177,7 +185,13 @@ pub fn step_segments(count: usize, current: impl Fn() -> usize + Copy + 'static)
                 .rounded_full()
                 // Inactive segments on the input tone: visible on a card in
                 // dark as in light.
-                .bg(move || if i <= current() { c::primary() } else { c::input() })
+                .bg(move || {
+                    if i <= current() {
+                        c::primary()
+                    } else {
+                        c::input()
+                    }
+                })
                 .transition_colors()
                 .duration(motion::BASE)
         }))
@@ -213,7 +227,9 @@ pub fn page_dots(
                         .w(move || px(if selected() { 22.0 } else { 8.0 }))
                         .rounded_full()
                         .bg(move || if selected() { c::primary() } else { c::input() })
-                        .when(!motion::reduced(), |v| v.transition_all().duration(motion::BASE).ease_in_out()),
+                        .when(!motion::reduced(), |v| {
+                            v.transition_all().duration(motion::BASE).ease_in_out()
+                        }),
                 )
         }))
 }
@@ -384,8 +400,18 @@ pub fn code_cells(
             .rounded(move || radius::control())
             .bg(move || c::card())
             .border_1()
-            .border_color(move || if invalid() { c::destructive() } else if next() { c::ring() } else { c::input() })
-            .style_when(next, |s| s.outline(px(1.0)).outline_color(move || c::ring()))
+            .border_color(move || {
+                if invalid() {
+                    c::destructive()
+                } else if next() {
+                    c::ring()
+                } else {
+                    c::input()
+                }
+            })
+            .style_when(next, |s| {
+                s.outline(px(1.0)).outline_color(move || c::ring())
+            })
             .transition_colors()
             .duration(motion::INSTANT)
             .children((0..group).map(move |k| {
@@ -397,22 +423,26 @@ pub fn code_cells(
                     .font_family(MONO)
                     .text_size(px(font::TITLE))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(move || if ch().is_some() { c::foreground() } else { c::muted_fg() })
+                    .text_color(move || {
+                        if ch().is_some() {
+                            c::foreground()
+                        } else {
+                            c::muted_fg()
+                        }
+                    })
             }))
     };
     view()
         .relative()
         .w_full()
-        .child(
-            view()
-                .gap_2()
-                .accessibility_elements_hidden(true)
-                .children((0..blocks.div_ceil(PER_ROW)).map(move |row| {
-                    view().flex_row().gap_2().children(
-                        (row * PER_ROW..((row + 1) * PER_ROW).min(blocks)).map(block),
-                    )
-                })),
-        )
+        .child(view().gap_2().accessibility_elements_hidden(true).children(
+            (0..blocks.div_ceil(PER_ROW)).map(move |row| {
+                view()
+                    .flex_row()
+                    .gap_2()
+                    .children((row * PER_ROW..((row + 1) * PER_ROW).min(blocks)).map(block))
+            }),
+        ))
         .child(
             nsh_base::input()
                 .absolute()

@@ -43,7 +43,12 @@ fn action(glyph: Icon, label: &'static str, on_press: impl Fn() + 'static) -> im
             .px(px(row::GUTTER - row::fill_inset()))
             .min_h(px(if is_desktop() { 52.0 } else { 60.0 }))
             .child(action_tile(glyph))
-            .child(text(label).flex_1().text_size(px(font::body())).font_weight(FontWeight::MEDIUM)),
+            .child(
+                text(label)
+                    .flex_1()
+                    .text_size(px(font::body()))
+                    .font_weight(FontWeight::MEDIUM),
+            ),
     )
 }
 
@@ -52,18 +57,27 @@ fn body() -> impl IntoElement {
     let query = signal(String::new());
     let people = computed(move || {
         let q = query.get();
-        s.chats.with(|cs| s.contacts.with(|ct| model::contacts_az(cs, ct, &q)))
+        s.chats
+            .with(|cs| s.contacts.with(|ct| model::contacts_az(cs, ct, &q)))
     });
     let browsing = move || query.with(|q| q.trim().is_empty());
     let username = s.me.with_untracked(|m| m.username.clone());
     view()
         .flex_1()
-        .child(view().px_4().py_2().child(search_field("Search name or username", query)))
         .child(
-            virtual_list(move || people.with(Vec::len), move |at: Position| {
-                let p = computed(move || people.with(|v| v.get(at.index()).cloned()));
-                contact_cell(s, p)
-            })
+            view()
+                .px_4()
+                .py_2()
+                .child(search_field("Search name or username", query)),
+        )
+        .child(
+            virtual_list(
+                move || people.with(Vec::len),
+                move |at: Position| {
+                    let p = computed(move || people.with(|v| v.get(at.index()).cloned()));
+                    contact_cell(s, p)
+                },
+            )
             .keys(move || people.with(|v| v.iter().map(|p| p.id).collect::<Vec<_>>()))
             .estimated_item_size(px(64.0))
             .header(
@@ -71,12 +85,20 @@ fn body() -> impl IntoElement {
                     .child(when(browsing, move || {
                         let username = username.clone();
                         view()
-                            .child(action(Icon::Users, "New group", features::groups::new_group))
+                            .child(action(
+                                Icon::Users,
+                                "New group",
+                                features::groups::new_group,
+                            ))
                             .child(action(Icon::Communities, "New community", || {
                                 nav::pop_to_root();
                                 nav::tab().set(Tab::Spaces);
                             }))
-                            .child(action(Icon::Megaphone, "New broadcast list", open_broadcast))
+                            .child(action(
+                                Icon::Megaphone,
+                                "New broadcast list",
+                                open_broadcast,
+                            ))
                             .child(action(Icon::Share, "Invite a friend", move || {
                                 // mock: app-core makes a one-time invite
                                 // (A10 invites); the link format is final.
@@ -111,7 +133,9 @@ fn contact_cell(s: Store, p: Memo<Option<crate::store::Contact>>) -> impl IntoEl
 // ---------------------------------------------------------------- broadcast
 
 fn open_broadcast() {
-    nav::push("chats:broadcast", || page("New broadcast list", broadcast()));
+    nav::push("chats:broadcast", || {
+        page("New broadcast list", broadcast())
+    });
 }
 
 /// Picks two or more recipients. The real app makes a broadcast list
@@ -119,7 +143,10 @@ fn open_broadcast() {
 fn broadcast() -> impl IntoElement {
     let s = store();
     let picked = signal(HashSet::<ContactId>::new());
-    let people = computed(move || s.chats.with(|cs| s.contacts.with(|ct| model::contacts_az(cs, ct, ""))));
+    let people = computed(move || {
+        s.chats
+            .with(|cs| s.contacts.with(|ct| model::contacts_az(cs, ct, "")))
+    });
     let count = move || picked.with(HashSet::len);
     view()
         .flex_1()
@@ -251,23 +278,28 @@ fn scan() -> impl IntoElement {
             )
             .child(muted("The code is read on this device.").text_center())
             .child(
-                card().w_full().max_w(px(360.0)).gap_2().child(section_label("Your code")).child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_3()
-                        .child(icon_tile(Icon::QrCode))
-                        .child(
-                            text(format!("songbird.chat/u/{username}"))
-                                .flex_1()
-                                .number_of_lines(1)
-                                .text_size(px(font::SMALL + 1.0)),
-                        )
-                        .child(icon_btn(Icon::Copy, "Copy your link", move || {
-                            set_clipboard(format!("https://songbird.chat/u/{username}"));
-                            toast("Your link is copied");
-                        })),
-                ),
+                card()
+                    .w_full()
+                    .max_w(px(360.0))
+                    .gap_2()
+                    .child(section_label("Your code"))
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_3()
+                            .child(icon_tile(Icon::QrCode))
+                            .child(
+                                text(format!("songbird.chat/u/{username}"))
+                                    .flex_1()
+                                    .number_of_lines(1)
+                                    .text_size(px(font::SMALL + 1.0)),
+                            )
+                            .child(icon_btn(Icon::Copy, "Copy your link", move || {
+                                set_clipboard(format!("https://songbird.chat/u/{username}"));
+                                toast("Your link is copied");
+                            })),
+                    ),
             ),
     )
 }

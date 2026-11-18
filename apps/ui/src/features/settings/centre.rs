@@ -45,14 +45,46 @@ const CAN_SEE: [Item; 6] = [
 ];
 
 const NEVER_SEES: [Item; 8] = [
-    (Icon::Chats, "Your messages.", "Only the people in a chat hold the keys to read it."),
-    (Icon::Image, "Your photos, videos and files.", "Each file is locked on your device with its own key before it's uploaded."),
-    (Icon::Video, "Your voice and video calls.", "Calls are encrypted end to end, including group calls."),
-    (Icon::User, "Your name, photo and about.", "Your profile is encrypted. Only the people you allow get its key."),
-    (Icon::Communities, "Group names, photos and descriptions.", "Members share a key for these. Our servers keep only the locked copy."),
-    (Icon::Contact, "Your contacts.", "Your contact list is synced between your devices encrypted. We never upload your address book."),
-    (Icon::Settings, "Your settings.", "Theme, notifications, who sees your last seen: each is an encrypted record only your devices can read."),
-    (Icon::Cloud, "What's in your backups.", "Backups are locked with your recovery key before they leave your device."),
+    (
+        Icon::Chats,
+        "Your messages.",
+        "Only the people in a chat hold the keys to read it.",
+    ),
+    (
+        Icon::Image,
+        "Your photos, videos and files.",
+        "Each file is locked on your device with its own key before it's uploaded.",
+    ),
+    (
+        Icon::Video,
+        "Your voice and video calls.",
+        "Calls are encrypted end to end, including group calls.",
+    ),
+    (
+        Icon::User,
+        "Your name, photo and about.",
+        "Your profile is encrypted. Only the people you allow get its key.",
+    ),
+    (
+        Icon::Communities,
+        "Group names, photos and descriptions.",
+        "Members share a key for these. Our servers keep only the locked copy.",
+    ),
+    (
+        Icon::Contact,
+        "Your contacts.",
+        "Your contact list is synced between your devices encrypted. We never upload your address book.",
+    ),
+    (
+        Icon::Settings,
+        "Your settings.",
+        "Theme, notifications, who sees your last seen: each is an encrypted record only your devices can read.",
+    ),
+    (
+        Icon::Cloud,
+        "What's in your backups.",
+        "Backups are locked with your recovery key before they leave your device.",
+    ),
 ];
 
 pub fn privacy_centre() {
@@ -133,8 +165,22 @@ fn backup_action() {
 
 /// The two lists, side by side when there is room.
 fn columns() -> AnyElement {
-    let can = || list("Songbird's servers can see", Icon::Eye, Tone::Info, &CAN_SEE);
-    let never = || list("Songbird never sees", Icon::EyeOff, Tone::Secure, &NEVER_SEES);
+    let can = || {
+        list(
+            "Songbird's servers can see",
+            Icon::Eye,
+            Tone::Info,
+            &CAN_SEE,
+        )
+    };
+    let never = || {
+        list(
+            "Songbird never sees",
+            Icon::EyeOff,
+            Tone::Secure,
+            &NEVER_SEES,
+        )
+    };
     when(wide, move || {
         // Stretched, so the two cards end on one line.
         view()
@@ -164,8 +210,20 @@ fn list(title: &'static str, glyph: Icon, tone: Tone, items: &'static [Item]) ->
                         .rounded_full()
                         .items_center()
                         .justify_center()
-                        .bg(move || if tone == Tone::Secure { c::accent() } else { c::info_bg() })
-                        .text_color(move || if tone == Tone::Secure { c::primary() } else { c::link() })
+                        .bg(move || {
+                            if tone == Tone::Secure {
+                                c::accent()
+                            } else {
+                                c::info_bg()
+                            }
+                        })
+                        .text_color(move || {
+                            if tone == Tone::Secure {
+                                c::primary()
+                            } else {
+                                c::link()
+                            }
+                        })
                         .child(icon(glyph, 16.0)),
                 )
                 .child(
@@ -185,21 +243,33 @@ fn list(title: &'static str, glyph: Icon, tone: Tone, items: &'static [Item]) ->
                 .gap_3()
                 .child(icon(*g, 18.0).mt(px(2.0)).text_color(move || c::muted_fg()))
                 .child(
-                    view()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .child(text(*line).text_size(px(font::body())).line_height(px(font::body() * 1.35))),
+                    view().flex_1().min_w(px(0.0)).child(
+                        text(*line)
+                            .text_size(px(font::body()))
+                            .line_height(px(font::body() * 1.35)),
+                    ),
                 )
         }))
         .child(view().flex_grow(1.0))
-        .child(view().flex_row().child(btn("Read the details", Variant::Ghost, BtnSize::Sm, || {
-            crate::features::plans::open_article("can-see")
-        }).ml(px(-12.0))))
+        .child(
+            view().flex_row().child(
+                btn("Read the details", Variant::Ghost, BtnSize::Sm, || {
+                    crate::features::plans::open_article("can-see")
+                })
+                .ml(px(-12.0)),
+            ),
+        )
 }
 
 /// A topic under the lists: a heading, one sentence, more on demand,
 /// an optional way to act on it.
-fn topic(glyph: Icon, title: &'static str, line: &'static str, more: &'static str, action: Option<(&'static str, fn())>) -> View {
+fn topic(
+    glyph: Icon,
+    title: &'static str,
+    line: &'static str,
+    more: &'static str,
+    action: Option<(&'static str, fn())>,
+) -> View {
     view().px_4().pt_4().child(
         card()
             .flex_row()
@@ -220,7 +290,12 @@ fn topic(glyph: Icon, title: &'static str, line: &'static str, more: &'static st
                     .child(muted(line))
                     .child(expander("Learn more", more))
                     .child(action.map(|(label, f)| {
-                        view().flex_row().pt_1().child(btn(label, Variant::Outline, BtnSize::Sm, move || f()))
+                        view().flex_row().pt_1().child(btn(
+                            label,
+                            Variant::Outline,
+                            BtnSize::Sm,
+                            move || f(),
+                        ))
                     })),
             ),
     )

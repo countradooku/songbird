@@ -28,7 +28,11 @@ enum Page {
 /// The wizard as one element (its steps inside). `skip_key`: the user just
 /// confirmed the recovery key. `on_done` leaves it. With a `host`, the
 /// host's Back steps through the pages and the wizard draws none of its own.
-pub(crate) fn wizard_body(skip_key: bool, on_done: Rc<dyn Fn()>, host: Option<FlowHost>) -> AnyElement {
+pub(crate) fn wizard_body(
+    skip_key: bool,
+    on_done: Rc<dyn Fn()>,
+    host: Option<FlowHost>,
+) -> AnyElement {
     let s = store();
     // Onboarding has just asked "Back up your chats?", so its wizard
     // starts at the destination: no second intro.
@@ -49,12 +53,14 @@ pub(crate) fn wizard_body(skip_key: bool, on_done: Rc<dyn Fn()>, host: Option<Fl
         Page::Options => Some(if skip_key { Page::Where } else { Page::Key }),
     };
     if let Some(h) = host {
-        h.back.replace(Some(Rc::new(move || match previous(page.get_untracked()) {
-            Some(p) => {
-                go(p, false);
-                true
+        h.back.replace(Some(Rc::new(move || {
+            match previous(page.get_untracked()) {
+                Some(p) => {
+                    go(p, false);
+                    true
+                }
+                None => false,
             }
-            None => false,
         })));
     }
     // The wizard's own Back, only when no host draws one.

@@ -47,43 +47,51 @@ const JUMP_ROOM: f32 = 56.0;
 /// The list of messages.
 pub(crate) fn message_list(cv: Conv) -> impl IntoElement {
     let (s, chat) = (cv.s, cv.chat);
-    virtual_list(move || s.message_count(chat), move |at: Position| row(cv, at))
-        .keys(move || s.message_ids(chat))
-        .estimated_item_size(px(58.0))
-        .alignment(ListAlignment::Bottom)
-        .follow_end(px(END_SLOP))
-        .initial_scroll_at_end()
-        // The messages scroll under the floating header and composer:
-        // their measured frames keep the first and last messages clear.
-        .content_padding_top(move || px(cv.top_inset.get() + 8.0))
-        // While scrolled up, the jump-to-latest button floats over the
-        // list's end: room for it, so it never covers the status line.
-        .content_padding_bottom(move || {
-            px(cv.bottom_inset.get() + if cv.following.get() { 8.0 } else { 8.0 + JUMP_ROOM })
-        })
-        .footer(typing_indicator(cv))
-        .keyboard_dismiss_mode(KeyboardDismissMode::Interactive)
-        .event_throttle(100.0)
-        .on_scroll(move |e: &ScrollEvent| {
-            let at_end = e.offset.y + e.size.height >= e.content_size.height - px(END_SLOP);
-            if cv.following.get_untracked() != at_end {
-                cv.following.set(at_end);
-            }
-            if at_end && cv.unseen.get_untracked() > 0 {
-                cv.unseen.set(0);
-                cv.s.mark_read(cv.chat);
-            }
-        })
-        .flex_1()
-        .element_ref(&cv.list)
-        .label("Messages")
+    virtual_list(
+        move || s.message_count(chat),
+        move |at: Position| row(cv, at),
+    )
+    .keys(move || s.message_ids(chat))
+    .estimated_item_size(px(58.0))
+    .alignment(ListAlignment::Bottom)
+    .follow_end(px(END_SLOP))
+    .initial_scroll_at_end()
+    // The messages scroll under the floating header and composer:
+    // their measured frames keep the first and last messages clear.
+    .content_padding_top(move || px(cv.top_inset.get() + 8.0))
+    // While scrolled up, the jump-to-latest button floats over the
+    // list's end: room for it, so it never covers the status line.
+    .content_padding_bottom(move || {
+        px(cv.bottom_inset.get()
+            + if cv.following.get() {
+                8.0
+            } else {
+                8.0 + JUMP_ROOM
+            })
+    })
+    .footer(typing_indicator(cv))
+    .keyboard_dismiss_mode(KeyboardDismissMode::Interactive)
+    .event_throttle(100.0)
+    .on_scroll(move |e: &ScrollEvent| {
+        let at_end = e.offset.y + e.size.height >= e.content_size.height - px(END_SLOP);
+        if cv.following.get_untracked() != at_end {
+            cv.following.set(at_end);
+        }
+        if at_end && cv.unseen.get_untracked() > 0 {
+            cv.unseen.set(0);
+            cv.s.mark_read(cv.chat);
+        }
+    })
+    .flex_1()
+    .element_ref(&cv.list)
+    .label("Messages")
 }
 
 /// A sent message rising in from the composer.
 fn rise() -> MotionSpec {
     MotionSpec::new(super::timing(motion::SLOW, Easing::EaseOut))
-    .values(MotionChannel::Opacity, [0.0, 1.0])
-    .values(MotionChannel::TranslateY, [8.0, 0.0])
+        .values(MotionChannel::Opacity, [0.0, 1.0])
+        .values(MotionChannel::TranslateY, [8.0, 0.0])
 }
 
 /// The rhythm of a conversation (REDESIGN.md "Conversation details"):
@@ -132,7 +140,13 @@ fn row(cv: Conv, at: Position) -> View {
         .w_full()
         .items_center()
         .bind_motion(&enter)
-        .bg(move || if lit() { c::highlight().opacity(0.55) } else { AdaptiveColor::TRANSPARENT })
+        .bg(move || {
+            if lit() {
+                c::highlight().opacity(0.55)
+            } else {
+                AdaptiveColor::TRANSPARENT
+            }
+        })
         .transition_colors()
         .duration(motion::SLOW)
         .child(
@@ -158,15 +172,20 @@ fn row(cv: Conv, at: Position) -> View {
 fn time_label(label: Memo<String>) -> View {
     // 16pt above the label (the run gap and 6), 8pt below: it belongs to
     // the run under it.
-    view().w_full().items_center().pt(px(6.0)).pb(px(8.0)).child(
-        text(move || label.get())
-            .text_size(px(font::CAPTION))
-            .line_height(px(16.0))
-            .font_weight(FontWeight::MEDIUM)
-            .tabular_nums()
-            .text_color(move || c::muted_fg())
-            .role(AccessibilityRole::Header),
-    )
+    view()
+        .w_full()
+        .items_center()
+        .pt(px(6.0))
+        .pb(px(8.0))
+        .child(
+            text(move || label.get())
+                .text_size(px(font::CAPTION))
+                .line_height(px(16.0))
+                .font_weight(FontWeight::MEDIUM)
+                .tabular_nums()
+                .text_color(move || c::muted_fg())
+                .role(AccessibilityRole::Header),
+        )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -191,7 +210,10 @@ fn notice_of(t: &str) -> Notice {
 }
 
 /// The system line's text and its leading glyph (14pt).
-fn notice_line(glyph: impl Fn() -> Icon + Copy + 'static, words: impl Fn() -> String + 'static) -> Text {
+fn notice_line(
+    glyph: impl Fn() -> Icon + Copy + 'static,
+    words: impl Fn() -> String + 'static,
+) -> Text {
     text("")
         .text_size(px(font::CAPTION))
         .line_height(px(17.0))
@@ -232,7 +254,10 @@ fn system_row(cv: Conv, item: ItemMemo) -> View {
     view().w_full().items_center().py_1().child(
         pressable()
             .on_press(move || {
-                if matches!(notice.get_untracked(), Notice::Encryption | Notice::KeyChange) {
+                if matches!(
+                    notice.get_untracked(),
+                    Notice::Encryption | Notice::KeyChange
+                ) {
                     verify();
                 }
             })
@@ -256,11 +281,21 @@ fn system_row(cv: Conv, item: ItemMemo) -> View {
 /// arrives), as quiet as the other notices.
 fn nudge_row(cv: Conv, item: ItemMemo) -> View {
     let s = cv.s;
-    let line = sel(item, |i| if i.m.mine() { "You sent a nudge".to_string() } else { String::new() });
+    let line = sel(item, |i| {
+        if i.m.mine() {
+            "You sent a nudge".to_string()
+        } else {
+            String::new()
+        }
+    });
     let from = sel(item, |i| i.m.from);
     let label = move || {
         let l = line.get();
-        if l.is_empty() { format!("{} sent you a nudge", s.contact_name(from.get())) } else { l }
+        if l.is_empty() {
+            format!("{} sent you a nudge", s.contact_name(from.get()))
+        } else {
+            l
+        }
     };
     view()
         .w_full()
@@ -277,7 +312,9 @@ fn nudge_row(cv: Conv, item: ItemMemo) -> View {
 fn bubble_row(cv: Conv, item: ItemMemo) -> AnyElement {
     let s = cv.s;
     let id = sel(item, |i| i.m.id);
-    let people = s.chat(cv.chat).is_some_and(|c| matches!(c.kind, ChatKind::Group | ChatKind::Community));
+    let people = s
+        .chat(cv.chat)
+        .is_some_and(|c| matches!(c.kind, ChatKind::Group | ChatKind::Community));
     let selected = move || cv.selected.with(|v| v.contains(&id.get()));
     // While selecting, the marks make a column of their own at the
     // leading edge (for both sides' messages), and the chosen rows are
@@ -289,19 +326,34 @@ fn bubble_row(cv: Conv, item: ItemMemo) -> AnyElement {
         .w_full()
         .rounded(move || radius::control())
         .bg(move || {
-            if cv.selecting.get() && selected() { c::primary().opacity(0.1) } else { AdaptiveColor::TRANSPARENT }
+            if cv.selecting.get() && selected() {
+                c::primary().opacity(0.1)
+            } else {
+                AdaptiveColor::TRANSPARENT
+            }
         })
         .transition_colors()
         .duration(motion::INSTANT)
         .child(when(cv.selecting, move || select_mark(selected)))
-        .child(view().flex_1().min_w(px(0.0)).child(bubbles::bubble_column(cv, item, people)));
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(0.0))
+                .child(bubbles::bubble_column(cv, item, people)),
+        );
     // While selecting, the whole row toggles the message.
     let picker = when(cv.selecting, move || {
         pressable()
             .absolute()
             .inset_0()
             .selected(selected)
-            .accessibility_label(super::say(move || if selected() { "Selected message" } else { "Select message" }))
+            .accessibility_label(super::say(move || {
+                if selected() {
+                    "Selected message"
+                } else {
+                    "Select message"
+                }
+            }))
             .on_press(move || cv.toggle_selected(id.get_untracked()))
     });
     if is_desktop() {
@@ -335,13 +387,20 @@ fn bubble_row(cv: Conv, item: ItemMemo) -> AnyElement {
         .child(
             view()
                 .bind_translate_x(&x)
-                .claim_touches(TouchClaim::on_pan(PanActivation::horizontal(px(14.0), px(12.0))))
+                .claim_touches(TouchClaim::on_pan(PanActivation::horizontal(
+                    px(14.0),
+                    px(12.0),
+                )))
                 .on_responder_move(move |e: &ResponderEvent| {
                     if cv.selecting.get_untracked() {
                         return;
                     }
                     let dx = e.gesture.delta.x.0.max(0.0);
-                    x.set(if dx > REACH { REACH + (dx - REACH) * 0.2 } else { dx });
+                    x.set(if dx > REACH {
+                        REACH + (dx - REACH) * 0.2
+                    } else {
+                        dx
+                    });
                 })
                 .on_responder_release(move |e: &ResponderEvent| {
                     if !cv.selecting.get_untracked() && e.gesture.delta.x.0 >= REACH {
@@ -368,8 +427,20 @@ fn select_mark(selected: impl Fn() -> bool + Copy + 'static) -> View {
         .items_center()
         .justify_center()
         .border_2()
-        .border_color(move || if selected() { c::primary() } else { c::muted_fg() })
-        .bg(move || if selected() { c::primary() } else { AdaptiveColor::TRANSPARENT })
+        .border_color(move || {
+            if selected() {
+                c::primary()
+            } else {
+                c::muted_fg()
+            }
+        })
+        .bg(move || {
+            if selected() {
+                c::primary()
+            } else {
+                AdaptiveColor::TRANSPARENT
+            }
+        })
         .text_color(move || c::on_primary())
         .accessibility_elements_hidden(true)
         .child(icon(Icon::Check, 14.0).opacity(move || if selected() { 1.0_f32 } else { 0.0 }))
@@ -390,8 +461,8 @@ fn typing_indicator(cv: Conv) -> AnyElement {
                 .map(|i| {
                     let m = motion();
                     let spec = MotionSpec::new(super::looping(1100.0, i as f32 * 160.0))
-                    .values(MotionChannel::Opacity, [0.6, 1.0, 0.35, 0.6])
-                    .values(MotionChannel::TranslateY, [0.0, -3.0, 0.0, 0.0]);
+                        .values(MotionChannel::Opacity, [0.6, 1.0, 0.35, 0.6])
+                        .values(MotionChannel::TranslateY, [0.0, -3.0, 0.0, 0.0]);
                     let _ = m.play(spec);
                     m
                 })
@@ -410,7 +481,11 @@ fn typing_indicator(cv: Conv) -> AnyElement {
                         .label(who())
                         .role(AccessibilityRole::Text)
                         .children(dots.into_iter().map(|m| {
-                            view().size(px(7.0)).rounded_full().bg(move || c::bubble_meta()).bind_motion(&m)
+                            view()
+                                .size(px(7.0))
+                                .rounded_full()
+                                .bg(move || c::bubble_meta())
+                                .bind_motion(&m)
                         })),
                 ),
             )
@@ -427,8 +502,8 @@ pub(crate) fn jump_button(cv: Conv) -> AnyElement {
         move || {
             let pop = motion().entering(
                 MotionSpec::new(super::timing(motion::FAST, Easing::EaseOut))
-                .values(MotionChannel::Opacity, [0.0, 1.0])
-                .values(MotionChannel::Scale, [0.9, 1.0]),
+                    .values(MotionChannel::Opacity, [0.0, 1.0])
+                    .values(MotionChannel::Scale, [0.9, 1.0]),
             );
             let side = floating::capsule_height();
             view()
@@ -453,8 +528,18 @@ pub(crate) fn jump_button(cv: Conv) -> AnyElement {
                         .transition()
                         .duration(motion::FAST)
                         .hover(|st| st.bg(move || c::foreground().opacity(0.06)))
-                        .active(|st| if motion::reduced() { st.opacity(0.85) } else { st.scale(motion::ICON_PRESS_SCALE) })
-                        .focus_visible(|st| st.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
+                        .active(|st| {
+                            if motion::reduced() {
+                                st.opacity(0.85)
+                            } else {
+                                st.scale(motion::ICON_PRESS_SCALE)
+                            }
+                        })
+                        .focus_visible(|st| {
+                            st.outline(px(2.0))
+                                .outline_offset(px(2.0))
+                                .outline_color(move || c::ring())
+                        })
                         .child(icon(Icon::ChevronDown, 20.0)),
                 ))
                 .child(when(

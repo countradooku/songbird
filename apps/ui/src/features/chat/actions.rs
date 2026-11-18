@@ -43,7 +43,19 @@ struct Metrics {
 }
 
 fn metrics() -> Metrics {
-    if is_desktop() { Metrics { button: 36.0, row: 34.0, menu_w: 240.0 } } else { Metrics { button: 44.0, row: 48.0, menu_w: 250.0 } }
+    if is_desktop() {
+        Metrics {
+            button: 36.0,
+            row: 34.0,
+            menu_w: 240.0,
+        }
+    } else {
+        Metrics {
+            button: 44.0,
+            row: 48.0,
+            menu_w: 250.0,
+        }
+    }
 }
 
 /// Where each part goes (window points).
@@ -64,7 +76,14 @@ struct Layout {
 /// directly above, the menu (`menu` w, h) directly below, or both above
 /// when there is no room below; the message moves only when neither fits.
 /// Mine (`trailing`) align their trailing edges with the message's.
-fn layout(msg: (f32, f32, f32, f32), win: (f32, f32), safe: (f32, f32), bar: (f32, f32), menu: (f32, f32), trailing: bool) -> Layout {
+fn layout(
+    msg: (f32, f32, f32, f32),
+    win: (f32, f32),
+    safe: (f32, f32),
+    bar: (f32, f32),
+    menu: (f32, f32),
+    trailing: bool,
+) -> Layout {
     let (mx, my, mw, mh) = msg;
     let top = safe.0 + MARGIN;
     let bottom = win.1 - safe.1 - MARGIN;
@@ -90,7 +109,11 @@ fn layout(msg: (f32, f32, f32, f32), win: (f32, f32), safe: (f32, f32), bar: (f3
         (y, h, false)
     };
     let bar_y = msg_y - bar_room;
-    let menu_y = if menu_above { bar_y - GAP - menu.1 } else { msg_y + msg_h + GAP };
+    let menu_y = if menu_above {
+        bar_y - GAP - menu.1
+    } else {
+        msg_y + msg_h + GAP
+    };
     Layout {
         msg_y: msg_y.round(),
         msg_h: msg_h.round(),
@@ -102,13 +125,18 @@ fn layout(msg: (f32, f32, f32, f32), win: (f32, f32), safe: (f32, f32), bar: (f3
 
 fn menu(cv: Conv, at: MenuAt) -> AnyElement {
     let (s, chat) = (cv.s, cv.chat);
-    let Some(m) = s.message(chat, at.id) else { return view().into_element() };
+    let Some(m) = s.message(chat, at.id) else {
+        return view().into_element();
+    };
     let close = move || cv.menu.set(None);
     let k = metrics();
     let reacts = !matches!(m.body, Body::Deleted);
     let quick = s.settings.with_untracked(|x| x.default_reactions.len()) + 1;
     let bar = if reacts {
-        (quick as f32 * k.button + (quick - 1) as f32 * 2.0 + 8.0 + 2.0, k.button + 8.0 + 2.0)
+        (
+            quick as f32 * k.button + (quick - 1) as f32 * 2.0 + 8.0 + 2.0,
+            k.button + 8.0 + 2.0,
+        )
     } else {
         (0.0, 0.0)
     };
@@ -127,7 +155,8 @@ fn menu(cv: Conv, at: MenuAt) -> AnyElement {
     let (bar_part, menu_part) = panel(cv, &m, k.menu_w);
     // The message, lifted: the same bubble, made again for the overlay at
     // the frame it has in the list.
-    let item: ItemMemo = computed(move || s.message(chat, at.id).map(|m| Item { m, place: at.place }));
+    let item: ItemMemo =
+        computed(move || s.message(chat, at.id).map(|m| Item { m, place: at.place }));
     let lifted = view()
         .absolute()
         .left(px(at.x.round()))
@@ -143,11 +172,13 @@ fn menu(cv: Conv, at: MenuAt) -> AnyElement {
         motion()
     } else {
         motion().entering(
-            MotionSpec::new(super::timing(motion::BASE, Easing::EaseOut)).values(MotionChannel::Scale, [1.0, 1.03, 1.0]),
+            MotionSpec::new(super::timing(motion::BASE, Easing::EaseOut))
+                .values(MotionChannel::Scale, [1.0, 1.03, 1.0]),
         )
     };
     let fade = motion().entering(
-        MotionSpec::new(super::timing(motion::FAST, Easing::EaseOut)).values(MotionChannel::Opacity, [0.0, 1.0]),
+        MotionSpec::new(super::timing(motion::FAST, Easing::EaseOut))
+            .values(MotionChannel::Opacity, [0.0, 1.0]),
     );
     let from_menu = if at_layout.menu_above { 6.0 } else { -6.0 };
     let bar_in = motion().entering(grow(6.0));
@@ -164,7 +195,13 @@ fn menu(cv: Conv, at: MenuAt) -> AnyElement {
                     .on_press(close),
             ),
         )
-        .child(overlay().absolute().inset_0().pointer_events(PointerEvents::BoxNone).child(view().bind_motion(&lifted_in).child(lifted)))
+        .child(
+            overlay()
+                .absolute()
+                .inset_0()
+                .pointer_events(PointerEvents::BoxNone)
+                .child(view().bind_motion(&lifted_in).child(lifted)),
+        )
         .child(bar_part.map(|b| {
             overlay()
                 .absolute()
@@ -195,7 +232,13 @@ fn rows_count(m: &crate::store::Message) -> usize {
 
 /// One row of the menu.
 fn action(glyph: Icon, label: &'static str, danger: bool, f: impl Fn() + 'static) -> AnyElement {
-    let ink = move || if danger { c::destructive() } else { c::foreground() };
+    let ink = move || {
+        if danger {
+            c::destructive()
+        } else {
+            c::foreground()
+        }
+    };
     pressable()
         .on_press(f)
         .accessibility_label(label)
@@ -221,25 +264,47 @@ fn panel(cv: Conv, m: &crate::store::Message, menu_w: f32) -> (Option<View>, Vie
     let copyable = matches!(m.body, Body::Text(_) | Body::Link { .. });
     let starred = m.starred;
     let pinned = m.pinned;
-    let reacted: Option<String> = m.reactions.iter().find(|r| r.by.contains(&None)).map(|r| r.emoji.clone());
+    let reacted: Option<String> = m
+        .reactions
+        .iter()
+        .find(|r| r.by.contains(&None))
+        .map(|r| r.emoji.clone());
     let quick = s.settings.with_untracked(|x| x.default_reactions.clone());
     let mut rows: Vec<AnyElement> = Vec::new();
     if !deleted {
-        rows.push(action(Icon::Reply, "Reply", false, move || cv.start_reply(id)));
+        rows.push(action(Icon::Reply, "Reply", false, move || {
+            cv.start_reply(id)
+        }));
         if copyable {
             rows.push(action(Icon::Copy, "Copy", false, move || cv.copy(&[id])));
         }
-        rows.push(action(Icon::Forward, "Forward", false, move || cv.ask_forward(vec![id])));
-        rows.push(action(Icon::Star, if starred { "Unstar" } else { "Star" }, false, move || {
-            cv.menu.set(None);
-            s.toggle_star(chat, id);
-            toast(if starred { "Unstarred" } else { "Starred" });
+        rows.push(action(Icon::Forward, "Forward", false, move || {
+            cv.ask_forward(vec![id])
         }));
-        rows.push(action(Icon::Pin, if pinned { "Unpin" } else { "Pin" }, false, move || {
-            cv.menu.set(None);
-            s.toggle_pin_message(chat, id);
-            toast(if pinned { "Message unpinned" } else { "Message pinned" });
-        }));
+        rows.push(action(
+            Icon::Star,
+            if starred { "Unstar" } else { "Star" },
+            false,
+            move || {
+                cv.menu.set(None);
+                s.toggle_star(chat, id);
+                toast(if starred { "Unstarred" } else { "Starred" });
+            },
+        ));
+        rows.push(action(
+            Icon::Pin,
+            if pinned { "Unpin" } else { "Pin" },
+            false,
+            move || {
+                cv.menu.set(None);
+                s.toggle_pin_message(chat, id);
+                toast(if pinned {
+                    "Message unpinned"
+                } else {
+                    "Message pinned"
+                });
+            },
+        ));
         if logic::editable(m) {
             rows.push(action(Icon::Edit, "Edit", false, move || cv.start_edit(id)));
         }
@@ -250,8 +315,12 @@ fn panel(cv: Conv, m: &crate::store::Message, menu_w: f32) -> (Option<View>, Vie
             super::message_info(chat, id);
         }));
     }
-    rows.push(action(Icon::Check, "Select", false, move || cv.start_select(id)));
-    rows.push(action(Icon::Trash, "Delete", true, move || cv.ask_delete(vec![id])));
+    rows.push(action(Icon::Check, "Select", false, move || {
+        cv.start_select(id)
+    }));
+    rows.push(action(Icon::Trash, "Delete", true, move || {
+        cv.ask_delete(vec![id])
+    }));
 
     let reaction = move |emoji: String| {
         let on = reacted.as_deref() == Some(emoji.as_str());
@@ -259,16 +328,32 @@ fn panel(cv: Conv, m: &crate::store::Message, menu_w: f32) -> (Option<View>, Vie
         pressable()
             .on_press(move || cv.react(id, &e))
             .selected(on)
-            .accessibility_label(if on { format!("Remove {emoji}") } else { format!("React with {emoji}") })
+            .accessibility_label(if on {
+                format!("Remove {emoji}")
+            } else {
+                format!("React with {emoji}")
+            })
             .size(px(if is_desktop() { 36.0 } else { 44.0 }))
             .rounded_full()
             .items_center()
             .justify_center()
-            .bg(move || if on { c::accent() } else { AdaptiveColor::TRANSPARENT })
+            .bg(move || {
+                if on {
+                    c::accent()
+                } else {
+                    AdaptiveColor::TRANSPARENT
+                }
+            })
             .hover(|st| st.bg(move || c::accent()))
             .transition_transform()
             .duration(motion::FAST)
-            .active(|st| if motion::reduced() { st.opacity(0.7) } else { st.scale(1.18) })
+            .active(|st| {
+                if motion::reduced() {
+                    st.opacity(0.7)
+                } else {
+                    st.scale(1.18)
+                }
+            })
             .child(text(emoji).text_size(px(if is_desktop() { 22.0 } else { 26.0 })))
     };
     let reactions = view()
@@ -329,7 +414,14 @@ mod tests {
 
     #[test]
     fn bar_above_and_menu_below_when_there_is_room() {
-        let l = layout((100.0, 200.0, 220.0, 40.0), WIN, (0.0, 0.0), BAR, MENU, true);
+        let l = layout(
+            (100.0, 200.0, 220.0, 40.0),
+            WIN,
+            (0.0, 0.0),
+            BAR,
+            MENU,
+            true,
+        );
         assert_eq!(l.msg_y, 200.0);
         assert_eq!(l.bar.1, 200.0 - 8.0 - 54.0);
         assert_eq!(l.menu.1, 248.0);
@@ -341,7 +433,14 @@ mod tests {
 
     #[test]
     fn the_menu_flips_above_near_the_bottom() {
-        let l = layout((40.0, 700.0, 200.0, 40.0), WIN, (0.0, 0.0), BAR, MENU, false);
+        let l = layout(
+            (40.0, 700.0, 200.0, 40.0),
+            WIN,
+            (0.0, 0.0),
+            BAR,
+            MENU,
+            false,
+        );
         assert!(l.menu_above);
         assert_eq!(l.msg_y, 700.0);
         assert!(l.menu.1 >= 8.0);
@@ -352,12 +451,26 @@ mod tests {
 
     #[test]
     fn the_message_moves_when_neither_fits_and_all_stays_inside() {
-        let l = layout((40.0, 380.0, 200.0, 120.0), WIN, (47.0, 34.0), BAR, MENU, false);
+        let l = layout(
+            (40.0, 380.0, 200.0, 120.0),
+            WIN,
+            (47.0, 34.0),
+            BAR,
+            MENU,
+            false,
+        );
         assert!(l.bar.1 >= 47.0 + 8.0);
         assert!(l.menu.1 + MENU.1 <= 844.0 - 34.0 - 8.0);
         assert!(no_overlap((l.menu.1, MENU.1, 0.0), (l.msg_y, l.msg_h, 0.0)));
         // A very tall message is shown from its top, clipped.
-        let tall = layout((40.0, 60.0, 200.0, 900.0), WIN, (0.0, 0.0), BAR, MENU, false);
+        let tall = layout(
+            (40.0, 60.0, 200.0, 900.0),
+            WIN,
+            (0.0, 0.0),
+            BAR,
+            MENU,
+            false,
+        );
         assert!(tall.msg_h < 900.0);
         assert!(tall.menu.1 + MENU.1 <= 836.0);
     }

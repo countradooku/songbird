@@ -16,7 +16,8 @@ impl Store {
 
     /// The message at `index` (oldest first), if there still is one.
     pub fn message_at(&self, chat: ChatId, index: usize) -> Option<Message> {
-        self.messages.with(|m| m.get(&chat).and_then(|v| v.get(index)).cloned())
+        self.messages
+            .with(|m| m.get(&chat).and_then(|v| v.get(index)).cloned())
     }
 
     /// The messages around `index`: before, at, after (for date
@@ -27,7 +28,9 @@ impl Store {
         index: usize,
     ) -> (Option<Message>, Option<Message>, Option<Message>) {
         self.messages.with(|m| {
-            let Some(v) = m.get(&chat) else { return (None, None, None) };
+            let Some(v) = m.get(&chat) else {
+                return (None, None, None);
+            };
             let before = index.checked_sub(1).and_then(|i| v.get(i)).cloned();
             (before, v.get(index).cloned(), v.get(index + 1).cloned())
         })
@@ -35,22 +38,31 @@ impl Store {
 
     /// Where message `id` is in the chat.
     pub fn index_of(&self, chat: ChatId, id: MsgId) -> Option<usize> {
-        self.messages.with(|m| m.get(&chat).and_then(|v| v.iter().position(|x| x.id == id)))
+        self.messages
+            .with(|m| m.get(&chat).and_then(|v| v.iter().position(|x| x.id == id)))
     }
 
     /// The ids of the chat's messages, in order (the list's identities).
     pub fn message_ids(&self, chat: ChatId) -> Vec<MsgId> {
-        self.messages.with(|m| m.get(&chat).map(|v| v.iter().map(|x| x.id).collect()).unwrap_or_default())
+        self.messages.with(|m| {
+            m.get(&chat)
+                .map(|v| v.iter().map(|x| x.id).collect())
+                .unwrap_or_default()
+        })
     }
 
     /// The user's latest text message (Up arrow edits it).
     pub fn last_own_text(&self, chat: ChatId) -> Option<(MsgId, String)> {
         self.messages.with(|m| {
-            m.get(&chat)?.iter().rev().find(|x| x.mine()).and_then(|x| match &x.body {
-                Body::Text(t) => Some((x.id, t.clone())),
-                Body::Link { text, .. } => Some((x.id, text.clone())),
-                _ => None,
-            })
+            m.get(&chat)?
+                .iter()
+                .rev()
+                .find(|x| x.mine())
+                .and_then(|x| match &x.body {
+                    Body::Text(t) => Some((x.id, t.clone())),
+                    Body::Link { text, .. } => Some((x.id, text.clone())),
+                    _ => None,
+                })
         })
     }
 
@@ -69,12 +81,17 @@ impl Store {
     /// How many people a group holds (the user included) and how many of
     /// the others are online now: the header's "5 people · 2 online".
     pub fn people_online(&self, chat: ChatId) -> (usize, usize) {
-        let Some(c) = self.chat(chat) else { return (0, 0) };
+        let Some(c) = self.chat(chat) else {
+            return (0, 0);
+        };
         let online = self.contacts.with(|cs| {
             c.members
                 .iter()
                 .filter_map(|m| m.contact)
-                .filter(|id| cs.iter().any(|x| x.id == *id && x.presence == Presence::Online))
+                .filter(|id| {
+                    cs.iter()
+                        .any(|x| x.id == *id && x.presence == Presence::Online)
+                })
                 .count()
         });
         (c.members.len(), online)
@@ -83,13 +100,17 @@ impl Store {
     /// Messages of the chat matching `keep`, newest first.
     fn messages_where(&self, chat: ChatId, keep: impl Fn(&Message) -> bool) -> Vec<Message> {
         self.messages.with(|m| {
-            m.get(&chat).map(|v| v.iter().rev().filter(|x| keep(x)).cloned().collect()).unwrap_or_default()
+            m.get(&chat)
+                .map(|v| v.iter().rev().filter(|x| keep(x)).cloned().collect())
+                .unwrap_or_default()
         })
     }
 
     /// Photos and videos shared in the chat, newest first.
     pub fn media_of(&self, chat: ChatId) -> Vec<Message> {
-        self.messages_where(chat, |m| matches!(m.body, Body::Image { .. } | Body::Video { .. }))
+        self.messages_where(chat, |m| {
+            matches!(m.body, Body::Image { .. } | Body::Video { .. })
+        })
     }
 
     /// Documents shared in the chat, newest first.
@@ -111,7 +132,10 @@ impl Store {
     pub fn groups_in_common(&self, contact: ContactId) -> Vec<Chat> {
         self.chats.with(|cs| {
             cs.iter()
-                .filter(|c| matches!(c.kind, ChatKind::Group) && c.members.iter().any(|m| m.contact == Some(contact)))
+                .filter(|c| {
+                    matches!(c.kind, ChatKind::Group)
+                        && c.members.iter().any(|m| m.contact == Some(contact))
+                })
                 .cloned()
                 .collect()
         })

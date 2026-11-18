@@ -54,7 +54,10 @@ pub fn public(key: &Ed25519KeyPair) -> [u8; 32] {
 }
 
 pub fn sha256(body: &[u8]) -> [u8; 32] {
-    digest::digest(&digest::SHA256, body).as_ref().try_into().unwrap_or([0; 32])
+    digest::digest(&digest::SHA256, body)
+        .as_ref()
+        .try_into()
+        .unwrap_or([0; 32])
 }
 
 /// The transcript a signed api request covers (`services/api/src/auth.rs:87`).
@@ -95,9 +98,23 @@ pub fn sign_request(
 ) -> (String, Option<String>) {
     let nonce: [u8; 16] = random();
     let hash = body.map(sha256);
-    let t = api_transcript(server_name, method, path, ts_ms, &nonce, device, &hash.unwrap_or([0; 32]));
+    let t = api_transcript(
+        server_name,
+        method,
+        path,
+        ts_ms,
+        &nonce,
+        device,
+        &hash.unwrap_or([0; 32]),
+    );
     let sig = key.sign(&t);
-    let header = format!("Songbird {}.{}.{}.{}", hex(device), ts_ms, hex(&nonce), hex(sig.as_ref()));
+    let header = format!(
+        "Songbird {}.{}.{}.{}",
+        hex(device),
+        ts_ms,
+        hex(&nonce),
+        hex(sig.as_ref())
+    );
     (header, hash.map(|h| hex(&h)))
 }
 
@@ -133,12 +150,26 @@ pub fn registration(
         registration::transcript(context, server_name, &challenge, &identity_key, &auth_key)
             .map_err(|_| BuildError::ServerName)
     };
-    let identity_sig: [u8; 64] =
-        identity.sign(&signed(IDENTITY_CONTEXT)?).as_ref().try_into().map_err(|_| BuildError::Keys)?;
-    let auth_sig: [u8; 64] =
-        device.sign(&signed(DEVICE_CONTEXT)?).as_ref().try_into().map_err(|_| BuildError::Keys)?;
-    Ok(RegisterRequest { challenge, solutions, invite, identity_key, auth_key, identity_sig, auth_sig }
-        .encode())
+    let identity_sig: [u8; 64] = identity
+        .sign(&signed(IDENTITY_CONTEXT)?)
+        .as_ref()
+        .try_into()
+        .map_err(|_| BuildError::Keys)?;
+    let auth_sig: [u8; 64] = device
+        .sign(&signed(DEVICE_CONTEXT)?)
+        .as_ref()
+        .try_into()
+        .map_err(|_| BuildError::Keys)?;
+    Ok(RegisterRequest {
+        challenge,
+        solutions,
+        invite,
+        identity_key,
+        auth_key,
+        identity_sig,
+        auth_sig,
+    }
+    .encode())
 }
 
 /// Whether `text` is a well-formed invite code (24 Crockford symbols).
@@ -169,7 +200,15 @@ mod tests {
 
     #[test]
     fn transcript_matches_the_api_layout() {
-        let t = api_transcript("api.localhost", "GET", "/v1/devices", 7, &random(), &random(), &[0; 32]);
+        let t = api_transcript(
+            "api.localhost",
+            "GET",
+            "/v1/devices",
+            7,
+            &random(),
+            &random(),
+            &[0; 32],
+        );
         assert!(t.starts_with(b"songbird-api-v1\0api.localhost\0GET\0/v1/devices\0"));
         assert_eq!(t.len(), 16 + 13 + 1 + 3 + 1 + 11 + 1 + 8 + 16 + 16 + 32);
         assert_eq!(&t[t.len() - 72..t.len() - 64], &7u64.to_be_bytes());
@@ -179,13 +218,29 @@ mod tests {
     fn signatures_verify_with_the_public_key() {
         let key = ed25519(&random()).unwrap();
         let device: [u8; 16] = random();
-        let (auth, digest) = sign_request(&key, &device, "api.localhost", "PUT", "/v1/x", 1, Some(b"{}"));
+        let (auth, digest) = sign_request(
+            &key,
+            &device,
+            "api.localhost",
+            "PUT",
+            "/v1/x",
+            1,
+            Some(b"{}"),
+        );
         assert!(auth.starts_with(&format!("Songbird {}.", hex(&device))));
         assert_eq!(digest.unwrap().len(), 64);
         let parts: Vec<&str> = auth.trim_start_matches("Songbird ").split('.').collect();
         assert_eq!(parts.len(), 4);
         let nonce: [u8; 16] = unhex(parts[2]).unwrap().try_into().unwrap();
-        let t = api_transcript("api.localhost", "PUT", "/v1/x", 1, &nonce, &device, &sha256(b"{}"));
+        let t = api_transcript(
+            "api.localhost",
+            "PUT",
+            "/v1/x",
+            1,
+            &nonce,
+            &device,
+            &sha256(b"{}"),
+        );
         let sig = unhex(parts[3]).unwrap();
         aws_lc_rs::signature::UnparsedPublicKey::new(&aws_lc_rs::signature::ED25519, public(&key))
             .verify(&t, &sig)

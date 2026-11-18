@@ -126,7 +126,12 @@ pub fn broadcasts() {
         let creating = signal(false);
         let name = signal(String::new());
         let chosen = signal(Vec::<ContactId>::new());
-        let people = s.contacts.with_untracked(|cs| cs.iter().filter(|c| !c.blocked && c.id < 16).map(|c| (c.id, c.name.clone())).collect::<Vec<_>>());
+        let people = s.contacts.with_untracked(|cs| {
+            cs.iter()
+                .filter(|c| !c.blocked && c.id < 16)
+                .map(|c| (c.id, c.name.clone()))
+                .collect::<Vec<_>>()
+        });
         view()
             .child(view().px_4().pt_4().child(banner(
                 Tone::Info,
@@ -203,10 +208,21 @@ pub fn broadcasts() {
 pub fn starred_by_chat(all: &[(u64, String, Vec<Message>)]) -> Vec<(u64, String, Vec<Message>)> {
     let mut out: Vec<_> = all
         .iter()
-        .map(|(id, title, msgs)| (*id, title.clone(), msgs.iter().filter(|m| m.starred).cloned().collect::<Vec<_>>()))
+        .map(|(id, title, msgs)| {
+            (
+                *id,
+                title.clone(),
+                msgs.iter()
+                    .filter(|m| m.starred)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+        })
         .filter(|(_, _, m)| !m.is_empty())
         .collect();
-    out.sort_by_key(|(_, _, m)| std::cmp::Reverse(m.iter().map(|x| x.at).max().unwrap_or(i64::MIN)));
+    out.sort_by_key(|(_, _, m)| {
+        std::cmp::Reverse(m.iter().map(|x| x.at).max().unwrap_or(i64::MIN))
+    });
     out
 }
 
@@ -214,8 +230,15 @@ pub fn starred() {
     super::push("Starred messages", || {
         let s = store();
         let groups = computed(move || {
-            let chats = s.chats.with(|cs| cs.iter().map(|c| (c.id, c.title.clone())).collect::<Vec<_>>());
-            let all: Vec<_> = chats.into_iter().map(|(id, t)| (id, t, s.messages_of(id))).collect();
+            let chats = s.chats.with(|cs| {
+                cs.iter()
+                    .map(|c| (c.id, c.title.clone()))
+                    .collect::<Vec<_>>()
+            });
+            let all: Vec<_> = chats
+                .into_iter()
+                .map(|(id, t)| (id, t, s.messages_of(id)))
+                .collect();
             starred_by_chat(&all)
         });
         view()
@@ -234,20 +257,25 @@ pub fn starred() {
                 let list = groups.get();
                 untracked(move || {
                     view().children(list.into_iter().map(|(chat, title, msgs)| {
-                        view().child(section_title(title)).child(group_with_inset(msgs.into_iter().map(move |m| {
-                            let who = s.contact_name(m.from);
-                            let preview = match &m.body {
-                                Body::Text(t) => t.clone(),
-                                b => b.preview(),
-                            };
-                            Row::new(preview)
-                                .subtitle(format!("{who} · {}", when_label(m.at)))
-                                .leading(icon(Icon::Star, 16.0).text_color(move || c::primary()))
-                                .chevron()
-                                .on_press(move || features::chat::open(chat))
-                                .build()
-                        // Under the titles: the gutter, the 16pt star and the gap.
-                        }), INSET_PLAIN + 16.0 + 12.0))
+                        view().child(section_title(title)).child(group_with_inset(
+                            msgs.into_iter().map(move |m| {
+                                let who = s.contact_name(m.from);
+                                let preview = match &m.body {
+                                    Body::Text(t) => t.clone(),
+                                    b => b.preview(),
+                                };
+                                Row::new(preview)
+                                    .subtitle(format!("{who} · {}", when_label(m.at)))
+                                    .leading(
+                                        icon(Icon::Star, 16.0).text_color(move || c::primary()),
+                                    )
+                                    .chevron()
+                                    .on_press(move || features::chat::open(chat))
+                                    .build()
+                                // Under the titles: the gutter, the 16pt star and the gap.
+                            }),
+                            INSET_PLAIN + 16.0 + 12.0,
+                        ))
                     }))
                 })
             }))
@@ -264,7 +292,12 @@ pub fn presence() {
         let settings = s.settings;
         let picking = signal(false);
         let off = computed(move || {
-            s.contacts.with(|cs| cs.iter().filter(|c| c.nudges_off).map(|c| (c.id, c.name.clone())).collect::<Vec<_>>())
+            s.contacts.with(|cs| {
+                cs.iter()
+                    .filter(|c| c.nudges_off)
+                    .map(|c| (c.id, c.name.clone()))
+                    .collect::<Vec<_>>()
+            })
         });
         view()
             .child(super::section_plain(
@@ -328,25 +361,35 @@ pub fn presence() {
 fn nudge_sheet(open: Signal<bool>) -> nsh_base::SheetElement {
     let s = store();
     let people = computed(move || {
-        s.contacts.with(|cs| cs.iter().filter(|c| !c.nudges_off && !c.blocked).map(|c| (c.id, c.name.clone())).collect::<Vec<_>>())
+        s.contacts.with(|cs| {
+            cs.iter()
+                .filter(|c| !c.nudges_off && !c.blocked)
+                .map(|c| (c.id, c.name.clone()))
+                .collect::<Vec<_>>()
+        })
     });
     app_sheet(
         open,
         "Turn off nudges from",
-        scroll().max_h(px(420.0)).child(view().pb_2().child(dynamic(move || {
-            let list = people.get();
-            untracked(move || {
-                group_with_inset(list.into_iter().map(|(id, name)| {
-                    Row::new(name.clone())
-                        .leading(avatar(name, id, 36.0))
-                        .on_press(move || {
-                            s.set_nudges_off(id, true);
-                            open.set(false);
-                        })
-                        .build()
-                }), INSET_AVATAR)
-            })
-        }))),
+        scroll()
+            .max_h(px(420.0))
+            .child(view().pb_2().child(dynamic(move || {
+                let list = people.get();
+                untracked(move || {
+                    group_with_inset(
+                        list.into_iter().map(|(id, name)| {
+                            Row::new(name.clone())
+                                .leading(avatar(name, id, 36.0))
+                                .on_press(move || {
+                                    s.set_nudges_off(id, true);
+                                    open.set(false);
+                                })
+                                .build()
+                        }),
+                        INSET_AVATAR,
+                    )
+                })
+            }))),
     )
 }
 
@@ -447,7 +490,12 @@ fn step(n: u32, line: &'static str) -> View {
                 .items_center()
                 .justify_center()
                 .bg(move || c::accent())
-                .child(text(n.to_string()).text_size(px(font::SMALL)).font_weight(FontWeight::BOLD).text_color(move || c::primary())),
+                .child(
+                    text(n.to_string())
+                        .text_size(px(font::SMALL))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(move || c::primary()),
+                ),
         )
         .child(body(line).flex_1())
 }
@@ -457,7 +505,8 @@ fn rules() {
     super::push("Rules for Maria", || {
         let s = store();
         let ext = s.ext();
-        let p = move |f: fn(&crate::store::ParentalRules) -> bool| move || ext.with(|x| f(&x.parental));
+        let p =
+            move |f: fn(&crate::store::ParentalRules) -> bool| move || ext.with(|x| f(&x.parental));
         view()
             .child(view().px_4().pt_4().child(banner(
                 Tone::Secure,
@@ -466,50 +515,79 @@ fn rules() {
             )))
             .child(section_plain(
                 "Who can message them",
-                [ChildContact::ApprovedOnly, ChildContact::ContactsAndRequests]
-                    .into_iter()
-                    .map(|w| {
-                        radio_row(w.label(), None, move || ext.with(|x| x.parental.who_can_message == w), move || {
-                            s.ext_update(|x| x.parental.who_can_message = w)
-                        })
-                    })
-                    .collect(),
+                [
+                    ChildContact::ApprovedOnly,
+                    ChildContact::ContactsAndRequests,
+                ]
+                .into_iter()
+                .map(|w| {
+                    radio_row(
+                        w.label(),
+                        None,
+                        move || ext.with(|x| x.parental.who_can_message == w),
+                        move || s.ext_update(|x| x.parental.who_can_message = w),
+                    )
+                })
+                .collect(),
             ))
             .child(section_plain(
                 "Groups and calls",
                 vec![
-                    toggle_row("Group invites need my approval", None, p(|r| r.groups_need_approval), move |v| {
-                        s.ext_update(|x| x.parental.groups_need_approval = v)
-                    }),
-                    toggle_row("Block calls from people not in contacts", None, p(|r| r.block_unknown_calls), move |v| {
-                        s.ext_update(|x| x.parental.block_unknown_calls = v)
-                    }),
+                    toggle_row(
+                        "Group invites need my approval",
+                        None,
+                        p(|r| r.groups_need_approval),
+                        move |v| s.ext_update(|x| x.parental.groups_need_approval = v),
+                    ),
+                    toggle_row(
+                        "Block calls from people not in contacts",
+                        None,
+                        p(|r| r.block_unknown_calls),
+                        move |v| s.ext_update(|x| x.parental.block_unknown_calls = v),
+                    ),
                     toggle_row(
                         "Others can find them by username",
                         Some("Off: only people they add, or you approve, can start a chat."),
                         p(|r| r.discoverable),
                         move |v| s.ext_update(|x| x.parental.discoverable = v),
                     ),
-                    toggle_row("Allow nudges", None, p(|r| r.nudges), move |v| s.ext_update(|x| x.parental.nudges = v)),
+                    toggle_row("Allow nudges", None, p(|r| r.nudges), move |v| {
+                        s.ext_update(|x| x.parental.nudges = v)
+                    }),
                 ],
             ))
             .child(section_title("Quiet hours"))
             .child(view().px_4().child(segmented(
-                vec![(None, "Off"), (Some("21:00–07:00"), "21:00–07:00"), (Some("22:00–07:00"), "22:00–07:00")],
+                vec![
+                    (None, "Off"),
+                    (Some("21:00–07:00"), "21:00–07:00"),
+                    (Some("22:00–07:00"), "22:00–07:00"),
+                ],
                 move || ext.with(|x| x.parental.quiet_hours),
                 move |q| s.ext_update(|x| x.parental.quiet_hours = q),
             )))
-            .child(super::foot("No notifications during quiet hours, except calls from you."))
-            .child(view().pt_4().child(group(vec![Row::new("Unlink")
-                .icon(Icon::LogOut)
-                .danger()
-                .on_press(move || {
-                    confirm("Unlink Maria's account?", "The rules stop at once. Maria is told.", "Unlink", move || {
-                        s.settings_update(|x| x.parental_controls = false);
-                        crate::nav::pop();
-                    })
-                })
-                .build()])))
+            .child(super::foot(
+                "No notifications during quiet hours, except calls from you.",
+            ))
+            .child(
+                view().pt_4().child(group(vec![
+                    Row::new("Unlink")
+                        .icon(Icon::LogOut)
+                        .danger()
+                        .on_press(move || {
+                            confirm(
+                                "Unlink Maria's account?",
+                                "The rules stop at once. Maria is told.",
+                                "Unlink",
+                                move || {
+                                    s.settings_update(|x| x.parental_controls = false);
+                                    crate::nav::pop();
+                                },
+                            )
+                        })
+                        .build(),
+                ])),
+            )
             .into_element()
     });
 }
@@ -522,7 +600,10 @@ fn child_view() {
         let rules = move || {
             ext.with(|x| {
                 let r = &x.parental;
-                let mut out = vec![format!("Who can message you: {}", r.who_can_message.label().to_lowercase())];
+                let mut out = vec![format!(
+                    "Who can message you: {}",
+                    r.who_can_message.label().to_lowercase()
+                )];
                 if r.groups_need_approval {
                     out.push("Group invites wait for Mama to approve".into());
                 }
@@ -672,8 +753,16 @@ mod tests {
     #[test]
     fn starred_groups_by_chat_newest_first() {
         let all = vec![
-            (1, "A".to_string(), vec![msg(1, 1, -100, true), msg(2, 1, -5, false)]),
-            (2, "B".to_string(), vec![msg(3, 2, -10, true), msg(4, 2, -50, true)]),
+            (
+                1,
+                "A".to_string(),
+                vec![msg(1, 1, -100, true), msg(2, 1, -5, false)],
+            ),
+            (
+                2,
+                "B".to_string(),
+                vec![msg(3, 2, -10, true), msg(4, 2, -50, true)],
+            ),
             (3, "C".to_string(), vec![msg(5, 3, -1, false)]),
         ];
         let out = starred_by_chat(&all);

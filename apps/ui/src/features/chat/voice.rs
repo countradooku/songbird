@@ -21,7 +21,11 @@ const TICK_MS: u64 = 100;
 
 impl Player {
     pub fn new() -> Self {
-        Player { playing: signal(None), pos: signal(HashMap::new()), speed: signal(1.0) }
+        Player {
+            playing: signal(None),
+            pos: signal(HashMap::new()),
+            speed: signal(1.0),
+        }
     }
 
     /// Plays or pauses note `id`.
@@ -54,7 +58,11 @@ impl Player {
 
     pub fn speed_label(self) -> String {
         let s = self.speed.get();
-        if (s - 1.5).abs() < 0.01 { "1.5×".into() } else { format!("{}×", s as u32) }
+        if (s - 1.5).abs() < 0.01 {
+            "1.5×".into()
+        } else {
+            format!("{}×", s as u32)
+        }
     }
 
     /// How far into note `id` playback is, 0..1.
@@ -70,7 +78,9 @@ impl Player {
     }
 
     fn tick(self, cv: Conv) {
-        let Some(id) = self.playing.get_untracked() else { return };
+        let Some(id) = self.playing.get_untracked() else {
+            return;
+        };
         let secs = match cv.s.message(cv.chat, id).map(|m| m.body) {
             Some(Body::Voice { secs, .. }) => secs as f32,
             _ => {

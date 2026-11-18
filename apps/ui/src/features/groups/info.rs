@@ -4,9 +4,9 @@
 
 use nsh_core::prelude::*;
 
-use super::{page_scroll, 
-    ask_line, danger_icon, icon_toggle_row, chat_avatar, community, create, first_name, glide, invite_link_page, join_requests_page,
-    member_changes_page, role_tag, roles_page,
+use super::{
+    ask_line, chat_avatar, community, create, danger_icon, first_name, glide, icon_toggle_row,
+    invite_link_page, join_requests_page, member_changes_page, page_scroll, role_tag, roles_page,
 };
 use crate::{
     features::{calls, chat as chat_feature, devices, media},
@@ -42,7 +42,15 @@ pub(super) fn info_page(chat: ChatId) -> Screen {
         Some(ChatKind::Community) => community::home_page(chat),
         Some(ChatKind::Channel { .. }) => channel_page(s, chat),
         Some(_) => group_page(s, chat),
-        None => page("Group info", empty_state(Icon::Users, "Not found", "This chat is no longer here.", None)),
+        None => page(
+            "Group info",
+            empty_state(
+                Icon::Users,
+                "Not found",
+                "This chat is no longer here.",
+                None,
+            ),
+        ),
     }
 }
 
@@ -97,7 +105,11 @@ fn group_page(s: Store, chat: ChatId) -> Screen {
                     .child(header(s, chat, move || {
                         let c = get();
                         let n = c.members.len();
-                        if n == 1 { "Group · 1 member".to_string() } else { format!("Group · {n} members") }
+                        if n == 1 {
+                            "Group · 1 member".to_string()
+                        } else {
+                            format!("Group · {n} members")
+                        }
                     }))
                     .child(
                         view()
@@ -107,11 +119,19 @@ fn group_page(s: Store, chat: ChatId) -> Screen {
                             .child(action_tile(Icon::Phone, "Audio", move || call(false)))
                             .child(action_tile(Icon::Video, "Video", move || call(true)))
                             .child(action_tile(Icon::UserPlus, "Add", add))
-                            .child(action_tile(Icon::Search, "Search", move || search_page(chat))),
+                            .child(action_tile(Icon::Search, "Search", move || {
+                                search_page(chat)
+                            })),
                     )
                     .child(dynamic(move || {
-                        let media_n = s.messages.with(|m| m.get(&chat).map_or(0, |v| v.iter().filter(|x| is_shared(&x.body)).count()));
-                        let starred_n = s.messages.with(|m| m.get(&chat).map_or(0, |v| v.iter().filter(|x| x.starred).count()));
+                        let media_n = s.messages.with(|m| {
+                            m.get(&chat)
+                                .map_or(0, |v| v.iter().filter(|x| is_shared(&x.body)).count())
+                        });
+                        let starred_n = s.messages.with(|m| {
+                            m.get(&chat)
+                                .map_or(0, |v| v.iter().filter(|x| x.starred).count())
+                        });
                         untracked(move || {
                             group([
                                 Row::new("Media, links and docs")
@@ -121,7 +141,11 @@ fn group_page(s: Store, chat: ChatId) -> Screen {
                                     .build(),
                                 Row::new("Starred messages")
                                     .icon(Icon::Star)
-                                    .value(if starred_n == 0 { "None".to_string() } else { starred_n.to_string() })
+                                    .value(if starred_n == 0 {
+                                        "None".to_string()
+                                    } else {
+                                        starred_n.to_string()
+                                    })
                                     .on_press(move || starred_page(chat))
                                     .build(),
                             ])
@@ -129,7 +153,9 @@ fn group_page(s: Store, chat: ChatId) -> Screen {
                         })
                     }))
                     .child(group([
-                        icon_toggle_row(Icon::BellOff, "Mute notifications",
+                        icon_toggle_row(
+                            Icon::BellOff,
+                            "Mute notifications",
                             None,
                             move || ch.with(|c| c.as_ref().is_some_and(|c| c.muted)),
                             move |_| s.toggle_mute(chat),
@@ -149,14 +175,18 @@ fn group_page(s: Store, chat: ChatId) -> Screen {
                                 })
                             }))
                             .into_element(),
-                        icon_toggle_row(Icon::Lock, "Lock chat",
+                        icon_toggle_row(
+                            Icon::Lock,
+                            "Lock chat",
                             Some("Only you can open it, with your device's lock."),
                             move || ch.with(|c| c.as_ref().is_some_and(|c| c.locked)),
                             move |_| s.toggle_lock(chat),
                         ),
                         Row::new("Encryption")
                             .icon(Icon::ShieldCheck)
-                            .subtitle("Messages and calls are end-to-end encrypted. Tap to learn more.")
+                            .subtitle(
+                                "Messages and calls are end-to-end encrypted. Tap to learn more.",
+                            )
                             .on_press(move || crypto_open.set(true))
                             .build(),
                     ]))
@@ -178,12 +208,28 @@ fn group_page(s: Store, chat: ChatId) -> Screen {
                             .build(),
                     ])),
             ))
-            .child(app_sheet(edit_open, "Edit group info", edit_sheet(s, chat, edit_open)))
-            .child(app_sheet(add_open, "Add members", add_sheet(s, chat, add_open)))
-            .child(app_sheet(timer_open, "Disappearing messages", timer_sheet(s, chat, ch, timer_open)))
+            .child(app_sheet(
+                edit_open,
+                "Edit group info",
+                edit_sheet(s, chat, edit_open),
+            ))
+            .child(app_sheet(
+                add_open,
+                "Add members",
+                add_sheet(s, chat, add_open),
+            ))
+            .child(app_sheet(
+                timer_open,
+                "Disappearing messages",
+                timer_sheet(s, chat, ch, timer_open),
+            ))
             .child(crate::features::chat::theme_sheet(chat, theme_open))
             .child(app_sheet(crypto_open, "Encryption", crypto_sheet(s, chat)))
-            .child(app_sheet(member_open, "Group member", member_sheet(s, chat, ch, member, member_open))),
+            .child(app_sheet(
+                member_open,
+                "Group member",
+                member_sheet(s, chat, ch, member, member_open),
+            )),
     )
 }
 
@@ -212,12 +258,19 @@ fn header(s: Store, chat: ChatId, kind_line: impl Fn() -> String + 'static) -> V
                 .text_size(px(font::body()))
                 .line_height(px(font::body() * 1.4))
                 .text_center()
-                .style_when(move || s.chat(chat).is_none_or(|c| c.about.is_empty()), |st| st.hidden()),
+                .style_when(
+                    move || s.chat(chat).is_none_or(|c| c.about.is_empty()),
+                    |st| st.hidden(),
+                ),
         )
 }
 
 /// One of the four actions under the header.
-pub(crate) fn action_tile(glyph: Icon, label: &'static str, on_press: impl Fn() + 'static) -> impl IntoElement {
+pub(crate) fn action_tile(
+    glyph: Icon,
+    label: &'static str,
+    on_press: impl Fn() + 'static,
+) -> impl IntoElement {
     press_surface(Press::Tile, on_press)
         .accessibility_label(label)
         .flex_1()
@@ -229,7 +282,11 @@ pub(crate) fn action_tile(glyph: Icon, label: &'static str, on_press: impl Fn() 
         .border_1()
         .border_color(move || c::border())
         .child(icon(glyph, 22.0).text_color(move || c::primary()))
-        .child(text(label).text_size(px(font::SMALL)).font_weight(FontWeight::MEDIUM))
+        .child(
+            text(label)
+                .text_size(px(font::SMALL))
+                .font_weight(FontWeight::MEDIUM),
+        )
 }
 
 /// Permissions, invite link, join requests, member changes.
@@ -242,7 +299,11 @@ fn admin_rows(s: Store, chat: ChatId, ch: Memo<Option<Chat>>) -> View {
             let mut rows = vec![
                 Row::new("Group permissions")
                     .icon(Icon::Shield)
-                    .subtitle(if manage { "Choose what members can do" } else { "See what members can do" })
+                    .subtitle(if manage {
+                        "Choose what members can do"
+                    } else {
+                        "See what members can do"
+                    })
                     .chevron()
                     .on_press(move || roles_page(chat))
                     .build(),
@@ -267,7 +328,9 @@ fn admin_rows(s: Store, chat: ChatId, ch: Memo<Option<Chat>>) -> View {
                             .items_center()
                             .gap_1()
                             .child(unread_badge(move || requests as u32, || false))
-                            .child(icon(Icon::ChevronRight, 16.0).text_color(move || c::muted_fg())),
+                            .child(
+                                icon(Icon::ChevronRight, 16.0).text_color(move || c::muted_fg()),
+                            ),
                     )
                 } else {
                     r.value("None")
@@ -309,11 +372,19 @@ fn members_section(
     view()
         // The page stacks sections 16pt apart; with the title's own
         // 4pt that is the 20pt every other section title sits below a card.
-        .child(section_title(move || match count() {
-            1 => "1 member".to_string(),
-            n => format!("{n} members"),
-        }).pt_1())
-        .child(view().px_4().pb_3().child(search_field("Search members", query)))
+        .child(
+            section_title(move || match count() {
+                1 => "1 member".to_string(),
+                n => format!("{n} members"),
+            })
+            .pt_1(),
+        )
+        .child(
+            view()
+                .px_4()
+                .pb_3()
+                .child(search_field("Search members", query)),
+        )
         .child(
             view()
                 .mx_4()
@@ -324,16 +395,29 @@ fn members_section(
                 .border_color(move || c::border())
                 .child(
                     view()
-                        .style_when(move || !ch.with(|c| c.as_ref().is_some_and(can_add)), |st| st.hidden())
-                        .child(Row::new("Add members").icon(Icon::UserPlus).on_press(add).build())
+                        .style_when(
+                            move || !ch.with(|c| c.as_ref().is_some_and(can_add)),
+                            |st| st.hidden(),
+                        )
+                        .child(
+                            Row::new("Add members")
+                                .icon(Icon::UserPlus)
+                                .on_press(add)
+                                .build(),
+                        )
                         .child(separator_inset(56.0)),
                 )
                 .child(
-                    virtual_list(move || list.with(Vec::len), move |at| {
-                        let m = computed(move || list.with(|l| l.get(at.index()).cloned()));
-                        member_row(s, m, open_member)
+                    virtual_list(
+                        move || list.with(Vec::len),
+                        move |at| {
+                            let m = computed(move || list.with(|l| l.get(at.index()).cloned()));
+                            member_row(s, m, open_member)
+                        },
+                    )
+                    .keys(move || {
+                        list.with(|l| l.iter().map(|m| m.contact.unwrap_or(0)).collect::<Vec<_>>())
                     })
-                    .keys(move || list.with(|l| l.iter().map(|m| m.contact.unwrap_or(0)).collect::<Vec<_>>()))
                     .viewport(ListViewport::Parent)
                     .estimated_item_size(px(if is_desktop() { 52.0 } else { 64.0 }))
                     .separator(|| separator_inset(68.0))
@@ -343,13 +427,26 @@ fn members_section(
 }
 
 /// A member: avatar, name ("You" for the user), username, role tag.
-fn member_row(s: Store, m: Memo<Option<Member>>, open: impl Fn(ContactId) + Copy + 'static) -> impl IntoElement {
+fn member_row(
+    s: Store,
+    m: Memo<Option<Member>>,
+    open: impl Fn(ContactId) + Copy + 'static,
+) -> impl IntoElement {
     let contact = move || m.with(|m| m.as_ref().and_then(|m| m.contact));
     let name = move || s.contact_name(contact());
     let role = move || m.with(|m| m.as_ref().map_or(Role::Member, |m| m.role));
     let sub = move || match contact() {
         None => s.me.with(|p| p.about.clone()),
-        Some(id) => s.contact(id).map(|c| if c.about.is_empty() { format!("@{}", c.username) } else { c.about }).unwrap_or_default(),
+        Some(id) => s
+            .contact(id)
+            .map(|c| {
+                if c.about.is_empty() {
+                    format!("@{}", c.username)
+                } else {
+                    c.about
+                }
+            })
+            .unwrap_or_default(),
     };
     let seed = move || contact().unwrap_or(s.me.with(|p| p.seed));
     press_surface(Press::Row, move || {
@@ -357,7 +454,13 @@ fn member_row(s: Store, m: Memo<Option<Member>>, open: impl Fn(ContactId) + Copy
             open(id);
         }
     })
-    .accessibility_label(move || Some(SharedString::from(format!("{}, {}", name(), role().label()))))
+    .accessibility_label(move || {
+        Some(SharedString::from(format!(
+            "{}, {}",
+            name(),
+            role().label()
+        )))
+    })
     .flex_row()
     .items_center()
     .gap_3()
@@ -377,7 +480,12 @@ fn member_row(s: Store, m: Memo<Option<Member>>, open: impl Fn(ContactId) + Copy
             .min_w(px(0.0))
             .gap(px(2.0))
             .child(text(name).text_size(px(font::body())).number_of_lines(1))
-            .child(text(sub).text_size(px(font::SMALL)).text_color(move || c::muted_fg()).number_of_lines(1)),
+            .child(
+                text(sub)
+                    .text_size(px(font::SMALL))
+                    .text_color(move || c::muted_fg())
+                    .number_of_lines(1),
+            ),
     )
     .child(
         view()
@@ -495,12 +603,18 @@ fn person_header(contact: &Contact, role: Role) -> View {
                         .flex_row()
                         .items_center()
                         .gap_2()
-                        .child(text(contact.name.clone()).text_size(px(font::TITLE)).font_weight(FontWeight::SEMIBOLD))
+                        .child(
+                            text(contact.name.clone())
+                                .text_size(px(font::TITLE))
+                                .font_weight(FontWeight::SEMIBOLD),
+                        )
                         .child(contact.verified.then(|| {
                             view()
                                 .label("Verified")
                                 .role(AccessibilityRole::Image)
-                                .child(icon(Icon::ShieldCheck, 16.0).text_color(move || c::primary()))
+                                .child(
+                                    icon(Icon::ShieldCheck, 16.0).text_color(move || c::primary()),
+                                )
                         }))
                         .child(role_tag(role)),
                 )
@@ -516,10 +630,18 @@ fn edit_sheet(s: Store, chat: ChatId, open: Signal<bool>) -> View {
     view()
         .px_4()
         .gap_4()
-        .child(labelled_field("Group name", field("Group name", name).max_length(100_u32), "Everyone in the group sees it.", || false))
+        .child(labelled_field(
+            "Group name",
+            field("Group name", name).max_length(100_u32),
+            "Everyone in the group sees it.",
+            || false,
+        ))
         .child(labelled_field(
             "Description",
-            field("Add a description", about).multiline(true).h(px(96.0)).py_2(),
+            field("Add a description", about)
+                .multiline(true)
+                .h(px(96.0))
+                .py_2(),
             "Shown at the top of the group's info.",
             || false,
         ))
@@ -534,7 +656,11 @@ fn edit_sheet(s: Store, chat: ChatId, open: Signal<bool>) -> View {
                     c.title = title;
                     c.about = desc;
                 });
-                s.push_message(chat, None, Body::System("You changed the group info".into()));
+                s.push_message(
+                    chat,
+                    None,
+                    Body::System("You changed the group info".into()),
+                );
                 open.set(false);
             })
             .disabled(move || name.with(|n| n.trim().is_empty())),
@@ -547,8 +673,10 @@ fn add_sheet(s: Store, chat: ChatId, open: Signal<bool>) -> View {
     let query = signal(String::new());
     let list = computed(move || {
         let q = query.get();
-        let inside: Vec<ContactId> =
-            s.chat(chat).map(|c| c.members.iter().filter_map(|m| m.contact).collect()).unwrap_or_default();
+        let inside: Vec<ContactId> = s
+            .chat(chat)
+            .map(|c| c.members.iter().filter_map(|m| m.contact).collect())
+            .unwrap_or_default();
         create::addable(s)
             .into_iter()
             .filter(|c| !inside.contains(&c.id) && create::matches(c, &q))
@@ -556,26 +684,28 @@ fn add_sheet(s: Store, chat: ChatId, open: Signal<bool>) -> View {
     });
     view()
         .gap_3()
-        .child(view().px_4().child(search_field("Search name or username", query)))
         .child(
-            scroll().max_h(px(360.0)).child(view().child(each(
-                move || list.get(),
-                |c: &Contact| c.id,
-                move |c, _| {
-                    let id = c.get_untracked().id;
-                    let memo = computed(move || Some(c.get()));
-                    let chosen = move || picked.with(|p| p.contains(&id));
-                    create::contact_pick_row(memo, chosen, move || {
-                        picked.update(|p| match p.iter().position(|x| *x == id) {
-                            Some(i) => {
-                                p.remove(i);
-                            }
-                            None => p.push(id),
-                        })
-                    })
-                },
-            ))),
+            view()
+                .px_4()
+                .child(search_field("Search name or username", query)),
         )
+        .child(scroll().max_h(px(360.0)).child(view().child(each(
+            move || list.get(),
+            |c: &Contact| c.id,
+            move |c, _| {
+                let id = c.get_untracked().id;
+                let memo = computed(move || Some(c.get()));
+                let chosen = move || picked.with(|p| p.contains(&id));
+                create::contact_pick_row(memo, chosen, move || {
+                    picked.update(|p| match p.iter().position(|x| *x == id) {
+                        Some(i) => {
+                            p.remove(i);
+                        }
+                        None => p.push(id),
+                    })
+                })
+            },
+        ))))
         .child(
             view().px_4().child(
                 btn(
@@ -664,14 +794,22 @@ fn exit(s: Store, chat: ChatId) {
     let heir = crate::store::ext_groups::successor(&c).map(|h| s.contact_name(Some(h)));
     let message = match (my_role(&c), heir) {
         (Some(Role::Owner), Some(h)) => {
-            format!("You're the owner. {h} will become the owner. You won't get new messages from this group.")
+            format!(
+                "You're the owner. {h} will become the owner. You won't get new messages from this group."
+            )
         }
-        _ => "You won't get new messages from this group. Members will see that you left.".to_string(),
+        _ => "You won't get new messages from this group. Members will see that you left."
+            .to_string(),
     };
-    confirm(format!("Exit “{}”?", c.title), message, "Exit group", move || {
-        s.exit_group(chat);
-        nav::pop();
-    });
+    confirm(
+        format!("Exit “{}”?", c.title),
+        message,
+        "Exit group",
+        move || {
+            s.exit_group(chat);
+            nav::pop();
+        },
+    );
 }
 
 fn report(s: Store, chat: ChatId) {
@@ -695,7 +833,10 @@ fn channel_page(s: Store, chat: ChatId) -> Screen {
         Some(ChatKind::Channel { followers, .. }) => followers,
         _ => 0,
     };
-    let admin = matches!(s.chat(chat).map(|c| c.kind), Some(ChatKind::Channel { admin: true, .. }));
+    let admin = matches!(
+        s.chat(chat).map(|c| c.kind),
+        Some(ChatKind::Channel { admin: true, .. })
+    );
     let unfollow = move || {
         let title = s.chat(chat).map(|c| c.title).unwrap_or_default();
         confirm(
@@ -716,7 +857,9 @@ fn channel_page(s: Store, chat: ChatId) -> Screen {
         page_scroll(
             view()
                 .gap_4()
-                .child(header(s, chat, move || format!("Channel · {}", followers_label(followers()))))
+                .child(header(s, chat, move || {
+                    format!("Channel · {}", followers_label(followers()))
+                }))
                 .child(
                     view()
                         .flex_row()
@@ -741,22 +884,40 @@ fn channel_page(s: Store, chat: ChatId) -> Screen {
                     "Followers can't see each other. Only the channel's admins can post.",
                 )))
                 .child(group([
-                    icon_toggle_row(Icon::BellOff, "Mute notifications",
+                    icon_toggle_row(
+                        Icon::BellOff,
+                        "Mute notifications",
                         None,
                         move || ch.with(|c| c.as_ref().is_some_and(|c| c.muted)),
                         move |_| s.toggle_mute(chat),
                     ),
-                    Row::new("Media, links and docs").icon(Icon::Image).chevron().on_press(move || media_page(chat)).build(),
+                    Row::new("Media, links and docs")
+                        .icon(Icon::Image)
+                        .chevron()
+                        .on_press(move || media_page(chat))
+                        .build(),
                 ]))
                 .child(admin.then(|| {
                     view()
                         .child(section_title("Posting tools"))
                         .child(group([
-                            Row::new("New post").icon(Icon::Edit).on_press(move || chat_feature::open(chat)).build(),
-                            Row::new("Poll").icon(Icon::Poll).on_press(move || chat_feature::open(chat)).build(),
-                            Row::new("Channel admins").icon(Icon::Shield).chevron().on_press(move || roles_page(chat)).build(),
+                            Row::new("New post")
+                                .icon(Icon::Edit)
+                                .on_press(move || chat_feature::open(chat))
+                                .build(),
+                            Row::new("Poll")
+                                .icon(Icon::Poll)
+                                .on_press(move || chat_feature::open(chat))
+                                .build(),
+                            Row::new("Channel admins")
+                                .icon(Icon::Shield)
+                                .chevron()
+                                .on_press(move || roles_page(chat))
+                                .build(),
                         ]))
-                        .child(footnote("Posts go to every follower. Followers can react but not reply."))
+                        .child(footnote(
+                            "Posts go to every follower. Followers can react but not reply.",
+                        ))
                 }))
                 .child(group([
                     Row::new("Report channel")
@@ -778,7 +939,10 @@ fn channel_page(s: Store, chat: ChatId) -> Screen {
 
 /// Photos, videos, links and files: what "Media, links and docs" counts.
 pub(crate) fn is_shared(b: &Body) -> bool {
-    matches!(b, Body::Image { .. } | Body::Video { .. } | Body::Link { .. } | Body::File { .. })
+    matches!(
+        b,
+        Body::Image { .. } | Body::Video { .. } | Body::Link { .. } | Body::File { .. }
+    )
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -797,7 +961,11 @@ fn media_page(chat: ChatId) {
             view()
                 .flex_1()
                 .child(view().px_4().pt_3().pb_3().child(segmented(
-                    vec![(Shelf::Media, "Media"), (Shelf::Links, "Links"), (Shelf::Docs, "Docs")],
+                    vec![
+                        (Shelf::Media, "Media"),
+                        (Shelf::Links, "Links"),
+                        (Shelf::Docs, "Docs"),
+                    ],
                     move || shelf.get(),
                     move |v| shelf.set(v),
                 )))
@@ -810,15 +978,36 @@ fn media_page(chat: ChatId) {
     });
 }
 
-fn shelf_view(s: Store, chat: ChatId, which: Shelf, msgs: Vec<crate::store::Message>) -> AnyElement {
+fn shelf_view(
+    s: Store,
+    chat: ChatId,
+    which: Shelf,
+    msgs: Vec<crate::store::Message>,
+) -> AnyElement {
     match which {
         Shelf::Media => {
-            let items: Vec<_> = msgs.iter().rev().filter(|m| matches!(m.body, Body::Image { .. } | Body::Video { .. })).cloned().collect();
+            let items: Vec<_> = msgs
+                .iter()
+                .rev()
+                .filter(|m| matches!(m.body, Body::Image { .. } | Body::Video { .. }))
+                .cloned()
+                .collect();
             if items.is_empty() {
-                return empty_state(Icon::Image, "No media", "Photos and videos shared in this chat show here.", None).into_element();
+                return empty_state(
+                    Icon::Image,
+                    "No media",
+                    "Photos and videos shared in this chat show here.",
+                    None,
+                )
+                .into_element();
             }
             page_scroll(
-                view().px_4().flex_row().flex_wrap().gap_1().children(items.into_iter().map(move |m| media_tile(s, chat, m))),
+                view()
+                    .px_4()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap_1()
+                    .children(items.into_iter().map(move |m| media_tile(s, chat, m))),
             )
             .into_element()
         }
@@ -827,7 +1016,9 @@ fn shelf_view(s: Store, chat: ChatId, which: Shelf, msgs: Vec<crate::store::Mess
                 .iter()
                 .rev()
                 .filter_map(|m| match &m.body {
-                    Body::Link { url, title, site, .. } => {
+                    Body::Link {
+                        url, title, site, ..
+                    } => {
                         let url = url.clone();
                         Some(
                             Row::new(title.clone())
@@ -843,7 +1034,13 @@ fn shelf_view(s: Store, chat: ChatId, which: Shelf, msgs: Vec<crate::store::Mess
                 })
                 .collect();
             if rows.is_empty() {
-                return empty_state(Icon::Link, "No links", "Links shared in this chat show here.", None).into_element();
+                return empty_state(
+                    Icon::Link,
+                    "No links",
+                    "Links shared in this chat show here.",
+                    None,
+                )
+                .into_element();
             }
             page_scroll(group(rows)).into_element()
         }
@@ -853,13 +1050,22 @@ fn shelf_view(s: Store, chat: ChatId, which: Shelf, msgs: Vec<crate::store::Mess
                 .rev()
                 .filter_map(|m| match &m.body {
                     Body::File { name, size, kind } => Some(
-                        Row::new(name.clone()).icon(Icon::File).subtitle(format!("{kind} · {size} · {}", when_label(m.at))).build(),
+                        Row::new(name.clone())
+                            .icon(Icon::File)
+                            .subtitle(format!("{kind} · {size} · {}", when_label(m.at)))
+                            .build(),
                     ),
                     _ => None,
                 })
                 .collect();
             if rows.is_empty() {
-                return empty_state(Icon::File, "No documents", "Files shared in this chat show here.", None).into_element();
+                return empty_state(
+                    Icon::File,
+                    "No documents",
+                    "Files shared in this chat show here.",
+                    None,
+                )
+                .into_element();
             }
             page_scroll(group(rows)).into_element()
         }
@@ -873,20 +1079,39 @@ fn media_tile(_s: Store, chat: ChatId, m: crate::store::Message) -> AnyElement {
     // and the viewer, cropped to the square.
     let (alt, video, w, h) = match &m.body {
         Body::Image { alt, w, h, .. } => (alt.clone(), false, (*w).max(1), (*h).max(1)),
-        Body::Video { caption, .. } => (if caption.is_empty() { "A video".to_string() } else { caption.clone() }, true, 16, 9),
+        Body::Video { caption, .. } => (
+            if caption.is_empty() {
+                "A video".to_string()
+            } else {
+                caption.clone()
+            },
+            true,
+            16,
+            9,
+        ),
         _ => (String::new(), false, 1, 1),
     };
     let src = crate::ui::portrait::photo(&alt, id, w, h);
     let side = if wide() { 112.0 } else { 116.0 };
     press_surface(Press::Tile, move || media::open_viewer(chat, id))
-        .accessibility_label(if video { format!("Video: {alt}") } else { format!("Photo: {alt}") })
+        .accessibility_label(if video {
+            format!("Video: {alt}")
+        } else {
+            format!("Photo: {alt}")
+        })
         .size(px(side))
         .rounded(move || radius::sm())
         .overflow_hidden()
         .items_center()
         .justify_center()
         .bg(move || c::muted())
-        .child(image(src).absolute().inset_0().object_fit(ResizeMode::Cover).accessibility_elements_hidden(true))
+        .child(
+            image(src)
+                .absolute()
+                .inset_0()
+                .object_fit(ResizeMode::Cover)
+                .accessibility_elements_hidden(true),
+        )
         .child(video.then(|| {
             view()
                 .size(px(36.0))
@@ -907,7 +1132,11 @@ fn starred_page(chat: ChatId) {
         page(
             "Starred messages",
             view().flex_1().child(dynamic(move || {
-                let starred: Vec<_> = s.messages_of(chat).into_iter().filter(|m| m.starred).collect();
+                let starred: Vec<_> = s
+                    .messages_of(chat)
+                    .into_iter()
+                    .filter(|m| m.starred)
+                    .collect();
                 untracked(move || {
                     if starred.is_empty() {
                         return empty_state(
@@ -944,7 +1173,10 @@ fn search_page(chat: ChatId) {
             s.messages_of(chat)
                 .into_iter()
                 .rev()
-                .filter(|m| !matches!(m.body, Body::System(_)) && m.body.preview().to_lowercase().contains(&q))
+                .filter(|m| {
+                    !matches!(m.body, Body::System(_))
+                        && m.body.preview().to_lowercase().contains(&q)
+                })
                 .take(200)
                 .collect::<Vec<_>>()
         });
@@ -952,22 +1184,47 @@ fn search_page(chat: ChatId) {
             "Search",
             view()
                 .flex_1()
-                .child(view().px_4().pt_3().pb_2().child(search_field("Search messages", query)))
                 .child(
-                    virtual_list(move || results.with(Vec::len), move |at| {
-                        let m = computed(move || results.with(|r| r.get(at.index()).cloned()));
-                        let title = move || m.with(|m| m.as_ref().map(|m| m.body.preview()).unwrap_or_default());
-                        let sub = move || {
-                            m.with(|m| m.as_ref().map(|m| format!("{} · {}", s.contact_name(m.from), when_label(m.at))).unwrap_or_default())
-                        };
-                        press_surface(Press::Row, move || chat_feature::open(chat))
-                            .accessibility_label(move || Some(SharedString::from(title())))
-                            .px_4()
-                            .py_2()
-                            .gap(px(2.0))
-                            .child(text(title).text_size(px(font::body())).number_of_lines(2))
-                            .child(text(sub).text_size(px(font::SMALL)).text_color(move || c::muted_fg()))
-                    })
+                    view()
+                        .px_4()
+                        .pt_3()
+                        .pb_2()
+                        .child(search_field("Search messages", query)),
+                )
+                .child(
+                    virtual_list(
+                        move || results.with(Vec::len),
+                        move |at| {
+                            let m = computed(move || results.with(|r| r.get(at.index()).cloned()));
+                            let title = move || {
+                                m.with(|m| m.as_ref().map(|m| m.body.preview()).unwrap_or_default())
+                            };
+                            let sub = move || {
+                                m.with(|m| {
+                                    m.as_ref()
+                                        .map(|m| {
+                                            format!(
+                                                "{} · {}",
+                                                s.contact_name(m.from),
+                                                when_label(m.at)
+                                            )
+                                        })
+                                        .unwrap_or_default()
+                                })
+                            };
+                            press_surface(Press::Row, move || chat_feature::open(chat))
+                                .accessibility_label(move || Some(SharedString::from(title())))
+                                .px_4()
+                                .py_2()
+                                .gap(px(2.0))
+                                .child(text(title).text_size(px(font::body())).number_of_lines(2))
+                                .child(
+                                    text(sub)
+                                        .text_size(px(font::SMALL))
+                                        .text_color(move || c::muted_fg()),
+                                )
+                        },
+                    )
                     .estimated_item_size(px(56.0))
                     .empty(view().p_4().child(muted(move || {
                         if query.with(|q| q.trim().chars().count() < 2) {

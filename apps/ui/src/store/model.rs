@@ -97,7 +97,10 @@ pub enum ChatKind {
     Group,
     /// A community's home; its groups point to it with `Chat::community`.
     Community,
-    Channel { followers: u32, admin: bool },
+    Channel {
+        followers: u32,
+        admin: bool,
+    },
     /// A chat bridged to WhatsApp (A15); hides features WhatsApp lacks.
     WhatsApp(ContactId),
 }
@@ -198,19 +201,67 @@ pub struct Chat {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Body {
     Text(String),
-    Link { text: String, url: String, title: String, site: String },
-    Image { caption: String, alt: String, w: u32, h: u32, hd: bool },
-    Video { caption: String, secs: u32 },
-    Voice { secs: u32, played: bool },
-    File { name: String, size: String, kind: String },
-    Poll { question: String, options: Vec<(String, u32)>, mine: Option<usize>, multiple: bool },
-    Event { title: String, when: String, place: String, going: u32, mine: Option<bool> },
-    Contact { name: String, username: String },
-    Location { label: String, live: bool },
-    Sticker { emoji: String, pack: String },
-    ViewOnce { photo: bool, opened: bool },
+    Link {
+        text: String,
+        url: String,
+        title: String,
+        site: String,
+    },
+    Image {
+        caption: String,
+        alt: String,
+        w: u32,
+        h: u32,
+        hd: bool,
+    },
+    Video {
+        caption: String,
+        secs: u32,
+    },
+    Voice {
+        secs: u32,
+        played: bool,
+    },
+    File {
+        name: String,
+        size: String,
+        kind: String,
+    },
+    Poll {
+        question: String,
+        options: Vec<(String, u32)>,
+        mine: Option<usize>,
+        multiple: bool,
+    },
+    Event {
+        title: String,
+        when: String,
+        place: String,
+        going: u32,
+        mine: Option<bool>,
+    },
+    Contact {
+        name: String,
+        username: String,
+    },
+    Location {
+        label: String,
+        live: bool,
+    },
+    Sticker {
+        emoji: String,
+        pack: String,
+    },
+    ViewOnce {
+        photo: bool,
+        opened: bool,
+    },
     Nudge,
-    Call { video: bool, missed: bool, secs: u32 },
+    Call {
+        video: bool,
+        missed: bool,
+        secs: u32,
+    },
     Deleted,
     /// Centred system notice ("Ana added Mihai").
     System(String),
@@ -232,10 +283,20 @@ impl Body {
             Body::Event { title, .. } => format!("Event: {title}"),
             Body::Contact { name, .. } => format!("Contact: {name}"),
             Body::Location { label, live } => {
-                if *live { format!("Live location · {label}") } else { format!("Location · {label}") }
+                if *live {
+                    format!("Live location · {label}")
+                } else {
+                    format!("Location · {label}")
+                }
             }
             Body::Sticker { emoji, .. } => format!("{emoji} Sticker"),
-            Body::ViewOnce { photo, .. } => if *photo { "View once photo".into() } else { "View once video".into() },
+            Body::ViewOnce { photo, .. } => {
+                if *photo {
+                    "View once photo".into()
+                } else {
+                    "View once video".into()
+                }
+            }
             Body::Nudge => "Nudge!".into(),
             Body::Call { video, missed, .. } => match (video, missed) {
                 (true, true) => "Missed video call".into(),
@@ -407,6 +468,15 @@ pub struct Settings {
     pub status: Audience,
     pub groups_add: Audience,
     pub read_receipts: bool,
+    /// Typing indicators, sent and shown (Prompt 9).
+    pub typing_indicators: bool,
+    /// Found by username lookups (server-enforced, Prompt 9).
+    pub discoverable: bool,
+    /// Message requests from everyone (`false`: from nobody; server-enforced).
+    pub message_requests: bool,
+    /// The account is deleted after this many months unused: 6, 12 or 24
+    /// (server-enforced).
+    pub inactivity_months: u8,
     pub default_timer: Option<Disappear>,
     pub app_lock: bool,
     pub block_screenshots: bool,

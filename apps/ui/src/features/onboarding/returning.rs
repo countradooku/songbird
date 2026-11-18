@@ -58,7 +58,10 @@ pub(super) fn link_device(s: Store, f: Flow) -> View {
     let linked = signal(false);
     // mock: the phone scans this code and approves (app-core `link_as_secondary`).
     set_timeout(Duration::from_millis(4500), move || {
-        if f.history.try_get().is_some_and(|h| h.last() == Some(&Step::LinkDevice)) {
+        if f.history
+            .try_get()
+            .is_some_and(|h| h.last() == Some(&Step::LinkDevice))
+        {
             let _ = linked.try_set(true);
         }
     });

@@ -297,7 +297,11 @@ pub struct SkinSpec {
 }
 
 const fn tt(size: f32, weight: u16, tracking: f32) -> TitleType {
-    TitleType { size, weight: FontWeight(weight), tracking }
+    TitleType {
+        size,
+        weight: FontWeight(weight),
+        tracking,
+    }
 }
 
 /// Apple, Liquid Glass (iOS 26 / macOS 26 HIG).
@@ -317,8 +321,16 @@ pub const APPLE: SkinSpec = SkinSpec {
         fab: FULL,
         search: FULL,
     },
-    desktop: Heights { sm: 24.0, md: 30.0, lg: 38.0 },
-    mobile: Heights { sm: 36.0, md: 48.0, lg: 54.0 },
+    desktop: Heights {
+        sm: 24.0,
+        md: 30.0,
+        lg: 38.0,
+    },
+    mobile: Heights {
+        sm: 36.0,
+        md: 48.0,
+        lg: 54.0,
+    },
     field_h: (32.0, 48.0),
     page_title: tt(17.0, 600, -0.4),
     large_title: tt(34.0, 700, 0.4),
@@ -368,8 +380,16 @@ pub const MATERIAL: SkinSpec = SkinSpec {
         fab: 16.0,
         search: FULL,
     },
-    desktop: Heights { sm: 32.0, md: 40.0, lg: 48.0 },
-    mobile: Heights { sm: 40.0, md: 48.0, lg: 56.0 },
+    desktop: Heights {
+        sm: 32.0,
+        md: 40.0,
+        lg: 48.0,
+    },
+    mobile: Heights {
+        sm: 40.0,
+        md: 48.0,
+        lg: 56.0,
+    },
     field_h: (40.0, 56.0),
     page_title: tt(22.0, 400, 0.0),
     large_title: tt(32.0, 500, 0.0),
@@ -419,8 +439,16 @@ pub const FLUENT: SkinSpec = SkinSpec {
         fab: 4.0,
         search: 4.0,
     },
-    desktop: Heights { sm: 24.0, md: 32.0, lg: 40.0 },
-    mobile: Heights { sm: 32.0, md: 40.0, lg: 48.0 },
+    desktop: Heights {
+        sm: 24.0,
+        md: 32.0,
+        lg: 40.0,
+    },
+    mobile: Heights {
+        sm: 32.0,
+        md: 40.0,
+        lg: 48.0,
+    },
     field_h: (32.0, 40.0),
     page_title: tt(20.0, 600, 0.0),
     large_title: tt(28.0, 600, 0.0),
@@ -470,8 +498,16 @@ pub const ADWAITA: SkinSpec = SkinSpec {
         fab: 6.0,
         search: 6.0,
     },
-    desktop: Heights { sm: 24.0, md: 34.0, lg: 42.0 },
-    mobile: Heights { sm: 34.0, md: 42.0, lg: 50.0 },
+    desktop: Heights {
+        sm: 24.0,
+        md: 34.0,
+        lg: 42.0,
+    },
+    mobile: Heights {
+        sm: 34.0,
+        md: 42.0,
+        lg: 50.0,
+    },
     field_h: (34.0, 42.0),
     page_title: tt(15.0, 700, 0.0),
     large_title: tt(15.0, 700, 0.0),
@@ -507,7 +543,11 @@ pub const ADWAITA: SkinSpec = SkinSpec {
 impl SkinSpec {
     /// Button heights for the current family.
     pub fn heights(&self) -> Heights {
-        if is_desktop() { self.desktop } else { self.mobile }
+        if is_desktop() {
+            self.desktop
+        } else {
+            self.mobile
+        }
     }
 
     /// How much of a phone window's bottom (above the safe area) the
@@ -524,7 +564,11 @@ impl SkinSpec {
     /// The icon for "new chat" in a header: Apple's square and pencil,
     /// a pencil elsewhere.
     pub fn compose_icon(&self) -> super::icons::Icon {
-        if self.skin == Skin::Apple { super::icons::Icon::Compose } else { super::icons::Icon::Edit }
+        if self.skin == Skin::Apple {
+            super::icons::Icon::Compose
+        } else {
+            super::icons::Icon::Edit
+        }
     }
 
     /// A section root shows a large title at this width.
@@ -564,7 +608,11 @@ fn env_skin() -> Option<Skin> {
         return None;
     }
     static ENV: std::sync::OnceLock<Option<Skin>> = std::sync::OnceLock::new();
-    *ENV.get_or_init(|| std::env::var("SONGBIRD_SKIN").ok().and_then(|v| Skin::parse(&v)))
+    *ENV.get_or_init(|| {
+        std::env::var("SONGBIRD_SKIN")
+            .ok()
+            .and_then(|v| Skin::parse(&v))
+    })
 }
 
 /// The skin of this OS (and, in debug builds, `SONGBIRD_SKIN`), ignoring
@@ -597,7 +645,9 @@ pub fn spec() -> SkinSpec {
 /// theme rebuild on.
 pub fn tracked_skin() -> Skin {
     if cfg!(debug_assertions) {
-        global::<ActiveSkin>().with(|a| a.0).unwrap_or_else(platform_skin)
+        global::<ActiveSkin>()
+            .with(|a| a.0)
+            .unwrap_or_else(platform_skin)
     } else {
         platform_skin()
     }
@@ -649,7 +699,10 @@ mod tests {
     fn names_round_trip_and_cycle() {
         for s in Skin::ALL {
             assert_eq!(Skin::parse(s.name()), Some(s));
-            assert_eq!(Skin::parse(&format!(" {} ", s.label().to_uppercase())), Some(s));
+            assert_eq!(
+                Skin::parse(&format!(" {} ", s.label().to_uppercase())),
+                Some(s)
+            );
             assert_eq!(s.spec().skin, s);
         }
         assert_eq!(Skin::parse("cupertino"), None);
@@ -663,7 +716,9 @@ mod tests {
     #[test]
     fn scoped_skin_wins_and_restores() {
         let outside = skin();
-        let inner = with_skin(Skin::Fluent, || (skin(), with_skin(Skin::Adwaita, skin), skin()));
+        let inner = with_skin(Skin::Fluent, || {
+            (skin(), with_skin(Skin::Adwaita, skin), skin())
+        });
         assert_eq!(inner, (Skin::Fluent, Skin::Adwaita, Skin::Fluent));
         assert_eq!(skin(), outside);
     }
@@ -686,7 +741,10 @@ mod tests {
     fn material_is_m3_expressive() {
         let m = MATERIAL;
         assert_eq!((m.switch.track_w, m.switch.track_h), (52.0, 32.0));
-        assert!(m.switch.thumb_on > m.switch.thumb_off, "the thumb grows when on");
+        assert!(
+            m.switch.thumb_on > m.switch.thumb_off,
+            "the thumb grows when on"
+        );
         assert_eq!(m.radius.fab, 16.0);
         assert_eq!(m.radius.sheet, 28.0);
         assert_eq!(m.radius.button, FULL);
@@ -701,7 +759,15 @@ mod tests {
     fn fluent_is_fluent_2() {
         let f = FLUENT;
         assert_eq!((f.switch.track_w, f.switch.track_h), (40.0, 20.0));
-        assert_eq!((f.radius.control, f.radius.button, f.radius.card, f.radius.dialog), (4.0, 4.0, 8.0, 8.0));
+        assert_eq!(
+            (
+                f.radius.control,
+                f.radius.button,
+                f.radius.card,
+                f.radius.dialog
+            ),
+            (4.0, 4.0, 8.0, 8.0)
+        );
         assert_eq!((f.large_title.size, f.page_title.size), (28.0, 20.0));
         assert_eq!(f.large_title.weight, FontWeight(600));
         assert!(f.card_stroke && !f.fab && f.dialogs_centred);
@@ -727,7 +793,10 @@ mod tests {
             assert!(w.thumb_off + 2.0 * w.border <= w.track_h, "{s:?} off thumb");
             assert!(w.thumb_on <= w.track_h, "{s:?} on thumb");
             assert!(w.travel() > 0.0, "{s:?} travel");
-            assert!(w.inset_off + w.thumb_off + w.inset_on <= w.track_w, "{s:?} off fits");
+            assert!(
+                w.inset_off + w.thumb_off + w.inset_on <= w.track_w,
+                "{s:?} off fits"
+            );
             assert!(w.travel() >= w.thumb_off * 0.6, "{s:?} the move reads");
         }
     }
@@ -737,7 +806,12 @@ mod tests {
     fn panes_round_as_each_platform_does() {
         let r = |s: Skin| s.spec().radius.pane;
         assert_eq!(
-            (r(Skin::Apple), r(Skin::Material), r(Skin::Fluent), r(Skin::Adwaita)),
+            (
+                r(Skin::Apple),
+                r(Skin::Material),
+                r(Skin::Fluent),
+                r(Skin::Adwaita)
+            ),
             (16.0, 24.0, 8.0, 12.0)
         );
     }

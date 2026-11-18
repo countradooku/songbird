@@ -53,6 +53,12 @@ fn content() -> AnyElement {
                     links::invites,
                 ),
                 nav_row("Request account info", Icon::File, request_info),
+                value_row(
+                    "Delete if I'm away",
+                    Some(Icon::Timer),
+                    move || format!("After {} months", settings.with(|x| x.inactivity_months)),
+                    inactivity,
+                ),
                 Row::new("Delete my account")
                     .leading(danger_tile(Icon::Trash))
                     .danger()
@@ -61,6 +67,37 @@ fn content() -> AnyElement {
             ],
         ))
         .into_element()
+}
+
+/// How long the account may stay unused before the server deletes it
+/// (6, 12 or 24 months; the main phone's choice).
+fn inactivity() {
+    super::push("Delete if I'm away", || {
+        let s = store();
+        view()
+            .child(section(
+                "Delete my account if I'm away for",
+                [6u8, 12, 24]
+                    .into_iter()
+                    .map(|m| {
+                        radio_row(
+                            match m {
+                                6 => "6 months",
+                                12 => "12 months",
+                                _ => "24 months",
+                            },
+                            None,
+                            move || s.settings.with(|x| x.inactivity_months == m),
+                            move || s.set_inactivity(m),
+                        )
+                    })
+                    .collect(),
+            ))
+            .child(foot(
+                "Your devices are reminded a month and a week before. Using Songbird on any device restarts the clock.",
+            ))
+            .into_element()
+    });
 }
 
 /// What the account report holds: only what the server has.

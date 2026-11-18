@@ -305,3 +305,19 @@ fn records_are_padded_so_sizes_say_little() -> Result<(), SyncError> {
     assert_eq!(sizes.len(), 1, "both fit the smallest bucket: {sizes:?}");
     Ok(())
 }
+
+#[test]
+fn a_saved_replica_comes_back_whole_and_keeps_syncing() -> Result<(), SyncError> {
+    let (server, mut a, _) = two_devices_with_data()?;
+    a.set("s/theme", b"light".to_vec(), 5_000)?;
+    let back = Replica::load(&a.save())?;
+    assert_eq!(back.entries(), a.entries());
+    assert!(back.has_pending());
+    let mut back = back;
+    block_on(sync(&mut back, &server, 6_000))?;
+    // Its clock came back too: a later edit still wins.
+    let h = back.set("s/theme", b"dark".to_vec(), 1)?;
+    assert!(h.wall_ms >= 5_000);
+    assert!(Replica::load(b"junk").is_err());
+    Ok(())
+}

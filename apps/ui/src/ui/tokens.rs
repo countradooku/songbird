@@ -14,7 +14,10 @@ use nsh_core::prelude::*;
 /// simulator as red capsules), so the app's own copy of the tokens it
 /// applied (`theming::custom_color`) answers when NSH has none.
 fn role(name: &str) -> AdaptiveColor {
-    theme().color(name).or_else(|| crate::theming::custom_color(name)).unwrap_or(theme().destructive)
+    theme()
+        .color(name)
+        .or_else(|| crate::theming::custom_color(name))
+        .unwrap_or(theme().destructive)
 }
 
 /// Named colour roles the default shadcn set does not have.
@@ -23,76 +26,182 @@ pub mod c {
     use nsh_base::theme;
     use nsh_core::prelude::AdaptiveColor;
 
-    pub fn background() -> AdaptiveColor { theme().background }
-    pub fn foreground() -> AdaptiveColor { theme().foreground }
-    pub fn card() -> AdaptiveColor { theme().card }
-    pub fn popover() -> AdaptiveColor { theme().popover }
-    pub fn primary() -> AdaptiveColor { theme().primary }
-    pub fn on_primary() -> AdaptiveColor { theme().primary_foreground }
-    pub fn secondary() -> AdaptiveColor { theme().secondary }
-    pub fn on_secondary() -> AdaptiveColor { theme().secondary_foreground }
-    pub fn muted() -> AdaptiveColor { theme().muted }
-    pub fn muted_fg() -> AdaptiveColor { theme().muted_foreground }
-    pub fn accent() -> AdaptiveColor { theme().accent }
-    pub fn on_accent() -> AdaptiveColor { theme().accent_foreground }
-    pub fn destructive() -> AdaptiveColor { theme().destructive }
-    pub fn on_destructive() -> AdaptiveColor { role("destructive-foreground") }
-    pub fn border() -> AdaptiveColor { theme().border }
-    pub fn input() -> AdaptiveColor { theme().input }
-    pub fn ring() -> AdaptiveColor { theme().ring }
-    pub fn sidebar() -> AdaptiveColor { theme().sidebar }
-    pub fn sidebar_accent() -> AdaptiveColor { theme().sidebar_accent }
+    pub fn background() -> AdaptiveColor {
+        theme().background
+    }
+    pub fn foreground() -> AdaptiveColor {
+        theme().foreground
+    }
+    pub fn card() -> AdaptiveColor {
+        theme().card
+    }
+    pub fn popover() -> AdaptiveColor {
+        theme().popover
+    }
+    pub fn primary() -> AdaptiveColor {
+        theme().primary
+    }
+    pub fn on_primary() -> AdaptiveColor {
+        theme().primary_foreground
+    }
+    pub fn secondary() -> AdaptiveColor {
+        theme().secondary
+    }
+    pub fn on_secondary() -> AdaptiveColor {
+        theme().secondary_foreground
+    }
+    pub fn muted() -> AdaptiveColor {
+        theme().muted
+    }
+    pub fn muted_fg() -> AdaptiveColor {
+        theme().muted_foreground
+    }
+    pub fn accent() -> AdaptiveColor {
+        theme().accent
+    }
+    pub fn on_accent() -> AdaptiveColor {
+        theme().accent_foreground
+    }
+    pub fn destructive() -> AdaptiveColor {
+        theme().destructive
+    }
+    pub fn on_destructive() -> AdaptiveColor {
+        role("destructive-foreground")
+    }
+    pub fn border() -> AdaptiveColor {
+        theme().border
+    }
+    pub fn input() -> AdaptiveColor {
+        theme().input
+    }
+    pub fn ring() -> AdaptiveColor {
+        theme().ring
+    }
+    pub fn sidebar() -> AdaptiveColor {
+        theme().sidebar
+    }
+    pub fn sidebar_accent() -> AdaptiveColor {
+        theme().sidebar_accent
+    }
 
-    pub fn chat_bg() -> AdaptiveColor { role("chat-bg") }
-    pub fn bubble_out() -> AdaptiveColor { role("bubble-out") }
-    pub fn on_bubble_out() -> AdaptiveColor { role("bubble-out-foreground") }
-    pub fn bubble_in() -> AdaptiveColor { role("bubble-in") }
-    pub fn on_bubble_in() -> AdaptiveColor { role("bubble-in-foreground") }
-    pub fn bubble_meta() -> AdaptiveColor { role("bubble-meta") }
-    pub fn tick_read() -> AdaptiveColor { role("tick-read") }
-    pub fn link() -> AdaptiveColor { role("link") }
-    pub fn success() -> AdaptiveColor { role("success") }
-    pub fn on_success() -> AdaptiveColor { role("success-foreground") }
-    pub fn warning() -> AdaptiveColor { role("warning") }
-    pub fn warning_bg() -> AdaptiveColor { role("warning-bg") }
-    pub fn danger_bg() -> AdaptiveColor { role("danger-bg") }
-    pub fn info_bg() -> AdaptiveColor { role("info-bg") }
-    pub fn online() -> AdaptiveColor { role("online") }
-    pub fn call_accept() -> AdaptiveColor { role("call-accept") }
-    pub fn call_decline() -> AdaptiveColor { role("call-decline") }
-    pub fn call_bg() -> AdaptiveColor { role("call-bg") }
-    pub fn on_call() -> AdaptiveColor { role("call-foreground") }
-    pub fn overlay() -> AdaptiveColor { role("overlay") }
-    pub fn mention() -> AdaptiveColor { role("mention") }
-    pub fn whatsapp() -> AdaptiveColor { role("whatsapp") }
-    pub fn highlight() -> AdaptiveColor { role("highlight") }
+    pub fn chat_bg() -> AdaptiveColor {
+        role("chat-bg")
+    }
+    pub fn bubble_out() -> AdaptiveColor {
+        role("bubble-out")
+    }
+    pub fn on_bubble_out() -> AdaptiveColor {
+        role("bubble-out-foreground")
+    }
+    pub fn bubble_in() -> AdaptiveColor {
+        role("bubble-in")
+    }
+    pub fn on_bubble_in() -> AdaptiveColor {
+        role("bubble-in-foreground")
+    }
+    pub fn bubble_meta() -> AdaptiveColor {
+        role("bubble-meta")
+    }
+    pub fn tick_read() -> AdaptiveColor {
+        role("tick-read")
+    }
+    pub fn link() -> AdaptiveColor {
+        role("link")
+    }
+    pub fn success() -> AdaptiveColor {
+        role("success")
+    }
+    pub fn on_success() -> AdaptiveColor {
+        role("success-foreground")
+    }
+    pub fn warning() -> AdaptiveColor {
+        role("warning")
+    }
+    pub fn warning_bg() -> AdaptiveColor {
+        role("warning-bg")
+    }
+    pub fn danger_bg() -> AdaptiveColor {
+        role("danger-bg")
+    }
+    pub fn info_bg() -> AdaptiveColor {
+        role("info-bg")
+    }
+    pub fn online() -> AdaptiveColor {
+        role("online")
+    }
+    pub fn call_accept() -> AdaptiveColor {
+        role("call-accept")
+    }
+    pub fn call_decline() -> AdaptiveColor {
+        role("call-decline")
+    }
+    pub fn call_bg() -> AdaptiveColor {
+        role("call-bg")
+    }
+    pub fn on_call() -> AdaptiveColor {
+        role("call-foreground")
+    }
+    pub fn overlay() -> AdaptiveColor {
+        role("overlay")
+    }
+    pub fn mention() -> AdaptiveColor {
+        role("mention")
+    }
+    pub fn whatsapp() -> AdaptiveColor {
+        role("whatsapp")
+    }
+    pub fn highlight() -> AdaptiveColor {
+        role("highlight")
+    }
     /// A switch's knob: near-white in both themes.
-    pub fn switch_thumb() -> AdaptiveColor { role("switch-thumb") }
+    pub fn switch_thumb() -> AdaptiveColor {
+        role("switch-thumb")
+    }
     /// A switch's off track: a light fill, outlined in `input`.
-    pub fn switch_track() -> AdaptiveColor { role("switch-track") }
+    pub fn switch_track() -> AdaptiveColor {
+        role("switch-track")
+    }
     /// A switch's on track (a deeper violet than `primary` in dark, so the
     /// light knob keeps 3:1 on it).
-    pub fn switch_on() -> AdaptiveColor { role("switch-on") }
+    pub fn switch_on() -> AdaptiveColor {
+        role("switch-on")
+    }
     /// A raised surface on a recessed one: the selected segment.
-    pub fn raised() -> AdaptiveColor { role("raised") }
+    pub fn raised() -> AdaptiveColor {
+        role("raised")
+    }
     /// The secondary button's fill: distinct from cards, sheets and popovers.
-    pub fn control() -> AdaptiveColor { role("control") }
+    pub fn control() -> AdaptiveColor {
+        role("control")
+    }
     /// The wide window's canvas behind the floating panes: a step under
     /// the pane (darker in light and dark; lighter in high-contrast dark,
     /// where nothing is darker than the black page).
-    pub fn canvas() -> AdaptiveColor { role("canvas") }
+    pub fn canvas() -> AdaptiveColor {
+        role("canvas")
+    }
     /// A floating pane's surface: the page's own colour (`background`), so
     /// content made for a page sits in a pane seamlessly.
-    pub fn pane() -> AdaptiveColor { role("pane") }
+    pub fn pane() -> AdaptiveColor {
+        role("pane")
+    }
     /// A pane's hairline edge on the canvas (Apple, Fluent, Adwaita).
-    pub fn pane_border() -> AdaptiveColor { role("pane-border") }
+    pub fn pane_border() -> AdaptiveColor {
+        role("pane-border")
+    }
     /// A capsule floating over a conversation (header, composer, header
     /// actions): the skin's raised surface.
-    pub fn capsule() -> AdaptiveColor { role("capsule") }
+    pub fn capsule() -> AdaptiveColor {
+        role("capsule")
+    }
     /// A capsule's hairline edge.
-    pub fn capsule_border() -> AdaptiveColor { role("capsule-border") }
+    pub fn capsule_border() -> AdaptiveColor {
+        role("capsule-border")
+    }
     /// Initials on the avatar hues: white in both themes (large text).
-    pub fn on_avatar() -> AdaptiveColor { role("avatar-foreground") }
+    pub fn on_avatar() -> AdaptiveColor {
+        role("avatar-foreground")
+    }
 
     /// One of the eight avatar hues; `seed` is data (a contact's id).
     pub fn avatar(seed: u64) -> AdaptiveColor {
@@ -112,17 +221,29 @@ pub mod radius {
     use crate::ui::skin::spec;
 
     /// Controls and popups.
-    pub fn control() -> Points { px(spec().radius.control) }
+    pub fn control() -> Points {
+        px(spec().radius.control)
+    }
     /// Tags, small chips, inner fills.
-    pub fn sm() -> Points { px(spec().radius.small) }
+    pub fn sm() -> Points {
+        px(spec().radius.small)
+    }
     /// Cards and grouped lists.
-    pub fn lg() -> Points { px(spec().radius.card) }
+    pub fn lg() -> Points {
+        px(spec().radius.card)
+    }
     /// Chat bubbles.
-    pub fn bubble() -> Points { px(spec().radius.bubble) }
+    pub fn bubble() -> Points {
+        px(spec().radius.bubble)
+    }
     /// Sheets' top corners.
-    pub fn sheet() -> Points { px(spec().radius.sheet) }
+    pub fn sheet() -> Points {
+        px(spec().radius.sheet)
+    }
     /// The wide window's floating panes.
-    pub fn pane() -> Points { px(spec().radius.pane) }
+    pub fn pane() -> Points {
+        px(spec().radius.pane)
+    }
 }
 
 /// The type scale, in points. Phones get a step up for body text (16pt
@@ -140,7 +261,11 @@ pub mod font {
 
     /// Body text for the current platform family.
     pub fn body() -> f32 {
-        if is_desktop() { BODY_DESKTOP } else { BODY_MOBILE }
+        if is_desktop() {
+            BODY_DESKTOP
+        } else {
+            BODY_MOBILE
+        }
     }
 }
 

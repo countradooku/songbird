@@ -15,7 +15,10 @@ use crate::store::{Arrival, Chat, ChatKind, Settings, Store, store};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// A message from someone else (`sender` named in groups).
-    Message { sender: Option<String>, preview: String },
+    Message {
+        sender: Option<String>,
+        preview: String,
+    },
     /// Someone reacted to one of the user's messages.
     Reaction { sender: String, emoji: String },
     /// An incoming call.
@@ -51,7 +54,11 @@ pub fn decide(event: &Event, chat: &Chat, settings: &Settings, focus: Focus) -> 
     let reading = focus.app_focused && focus.open_chat == Some(chat.id);
     let (title, body) = match event {
         Event::Message { sender, preview } => {
-            let on = if group { settings.notify_groups } else { settings.notify_messages };
+            let on = if group {
+                settings.notify_groups
+            } else {
+                settings.notify_messages
+            };
             if !on || chat.muted || reading {
                 return None;
             }
@@ -62,11 +69,18 @@ pub fn decide(event: &Event, chat: &Chat, settings: &Settings, focus: Focus) -> 
             (chat.title.clone(), body)
         }
         Event::Reaction { sender, emoji } => {
-            let on = if group { settings.reactions_groups } else { settings.reactions_messages };
+            let on = if group {
+                settings.reactions_groups
+            } else {
+                settings.reactions_messages
+            };
             if !on || chat.muted || reading {
                 return None;
             }
-            (chat.title.clone(), format!("{sender} reacted {emoji} to your message"))
+            (
+                chat.title.clone(),
+                format!("{sender} reacted {emoji} to your message"),
+            )
         }
         // A call rings even in a muted chat (muting is about messages), and
         // even while the chat is open: it needs an answer.
@@ -148,9 +162,16 @@ fn watch(
     sink: impl Fn(Notice) + 'static,
 ) {
     s.on_arrival(move |s, a| {
-        let focus = Focus { app_focused: focused.get_untracked().0, open_chat: focus_of() };
+        let focus = Focus {
+            app_focused: focused.get_untracked().0,
+            open_chat: focus_of(),
+        };
         let (chat, event) = match a {
-            Arrival::Message { chat, sender, preview } => (chat, Event::Message { sender, preview }),
+            Arrival::Message {
+                chat,
+                sender,
+                preview,
+            } => (chat, Event::Message { sender, preview }),
             Arrival::Call { chat, video } => (chat, Event::Call { video }),
         };
         notify(s, chat, &event, focus, &sink);
@@ -166,9 +187,8 @@ pub fn demo_from_env() {
     let preview = crate::PREVIEW_BUILD;
     // The environment, or (emulators and devices, which pass none through) a
     // `songbird-demo-arrivals` file in the app's data folder.
-    let from_file = || {
-        data_dir().and_then(|d| std::fs::read_to_string(d.join("songbird-demo-arrivals")).ok())
-    };
+    let from_file =
+        || data_dir().and_then(|d| std::fs::read_to_string(d.join("songbird-demo-arrivals")).ok());
     let Some(secs) = std::env::var("SONGBIRD_DEMO_ARRIVALS")
         .ok()
         .or_else(from_file)
@@ -189,7 +209,11 @@ pub fn demo_from_env() {
     let after = std::time::Duration::from_secs(secs);
     set_timeout(after, || nsh_core::element::desktop::main_window().hide());
     set_timeout(after + std::time::Duration::from_secs(2), move || {
-        s.push_message(chat, Some(peer), crate::store::Body::Text("Are we still on for tonight?".into()));
+        s.push_message(
+            chat,
+            Some(peer),
+            crate::store::Body::Text("Are we still on for tonight?".into()),
+        );
     });
     set_timeout(after + std::time::Duration::from_secs(8), move || {
         crate::features::calls::simulate_incoming(chat, true);
@@ -209,7 +233,11 @@ mod tests {
     use crate::store::seed_for_tests as seed;
 
     fn chat(kind: ChatKind, muted: bool) -> Chat {
-        let mut c = seed::seed().chats.into_iter().next().expect("a seeded chat");
+        let mut c = seed::seed()
+            .chats
+            .into_iter()
+            .next()
+            .expect("a seeded chat");
         c.id = 7;
         c.title = "Ana".into();
         c.kind = kind;
@@ -222,15 +250,30 @@ mod tests {
     }
 
     fn msg(text: &str) -> Event {
-        Event::Message { sender: Some("Ana".into()), preview: text.into() }
+        Event::Message {
+            sender: Some("Ana".into()),
+            preview: text.into(),
+        }
     }
 
-    const AWAY: Focus = Focus { app_focused: false, open_chat: None };
+    const AWAY: Focus = Focus {
+        app_focused: false,
+        open_chat: None,
+    };
 
     #[test]
     fn a_message_notifies_with_its_chat_and_text() {
-        let n = decide(&msg("hi"), &chat(ChatKind::Direct(1), false), &settings(), AWAY).unwrap();
-        assert_eq!((n.title.as_str(), n.body.as_str(), n.id.as_str()), ("Ana", "hi", "chat:7"));
+        let n = decide(
+            &msg("hi"),
+            &chat(ChatKind::Direct(1), false),
+            &settings(),
+            AWAY,
+        )
+        .unwrap();
+        assert_eq!(
+            (n.title.as_str(), n.body.as_str(), n.id.as_str()),
+            ("Ana", "hi", "chat:7")
+        );
         let g = decide(&msg("hi"), &chat(ChatKind::Group, false), &settings(), AWAY).unwrap();
         assert_eq!(g.body, "Ana: hi", "groups name the sender");
     }
@@ -239,7 +282,10 @@ mod tests {
     fn muted_chats_stay_quiet_but_calls_still_ring() {
         let muted = chat(ChatKind::Direct(1), true);
         assert_eq!(decide(&msg("hi"), &muted, &settings(), AWAY), None);
-        let r = Event::Reaction { sender: "Ana".into(), emoji: "👍".into() };
+        let r = Event::Reaction {
+            sender: "Ana".into(),
+            emoji: "👍".into(),
+        };
         assert_eq!(decide(&r, &muted, &settings(), AWAY), None);
         assert!(decide(&Event::Call { video: true }, &muted, &settings(), AWAY).is_some());
     }
@@ -251,12 +297,21 @@ mod tests {
         let mut s = settings();
         s.notify_messages = false;
         assert_eq!(decide(&msg("x"), &direct, &s, AWAY), None);
-        assert!(decide(&msg("x"), &group, &s, AWAY).is_some(), "groups have their own switch");
+        assert!(
+            decide(&msg("x"), &group, &s, AWAY).is_some(),
+            "groups have their own switch"
+        );
         s.notify_groups = false;
         assert_eq!(decide(&msg("x"), &group, &s, AWAY), None);
         s.notify_calls = false;
-        assert_eq!(decide(&Event::Call { video: false }, &direct, &s, AWAY), None);
-        let r = Event::Reaction { sender: "Ana".into(), emoji: "🎉".into() };
+        assert_eq!(
+            decide(&Event::Call { video: false }, &direct, &s, AWAY),
+            None
+        );
+        let r = Event::Reaction {
+            sender: "Ana".into(),
+            emoji: "🎉".into(),
+        };
         let mut s = settings();
         s.reactions_messages = false;
         assert_eq!(decide(&r, &direct, &s, AWAY), None);
@@ -267,13 +322,22 @@ mod tests {
     #[test]
     fn the_chat_being_read_is_not_notified_but_a_background_one_is() {
         let c = chat(ChatKind::Direct(1), false);
-        let reading = Focus { app_focused: true, open_chat: Some(7) };
+        let reading = Focus {
+            app_focused: true,
+            open_chat: Some(7),
+        };
         assert_eq!(decide(&msg("x"), &c, &settings(), reading), None);
         // Open but the window in the background (the user is elsewhere).
-        let behind = Focus { app_focused: false, open_chat: Some(7) };
+        let behind = Focus {
+            app_focused: false,
+            open_chat: Some(7),
+        };
         assert!(decide(&msg("x"), &c, &settings(), behind).is_some());
         // Another chat open.
-        let other = Focus { app_focused: true, open_chat: Some(8) };
+        let other = Focus {
+            app_focused: true,
+            open_chat: Some(8),
+        };
         assert!(decide(&msg("x"), &c, &settings(), other).is_some());
         // A call rings even in the chat being read.
         assert!(decide(&Event::Call { video: false }, &c, &settings(), reading).is_some());
@@ -285,9 +349,15 @@ mod tests {
         s.hide_notification_content = true;
         let c = chat(ChatKind::Group, false);
         let n = decide(&msg("the secret"), &c, &s, AWAY).unwrap();
-        assert_eq!((n.title.as_str(), n.body.as_str()), (PRIVATE_TITLE, "New message"));
+        assert_eq!(
+            (n.title.as_str(), n.body.as_str()),
+            (PRIVATE_TITLE, "New message")
+        );
         let call = decide(&Event::Call { video: true }, &c, &s, AWAY).unwrap();
-        assert_eq!((call.title.as_str(), call.body.as_str()), (PRIVATE_TITLE, "Incoming call"));
+        assert_eq!(
+            (call.title.as_str(), call.body.as_str()),
+            (PRIVATE_TITLE, "Incoming call")
+        );
     }
 
     #[test]
@@ -312,10 +382,15 @@ mod tests {
         let focused = signal(AppFocused(false));
         let open = signal(None::<u64>);
         let count = signal(0_u32);
-        watch(s, focused, move || open.get_untracked(), move |n: Notice| {
-            SHOWN.lock().unwrap().push(n.body);
-            count.update(|c| *c += 1);
-        });
+        watch(
+            s,
+            focused,
+            move || open.get_untracked(),
+            move |n: Notice| {
+                SHOWN.lock().unwrap().push(n.body);
+                count.update(|c| *c += 1);
+            },
+        );
         let (chat, peer) = s
             .chats
             .get_untracked()
@@ -349,14 +424,20 @@ mod tests {
     /// The wiring on the real engine, headless.
     #[test]
     fn the_store_s_events_reach_the_notifier() -> Result<(), String> {
-        let mut app = nsh_testing::Headless::start(nsh_engine::EngineConfig::new(
-            nsh_engine::Root::of::<NotifyProbe>(),
-        ))
-        .map_err(|e| e.to_string())?;
+        let mut app =
+            nsh_testing::Headless::start(nsh_engine::EngineConfig::new(nsh_engine::Root::of::<
+                NotifyProbe,
+            >()))
+            .map_err(|e| e.to_string())?;
         app.wait_for("text:shown: 4")?;
         assert_eq!(
             *SHOWN.lock().unwrap(),
-            ["hello", "first of two", "second of two", "Incoming video call"]
+            [
+                "hello",
+                "first of two",
+                "second of two",
+                "Incoming video call"
+            ]
         );
         Ok(())
     }

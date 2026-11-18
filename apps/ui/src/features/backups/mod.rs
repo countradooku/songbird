@@ -38,7 +38,10 @@ pub(crate) struct FlowHost {
 
 impl FlowHost {
     pub(crate) fn new() -> Self {
-        Self { back: stored(None), hide_back: signal(false) }
+        Self {
+            back: stored(None),
+            hide_back: signal(false),
+        }
     }
 
     /// Forgets the inner flow (the host moved to another step).
@@ -56,20 +59,28 @@ pub fn backup_settings() {
 /// The set-up wizard, pushed: why → where → recovery key → how often → done.
 pub fn backup_wizard() {
     nav::push("backup-wizard", || {
-        page("Set up backups", wizard_body(false, Rc::new(nav::pop), None))
+        page(
+            "Set up backups",
+            wizard_body(false, Rc::new(nav::pop), None),
+        )
     });
 }
 
 /// Restoring from the backup, pushed (from the backup settings).
 pub fn restore() {
     nav::push("backup-restore", || {
-        page("Restore from a backup", restore_view(false, Rc::new(nav::pop), None, None))
+        page(
+            "Restore from a backup",
+            restore_view(false, Rc::new(nav::pop), None, None),
+        )
     });
 }
 
 /// "Transfer chat history to a new phone", pushed.
 pub fn transfer() {
-    nav::push("transfer", || page("Transfer to a new phone", transfer::transfer_body()));
+    nav::push("transfer", || {
+        page("Transfer to a new phone", transfer::transfer_body())
+    });
 }
 
 // ---------------------------------------------------------------- destinations
@@ -77,7 +88,10 @@ pub fn transfer() {
 /// The destinations this platform offers, in the order shown.
 pub(crate) fn destinations() -> Vec<BackupDestination> {
     use BackupDestination::*;
-    let apple = matches!(os(), nsh_core::platform::Os::Ios | nsh_core::platform::Os::MacOs);
+    let apple = matches!(
+        os(),
+        nsh_core::platform::Os::Ios | nsh_core::platform::Os::MacOs
+    );
     let mut all = vec![SongbirdServers, EncryptedFile];
     if apple {
         all.push(ICloudDrive);
@@ -135,7 +149,13 @@ pub(crate) fn dest_group(
                     .justify_center()
                     .border_2()
                     .border_color(move || if selected() { c::primary() } else { c::input() })
-                    .bg(move || if selected() { c::primary() } else { AdaptiveColor::TRANSPARENT })
+                    .bg(move || {
+                        if selected() {
+                            c::primary()
+                        } else {
+                            AdaptiveColor::TRANSPARENT
+                        }
+                    })
                     .text_color(move || c::on_primary())
                     .transition_colors()
                     .duration(motion::FAST)
@@ -150,7 +170,12 @@ pub(crate) fn dest_group(
 type Extra = crate::store::ext_onboarding::BackupExtra;
 
 /// A field over one text of the backup state, written on each change.
-fn extra_field(s: Store, placeholder: &'static str, get: fn(&Extra) -> String, set: fn(&mut Extra, String)) -> nsh_core::element::Input {
+fn extra_field(
+    s: Store,
+    placeholder: &'static str,
+    get: fn(&Extra) -> String,
+    set: fn(&mut Extra, String),
+) -> nsh_core::element::Input {
     let extra = s.backup_extra();
     let value = signal(extra.with_untracked(get));
     field(placeholder, value)
@@ -170,14 +195,24 @@ pub(crate) fn dest_fields(s: Store, d: BackupDestination) -> Option<View> {
                 .gap_3()
                 .child(labelled_field(
                     "Server URL",
-                    extra_field(s, "https://cloud.example.org", |b| b.nextcloud_url.clone(), |b, v| b.nextcloud_url = v)
-                        .keyboard_type(KeyboardType::Url),
+                    extra_field(
+                        s,
+                        "https://cloud.example.org",
+                        |b| b.nextcloud_url.clone(),
+                        |b, v| b.nextcloud_url = v,
+                    )
+                    .keyboard_type(KeyboardType::Url),
                     "Your Nextcloud's address. Songbird asks for an app password next.",
                     || false,
                 ))
                 .child(labelled_field(
                     "Username",
-                    extra_field(s, "Nextcloud username", |b| b.nextcloud_user.clone(), |b, v| b.nextcloud_user = v),
+                    extra_field(
+                        s,
+                        "Nextcloud username",
+                        |b| b.nextcloud_user.clone(),
+                        |b, v| b.nextcloud_user = v,
+                    ),
                     "",
                     || false,
                 )),
@@ -187,20 +222,35 @@ pub(crate) fn dest_fields(s: Store, d: BackupDestination) -> Option<View> {
                 .gap_3()
                 .child(labelled_field(
                     "Endpoint",
-                    extra_field(s, "https://s3.example.com", |b| b.s3_endpoint.clone(), |b, v| b.s3_endpoint = v)
-                        .keyboard_type(KeyboardType::Url),
+                    extra_field(
+                        s,
+                        "https://s3.example.com",
+                        |b| b.s3_endpoint.clone(),
+                        |b, v| b.s3_endpoint = v,
+                    )
+                    .keyboard_type(KeyboardType::Url),
                     "",
                     || false,
                 ))
                 .child(labelled_field(
                     "Bucket",
-                    extra_field(s, "my-songbird-backups", |b| b.s3_bucket.clone(), |b, v| b.s3_bucket = v),
+                    extra_field(
+                        s,
+                        "my-songbird-backups",
+                        |b| b.s3_bucket.clone(),
+                        |b, v| b.s3_bucket = v,
+                    ),
                     "",
                     || false,
                 ))
                 .child(labelled_field(
                     "Access key ID",
-                    extra_field(s, "Access key ID", |b| b.s3_key.clone(), |b, v| b.s3_key = v),
+                    extra_field(
+                        s,
+                        "Access key ID",
+                        |b| b.s3_key.clone(),
+                        |b, v| b.s3_key = v,
+                    ),
                     "The secret key is asked for next and kept in this device's keychain.",
                     || false,
                 )),
@@ -212,9 +262,13 @@ pub(crate) fn dest_fields(s: Store, d: BackupDestination) -> Option<View> {
 /// Whether the fields `d` needs are filled.
 pub(crate) fn dest_ready(s: Store, d: BackupDestination) -> bool {
     s.backup_extra().with(|b| match d {
-        BackupDestination::Nextcloud => b.nextcloud_url.starts_with("https://") && !b.nextcloud_user.trim().is_empty(),
+        BackupDestination::Nextcloud => {
+            b.nextcloud_url.starts_with("https://") && !b.nextcloud_user.trim().is_empty()
+        }
         BackupDestination::S3 => {
-            b.s3_endpoint.starts_with("https://") && !b.s3_bucket.trim().is_empty() && !b.s3_key.trim().is_empty()
+            b.s3_endpoint.starts_with("https://")
+                && !b.s3_bucket.trim().is_empty()
+                && !b.s3_key.trim().is_empty()
         }
         _ => true,
     })
@@ -226,8 +280,12 @@ pub(crate) fn dest_ready(s: Store, d: BackupDestination) -> bool {
 fn os_note() -> &'static str {
     use nsh_core::platform::Os;
     match os() {
-        Os::Ios => "Your chats stay out of iCloud's own backups. Songbird backups are encrypted with your recovery key.",
-        Os::Android => "Your chats stay out of Android's own backups. Songbird backups are encrypted with your recovery key.",
+        Os::Ios => {
+            "Your chats stay out of iCloud's own backups. Songbird backups are encrypted with your recovery key."
+        }
+        Os::Android => {
+            "Your chats stay out of Android's own backups. Songbird backups are encrypted with your recovery key."
+        }
         _ => "Backups are encrypted with your recovery key before they leave this computer.",
     }
 }
@@ -291,7 +349,13 @@ fn more_rows(s: Store, on: bool) -> View {
                 .build(),
         );
     }
-    rows.push(Row::new("Restore from a backup").icon(Icon::Download).chevron().on_press(restore).build());
+    rows.push(
+        Row::new("Restore from a backup")
+            .icon(Icon::Download)
+            .chevron()
+            .on_press(restore)
+            .build(),
+    );
     if on {
         rows.push(
             Row::new("Turn off backups")
@@ -301,7 +365,9 @@ fn more_rows(s: Store, on: bool) -> View {
                     let dest = s.settings.with_untracked(|x| x.backup_destination.label());
                     confirm(
                         "Turn off backups?",
-                        format!("Your backup in {dest} is deleted, and new messages aren't backed up."),
+                        format!(
+                            "Your backup in {dest} is deleted, and new messages aren't backed up."
+                        ),
                         "Turn off",
                         move || {
                             s.disable_backups();
@@ -318,10 +384,14 @@ fn more_rows(s: Store, on: bool) -> View {
 fn problem_text(p: BackupProblem, dest: &str) -> String {
     match p {
         BackupProblem::StorageFull => {
-            format!("Your last backup didn't finish because {dest} is full. Free up space there, or choose another place.")
+            format!(
+                "Your last backup didn't finish because {dest} is full. Free up space there, or choose another place."
+            )
         }
         BackupProblem::SignedOut => {
-            format!("Your last backup didn't finish because Songbird was signed out of {dest}. Sign in again to keep backing up.")
+            format!(
+                "Your last backup didn't finish because Songbird was signed out of {dest}. Sign in again to keep backing up."
+            )
         }
     }
 }
@@ -364,11 +434,18 @@ fn backups_on(s: Store) -> View {
                         }))
                         .child(muted(move || {
                             let media = s.settings.with(|x| x.backup_include_media);
-                            let second = extra.with(|b| b.second).map(|d| format!(" · also {}", d.label())).unwrap_or_default();
+                            let second = extra
+                                .with(|b| b.second)
+                                .map(|d| format!(" · also {}", d.label()))
+                                .unwrap_or_default();
                             format!(
                                 "{} · {}{second}",
                                 freq().label(),
-                                if media { "Photos and videos included" } else { "Messages only" }
+                                if media {
+                                    "Photos and videos included"
+                                } else {
+                                    "Messages only"
+                                }
                             )
                         })),
                 ),
@@ -379,7 +456,12 @@ fn backups_on(s: Store) -> View {
                 view()
                     .gap_2()
                     .child(progress_bar("Backing up", move || running().unwrap_or(0.0)))
-                    .child(muted(move || format!("Backing up… {}%", (running().unwrap_or(0.0) * 100.0).round())))
+                    .child(muted(move || {
+                        format!(
+                            "Backing up… {}%",
+                            (running().unwrap_or(0.0) * 100.0).round()
+                        )
+                    }))
             },
         ))
         .child(when(
@@ -388,32 +470,38 @@ fn backups_on(s: Store) -> View {
                 view()
                     .gap_2()
                     .child(banner(Tone::Warning, Icon::Alert, move || {
-                        problem().map(|p| problem_text(p, dest().label())).unwrap_or_default()
+                        problem()
+                            .map(|p| problem_text(p, dest().label()))
+                            .unwrap_or_default()
                     }))
-                    .child(
-                        view().flex_row().child(btn(
-                            move || match problem() {
-                                Some(BackupProblem::SignedOut) => "Sign in again",
-                                _ => "Fix",
-                            },
-                            Variant::Primary,
-                            BtnSize::Sm,
-                            move || match problem() {
-                                Some(BackupProblem::StorageFull) => choose_open.set(true),
-                                _ => {
-                                    // mock: the provider's sign-in sheet (app-core `connect_destination`).
-                                    s.back_up_now();
-                                    toast(format!("Signed in to {}", dest().label()));
-                                }
-                            },
-                        )),
-                    )
+                    .child(view().flex_row().child(btn(
+                        move || match problem() {
+                            Some(BackupProblem::SignedOut) => "Sign in again",
+                            _ => "Fix",
+                        },
+                        Variant::Primary,
+                        BtnSize::Sm,
+                        move || match problem() {
+                            Some(BackupProblem::StorageFull) => choose_open.set(true),
+                            _ => {
+                                // mock: the provider's sign-in sheet (app-core `connect_destination`).
+                                s.back_up_now();
+                                toast(format!("Signed in to {}", dest().label()));
+                            }
+                        },
+                    )))
             },
         ))
         .child(
             view().flex_row().child(
                 btn_with_icon(
-                    move || if running().is_some() { "Backing up…" } else { "Back up now" },
+                    move || {
+                        if running().is_some() {
+                            "Backing up…"
+                        } else {
+                            "Back up now"
+                        }
+                    },
                     Some(Icon::Upload),
                     Variant::Secondary,
                     BtnSize::Md,
@@ -535,15 +623,17 @@ fn demo_rows(s: Store) -> Option<View> {
         return None;
     }
     Some(
-        view().child(section_title("Preview states (debug builds)")).child(group([
-            Row::new("Show a full-storage problem")
-                .icon(Icon::Alert)
-                .on_press(move || s.simulate_backup_problem(BackupProblem::StorageFull))
-                .build(),
-            Row::new("Show a signed-out problem")
-                .icon(Icon::Alert)
-                .on_press(move || s.simulate_backup_problem(BackupProblem::SignedOut))
-                .build(),
-        ])),
+        view()
+            .child(section_title("Preview states (debug builds)"))
+            .child(group([
+                Row::new("Show a full-storage problem")
+                    .icon(Icon::Alert)
+                    .on_press(move || s.simulate_backup_problem(BackupProblem::StorageFull))
+                    .build(),
+                Row::new("Show a signed-out problem")
+                    .icon(Icon::Alert)
+                    .on_press(move || s.simulate_backup_problem(BackupProblem::SignedOut))
+                    .build(),
+            ])),
     )
 }

@@ -23,11 +23,19 @@ fn surface(s: StyleRefinement) -> StyleRefinement {
         .border_color(c::border())
         .bg(c::popover())
         .shadow_lg();
-    if motion::reduced() { s } else { s.transition_all().duration(motion::FAST).ease_out() }
+    if motion::reduced() {
+        s
+    } else {
+        s.transition_all().duration(motion::FAST).ease_out()
+    }
 }
 
 fn starting(s: StyleRefinement) -> StyleRefinement {
-    if motion::reduced() { s.opacity(0.0) } else { s.opacity(0.0).scale(0.97).translate_y(px(-6.0)) }
+    if motion::reduced() {
+        s.opacity(0.0)
+    } else {
+        s.opacity(0.0).scale(0.97).translate_y(px(-6.0))
+    }
 }
 
 /// A menu opened by `trigger` (an icon-sized pressable this makes, with
@@ -55,14 +63,21 @@ pub fn app_menu(glyph: Icon, label: &'static str, items: Vec<AnyElement>) -> Any
                 .cursor_pointer()
                 // Android draws its own ripple on this (a plain view).
                 .when(press == PressStyle::Ripple, |v| {
-                    v.ripple(nsh_core::Ripple { borderless: true, ..Default::default() })
+                    v.ripple(nsh_core::Ripple {
+                        borderless: true,
+                        ..Default::default()
+                    })
                 })
                 .transition()
                 .duration(motion::FAST)
                 .hover(|s| s.bg(move || c::accent()))
                 .active(move |s| {
                     let s = s.bg(move || c::accent());
-                    if reduced || press != PressStyle::Highlight { s } else { s.scale(motion::ICON_PRESS_SCALE) }
+                    if reduced || press != PressStyle::Highlight {
+                        s
+                    } else {
+                        s.scale(motion::ICON_PRESS_SCALE)
+                    }
                 })
                 .focus_visible(|s| s.outline(px(2.0)).outline_color(move || c::ring()))
                 .child(icon(glyph, if is_desktop() { 18.0 } else { 22.0 })),
@@ -80,7 +95,13 @@ pub fn menu_entry(
     on_select: impl Fn() + 'static,
 ) -> AnyElement {
     let label: SharedString = label.into();
-    let ink = move || if danger { c::destructive() } else { c::foreground() };
+    let ink = move || {
+        if danger {
+            c::destructive()
+        } else {
+            c::foreground()
+        }
+    };
     menu_item()
         .on_select(on_select)
         .accessibility_label(label.clone())
@@ -102,7 +123,12 @@ pub fn menu_entry(
 pub fn menu_rule() -> AnyElement {
     // A hairline, inset like the items' text so it reads as a group break.
     let hairline = 1.0 / pixel_ratio().max(1.0);
-    menu_separator().h(px(hairline)).my_1().mx_3().bg(move || c::border()).into_element()
+    menu_separator()
+        .h(px(hairline))
+        .my_1()
+        .mx_3()
+        .bg(move || c::border())
+        .into_element()
 }
 
 /// A bare pressable area (a bubble's quote, a poll option, a tile): the
@@ -114,6 +140,10 @@ pub fn pressable() -> nsh_base::ButtonElement {
         .transition()
         .duration(motion::FAST)
         .active(|s| s.opacity(0.7))
-        .focus_visible(|s| s.outline(px(2.0)).outline_offset(px(1.0)).outline_color(move || c::ring()))
+        .focus_visible(|s| {
+            s.outline(px(2.0))
+                .outline_offset(px(1.0))
+                .outline_color(move || c::ring())
+        })
         .disabled_style(|s| s.opacity(0.45))
 }

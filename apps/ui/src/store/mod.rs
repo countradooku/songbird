@@ -80,13 +80,24 @@ pub fn when_label(at: Minutes) -> String {
     match day_of(at) {
         0 => clock(at),
         -1 => "Yesterday".into(),
-        d if d > -7 => ["Wednesday", "Thursday", "Friday", "Saturday", "Sunday", "Monday", "Tuesday"]
-            [(d.rem_euclid(7)) as usize]
+        d if d > -7 => [
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday",
+            "Monday",
+            "Tuesday",
+        ][(d.rem_euclid(7)) as usize]
             .into(),
         // Older: the day and month, as WhatsApp shows them ("7 Nov").
         d => {
             let day = 17 + d;
-            if day >= 1 { format!("{day} Nov") } else { format!("{} Oct", 31 + day) }
+            if day >= 1 {
+                format!("{day} Nov")
+            } else {
+                format!("{} Oct", 31 + day)
+            }
         }
     }
 }
@@ -119,8 +130,15 @@ pub fn presence_label(p: &Presence) -> String {
 /// A message from someone else or an incoming call, for the notifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Arrival {
-    Message { chat: ChatId, sender: Option<String>, preview: String },
-    Call { chat: ChatId, video: bool },
+    Message {
+        chat: ChatId,
+        sender: Option<String>,
+        preview: String,
+    },
+    Call {
+        chat: ChatId,
+        video: bool,
+    },
 }
 
 /// The store. `Copy`: closures and rows capture it like a signal.
@@ -191,7 +209,10 @@ impl Store {
             call_links: signal(seed.call_links),
             devices: signal(seed.devices),
             settings: signal(seed.settings),
-            session: signal(Session { onboarded, ..seed.session }),
+            session: signal(Session {
+                onboarded,
+                ..seed.session
+            }),
             on_arrival: stored(None),
             next_id: stored(100_000),
         }
@@ -207,18 +228,23 @@ impl Store {
     // ------------------------------------------------------------ reads
 
     pub fn contact(&self, id: ContactId) -> Option<Contact> {
-        self.contacts.with(|cs| cs.iter().find(|c| c.id == id).cloned())
+        self.contacts
+            .with(|cs| cs.iter().find(|c| c.id == id).cloned())
     }
 
     pub fn contact_name(&self, id: Option<ContactId>) -> String {
         match id {
             None => "You".into(),
-            Some(id) => self.contact(id).map(|c| c.name).unwrap_or_else(|| "Unknown".into()),
+            Some(id) => self
+                .contact(id)
+                .map(|c| c.name)
+                .unwrap_or_else(|| "Unknown".into()),
         }
     }
 
     pub fn chat(&self, id: ChatId) -> Option<Chat> {
-        self.chats.with(|cs| cs.iter().find(|c| c.id == id).cloned())
+        self.chats
+            .with(|cs| cs.iter().find(|c| c.id == id).cloned())
     }
 
     /// The other person of a direct (or WhatsApp) chat.
@@ -230,15 +256,20 @@ impl Store {
     }
 
     pub fn messages_of(&self, chat: ChatId) -> Vec<Message> {
-        self.messages.with(|m| m.get(&chat).cloned().unwrap_or_default())
+        self.messages
+            .with(|m| m.get(&chat).cloned().unwrap_or_default())
     }
 
     pub fn message(&self, chat: ChatId, id: MsgId) -> Option<Message> {
-        self.messages.with(|m| m.get(&chat).and_then(|v| v.iter().find(|x| x.id == id).cloned()))
+        self.messages.with(|m| {
+            m.get(&chat)
+                .and_then(|v| v.iter().find(|x| x.id == id).cloned())
+        })
     }
 
     pub fn last_message(&self, chat: ChatId) -> Option<Message> {
-        self.messages.with(|m| m.get(&chat).and_then(|v| v.last().cloned()))
+        self.messages
+            .with(|m| m.get(&chat).and_then(|v| v.last().cloned()))
     }
 
     /// Chats for the list: not archived, not requests; pinned first, then
@@ -257,7 +288,10 @@ impl Store {
 
     pub fn total_unread(&self) -> u32 {
         self.chats.with(|cs| {
-            cs.iter().filter(|c| !c.archived && !c.request && !c.muted).map(|c| c.unread).sum()
+            cs.iter()
+                .filter(|c| !c.archived && !c.request && !c.muted)
+                .map(|c| c.unread)
+                .sum()
         })
     }
 
@@ -272,7 +306,10 @@ impl Store {
     }
 
     pub fn mark_read(&self, id: ChatId) {
-        if self.chat(id).is_some_and(|c| c.unread > 0 || c.marked_unread || c.mentions > 0) {
+        if self
+            .chat(id)
+            .is_some_and(|c| c.unread > 0 || c.marked_unread || c.mentions > 0)
+        {
             self.edit_chat(id, |c| {
                 c.unread = 0;
                 c.mentions = 0;
@@ -301,7 +338,10 @@ impl Store {
     pub fn set_disappearing(&self, id: ChatId, timer: Option<Disappear>) {
         self.edit_chat(id, |c| c.disappearing = timer);
         let label = match timer {
-            Some(t) => format!("You turned on disappearing messages. New messages will disappear after {}.", t.label()),
+            Some(t) => format!(
+                "You turned on disappearing messages. New messages will disappear after {}.",
+                t.label()
+            ),
             None => "You turned off disappearing messages.".into(),
         };
         self.push_message(id, None, Body::System(label));
@@ -351,7 +391,10 @@ impl Store {
     /// Appends a message and returns its id. Mine start as `Sending`.
     pub fn push_message(&self, chat: ChatId, from: Option<ContactId>, body: Body) -> MsgId {
         let id = self.id();
-        let at = self.last_message(chat).map(|m| m.at.max(NOW)).unwrap_or(NOW);
+        let at = self
+            .last_message(chat)
+            .map(|m| m.at.max(NOW))
+            .unwrap_or(NOW);
         let system = matches!(body, Body::System(_));
         let msg = Message {
             id,
@@ -359,7 +402,11 @@ impl Store {
             from,
             body,
             at,
-            status: if from.is_none() && !system { Tick::Sending } else { Tick::Read },
+            status: if from.is_none() && !system {
+                Tick::Sending
+            } else {
+                Tick::Read
+            },
             reply_to: None,
             reactions: Vec::new(),
             edited: false,
@@ -369,10 +416,15 @@ impl Store {
             receipts: Vec::new(),
         };
         let incoming = (from.is_some() && !system).then(|| (msg.body.preview(), from));
-        self.messages.update(|m| m.entry(chat).or_default().push(msg));
+        self.messages
+            .update(|m| m.entry(chat).or_default().push(msg));
         if let Some((preview, Some(from))) = incoming {
             let sender = self.contact(from).map(|c| c.name);
-            self.arrive(Arrival::Message { chat, sender, preview });
+            self.arrive(Arrival::Message {
+                chat,
+                sender,
+                preview,
+            });
         }
         id
     }
@@ -386,12 +438,16 @@ impl Store {
 
     /// Sets who hears of arrivals (one listener: the notifier).
     pub fn on_arrival(&self, f: impl Fn(Store, Arrival) + 'static) {
-        self.on_arrival.with(|slot| *slot = Some(std::rc::Rc::new(f)));
+        self.on_arrival
+            .with(|slot| *slot = Some(std::rc::Rc::new(f)));
     }
 
     fn edit_message(&self, chat: ChatId, id: MsgId, f: impl FnOnce(&mut Message)) {
         self.messages.update(|m| {
-            if let Some(msg) = m.get_mut(&chat).and_then(|v| v.iter_mut().find(|x| x.id == id)) {
+            if let Some(msg) = m
+                .get_mut(&chat)
+                .and_then(|v| v.iter_mut().find(|x| x.id == id))
+            {
                 f(msg);
             }
         });
@@ -401,14 +457,24 @@ impl Store {
     /// through Sent → Delivered → Read and, in direct chats, has the
     /// contact type and answer.
     pub fn send_text(&self, chat: ChatId, text: String, reply_to: Option<MsgId>) -> MsgId {
-        let link = text.split_whitespace().find(|w| w.starts_with("https://")).map(str::to_owned);
+        let link = text
+            .split_whitespace()
+            .find(|w| w.starts_with("https://"))
+            .map(str::to_owned);
         let previews = self.settings.with_untracked(|s| s.link_previews);
         let body = match link {
             Some(url) if previews => {
                 // The link as the sender typed it, without the punctuation
                 // that ends its sentence.
-                let url = url.trim_end_matches(['.', ',', ';', ':', '!', '?', ')']).to_string();
-                Body::Link { title: link_title(&url), site: link_site(&url), url, text }
+                let url = url
+                    .trim_end_matches(['.', ',', ';', ':', '!', '?', ')'])
+                    .to_string();
+                Body::Link {
+                    title: link_title(&url),
+                    site: link_site(&url),
+                    url,
+                    text,
+                }
             }
             _ => Body::Text(text),
         };
@@ -432,9 +498,16 @@ impl Store {
         if offline {
             return;
         }
-        set_timeout(Duration::from_millis(350), move || store.advance(chat, id, Tick::Sent));
-        set_timeout(Duration::from_millis(1000), move || store.advance(chat, id, Tick::Delivered));
-        let direct = matches!(store.chat(chat).map(|c| c.kind), Some(ChatKind::Direct(_) | ChatKind::WhatsApp(_)));
+        set_timeout(Duration::from_millis(350), move || {
+            store.advance(chat, id, Tick::Sent)
+        });
+        set_timeout(Duration::from_millis(1000), move || {
+            store.advance(chat, id, Tick::Delivered)
+        });
+        let direct = matches!(
+            store.chat(chat).map(|c| c.kind),
+            Some(ChatKind::Direct(_) | ChatKind::WhatsApp(_))
+        );
         if !direct {
             return;
         }
@@ -469,7 +542,10 @@ impl Store {
     pub fn react(&self, chat: ChatId, id: MsgId, emoji: &str) {
         let emoji = emoji.to_string();
         self.edit_message(chat, id, |m| {
-            let had = m.reactions.iter().any(|r| r.emoji == emoji && r.by.contains(&None));
+            let had = m
+                .reactions
+                .iter()
+                .any(|r| r.emoji == emoji && r.by.contains(&None));
             for r in &mut m.reactions {
                 r.by.retain(|b| b.is_some());
             }
@@ -477,7 +553,10 @@ impl Store {
             if !had {
                 match m.reactions.iter_mut().find(|r| r.emoji == emoji) {
                     Some(r) => r.by.push(None),
-                    None => m.reactions.push(Reaction { emoji, by: vec![None] }),
+                    None => m.reactions.push(Reaction {
+                        emoji,
+                        by: vec![None],
+                    }),
                 }
             }
         });
@@ -532,7 +611,10 @@ impl Store {
 
     pub fn rsvp(&self, chat: ChatId, id: MsgId, going: bool) {
         self.edit_message(chat, id, |m| {
-            if let Body::Event { going: count, mine, .. } = &mut m.body {
+            if let Body::Event {
+                going: count, mine, ..
+            } = &mut m.body
+            {
                 if *mine == Some(true) {
                     *count -= 1;
                 }
@@ -577,13 +659,16 @@ impl Store {
     /// The direct chat with `contact`, made if there is none.
     pub fn direct_chat(&self, contact: ContactId) -> ChatId {
         if let Some(id) = self.chats.with(|cs| {
-            cs.iter().find(|c| c.kind == ChatKind::Direct(contact)).map(|c| c.id)
+            cs.iter()
+                .find(|c| c.kind == ChatKind::Direct(contact))
+                .map(|c| c.id)
         }) {
             return id;
         }
         let name = self.contact_name(Some(contact));
         let id = self.id();
-        self.chats.update(|cs| cs.push(seed::chat(id, ChatKind::Direct(contact), &name)));
+        self.chats
+            .update(|cs| cs.push(seed::chat(id, ChatKind::Direct(contact), &name)));
         id
     }
 
@@ -591,11 +676,21 @@ impl Store {
     pub fn create_group(&self, title: String, members: Vec<ContactId>) -> ChatId {
         let id = self.id();
         let mut chat = seed::chat(id, ChatKind::Group, &title);
-        chat.members = std::iter::once(Member { contact: None, role: Role::Owner })
-            .chain(members.iter().map(|&c| Member { contact: Some(c), role: Role::Member }))
-            .collect();
+        chat.members = std::iter::once(Member {
+            contact: None,
+            role: Role::Owner,
+        })
+        .chain(members.iter().map(|&c| Member {
+            contact: Some(c),
+            role: Role::Member,
+        }))
+        .collect();
         self.chats.update(|cs| cs.push(chat));
-        self.push_message(id, None, Body::System(format!("You created the group “{title}”")));
+        self.push_message(
+            id,
+            None,
+            Body::System(format!("You created the group “{title}”")),
+        );
         self.push_message(
             id,
             None,
@@ -620,7 +715,12 @@ impl Store {
 
     pub fn add_members(&self, chat: ChatId, contacts: Vec<ContactId>) {
         for &contact in &contacts {
-            self.edit_chat(chat, |c| c.members.push(Member { contact: Some(contact), role: Role::Member }));
+            self.edit_chat(chat, |c| {
+                c.members.push(Member {
+                    contact: Some(contact),
+                    role: Role::Member,
+                })
+            });
             let name = self.contact_name(Some(contact));
             self.push_message(chat, None, Body::System(format!("You added {name}")));
         }
@@ -639,7 +739,9 @@ impl Store {
 
     pub fn reset_invite_link(&self, chat: ChatId) {
         let token = self.id();
-        self.edit_chat(chat, |c| c.invite_link = format!("https://songbird.chat/g/{token:x}"));
+        self.edit_chat(chat, |c| {
+            c.invite_link = format!("https://songbird.chat/g/{token:x}")
+        });
     }
 
     // ------------------------------------------------------------ calls
@@ -663,7 +765,12 @@ impl Store {
 
     pub fn create_call_link(&self, name: String, lobby: bool) -> CallLink {
         let id = self.id();
-        let link = CallLink { id, name, url: format!("https://songbird.chat/call/{id:x}"), lobby };
+        let link = CallLink {
+            id,
+            name,
+            url: format!("https://songbird.chat/call/{id:x}"),
+            lobby,
+        };
         self.call_links.update(|l| l.insert(0, link.clone()));
         link
     }
@@ -672,6 +779,8 @@ impl Store {
 
     pub fn settings_update(&self, f: impl FnOnce(&mut Settings)) {
         self.settings.update(f);
+        // Synced settings become encrypted records; device ones are saved here (Prompt 9).
+        crate::backend::records::changed(*self);
     }
 
     pub fn profile_update(&self, f: impl FnOnce(&mut Profile)) {
@@ -685,7 +794,13 @@ impl Store {
     pub fn link_device(&self, name: String, kind: DeviceKind) {
         let id = self.id();
         self.devices.update(|d| {
-            d.push(Device { id, name, kind, last_active: "Active now".into(), this_device: false })
+            d.push(Device {
+                id,
+                name,
+                kind,
+                last_active: "Active now".into(),
+                this_device: false,
+            })
         });
     }
 
@@ -737,8 +852,14 @@ mod tests {
     fn link_previews_get_a_title_from_the_url() {
         assert_eq!(link_title("https://songbird.chat"), "Songbird");
         assert_eq!(link_title("https://www.songbird.chat/"), "Songbird");
-        assert_eq!(link_title("https://songbird.chat/blog/privacy-first"), "Privacy first");
-        assert_eq!(link_title("https://example.com/docs/setup.html?x=1"), "Setup");
+        assert_eq!(
+            link_title("https://songbird.chat/blog/privacy-first"),
+            "Privacy first"
+        );
+        assert_eq!(
+            link_title("https://example.com/docs/setup.html?x=1"),
+            "Setup"
+        );
         assert_eq!(link_site("https://www.example.com/a"), "example.com");
     }
 
@@ -778,12 +899,22 @@ mod tests {
         assert_eq!(theme(4), Some(ChatTheme::Slate), "Design team");
         assert_eq!(theme(9), Some(ChatTheme::Moss), "Weekend trips");
         assert_eq!(theme(1), Some(ChatTheme::Dusk), "everything else");
-        assert_eq!(seed::chat(99, ChatKind::Group, "New").theme, ChatTheme::Dusk);
+        assert_eq!(
+            seed::chat(99, ChatKind::Group, "New").theme,
+            ChatTheme::Dusk
+        );
     }
 
     #[test]
     fn previews_are_one_line() {
         assert_eq!(Body::Text("a\nb".into()).preview(), "a");
-        assert_eq!(Body::Voice { secs: 75, played: false }.preview(), "Voice message (1:15)");
+        assert_eq!(
+            Body::Voice {
+                secs: 75,
+                played: false
+            }
+            .preview(),
+            "Voice message (1:15)"
+        );
     }
 }

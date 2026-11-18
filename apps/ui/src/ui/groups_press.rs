@@ -39,7 +39,12 @@ pub fn press_surface(kind: Press, on_press: impl Fn() + 'static) -> nsh_base::Bu
         .cursor_pointer()
         .transition()
         .duration(motion::INSTANT)
-        .ease_bezier(motion::SETTLE.0, motion::SETTLE.1, motion::SETTLE.2, motion::SETTLE.3)
+        .ease_bezier(
+            motion::SETTLE.0,
+            motion::SETTLE.1,
+            motion::SETTLE.2,
+            motion::SETTLE.3,
+        )
         .disabled_style(|s| s.opacity(0.4));
     match kind {
         Press::Row => b
@@ -50,9 +55,17 @@ pub fn press_surface(kind: Press, on_press: impl Fn() + 'static) -> nsh_base::Bu
             .hover(|s| s.bg(move || c::accent()))
             .active(move |s| {
                 let s = s.bg(move || c::accent());
-                if scales { s.scale(motion::PRESS_SCALE) } else { s }
+                if scales {
+                    s.scale(motion::PRESS_SCALE)
+                } else {
+                    s
+                }
             })
-            .focus_visible(|s| s.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring())),
+            .focus_visible(|s| {
+                s.outline(px(2.0))
+                    .outline_offset(px(2.0))
+                    .outline_color(move || c::ring())
+            }),
         Press::Chip => b
             .hover(|s| s.opacity(0.85))
             .active(|s| s.bg(move || c::accent()))
@@ -62,8 +75,16 @@ pub fn press_surface(kind: Press, on_press: impl Fn() + 'static) -> nsh_base::Bu
             .hover(|s| s.opacity(0.8))
             .active(move |s| {
                 let s = s.opacity(0.7);
-                if reduced { s } else { s.scale(motion::ICON_PRESS_SCALE) }
+                if reduced {
+                    s
+                } else {
+                    s.scale(motion::ICON_PRESS_SCALE)
+                }
             })
-            .focus_visible(|s| s.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::on_call())),
+            .focus_visible(|s| {
+                s.outline(px(2.0))
+                    .outline_offset(px(2.0))
+                    .outline_color(move || c::on_call())
+            }),
     }
 }

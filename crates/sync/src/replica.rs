@@ -458,3 +458,116 @@ impl Replica {
         self.highest_seen = self.highest_seen.max(version);
     }
 }
+
+/// A replica's saved form (protobuf; the app keeps it in its encrypted local store).
+#[derive(Clone, PartialEq, ::prost::Message)]
+struct SavedEntry {
+    #[prost(bytes = "vec", tag = "1")]
+    id: Vec<u8>,
+    #[prost(message, optional, tag = "2")]
+    plain: Option<RecordPlain>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+struct Saved {
+    #[prost(bytes = "vec", tag = "1")]
+    key: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    node: Vec<u8>,
+    #[prost(uint64, tag = "3")]
+    clock_wall: u64,
+    #[prost(uint32, tag = "4")]
+    clock_counter: u32,
+    #[prost(uint64, tag = "5")]
+    version: u64,
+    #[prost(uint64, tag = "6")]
+    highest_seen: u64,
+    #[prost(message, repeated, tag = "7")]
+    committed: Vec<SavedEntry>,
+    #[prost(bytes = "vec", repeated, tag = "8")]
+    ids: Vec<Vec<u8>>,
+    #[prost(bytes = "vec", repeated, tag = "9")]
+    garbage: Vec<Vec<u8>>,
+    #[prost(message, repeated, tag = "10")]
+    pending: Vec<RecordPlain>,
+}
+
+impl Replica {
+    /// The replica's state, to keep on the device (it includes the storage key: keep it in the
+    /// app's protected storage).
+    #[must_use]
+    pub fn save(&self) -> Vec<u8> {
+        use prost::Message as _;
+        let last = self.clock.last();
+        Saved {
+            key: self.key.as_bytes().to_vec(),
+            node: self.clock.node().to_vec(),
+            clock_wall: last.wall_ms,
+            clock_counter: last.counter,
+            version: self.version,
+            highest_seen: self.highest_seen,
+            committed: self
+                .committed
+                .values()
+                .map(|e| SavedEntry {
+                    id: e.id.to_vec(),
+                    plain: Some(e.plain.clone()),
+                })
+                .collect(),
+            ids: self.ids.iter().map(|i| i.to_vec()).collect(),
+            garbage: self.garbage.iter().map(|i| i.to_vec()).collect(),
+            pending: self.pending.values().cloned().collect(),
+        }
+        .encode_to_vec()
+    }
+
+    /// A replica from [`Replica::save`]'s bytes.
+    ///
+    /// # Errors
+    /// [`SyncError::Malformed`].
+    pub fn load(bytes: &[u8]) -> Result<Self, SyncError> {
+        use prost::Message as _;
+        let s = Saved::decode(bytes).map_err(|_| SyncError::Malformed)?;
+        let id16 = |b: &[u8]| <Id>::try_from(b).map_err(|_| SyncError::Malformed);
+        let key: [u8; 32] = s
+            .key
+            .as_slice()
+            .try_into()
+            .map_err(|_| SyncError::Malformed)?;
+        let node = id16(&s.node)?;
+        let mut clock = Clock::new(node);
+        clock.observe(
+            Hlc {
+                wall_ms: s.clock_wall,
+                counter: s.clock_counter,
+                node,
+            },
+            u64::MAX,
+        );
+        let mut committed = BTreeMap::new();
+        for e in s.committed {
+            let plain = e.plain.ok_or(SyncError::Malformed)?;
+            committed.insert(
+                plain.key.clone(),
+                Entry {
+                    id: id16(&e.id)?,
+                    plain,
+                },
+            );
+        }
+        Ok(Self {
+            key: StorageKey::from_bytes(key),
+            clock,
+            committed,
+            ids: s.ids.iter().map(|i| id16(i)).collect::<Result<_, _>>()?,
+            garbage: s
+                .garbage
+                .iter()
+                .map(|i| id16(i))
+                .collect::<Result<_, _>>()?,
+            version: s.version,
+            highest_seen: s.highest_seen,
+            pending: s.pending.into_iter().map(|p| (p.key.clone(), p)).collect(),
+        })
+    }
+}

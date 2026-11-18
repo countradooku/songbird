@@ -21,7 +21,8 @@ use crate::store::Store;
 /// screenshots and notification checks on emulators and devices). Preview builds skip the first
 /// run on request, show the Calls tab's test rows and honour `SONGBIRD_DEMO_ARRIVALS`; a release
 /// build does none of it, whatever else the variable holds (D-0100).
-pub const PREVIEW_BUILD: bool = cfg!(debug_assertions) || is_one(option_env!("SONGBIRD_PREVIEW_BUILD"));
+pub const PREVIEW_BUILD: bool =
+    cfg!(debug_assertions) || is_one(option_env!("SONGBIRD_PREVIEW_BUILD"));
 
 const fn is_one(v: Option<&str>) -> bool {
     match v {
@@ -35,7 +36,14 @@ mod preview_tests {
     #[test]
     fn only_exactly_one_marks_a_preview_build() {
         assert!(super::is_one(Some("1")));
-        for v in [None, Some(""), Some("0"), Some("true"), Some("11"), Some(" 1")] {
+        for v in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("true"),
+            Some("11"),
+            Some(" 1"),
+        ] {
             assert!(!super::is_one(v), "{v:?}");
         }
     }
@@ -54,6 +62,11 @@ pub fn App() -> impl IntoElement {
     let s = Store::new();
     store::install(s);
     backend::restore();
+    // Settings saved on this device, and the encrypted records synced from
+    // the account's other devices (Prompt 9).
+    backend::records::restore(s);
+    backend::records::periodic(s);
+    s.refresh_server_settings();
     theming::follow_settings(s);
     features::desktop::install_shortcuts();
     features::notify::install(features::desktop::current_chat);
@@ -64,8 +77,10 @@ pub fn App() -> impl IntoElement {
         .bg(move || ui::c::background())
         .text_color(move || ui::c::foreground())
         .child(
-            when(onboarded, || when(ui::wide, shell::desktop).otherwise(shell::phone))
-                .otherwise(features::onboarding::flow),
+            when(onboarded, || {
+                when(ui::wide, shell::desktop).otherwise(shell::phone)
+            })
+            .otherwise(features::onboarding::flow),
         )
         .child(features::desktop::jump::layer())
         .child(features::calls::call_layer())

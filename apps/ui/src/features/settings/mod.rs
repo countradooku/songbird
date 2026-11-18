@@ -35,7 +35,10 @@ pub use centre::privacy_centre;
 /// Pushes a settings page whose scrolling body `body` makes.
 pub(crate) fn push(title: &'static str, body: impl Fn() -> AnyElement + 'static) {
     nav::push(title, move || {
-        page(title, page_scroll(view().w_full().max_w(px(760.0)).self_center().child(body())))
+        page(
+            title,
+            page_scroll(view().w_full().max_w(px(760.0)).self_center().child(body())),
+        )
     });
 }
 
@@ -85,7 +88,13 @@ fn selectable(title: &'static str, row: AnyElement) -> AnyElement {
     let selected = move || row_selected(title);
     view()
         .relative()
-        .bg(move || if selected() { c::sidebar_accent() } else { AdaptiveColor::TRANSPARENT })
+        .bg(move || {
+            if selected() {
+                c::sidebar_accent()
+            } else {
+                AdaptiveColor::TRANSPARENT
+            }
+        })
         .transition_colors()
         .duration(motion::INSTANT)
         .child(row)
@@ -121,13 +130,19 @@ pub(crate) fn section_plain(title: &'static str, rows: Vec<AnyElement>) -> View 
 /// box rather than carrying the padding itself, so it is measured at the
 /// width it is drawn at and never clips its last line.
 pub(crate) fn foot(label: impl IntoReactive<SharedString>) -> View {
-    view().w_full().px_4().pt_2().child(footnote(label).px_0().pt_0())
+    view()
+        .w_full()
+        .px_4()
+        .pt_2()
+        .child(footnote(label).px_0().pt_0())
 }
 
 /// The leading tile of a destructive row (delete the account): the
 /// standard squircle, in the danger tint.
 pub(crate) fn danger_tile(glyph: Icon) -> View {
-    icon_tile(glyph).bg(move || c::danger_bg()).text_color(move || c::destructive())
+    icon_tile(glyph)
+        .bg(move || c::danger_bg())
+        .text_color(move || c::destructive())
 }
 
 /// A row whose trailing value follows the store (rebuilt when it changes).
@@ -153,8 +168,16 @@ pub(crate) fn value_row(
 }
 
 /// A plain navigation row with an icon and a chevron.
-pub(crate) fn nav_row(title: &'static str, glyph: Icon, on_press: impl Fn() + 'static) -> AnyElement {
-    Row::new(title).icon(glyph).chevron().on_press(on_press).build()
+pub(crate) fn nav_row(
+    title: &'static str,
+    glyph: Icon,
+    on_press: impl Fn() + 'static,
+) -> AnyElement {
+    Row::new(title)
+        .icon(glyph)
+        .chevron()
+        .on_press(on_press)
+        .build()
 }
 
 /// The presence choices, with a shape for each (never colour alone).
@@ -162,7 +185,10 @@ pub(crate) const PRESENCES: [(&str, &str); 4] = [
     ("Online", "Contacts you allow see you're here."),
     ("Away", "When you're idle, or when you choose it."),
     ("Busy", "Nudges and call sounds stay quiet."),
-    ("Invisible", "You look offline. Your last seen stops updating."),
+    (
+        "Invisible",
+        "You look offline. Your last seen stops updating.",
+    ),
 ];
 
 pub(crate) fn presence_of(label: &str) -> Presence {
@@ -188,14 +214,22 @@ pub(crate) fn presence_name(p: &Presence) -> &'static str {
 /// (busy), a hollow ring (invisible).
 pub(crate) fn presence_mark(label: &'static str, size: f32) -> AnyElement {
     match label {
-        "Away" => icon(Icon::Clock, size).text_color(move || c::warning()).into_element(),
+        "Away" => icon(Icon::Clock, size)
+            .text_color(move || c::warning())
+            .into_element(),
         "Busy" => view()
             .size(px(size))
             .rounded_full()
             .items_center()
             .justify_center()
             .bg(move || c::destructive())
-            .child(view().w(px(size * 0.55)).h(px(2.0)).rounded_full().bg(move || c::on_destructive()))
+            .child(
+                view()
+                    .w(px(size * 0.55))
+                    .h(px(2.0))
+                    .rounded_full()
+                    .bg(move || c::on_destructive()),
+            )
             .into_element(),
         "Invisible" => view()
             .size(px(size))
@@ -203,7 +237,11 @@ pub(crate) fn presence_mark(label: &'static str, size: f32) -> AnyElement {
             .border_2()
             .border_color(move || c::muted_fg())
             .into_element(),
-        _ => view().size(px(size)).rounded_full().bg(move || c::online()).into_element(),
+        _ => view()
+            .size(px(size))
+            .rounded_full()
+            .bg(move || c::online())
+            .into_element(),
     }
 }
 
@@ -243,7 +281,11 @@ pub fn jump_pages() -> Vec<JumpPage> {
         .into_iter()
         .filter(|e| e.title != "Keyboard shortcuts")
         .map(|e| JumpPage {
-            label: if DESTINATIONS.contains(&e.title) { e.title.to_string() } else { format!("Settings: {}", e.title) },
+            label: if DESTINATIONS.contains(&e.title) {
+                e.title.to_string()
+            } else {
+                format!("Settings: {}", e.title)
+            },
             keywords: e.keywords,
             glyph: e.glyph,
             title: e.title,
@@ -254,7 +296,9 @@ pub fn jump_pages() -> Vec<JumpPage> {
 /// Opens the settings page `title` (a [`JumpPage::title`]) from anywhere:
 /// the You tab comes forward and, on desktop, its row shows selected.
 pub fn open_page(title: &str) {
-    let Some(e) = entries().into_iter().find(|e| e.title == title) else { return };
+    let Some(e) = entries().into_iter().find(|e| e.title == title) else {
+        return;
+    };
     nav::pop_to_root();
     nav::tab().set(nav::Tab::You);
     open_from(e.title, e.open);
@@ -271,39 +315,199 @@ struct Entry {
 }
 
 fn entries() -> Vec<Entry> {
-    let e = |title, keywords, glyph, open| Entry { title, keywords, glyph, open };
+    let e = |title, keywords, glyph, open| Entry {
+        title,
+        keywords,
+        glyph,
+        open,
+    };
     vec![
-        e("Account", "security notifications two-step pin passkeys delete request info", Icon::Key, account::account as fn()),
-        e("Privacy", "last seen online profile photo about status read receipts groups blocked timer disappearing app lock screenshots link previews ip", Icon::Lock, privacy::privacy),
-        e("Chats", "theme wallpaper animations reactions enter send archived save photos stickers backup transfer export clear", Icon::Chats, chats::chats),
-        e("Appearance", "theme dark light high contrast app icon text size motion", Icon::Palette, appearance::appearance),
-        e("Notifications", "sound ringtone tone reactions hide preview mute calls groups", Icon::Bell, notifications::notifications),
-        e("Storage and data", "media auto-download network usage proxy quality", Icon::Database, links::storage_and_data),
-        e("Linked devices", "computer desktop tablet qr", Icon::Laptop, links::linked_devices),
-        e("Lists", "custom chat lists family work filters", Icon::Filter, extras::lists),
-        e("Broadcast lists", "send many contacts", Icon::Megaphone, extras::broadcasts),
-        e("Starred messages", "saved favourite star", Icon::Star, extras::starred),
-        e("Presence and nudges", "online away busy invisible nudge buzz status", Icon::Zap, extras::presence),
-        e("Parental controls", "child family supervised screen time quiet hours", Icon::Users, extras::parental),
-        e("Proxy", "blocked censorship connection network", Icon::Globe, extras::proxy),
-        e("WhatsApp chats", "bridge interop import", Icon::Chats, links::whatsapp),
-        e("Subscription", "plus plan family billing", Icon::Sparkles, links::subscription),
-        e("Help and feedback", "support contact faq crash reports", Icon::HelpCircle, links::help),
-        e("Invite a friend", "share invite code", Icon::Heart, links::invite_friend),
-        e("What Songbird can see", "privacy centre server data encryption threat model eu", Icon::ShieldCheck, privacy_centre),
-        e("Read receipts", "privacy ticks seen read status", Icon::Check, privacy::privacy),
-        e("Last seen and online", "privacy presence", Icon::Eye, privacy::last_seen),
-        e("Blocked contacts", "privacy block unblock", Icon::Ban, privacy::blocked),
-        e("App lock", "face id fingerprint pin privacy", Icon::Lock, privacy::app_lock),
-        e("Default message timer", "disappearing messages privacy", Icon::Timer, privacy::default_timer),
-        e("Theme", "appearance dark light high contrast", Icon::Moon, appearance::appearance),
-        e("Chat wallpaper", "chats theme background colour", Icon::Image, chats::chats),
-        e("Ringtone", "notifications calls sound", Icon::Volume, notifications::ringtone),
-        e("Two-step PIN", "account security", Icon::Key, links::account_security),
-        e("Crash reports", "privacy help diagnostics", Icon::Alert, privacy::privacy),
-        e("Chat backup", "backups recovery key restore", Icon::Cloud, links::backups),
-        e("Keyboard shortcuts", "desktop keys", Icon::Keyboard, links::shortcuts),
-        e("Server connection", "backend real server register account device connection developer", Icon::Server, links::server),
+        e(
+            "Account",
+            "security notifications two-step pin passkeys delete request info",
+            Icon::Key,
+            account::account as fn(),
+        ),
+        e(
+            "Privacy",
+            "last seen online profile photo about status read receipts groups blocked timer disappearing app lock screenshots link previews ip",
+            Icon::Lock,
+            privacy::privacy,
+        ),
+        e(
+            "Chats",
+            "theme wallpaper animations reactions enter send archived save photos stickers backup transfer export clear",
+            Icon::Chats,
+            chats::chats,
+        ),
+        e(
+            "Appearance",
+            "theme dark light high contrast app icon text size motion",
+            Icon::Palette,
+            appearance::appearance,
+        ),
+        e(
+            "Notifications",
+            "sound ringtone tone reactions hide preview mute calls groups",
+            Icon::Bell,
+            notifications::notifications,
+        ),
+        e(
+            "Storage and data",
+            "media auto-download network usage proxy quality",
+            Icon::Database,
+            links::storage_and_data,
+        ),
+        e(
+            "Linked devices",
+            "computer desktop tablet qr",
+            Icon::Laptop,
+            links::linked_devices,
+        ),
+        e(
+            "Lists",
+            "custom chat lists family work filters",
+            Icon::Filter,
+            extras::lists,
+        ),
+        e(
+            "Broadcast lists",
+            "send many contacts",
+            Icon::Megaphone,
+            extras::broadcasts,
+        ),
+        e(
+            "Starred messages",
+            "saved favourite star",
+            Icon::Star,
+            extras::starred,
+        ),
+        e(
+            "Presence and nudges",
+            "online away busy invisible nudge buzz status",
+            Icon::Zap,
+            extras::presence,
+        ),
+        e(
+            "Parental controls",
+            "child family supervised screen time quiet hours",
+            Icon::Users,
+            extras::parental,
+        ),
+        e(
+            "Proxy",
+            "blocked censorship connection network",
+            Icon::Globe,
+            extras::proxy,
+        ),
+        e(
+            "WhatsApp chats",
+            "bridge interop import",
+            Icon::Chats,
+            links::whatsapp,
+        ),
+        e(
+            "Subscription",
+            "plus plan family billing",
+            Icon::Sparkles,
+            links::subscription,
+        ),
+        e(
+            "Help and feedback",
+            "support contact faq crash reports",
+            Icon::HelpCircle,
+            links::help,
+        ),
+        e(
+            "Invite a friend",
+            "share invite code",
+            Icon::Heart,
+            links::invite_friend,
+        ),
+        e(
+            "What Songbird can see",
+            "privacy centre server data encryption threat model eu",
+            Icon::ShieldCheck,
+            privacy_centre,
+        ),
+        e(
+            "Read receipts",
+            "privacy ticks seen read status",
+            Icon::Check,
+            privacy::privacy,
+        ),
+        e(
+            "Last seen and online",
+            "privacy presence",
+            Icon::Eye,
+            privacy::last_seen,
+        ),
+        e(
+            "Blocked contacts",
+            "privacy block unblock",
+            Icon::Ban,
+            privacy::blocked,
+        ),
+        e(
+            "App lock",
+            "face id fingerprint pin privacy",
+            Icon::Lock,
+            privacy::app_lock,
+        ),
+        e(
+            "Default message timer",
+            "disappearing messages privacy",
+            Icon::Timer,
+            privacy::default_timer,
+        ),
+        e(
+            "Theme",
+            "appearance dark light high contrast",
+            Icon::Moon,
+            appearance::appearance,
+        ),
+        e(
+            "Chat wallpaper",
+            "chats theme background colour",
+            Icon::Image,
+            chats::chats,
+        ),
+        e(
+            "Ringtone",
+            "notifications calls sound",
+            Icon::Volume,
+            notifications::ringtone,
+        ),
+        e(
+            "Two-step PIN",
+            "account security",
+            Icon::Key,
+            links::account_security,
+        ),
+        e(
+            "Crash reports",
+            "privacy help diagnostics",
+            Icon::Alert,
+            privacy::privacy,
+        ),
+        e(
+            "Chat backup",
+            "backups recovery key restore",
+            Icon::Cloud,
+            links::backups,
+        ),
+        e(
+            "Keyboard shortcuts",
+            "desktop keys",
+            Icon::Keyboard,
+            links::shortcuts,
+        ),
+        e(
+            "Server connection",
+            "backend real server register account device connection developer",
+            Icon::Server,
+            links::server,
+        ),
     ]
 }
 
@@ -318,11 +522,21 @@ pub fn you_tab() -> AnyElement {
         .child(app_header(
             "You",
             false,
-            Some(icon_btn(Icon::QrCode, "My QR code", move || open_from("Profile", profile::profile)).into_element()),
+            Some(
+                icon_btn(Icon::QrCode, "My QR code", move || {
+                    open_from("Profile", profile::profile)
+                })
+                .into_element(),
+            ),
         ))
         .child(page_scroll(
             view()
-                .child(view().px_4().pt_3().child(search_field("Search settings", query)))
+                .child(
+                    view()
+                        .px_4()
+                        .pt_3()
+                        .child(search_field("Search settings", query)),
+                )
                 .child(
                     when(searching, move || search_results(query))
                         .otherwise(move || you_home(status_open)),
@@ -344,22 +558,45 @@ fn you_home(status_open: Signal<bool>) -> View {
                 let row = if e.title == "Subscription" {
                     // The plan you're on, as the row's value (the page
                     // says the same).
-                    value_row(title, Some(e.glyph), || crate::features::plans::catalog::info(store().plan()).name.to_string(), move || {
-                        open_from(title, open)
-                    })
+                    value_row(
+                        title,
+                        Some(e.glyph),
+                        || {
+                            crate::features::plans::catalog::info(store().plan())
+                                .name
+                                .to_string()
+                        },
+                        move || open_from(title, open),
+                    )
                 } else {
-                    Row::new(e.title).icon(e.glyph).on_press(move || open_from(title, open)).chevron().build()
+                    Row::new(e.title)
+                        .icon(e.glyph)
+                        .on_press(move || open_from(title, open))
+                        .chevron()
+                        .build()
                 };
                 selectable(title, row)
             })
             .collect()
     };
-    let mut last = pick(&["Subscription", "Help and feedback", "Invite a friend", "Server connection"]);
+    let mut last = pick(&[
+        "Subscription",
+        "Help and feedback",
+        "Invite a friend",
+        "Server connection",
+    ]);
     if is_desktop() {
-        last.push(selectable("Desktop", nav_row("Desktop", Icon::Laptop, || open_from("Desktop", links::desktop))));
+        last.push(selectable(
+            "Desktop",
+            nav_row("Desktop", Icon::Laptop, || {
+                open_from("Desktop", links::desktop)
+            }),
+        ));
         last.push(selectable(
             "Keyboard shortcuts",
-            nav_row("Keyboard shortcuts", Icon::Keyboard, || open_from("Keyboard shortcuts", links::shortcuts)),
+            nav_row("Keyboard shortcuts", Icon::Keyboard, || {
+                open_from("Keyboard shortcuts", links::shortcuts)
+            }),
         ));
     }
     // One rhythm: 12 inside the profile block, 24 to the call-out, 16
@@ -395,9 +632,12 @@ fn you_home(status_open: Signal<bool>) -> View {
         ]))))
         .child(view().pt_4().child(group(last)))
         .child(
-            footnote(format!("Songbird {} · Made in the EU", env!("CARGO_PKG_VERSION")))
-                .text_center()
-                .pt_6(),
+            footnote(format!(
+                "Songbird {} · Made in the EU",
+                env!("CARGO_PKG_VERSION")
+            ))
+            .text_center()
+            .pt_6(),
         )
 }
 
@@ -410,13 +650,21 @@ fn profile_card() -> AnyElement {
     let status = move || {
         me.with(|p| p.status_line.clone()).map(|line| {
             let (emoji, until) = ext.with(|x| (x.status_emoji.clone(), x.status_until));
-            format!("{emoji} {line} · {}", until_label(until, crate::store::NOW).to_lowercase())
+            format!(
+                "{emoji} {line} · {}",
+                until_label(until, crate::store::NOW).to_lowercase()
+            )
         })
     };
     nsh_base::button()
         .on_press(|| open_from("Profile", profile::profile))
         .selected(move || row_selected("Profile"))
-        .accessibility_label(move || Some(SharedString::from(format!("Your profile, {}", me.with(|p| p.name.clone())))))
+        .accessibility_label(move || {
+            Some(SharedString::from(format!(
+                "Your profile, {}",
+                me.with(|p| p.name.clone())
+            )))
+        })
         .mx_4()
         .mt_3()
         .p_4()
@@ -424,9 +672,21 @@ fn profile_card() -> AnyElement {
         .items_center()
         .gap_4()
         .rounded(move || radius::lg())
-        .bg(move || if row_selected("Profile") { c::sidebar_accent() } else { c::card() })
+        .bg(move || {
+            if row_selected("Profile") {
+                c::sidebar_accent()
+            } else {
+                c::card()
+            }
+        })
         .border_1()
-        .border_color(move || if row_selected("Profile") { c::primary() } else { c::border() })
+        .border_color(move || {
+            if row_selected("Profile") {
+                c::primary()
+            } else {
+                c::border()
+            }
+        })
         .cursor_pointer()
         .transition()
         .duration(motion::INSTANT)
@@ -435,9 +695,17 @@ fn profile_card() -> AnyElement {
             let st = st.bg(move || c::accent());
             if reduced { st } else { st.scale(0.99) }
         })
-        .focus_visible(|st| st.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
+        .focus_visible(|st| {
+            st.outline(px(2.0))
+                .outline_offset(px(2.0))
+                .outline_color(move || c::ring())
+        })
         // Presence shows once on this tab: the choice right below.
-        .child(avatar(me.with_untracked(|p| p.name.clone()), me.with_untracked(|p| p.seed), 64.0))
+        .child(avatar(
+            me.with_untracked(|p| p.name.clone()),
+            me.with_untracked(|p| p.seed),
+            64.0,
+        ))
         .child(
             view()
                 .flex_1()
@@ -496,17 +764,19 @@ fn presence_bar(status_open: Signal<bool>) -> View {
                     })
                 })),
         )
-        .child(
-            view().flex_row().child(btn_with_icon(
-                move || {
-                    if me.with(|p| p.status_line.is_some()) { "Change status" } else { "Set a status" }
-                },
-                Some(Icon::Smile),
-                Variant::Outline,
-                BtnSize::Sm,
-                move || status_open.set(true),
-            )),
-        )
+        .child(view().flex_row().child(btn_with_icon(
+            move || {
+                if me.with(|p| p.status_line.is_some()) {
+                    "Change status"
+                } else {
+                    "Set a status"
+                }
+            },
+            Some(Icon::Smile),
+            Variant::Outline,
+            BtnSize::Sm,
+            move || status_open.set(true),
+        )))
 }
 
 /// The search results: the matching rows, or a calm empty line.
@@ -540,14 +810,23 @@ fn search_results(query: Signal<String>) -> View {
                     let titles = found.get();
                     untracked(move || {
                         let all = entries();
-                        group(titles.iter().filter_map(|t| all.iter().find(|e| e.title == *t)).map(|e| {
-                            let open = e.open;
-                            let title = e.title;
-                            selectable(
-                                title,
-                                Row::new(title).icon(e.glyph).chevron().on_press(move || open_from(title, open)).build(),
-                            )
-                        }))
+                        group(
+                            titles
+                                .iter()
+                                .filter_map(|t| all.iter().find(|e| e.title == *t))
+                                .map(|e| {
+                                    let open = e.open;
+                                    let title = e.title;
+                                    selectable(
+                                        title,
+                                        Row::new(title)
+                                            .icon(e.glyph)
+                                            .chevron()
+                                            .on_press(move || open_from(title, open))
+                                            .build(),
+                                    )
+                                }),
+                        )
                     })
                 })
             },

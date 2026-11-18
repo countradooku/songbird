@@ -24,7 +24,9 @@ thread_local! {
 /// has no account.
 pub fn connect() {
     disconnect();
-    let Some((device, seed)) = device_key() else { return };
+    let Some((device, seed)) = device_key() else {
+        return;
+    };
     let endpoint = live().with_untracked(|l| l.endpoint.clone());
     let Ok(key) = DeviceKey::from_seed(DeviceId::from_bytes(device), &seed) else {
         live().update(|l| l.problem = Some("This device's key is damaged.".into()));

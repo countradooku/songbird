@@ -4,7 +4,10 @@
 
 use nsh_core::prelude::*;
 
-use super::{LANE, chat_avatar, community_mark, create, glide, group_row, invite_link_page, list_card, list_row, page_scroll, square_tile};
+use super::{
+    LANE, chat_avatar, community_mark, create, glide, group_row, invite_link_page, list_card,
+    list_row, page_scroll, square_tile,
+};
 use crate::{
     nav,
     store::{
@@ -23,7 +26,10 @@ pub(super) fn home_page(chat: ChatId) -> Screen {
     let manage = move || ch.with(|c| c.as_ref().is_some_and(can_manage));
     let add_open = signal(false);
     let c0 = s.chat(chat);
-    let title = c0.as_ref().map(|c| c.title.clone()).unwrap_or_else(|| "Space".into());
+    let title = c0
+        .as_ref()
+        .map(|c| c.title.clone())
+        .unwrap_or_else(|| "Space".into());
     page(
         title,
         view()
@@ -155,7 +161,11 @@ pub(super) fn home_page(chat: ChatId) -> Screen {
 
 /// "1 member", "9 members": a count with its noun, singular for one.
 fn count(n: usize, noun: &str) -> String {
-    if n == 1 { format!("1 {noun}") } else { format!("{n} {noun}s") }
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
 }
 
 /// A row's trailing value (muted, tabular) and chevron.
@@ -194,7 +204,8 @@ fn add_group_sheet(s: Store, community: ChatId, open: Signal<bool>) -> View {
             let list = candidates();
             untracked(move || {
                 if list.is_empty() {
-                    return footnote("Groups you admin that aren't in a space show here.").into_element();
+                    return footnote("Groups you admin that aren't in a space show here.")
+                        .into_element();
                 }
                 group(list.iter().map(|g| {
                     let id = g.id;
@@ -213,7 +224,9 @@ fn add_group_sheet(s: Store, community: ChatId, open: Signal<bool>) -> View {
                 .into_element()
             })
         }))
-        .child(footnote("A group's own admins must agree before it joins. Its messages stay within the group."))
+        .child(footnote(
+            "A group's own admins must agree before it joins. Its messages stay within the group.",
+        ))
 }
 
 fn members_page(chat: ChatId) {
@@ -227,7 +240,8 @@ fn members_page(chat: ChatId) {
             "Members",
             page_scroll(view().pt_3().child(group(members.into_iter().map(|m| {
                 let name = s.contact_name(m.contact);
-                let mut row = Row::new(name.clone()).leading(avatar(name, m.contact.unwrap_or(42), 36.0));
+                let mut row =
+                    Row::new(name.clone()).leading(avatar(name, m.contact.unwrap_or(42), 36.0));
                 if m.role != Role::Member {
                     row = row.trailing(tag(m.role.label()));
                 }
@@ -264,7 +278,11 @@ pub fn find_channels() {
             let q = query.get().trim().to_lowercase();
             directory()
                 .into_iter()
-                .filter(|d| q.is_empty() || d.name.to_lowercase().contains(&q) || d.about.to_lowercase().contains(&q))
+                .filter(|d| {
+                    q.is_empty()
+                        || d.name.to_lowercase().contains(&q)
+                        || d.about.to_lowercase().contains(&q)
+                })
                 .collect::<Vec<_>>()
         });
         page(

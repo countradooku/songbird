@@ -60,13 +60,26 @@ pub fn call_btn(
         .cursor_pointer()
         .transition()
         .duration(motion::FAST)
-        .ease_bezier(motion::SETTLE.0, motion::SETTLE.1, motion::SETTLE.2, motion::SETTLE.3)
+        .ease_bezier(
+            motion::SETTLE.0,
+            motion::SETTLE.1,
+            motion::SETTLE.2,
+            motion::SETTLE.3,
+        )
         .hover(|s| s.opacity(0.88))
         .active(move |s| {
             let s = s.opacity(0.8);
-            if reduced { s } else { s.scale(motion::ICON_PRESS_SCALE) }
+            if reduced {
+                s
+            } else {
+                s.scale(motion::ICON_PRESS_SCALE)
+            }
         })
-        .focus_visible(|s| s.outline(px(2.0)).outline_offset(px(3.0)).outline_color(move || c::on_call()))
+        .focus_visible(|s| {
+            s.outline(px(2.0))
+                .outline_offset(px(3.0))
+                .outline_color(move || c::on_call())
+        })
         .child(dynamic(move || icon(glyph(), (size * 0.42).round())));
     view()
         .items_center()
@@ -109,7 +122,11 @@ pub fn call_pill(
         .hover(|s| s.bg(move || c::on_call().opacity(0.2)))
         .active(move |s| {
             let s = s.bg(move || c::on_call().opacity(0.24));
-            if reduced { s } else { s.scale(motion::PRESS_SCALE) }
+            if reduced {
+                s
+            } else {
+                s.scale(motion::PRESS_SCALE)
+            }
         })
         .focus_visible(|s| s.outline(px(2.0)).outline_color(move || c::on_call()))
         .child(icon(glyph, 16.0))
@@ -177,10 +194,13 @@ pub fn call_sheet(
                         .when(panel, |v| v.pt_2().pb_4())
                         .when(!panel, |v| v.pb_safe_area_plus(px(16.0)))
                         .child((!panel).then(|| {
-                            view()
-                                .items_center()
-                                .pt(px(6.0))
-                                .child(view().w(px(36.0)).h(px(5.0)).rounded_full().bg(move || c::on_call().opacity(0.3)))
+                            view().items_center().pt(px(6.0)).child(
+                                view()
+                                    .w(px(36.0))
+                                    .h(px(5.0))
+                                    .rounded_full()
+                                    .bg(move || c::on_call().opacity(0.3)),
+                            )
                         }))
                         .child(
                             view()
@@ -200,7 +220,9 @@ pub fn call_sheet(
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .role(AccessibilityRole::Header),
                                 )
-                                .child(call_icon_btn(Icon::Close, "Close", move || open.set(false))),
+                                .child(call_icon_btn(Icon::Close, "Close", move || {
+                                    open.set(false)
+                                })),
                         )
                         .child(content.borrow_mut().take()),
                 ),
@@ -208,7 +230,11 @@ pub fn call_sheet(
 }
 
 /// A 44pt icon button in the call's ink.
-pub fn call_icon_btn(glyph: Icon, label: impl Into<SharedString>, on_press: impl Fn() + 'static) -> nsh_base::ButtonElement {
+pub fn call_icon_btn(
+    glyph: Icon,
+    label: impl Into<SharedString>,
+    on_press: impl Fn() + 'static,
+) -> nsh_base::ButtonElement {
     let label: SharedString = label.into();
     button()
         .on_press(on_press)
@@ -259,7 +285,12 @@ pub fn call_group(rows: impl IntoIterator<Item = AnyElement>) -> View {
         .bg(move || c::on_call().opacity(0.07));
     for (i, row) in rows.into_iter().enumerate() {
         if i > 0 {
-            out = out.child(view().ml(px(52.0)).h(hairline()).bg(move || c::on_call().opacity(0.12)));
+            out = out.child(
+                view()
+                    .ml(px(52.0))
+                    .h(hairline())
+                    .bg(move || c::on_call().opacity(0.12)),
+            );
         }
         out = out.child(row);
     }
@@ -284,14 +315,29 @@ pub fn call_row(
         .px_4()
         .min_h(px(48.0))
         .py_2()
-        .child(leading.map(|l| view().w(px(24.0)).items_center().child(l).text_color(move || c::on_call().opacity(0.85))))
+        .child(leading.map(|l| {
+            view()
+                .w(px(24.0))
+                .items_center()
+                .child(l)
+                .text_color(move || c::on_call().opacity(0.85))
+        }))
         .child(
             view()
                 .flex_1()
                 .min_w(px(0.0))
                 .gap(px(2.0))
-                .child(text(title.clone()).text_size(px(font::body())).number_of_lines(1))
-                .child(subtitle.map(|st| text(st).text_size(px(font::SMALL)).line_height(px(18.0)).text_color(move || c::on_call().opacity(0.62)))),
+                .child(
+                    text(title.clone())
+                        .text_size(px(font::body()))
+                        .number_of_lines(1),
+                )
+                .child(subtitle.map(|st| {
+                    text(st)
+                        .text_size(px(font::SMALL))
+                        .line_height(px(18.0))
+                        .text_color(move || c::on_call().opacity(0.62))
+                })),
         )
         .child(trailing);
     match on_press {

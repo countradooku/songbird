@@ -91,8 +91,16 @@ pub fn price_line(plan: Plan) -> Option<String> {
     (p.monthly_cents > 0).then(|| {
         let twelve = p.monthly_cents * 12;
         let save = (100.0 * (1.0 - p.yearly_cents as f32 / twelve as f32)).round() as u32;
-        let saving = if save > 0 { format!(" (save {save}%)") } else { String::new() };
-        format!("{} a month, or {} a year{saving}", euros(p.monthly_cents), euros(p.yearly_cents))
+        let saving = if save > 0 {
+            format!(" (save {save}%)")
+        } else {
+            String::new()
+        };
+        format!(
+            "{} a month, or {} a year{saving}",
+            euros(p.monthly_cents),
+            euros(p.yearly_cents)
+        )
     })
 }
 
@@ -311,7 +319,8 @@ fn scrub_line(line: &str) -> String {
     for word in line.split(' ') {
         let bare = word.trim_matches(|c: char| "()[],;.".contains(c));
         let is_digits = !bare.is_empty() && bare.chars().all(|c| c.is_ascii_digit());
-        if bare.starts_with('+') && bare.len() > 2 && bare[1..].chars().all(|c| c.is_ascii_digit()) {
+        if bare.starts_with('+') && bare.len() > 2 && bare[1..].chars().all(|c| c.is_ascii_digit())
+        {
             in_phone = true;
             out.push(word.replace(bare, "[phone]"));
             continue;
@@ -343,10 +352,17 @@ fn scrub_word(word: &str) -> String {
         }
     }
     let parts: Vec<&str> = bare.split('.').collect();
-    if parts.len() == 4 && parts.iter().all(|p| !p.is_empty() && p.len() <= 3 && p.chars().all(|c| c.is_ascii_digit())) {
+    if parts.len() == 4
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.len() <= 3 && p.chars().all(|c| c.is_ascii_digit()))
+    {
         return replace("[ip]");
     }
-    if bare.len() >= 8 && bare.chars().all(|c| c.is_ascii_hexdigit()) && bare.chars().any(|c| c.is_ascii_alphabetic()) {
+    if bare.len() >= 8
+        && bare.chars().all(|c| c.is_ascii_hexdigit())
+        && bare.chars().any(|c| c.is_ascii_alphabetic())
+    {
         return replace("[id]");
     }
     word.to_string()
@@ -361,7 +377,10 @@ mod tests {
         assert_eq!(price_label(Plan::Plus, Billing::Monthly), "€2.99 a month");
         assert_eq!(price_label(Plan::Plus, Billing::Yearly), "€29.99 a year");
         assert_eq!(price_label(Plan::Free, Billing::Yearly), "Free");
-        assert_eq!(price_line(Plan::Plus).unwrap(), "€2.99 a month, or €29.99 a year (save 16%)");
+        assert_eq!(
+            price_line(Plan::Plus).unwrap(),
+            "€2.99 a month, or €29.99 a year (save 16%)"
+        );
         assert!(price_line(Plan::Free).is_none());
     }
 
@@ -399,7 +418,16 @@ mod tests {
     #[test]
     fn scrub_removes_what_identifies_people() {
         let out = scrub(SAMPLE_LOG);
-        for secret in ["81.196.44.12", "radu@example.com", "7f3a9c21e4b05d88", "4b8e1f0a9c7d2e3f6a5b", "@mihai", "721", "555 123", "9c1d2e7f"] {
+        for secret in [
+            "81.196.44.12",
+            "radu@example.com",
+            "7f3a9c21e4b05d88",
+            "4b8e1f0a9c7d2e3f6a5b",
+            "@mihai",
+            "721",
+            "555 123",
+            "9c1d2e7f",
+        ] {
             assert!(!out.contains(secret), "{secret} left in:\n{out}");
         }
         assert!(out.contains("[ip]"));

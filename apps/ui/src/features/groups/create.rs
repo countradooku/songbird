@@ -21,8 +21,12 @@ pub(crate) fn addable(s: Store) -> Vec<Contact> {
             })
             .collect()
     });
-    let mut out: Vec<Contact> =
-        s.contacts.with(|cs| cs.iter().filter(|c| !c.blocked && !strangers.contains(&c.id)).cloned().collect());
+    let mut out: Vec<Contact> = s.contacts.with(|cs| {
+        cs.iter()
+            .filter(|c| !c.blocked && !strangers.contains(&c.id))
+            .cloned()
+            .collect()
+    });
     out.sort_by_key(|c| c.name.to_lowercase());
     out
 }
@@ -40,11 +44,16 @@ pub(crate) fn new_group_flow(community: Option<ChatId>) {
         let s = store();
         let picked = signal(Vec::<ContactId>::new());
         let query = signal(String::new());
-        page("New group", pick_members(s, picked, query, move || {
-            if picked.with_untracked(|p| !p.is_empty()) {
-                nav::push("new-group-details", move || details_page(base, community, picked));
-            }
-        }))
+        page(
+            "New group",
+            pick_members(s, picked, query, move || {
+                if picked.with_untracked(|p| !p.is_empty()) {
+                    nav::push("new-group-details", move || {
+                        details_page(base, community, picked)
+                    });
+                }
+            }),
+        )
     });
 }
 
@@ -58,7 +67,10 @@ fn pick_members(
 ) -> View {
     let list = computed(move || {
         let q = query.get();
-        addable(s).into_iter().filter(|c| matches(c, &q)).collect::<Vec<_>>()
+        addable(s)
+            .into_iter()
+            .filter(|c| matches(c, &q))
+            .collect::<Vec<_>>()
     });
     let toggle_pick = move |id: ContactId| {
         picked.update(|p| match p.iter().position(|x| *x == id) {
@@ -84,7 +96,11 @@ fn pick_members(
                         .child(view().flex_row().gap_2().child(each(
                             picked,
                             |id: &ContactId| *id,
-                            move |id, _| picked_chip(s, id.get_untracked(), move || toggle_pick(id.get_untracked())),
+                            move |id, _| {
+                                picked_chip(s, id.get_untracked(), move || {
+                                    toggle_pick(id.get_untracked())
+                                })
+                            },
                         ))),
                 ),
         )
@@ -101,15 +117,23 @@ fn pick_members(
             .pb_2(),
         )
         .child(
-            virtual_list(move || list.with(Vec::len), move |at| {
-                let contact = computed(move || list.with(|l| l.get(at.index()).cloned()));
-                let id = move || contact.with(|c| c.as_ref().map_or(0, |c| c.id));
-                let chosen = move || picked.with(|p| p.contains(&id()));
-                contact_pick_row(contact, chosen, move || toggle_pick(id()))
-            })
+            virtual_list(
+                move || list.with(Vec::len),
+                move |at| {
+                    let contact = computed(move || list.with(|l| l.get(at.index()).cloned()));
+                    let id = move || contact.with(|c| c.as_ref().map_or(0, |c| c.id));
+                    let chosen = move || picked.with(|p| p.contains(&id()));
+                    contact_pick_row(contact, chosen, move || toggle_pick(id()))
+                },
+            )
             .keys(move || list.with(|l| l.iter().map(|c| c.id).collect::<Vec<_>>()))
             .estimated_item_size(px(if is_desktop() { 52.0 } else { 64.0 }))
-            .empty(empty_state(Icon::Search, "No one found", "Try another name or username.", None))
+            .empty(empty_state(
+                Icon::Search,
+                "No one found",
+                "Try another name or username.",
+                None,
+            ))
             .flex_1(),
         )
         .child(bottom_bar(
@@ -168,12 +192,23 @@ pub(crate) fn contact_pick_row(
                 .gap(px(2.0))
                 // Start-aligned in this row's direction: a name in Arabic or
                 // Hebrew still starts at the text column, not the far edge.
-                .child(text(name).text_size(px(font::body())).number_of_lines(1).text_left())
                 .child(
-                    text(move || contact.with(|c| c.as_ref().map(|c| format!("@{}", c.username)).unwrap_or_default()))
-                        .text_size(px(font::SMALL))
-                        .text_color(move || c::muted_fg())
-                        .number_of_lines(1),
+                    text(name)
+                        .text_size(px(font::body()))
+                        .number_of_lines(1)
+                        .text_left(),
+                )
+                .child(
+                    text(move || {
+                        contact.with(|c| {
+                            c.as_ref()
+                                .map(|c| format!("@{}", c.username))
+                                .unwrap_or_default()
+                        })
+                    })
+                    .text_size(px(font::SMALL))
+                    .text_color(move || c::muted_fg())
+                    .number_of_lines(1),
                 ),
         )
         .child(check_circle(chosen))
@@ -189,7 +224,13 @@ pub(crate) fn check_circle(chosen: impl Fn() -> bool + Copy + 'static) -> View {
         .justify_center()
         .border_2()
         .border_color(move || if chosen() { c::primary() } else { c::input() })
-        .bg(move || if chosen() { c::primary() } else { AdaptiveColor::TRANSPARENT })
+        .bg(move || {
+            if chosen() {
+                c::primary()
+            } else {
+                AdaptiveColor::TRANSPARENT
+            }
+        })
         .text_color(move || c::on_primary())
         .transition_colors()
         .duration(motion::FAST)
@@ -204,7 +245,16 @@ fn picked_chip(s: Store, id: ContactId, remove: impl Fn() + 'static) -> impl Int
     let fade = animated_value(if motion::reduced() { 1.0 } else { 0.0 });
     let grow = animated_value(if motion::reduced() { 1.0 } else { 0.9 });
     fade.timing(1.0, motion::FAST, Easing::EaseOut);
-    grow.timing(1.0, motion::FAST, Easing::Bezier(motion::SETTLE.0, motion::SETTLE.1, motion::SETTLE.2, motion::SETTLE.3));
+    grow.timing(
+        1.0,
+        motion::FAST,
+        Easing::Bezier(
+            motion::SETTLE.0,
+            motion::SETTLE.1,
+            motion::SETTLE.2,
+            motion::SETTLE.3,
+        ),
+    );
     press_surface(Press::Chip, remove)
         .accessibility_label(format!("Remove {name}"))
         .bind_opacity(&fade)
@@ -217,8 +267,16 @@ fn picked_chip(s: Store, id: ContactId, remove: impl Fn() + 'static) -> impl Int
         .pr_3()
         .rounded_full()
         .bg(move || c::secondary())
-        .child(avatar(name.clone(), id, if is_desktop() { 24.0 } else { 30.0 }))
-        .child(text(first_name(&name)).text_size(px(font::SMALL + 1.0)).font_weight(FontWeight::MEDIUM))
+        .child(avatar(
+            name.clone(),
+            id,
+            if is_desktop() { 24.0 } else { 30.0 },
+        ))
+        .child(
+            text(first_name(&name))
+                .text_size(px(font::SMALL + 1.0))
+                .font_weight(FontWeight::MEDIUM),
+        )
         .child(icon(Icon::Close, 14.0).text_color(move || c::muted_fg()))
 }
 
@@ -284,74 +342,99 @@ fn details_page(base: usize, community: Option<ChatId>, picked: Signal<Vec<Conta
                             .px_4()
                             .pt_5()
                             .child(
-                                press_surface(Press::Tile, || toast("Photos come with the media picker"))
-                                    .accessibility_label("Add group photo")
-                                    .size(px(64.0))
-                                    .rounded_full()
-                                    .items_center()
-                                    .justify_center()
-                                    .bg(move || c::secondary())
-                                    .text_color(move || c::muted_fg())
-                                    .child(icon(Icon::Camera, 26.0)),
+                                press_surface(Press::Tile, || {
+                                    toast("Photos come with the media picker")
+                                })
+                                .accessibility_label("Add group photo")
+                                .size(px(64.0))
+                                .rounded_full()
+                                .items_center()
+                                .justify_center()
+                                .bg(move || c::secondary())
+                                .text_color(move || c::muted_fg())
+                                .child(icon(Icon::Camera, 26.0)),
                             )
                             .child(
-                                view().flex_1().child(
-                                    labelled_field(
-                                        "Group name",
-                                        field("Group name", name).max_length(100_u32).auto_focus(true),
-                                        move || format!("{} of 100", name.with(|n| n.chars().count())),
-                                        || false,
-                                    ),
-                                ),
+                                view().flex_1().child(labelled_field(
+                                    "Group name",
+                                    field("Group name", name)
+                                        .max_length(100_u32)
+                                        .auto_focus(true),
+                                    move || format!("{} of 100", name.with(|n| n.chars().count())),
+                                    || false,
+                                )),
                             ),
                     )
                     .child(section_title("Settings"))
                     // Rows without icons: rules start on the 16pt gutter.
-                    .child(card_rows([
-                        view()
-                            .px_4()
-                            .py_3()
-                            .gap_2()
-                            .child(text("Disappearing messages").text_size(px(font::body())))
-                            .child(segmented(
-                                vec![
-                                    (None, "Off"),
-                                    (Some(Disappear::Day), "24 hours"),
-                                    (Some(Disappear::Week), "7 days"),
-                                    (Some(Disappear::Quarter), "90 days"),
-                                ],
-                                move || timer.get(),
-                                move |v| timer.set(v),
-                            ))
-                            .into_element(),
-                        toggle_row(
-                            "Members can add others",
-                            Some("When off, only admins can add people."),
-                            move || members_add.get(),
-                            move |v| members_add.set(v),
-                        ),
-                        toggle_row(
-                            "Approve new members",
-                            Some("An admin approves anyone who joins with the invite link."),
-                            move || approve.get(),
-                            move |v| approve.set(v),
-                        ),
-                    ], 16.0))
-                    .child(footnote("You'll be the owner. You can change these later in Group permissions."))
-                    .child(section_title(if n == 1 { "1 member".to_string() } else { format!("{n} members") }))
+                    .child(card_rows(
+                        [
+                            view()
+                                .px_4()
+                                .py_3()
+                                .gap_2()
+                                .child(text("Disappearing messages").text_size(px(font::body())))
+                                .child(segmented(
+                                    vec![
+                                        (None, "Off"),
+                                        (Some(Disappear::Day), "24 hours"),
+                                        (Some(Disappear::Week), "7 days"),
+                                        (Some(Disappear::Quarter), "90 days"),
+                                    ],
+                                    move || timer.get(),
+                                    move |v| timer.set(v),
+                                ))
+                                .into_element(),
+                            toggle_row(
+                                "Members can add others",
+                                Some("When off, only admins can add people."),
+                                move || members_add.get(),
+                                move |v| members_add.set(v),
+                            ),
+                            toggle_row(
+                                "Approve new members",
+                                Some("An admin approves anyone who joins with the invite link."),
+                                move || approve.get(),
+                                move |v| approve.set(v),
+                            ),
+                        ],
+                        16.0,
+                    ))
+                    .child(footnote(
+                        "You'll be the owner. You can change these later in Group permissions.",
+                    ))
+                    .child(section_title(if n == 1 {
+                        "1 member".to_string()
+                    } else {
+                        format!("{n} members")
+                    }))
                     .child(card_rows(members, 16.0 + 36.0 + 12.0)),
             ))
             // Hidden while the share sheet (with its own Open group) is up,
             // so there is one Open group on screen at a time.
-            .child(bottom_bar(
-                btn(
-                    move || if created.get().is_some() { "Open group" } else { "Create group" },
-                    Variant::Primary,
-                    BtnSize::Lg,
-                    create,
+            .child(
+                bottom_bar(
+                    btn(
+                        move || {
+                            if created.get().is_some() {
+                                "Open group"
+                            } else {
+                                "Create group"
+                            }
+                        },
+                        Variant::Primary,
+                        BtnSize::Lg,
+                        create,
+                    )
+                    .disabled(move || {
+                        created.get().is_none() && name.with(|n| n.trim().is_empty())
+                    }),
                 )
-                .disabled(move || created.get().is_none() && name.with(|n| n.trim().is_empty())),
-            ).style_when(move || share_open.get(), |st| st.opacity(0.0).pointer_events(PointerEvents::None)))
+                .style_when(
+                    move || share_open.get(),
+                    |st| st.opacity(0.0).pointer_events(PointerEvents::None),
+                ),
+            )
             .child(app_sheet(
                 share_open,
                 "Share invite link",
@@ -362,14 +445,29 @@ fn details_page(base: usize, community: Option<ChatId>, picked: Signal<Vec<Conta
 
 /// After creating: the link, Copy, Share, a code to scan, then the group.
 fn share_sheet(s: Store, created: Signal<Option<ChatId>>, base: usize) -> View {
-    let link = move || created.get().and_then(|id| s.chat(id)).map(|c| c.invite_link).unwrap_or_default();
-    let title = move || created.get().and_then(|id| s.chat(id)).map(|c| c.title).unwrap_or_default();
+    let link = move || {
+        created
+            .get()
+            .and_then(|id| s.chat(id))
+            .map(|c| c.invite_link)
+            .unwrap_or_default()
+    };
+    let title = move || {
+        created
+            .get()
+            .and_then(|id| s.chat(id))
+            .map(|c| c.title)
+            .unwrap_or_default()
+    };
     view()
         .px_4()
         .pb_2()
         .gap_4()
         .child(muted(move || {
-            format!("Anyone with this link can ask to join “{}”. You approve who gets in.", title())
+            format!(
+                "Anyone with this link can ask to join “{}”. You approve who gets in.",
+                title()
+            )
         }))
         .child(view().items_center().child(qr_code(link, 5.0)))
         .child(link_box(link))
@@ -378,26 +476,43 @@ fn share_sheet(s: Store, created: Signal<Option<ChatId>>, base: usize) -> View {
                 .flex_row()
                 .gap_2()
                 .child(
-                    btn_with_icon("Copy link", Some(Icon::Copy), Variant::Secondary, BtnSize::Md, move || {
-                        set_clipboard(link());
-                        toast("Link copied");
-                    })
+                    btn_with_icon(
+                        "Copy link",
+                        Some(Icon::Copy),
+                        Variant::Secondary,
+                        BtnSize::Md,
+                        move || {
+                            set_clipboard(link());
+                            toast("Link copied");
+                        },
+                    )
                     .flex_1(),
                 )
                 .child(
-                    btn_with_icon("Share…", Some(Icon::Share), Variant::Secondary, BtnSize::Md, move || {
-                        // mock: the platform share sheet; until then the link is copied.
-                        set_clipboard(link());
-                        toast("Link copied. Paste it in any app to share.");
-                    })
+                    btn_with_icon(
+                        "Share…",
+                        Some(Icon::Share),
+                        Variant::Secondary,
+                        BtnSize::Md,
+                        move || {
+                            // mock: the platform share sheet; until then the link is copied.
+                            set_clipboard(link());
+                            toast("Link copied. Paste it in any app to share.");
+                        },
+                    )
                     .flex_1(),
                 ),
         )
-        .child(btn("Open group", Variant::Primary, BtnSize::Lg, move || {
-            if let Some(id) = created.get_untracked() {
-                finish(base, id);
-            }
-        }))
+        .child(btn(
+            "Open group",
+            Variant::Primary,
+            BtnSize::Lg,
+            move || {
+                if let Some(id) = created.get_untracked() {
+                    finish(base, id);
+                }
+            },
+        ))
 }
 
 /// The link, selectable, in a quiet box.

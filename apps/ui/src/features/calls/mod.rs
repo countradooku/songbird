@@ -22,12 +22,12 @@ use std::time::Duration;
 use nsh_core::prelude::*;
 
 use crate::{
-    store::{ChatKind, ChatId, Store, store},
+    store::{ChatId, ChatKind, Store, store},
     ui::*,
 };
 
-pub use state::{CallState, Layout, MicAccess, Share};
 use state::{ActiveCall, EndReason, Participant, Phase, Waiting};
+pub use state::{CallState, Layout, MicAccess, Share};
 pub use tab::calls_tab;
 
 /// The call global.
@@ -46,7 +46,10 @@ fn with_call(f: impl FnOnce(&mut ActiveCall)) {
 
 /// A memo of one field of the active call: bindings that read it run only
 /// when it changes, not on every tick.
-fn field<T: Clone + PartialEq + 'static>(f: impl Fn(&ActiveCall) -> T + 'static, none: T) -> Memo<T> {
+fn field<T: Clone + PartialEq + 'static>(
+    f: impl Fn(&ActiveCall) -> T + 'static,
+    none: T,
+) -> Memo<T> {
     let st = calls();
     computed(move || st.with(|s| s.call.as_ref().map(&f).unwrap_or_else(|| none.clone())))
 }
@@ -85,13 +88,25 @@ fn describe(s: &Store, chat: ChatId) -> Option<(String, u64, bool, Vec<Participa
             .collect()
     } else {
         s.peer(chat)
-            .map(|p| Participant { id: p.id, name: p.name, seed: p.id, muted: false, hand: false, video: true, joins_at: 0 })
+            .map(|p| Participant {
+                id: p.id,
+                name: p.name,
+                seed: p.id,
+                muted: false,
+                hand: false,
+                video: true,
+                joins_at: 0,
+            })
             .into_iter()
             .collect()
     };
     // A 1:1 call shows the person: their contact id is the portrait's
     // seed everywhere (lists, headers, calls). A group shows its scene.
-    let seed = if group { c.seed } else { people.first().map_or(c.seed, |p| p.id) };
+    let seed = if group {
+        c.seed
+    } else {
+        people.first().map_or(c.seed, |p| p.id)
+    };
     Some((c.title, seed, group, people))
 }
 
@@ -121,7 +136,9 @@ pub fn start_call(chat: ChatId, video: bool) {
 }
 
 fn start_call_in(s: &Store, chat: ChatId, video: bool) {
-    let Some((title, seed, group, people)) = describe(s, chat) else { return };
+    let Some((title, seed, group, people)) = describe(s, chat) else {
+        return;
+    };
     let mut call = ActiveCall::new(next_id(), title, seed, Phase::Calling);
     call.chat = Some(chat);
     call.group = group;
@@ -138,7 +155,9 @@ pub fn simulate_incoming(chat: ChatId, video: bool) {
 }
 
 fn simulate_in(s: &Store, chat: ChatId, video: bool, elsewhere: bool) {
-    let Some((title, seed, group, people)) = describe(s, chat) else { return };
+    let Some((title, seed, group, people)) = describe(s, chat) else {
+        return;
+    };
     let mut call = ActiveCall::new(next_id(), title, seed, Phase::Incoming);
     call.chat = Some(chat);
     call.group = group;
@@ -156,11 +175,19 @@ fn simulate_in(s: &Store, chat: ChatId, video: bool, elsewhere: bool) {
 /// Joins a call link: the user's own links open with the lobby on the
 /// admin's side (people waiting); `guest` joins as someone waiting.
 fn join_link(name: String, seed: u64, lobby: bool, guest: bool) {
-    let phase = if lobby && guest { Phase::Lobby } else { Phase::Connecting };
+    let phase = if lobby && guest {
+        Phase::Lobby
+    } else {
+        Phase::Connecting
+    };
     let mut call = ActiveCall::new(next_id(), name, seed, phase);
     call.group = true;
     // mock: who is already in the call, and who waits.
-    let people = [("Ioana Ștefănescu", 3), ("Andrei Dumitrescu", 4), ("Priya Natarajan", 10)];
+    let people = [
+        ("Ioana Ștefănescu", 3),
+        ("Andrei Dumitrescu", 4),
+        ("Priya Natarajan", 10),
+    ];
     call.participants = people
         .iter()
         .enumerate()
@@ -175,10 +202,18 @@ fn join_link(name: String, seed: u64, lobby: bool, guest: bool) {
         })
         .collect();
     if lobby && !guest {
-        call.waiting = [("Amélie Durand", 8), ("Tomás Silva", 11), ("Cristina Pavel", 14)]
-            .iter()
-            .map(|(n, id)| Waiting { id: *id, name: (*n).into(), seed: *id })
-            .collect();
+        call.waiting = [
+            ("Amélie Durand", 8),
+            ("Tomás Silva", 11),
+            ("Cristina Pavel", 14),
+        ]
+        .iter()
+        .map(|(n, id)| Waiting {
+            id: *id,
+            name: (*n).into(),
+            seed: *id,
+        })
+        .collect();
     }
     begin(call);
 }
@@ -219,7 +254,11 @@ fn accept(video: bool) {
 fn toggle_mute() {
     with_call(|c| c.muted = !c.muted);
     let muted = calls().with_untracked(|s| s.call.as_ref().is_some_and(|c| c.muted));
-    announce_for_accessibility(if muted { "Microphone off" } else { "Microphone on" });
+    announce_for_accessibility(if muted {
+        "Microphone off"
+    } else {
+        "Microphone on"
+    });
 }
 
 fn toggle_video() {
@@ -288,11 +327,13 @@ fn panel_keys() {
 pub fn call_layer() -> AnyElement {
     let s = store();
     let active = field(|_| true, false);
-    when(move || active.get(), move || {
-        drive(s);
-        keys(s);
-        surface::layer(s)
-    })
+    when(
+        move || active.get(),
+        move || {
+            drive(s);
+            keys(s);
+            surface::layer(s)
+        },
+    )
     .into_element()
 }
-

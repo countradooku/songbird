@@ -131,7 +131,9 @@ fn invite_link_page() -> Screen {
     let me = s.me.get_untracked();
     let link_url = personal_link(&me.username);
     let share_open = signal(false);
-    let shared = signal(format!("Let's talk on Songbird, a private messenger: {link_url}"));
+    let shared = signal(format!(
+        "Let's talk on Songbird, a private messenger: {link_url}"
+    ));
     let copy_url = link_url.clone();
     let body = view()
         .w_full()
@@ -192,7 +194,10 @@ fn invite_link_page() -> Screen {
         );
     page(
         "Invite a friend",
-        view().flex_1().child(page_scroll(body)).child(share_sheet(share_open, shared)),
+        view()
+            .flex_1()
+            .child(page_scroll(body))
+            .child(share_sheet(share_open, shared)),
     )
 }
 
@@ -211,7 +216,11 @@ fn share_sheet(open: Signal<bool>, message: Signal<String>) -> nsh_base::SheetEl
                 open.set(false);
                 toast(done);
             }))
-            .child(text(label).text_size(px(font::CAPTION)).text_color(move || c::muted_fg()))
+            .child(
+                text(label)
+                    .text_size(px(font::CAPTION))
+                    .text_color(move || c::muted_fg()),
+            )
     };
     app_sheet(
         open,
@@ -234,7 +243,11 @@ fn share_sheet(open: Signal<bool>, message: Signal<String>) -> nsh_base::SheetEl
                     .child(target(Icon::Copy, "Copy", "Copied"))
                     .child(target(Icon::Chats, "Messages", "Opened Messages"))
                     .child(target(Icon::Send, "Mail", "Opened Mail"))
-                    .child(target(Icon::MoreHorizontal, "More", "Opened the share menu")),
+                    .child(target(
+                        Icon::MoreHorizontal,
+                        "More",
+                        "Opened the share menu",
+                    )),
             ),
     )
 }
@@ -259,14 +272,22 @@ fn two_lines(code: &str) -> String {
     if half >= groups.len() {
         return code.to_string();
     }
-    format!("{}-\n{}", groups[..half].join("-"), groups[half..].join("-"))
+    format!(
+        "{}-\n{}",
+        groups[..half].join("-"),
+        groups[half..].join("-")
+    )
 }
 
 /// One invite code: monospace (0 and O, 1 and I stay apart), on one line
 /// when there is room, else on two at a visible hyphen; whether it was
 /// used; its actions.
 fn code_row(code: &str, used: bool, actions: impl IntoElement) -> View {
-    let shown = if wide() { code.to_string() } else { two_lines(code) };
+    let shown = if wide() {
+        code.to_string()
+    } else {
+        two_lines(code)
+    };
     view()
         .flex_row()
         .items_center()
@@ -275,7 +296,10 @@ fn code_row(code: &str, used: bool, actions: impl IntoElement) -> View {
         .py_2()
         .min_h(px(if is_desktop() { 44.0 } else { 56.0 }))
         .role(AccessibilityRole::Text)
-        .label(format!("{code}, {}", if used { "used" } else { "not used yet" }))
+        .label(format!(
+            "{code}, {}",
+            if used { "used" } else { "not used yet" }
+        ))
         .child(icon_tile(if used { Icon::Check } else { Icon::Gift }))
         .child(
             view()
@@ -291,7 +315,11 @@ fn code_row(code: &str, used: bool, actions: impl IntoElement) -> View {
                         .text_color(move || if used { c::muted_fg() } else { c::foreground() })
                         .select_text(),
                 )
-                .child(text(if used { "Used" } else { "Not used yet" }).text_size(px(font::SMALL)).text_color(move || c::muted_fg())),
+                .child(
+                    text(if used { "Used" } else { "Not used yet" })
+                        .text_size(px(font::SMALL))
+                        .text_color(move || c::muted_fg()),
+                ),
         )
         .child(actions)
 }

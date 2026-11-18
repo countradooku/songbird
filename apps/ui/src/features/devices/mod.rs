@@ -22,7 +22,9 @@ pub const MAX_LINKED: usize = 4;
 
 /// The safety-number screen for a contact, pushed.
 pub fn safety_number(contact: ContactId) {
-    nav::push(format!("safety:{contact}"), move || page("Safety number", safety_body(contact)));
+    nav::push(format!("safety:{contact}"), move || {
+        page("Safety number", safety_body(contact))
+    });
 }
 
 fn first_name(name: &str) -> String {
@@ -32,7 +34,13 @@ fn first_name(name: &str) -> String {
 fn safety_body(contact: ContactId) -> AnyElement {
     let s = store();
     let Some(person) = s.contact(contact) else {
-        return empty_state(Icon::User, "Contact not found", "They may have been removed.", None).into_element();
+        return empty_state(
+            Icon::User,
+            "Contact not found",
+            "They may have been removed.",
+            None,
+        )
+        .into_element();
     };
     let me = s.me.get_untracked();
     let first = first_name(&person.name);
@@ -170,7 +178,12 @@ fn safety_body(contact: ContactId) -> AnyElement {
 }
 
 /// The scanner, mocked: after a moment it reads a matching code.
-fn scan_sheet(s: Store, contact: ContactId, open: Signal<bool>, first: String) -> nsh_base::SheetElement {
+fn scan_sheet(
+    s: Store,
+    contact: ContactId,
+    open: Signal<bool>,
+    first: String,
+) -> nsh_base::SheetElement {
     let matched = signal(false);
     let caption = format!("Point your camera at {first}'s code.");
     app_sheet(
@@ -294,21 +307,35 @@ fn devices_body() -> AnyElement {
                 .max_w(px(360.0)),
         )
         .child(
-            btn_with_icon("Link a device", Some(Icon::QrCode), Variant::Primary, BtnSize::Md, move || {
-                link_open.set(true)
-            })
+            btn_with_icon(
+                "Link a device",
+                Some(Icon::QrCode),
+                Variant::Primary,
+                BtnSize::Md,
+                move || link_open.set(true),
+            )
             .disabled(full),
         )
-        .child(when(full, || muted("You've linked 4 devices. Log one out to link another.").text_center()));
+        .child(when(full, || {
+            muted("You've linked 4 devices. Log one out to link another.").text_center()
+        }));
 
     let list = dynamic(move || {
         let devices = devices_here(s.devices.get());
         untracked(move || {
             group(devices.into_iter().map(move |d| {
                 let leading = icon_tile(device_icon(d.kind));
-                let subtitle = if d.this_device { "Active now".to_string() } else { d.last_active.clone() };
+                let subtitle = if d.this_device {
+                    "Active now".to_string()
+                } else {
+                    d.last_active.clone()
+                };
                 let row = Row::new(d.name.clone()).leading(leading).subtitle(subtitle);
-                let row = if d.this_device { row.trailing(tag("This device")) } else { row.chevron() };
+                let row = if d.this_device {
+                    row.trailing(tag("This device"))
+                } else {
+                    row.chevron()
+                };
                 row.on_press(move || {
                     selected.set(Some(d.clone()));
                     detail_open.set(true);
@@ -401,7 +428,11 @@ fn link_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
 }
 
 /// A device's sheet: rename it, or log it out.
-fn device_sheet(s: Store, open: Signal<bool>, selected: Signal<Option<Device>>) -> nsh_base::SheetElement {
+fn device_sheet(
+    s: Store,
+    open: Signal<bool>,
+    selected: Signal<Option<Device>>,
+) -> nsh_base::SheetElement {
     let name = signal(String::new());
     app_sheet(
         open,

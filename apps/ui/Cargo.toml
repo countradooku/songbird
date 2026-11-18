@@ -20,6 +20,10 @@ songbird-proto = { path = "../../crates/proto" }
 songbird-pow = { path = "../../crates/pow" }
 songbird-keys = { path = "../../crates/keys" }
 songbird-client = { path = "../../crates/client" }
+# Settings and contacts as encrypted records (Prompt 9), and the content
+# formats the app writes: profile, presence, supervision.
+songbird-sync = { path = "../../crates/sync" }
+songbird-content = { path = "../../crates/content" }
 aws-lc-rs = { version = "1.19.0", default-features = false, features = ["aws-lc-sys"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

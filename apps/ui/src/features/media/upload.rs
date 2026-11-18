@@ -139,7 +139,11 @@ pub fn upload_progress(
 pub fn simulate_upload(state: Signal<Upload>, offline: impl Fn() -> bool + 'static) {
     set_interval(Duration::from_millis(200), move || {
         let now = state.get_untracked();
-        let next = if offline() { now.network_lost() } else { now.advance(0.06) };
+        let next = if offline() {
+            now.network_lost()
+        } else {
+            now.advance(0.06)
+        };
         if next != now {
             state.set(next);
         }
@@ -166,7 +170,10 @@ mod tests {
     #[test]
     fn labels_say_what_happens() {
         assert_eq!(Upload::Uploading(0.42).label(), "Sending, 42%");
-        assert_eq!(Upload::Paused(0.42).label(), "Paused at 42%. Waiting for a connection");
+        assert_eq!(
+            Upload::Paused(0.42).label(),
+            "Paused at 42%. Waiting for a connection"
+        );
         assert!(ring_markup(Upload::Uploading(0.5)).contains("stroke-dashoffset"));
     }
 }

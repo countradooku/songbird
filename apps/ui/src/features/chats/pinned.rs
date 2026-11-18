@@ -49,7 +49,11 @@ fn pill_origin() -> (f32, f32) {
 /// The name under an avatar: a person's first name, a group's name
 /// without emoji words; one line, cut with an ellipsis.
 fn short_name(r: &ChatRow) -> String {
-    if r.group { letters(&r.title) } else { first_name(&r.title) }
+    if r.group {
+        letters(&r.title)
+    } else {
+        first_name(&r.title)
+    }
 }
 
 /// The grid, hidden while nothing is pinned. Its frame spans the same
@@ -69,7 +73,10 @@ pub fn grid(s: Store, pinned: Memo<Vec<ChatRow>>) -> View {
         .gap_1()
         .style_when(move || pinned.with(Vec::is_empty), |st| st.hidden())
         .child(line(0))
-        .child(line(1).style_when(move || pinned.with(|p| p.len() <= COLUMNS), |st| st.hidden()))
+        .child(line(1).style_when(
+            move || pinned.with(|p| p.len() <= COLUMNS),
+            |st| st.hidden(),
+        ))
 }
 
 /// The slot at `at`: an equal column, empty when fewer chats are pinned
@@ -119,7 +126,10 @@ fn person(s: Store, row: Memo<ChatRow>) -> impl IntoElement {
                 .rounded_full()
                 .bg(move || surface()())
                 .style_when(move || row.with(|r| r.unread <= 1), |st| st.hidden())
-                .child(unread_badge(move || row.with(|r| r.unread), move || row.with(|r| r.muted))),
+                .child(unread_badge(
+                    move || row.with(|r| r.unread),
+                    move || row.with(|r| r.muted),
+                )),
         );
 
     let name = text(move || row.with(short_name))
@@ -143,7 +153,13 @@ fn person(s: Store, row: Memo<ChatRow>) -> impl IntoElement {
         .py_2()
         .rounded(move || radius::control())
         .cursor_pointer()
-        .bg(move || if selected() { c::accent() } else { AdaptiveColor::TRANSPARENT })
+        .bg(move || {
+            if selected() {
+                c::accent()
+            } else {
+                AdaptiveColor::TRANSPARENT
+            }
+        })
         .transition_colors()
         .duration(motion::INSTANT)
         .hover(move |st| st.bg(move || if selected() { c::accent() } else { c::muted() }))

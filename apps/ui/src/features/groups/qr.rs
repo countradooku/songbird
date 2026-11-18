@@ -15,7 +15,9 @@ pub const SIDE: usize = 25;
 
 fn hash(text: &str) -> u64 {
     // FNV-1a: stable across runs and platforms.
-    text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
+    text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 fn in_finder(x: usize, y: usize) -> Option<bool> {
@@ -65,7 +67,11 @@ pub fn svg_markup(link: &str) -> String {
     for (y, row) in m.iter().enumerate() {
         for (x, dark) in row.iter().enumerate() {
             if *dark {
-                cells.push_str(&format!(r#"<rect x="{}" y="{}" width="1" height="1"/>"#, x + 2, y + 2));
+                cells.push_str(&format!(
+                    r#"<rect x="{}" y="{}" width="1" height="1"/>"#,
+                    x + 2,
+                    y + 2
+                ));
             }
         }
     }

@@ -28,17 +28,21 @@ pub fn packs() {
         let installing = move || state.with(|g| g.installing.as_ref().map(|i| i.progress));
         let of_kind = computed(move || {
             let k = kind.get();
-            state.with(|g| g.packs.iter().filter(|p| p.kind == k).cloned().collect::<Vec<_>>())
+            state.with(|g| {
+                g.packs
+                    .iter()
+                    .filter(|p| p.kind == k)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
         });
-        let add = move || {
-            match s.install_pack(link.get_untracked(), kind.get_untracked()) {
-                Ok(()) => {
-                    error.set(None);
-                    link.set(String::new());
-                    cleared.update(|n| *n += 1);
-                }
-                Err(e) => error.set(Some(e)),
+        let add = move || match s.install_pack(link.get_untracked(), kind.get_untracked()) {
+            Ok(()) => {
+                error.set(None);
+                link.set(String::new());
+                cleared.update(|n| *n += 1);
             }
+            Err(e) => error.set(Some(e)),
         };
         page(
             "Stickers and packs",
@@ -157,7 +161,10 @@ pub fn packs() {
 /// The installed packs of one kind, with move up, move down and remove.
 fn installed(s: crate::store::Store, list: Vec<Pack>) -> AnyElement {
     if list.is_empty() {
-        return view().px_4().child(muted("None installed. Add one from a link below.")).into_element();
+        return view()
+            .px_4()
+            .child(muted("None installed. Add one from a link below."))
+            .into_element();
     }
     let n = list.len();
     // Rules start on the text column (16 + 40 + 12).
@@ -232,7 +239,11 @@ const UP: &str = r#"<path d="m18 15-6-6-6 6"/>"#;
 const DOWN: &str = r#"<path d="m6 9 6 6 6-6"/>"#;
 
 /// An icon button with a chevron `icons.rs` lacks (up).
-fn reorder_btn(shapes: &'static str, label: String, on_press: impl Fn() + 'static) -> nsh_base::ButtonElement {
+fn reorder_btn(
+    shapes: &'static str,
+    label: String,
+    on_press: impl Fn() + 'static,
+) -> nsh_base::ButtonElement {
     let side = if is_desktop() { 32.0 } else { 44.0 };
     let src = nsh_core::element::ImageSrc::svg_markup(&format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{shapes}</svg>"#
@@ -257,22 +268,25 @@ fn picker_preview(of_kind: Memo<Vec<Pack>>) -> View {
             };
             view()
                 .gap_2()
-                .child(
+                .child(view().flex_row().gap_2().children(packs.iter().map(|p| {
+                    let selected = p.id == first.id;
                     view()
-                        .flex_row()
-                        .gap_2()
-                        .children(packs.iter().map(|p| {
-                            let selected = p.id == first.id;
-                            view()
-                                .size(px(32.0))
-                                .rounded(move || radius::sm())
-                                .items_center()
-                                .justify_center()
-                                .bg(move || if selected { c::accent() } else { AdaptiveColor::TRANSPARENT })
-                                .label(p.name.clone())
-                                .child(text(p.items.first().cloned().unwrap_or_default()).text_size(px(18.0)))
-                        })),
-                )
+                        .size(px(32.0))
+                        .rounded(move || radius::sm())
+                        .items_center()
+                        .justify_center()
+                        .bg(move || {
+                            if selected {
+                                c::accent()
+                            } else {
+                                AdaptiveColor::TRANSPARENT
+                            }
+                        })
+                        .label(p.name.clone())
+                        .child(
+                            text(p.items.first().cloned().unwrap_or_default()).text_size(px(18.0)),
+                        )
+                })))
                 .child(separator())
                 .child(
                     view()

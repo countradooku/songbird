@@ -60,6 +60,7 @@ pub mod profile;
 pub mod reports;
 pub mod settings;
 pub mod storage;
+pub mod supervision;
 pub use db::{Db, DbError, SurrealSettings};
 pub use push_store::PushStore;
 pub use storage::{StorageCaps, StorageWriteError};
@@ -293,6 +294,17 @@ DEFINE FIELD IF NOT EXISTS account ON sobj TYPE bytes;
 DEFINE INDEX IF NOT EXISTS sobj_account ON sobj FIELDS account;
 DEFINE FIELD IF NOT EXISTS hidden ON account TYPE option<bool>;
 DEFINE FIELD IF NOT EXISTS grp_contacts ON account TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS sv_requests ON account TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS sv_hidden ON account TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS sv_groups ON account TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS grp_approval ON account TYPE option<bytes>;
+DEFINE TABLE IF NOT EXISTS superv SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS pkey ON superv TYPE bytes;
+DEFINE FIELD IF NOT EXISTS pv ON superv TYPE int;
+DEFINE FIELD IF NOT EXISTS flags ON superv TYPE int;
+DEFINE FIELD IF NOT EXISTS policy ON superv TYPE bytes;
+DEFINE FIELD IF NOT EXISTS unlink_at ON superv TYPE datetime;
+DEFINE INDEX IF NOT EXISTS superv_unlink ON superv FIELDS unlink_at;
 ";
 
 /// Registry failures. They carry no identifiers.
@@ -362,6 +374,9 @@ pub enum RegistryError {
     /// (the API answers 503).
     #[error("busy: concurrent changes, retry later")]
     Busy,
+    /// A parent's policy locks this setting (Prompt 9, D-0105).
+    #[error("locked by supervision")]
+    Supervised,
 }
 
 /// One device's stored keys (opaque stored forms, `songbird_proto::keys`).
@@ -1997,6 +2012,7 @@ impl Registry {
                  DELETE avatar WHERE account = $a RETURN NONE;
                  DELETE grp_req WHERE acct = $a RETURN NONE;
                  DELETE srec WHERE account = $a RETURN NONE;
+                 DELETE superv:[$a] RETURN NONE;
                  DELETE sobj WHERE account = $a RETURN NONE;
                  UPDATE grp_prune SET gone = array::complement(gone, $devs)
                    WHERE gone CONTAINSANY $devs RETURN NONE;
@@ -2041,7 +2057,8 @@ impl Registry {
                  RETURN count(SELECT id FROM grp_req WHERE acct = $a);
                  RETURN count(SELECT id FROM grp_prune WHERE gone CONTAINSANY $ds);
                  RETURN count(SELECT id FROM srec WHERE account = $a)
-                   + count(SELECT id FROM sobj WHERE account = $a);",
+                   + count(SELECT id FROM sobj WHERE account = $a)
+                   + count(SELECT id FROM superv:[$a]);",
                 vec![
                     var("a", bytes(account.as_bytes())),
                     var("ds", Value::Array(ds)),

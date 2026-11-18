@@ -40,6 +40,7 @@ pub mod profile;
 pub mod registration;
 pub mod report;
 pub mod storage;
+pub mod supervision;
 pub mod system;
 
 pub use close::CloseCode;

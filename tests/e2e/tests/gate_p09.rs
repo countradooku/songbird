@@ -212,7 +212,10 @@ async fn stack(limits: RequestLimits) -> Option<Stack> {
     let app = Arc::new(App {
         calls: None,
         reports: None,
-        requests: None,
+        requests: Some(songbird_api::requests::Requests::new(
+            keys.clone(),
+            songbird_api::requests::RequestsMetrics::default(),
+        )),
         server_name: API.into(),
         push_store: Arc::new(
             songbird_accounts::PushStore::beside(&registry)
@@ -552,4 +555,243 @@ async fn presence_batch_latency() {
         pct(1.0)
     );
     drop(live);
+}
+
+impl Dev {
+    fn api(&self, s: &Stack) -> songbird_api::client::ApiClient {
+        songbird_api::client::ApiClient::new(
+            s.api,
+            API,
+            self.id,
+            aws_lc_rs::signature::Ed25519KeyPair::from_seed_unchecked(&self.seed).unwrap(),
+        )
+    }
+}
+
+fn json(b: &[u8]) -> serde_json::Value {
+    serde_json::from_slice(b).unwrap_or_default()
+}
+
+/// Prompt 9, M4 (D-0105): a parent's signed policy locks the rules the server enforces; the
+/// child's devices cannot loosen them; only the parent's signature changes or ends them, or the
+/// date; the server holds no parent account and no birth date.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_parents_policy_locks_rules_and_only_the_parent_or_the_date_ends_it() {
+    use songbird_content::supervision::{ClientRules, PolicyKey, seal_rules, unlink_at};
+    use songbird_proto::supervision::{GROUP_APPROVAL, HIDDEN, NO_REQUESTS, Policy, UNLINK};
+    let Some(s) = stack(RequestLimits::default()).await else {
+        return;
+    };
+    let child = person(&s, 2).await;
+    let parent = person(&s, 1).await;
+    let (child_primary, child_linked) = (child.devices[0].api(&s), child.devices[1].api(&s));
+    let parent_api = parent.devices[0].api(&s);
+    // In person: the parent's device makes the key and the secret; the child's enters an age.
+    let key = PolicyKey::generate().unwrap();
+    let secret = rand32();
+    let rules = ClientRules {
+        approved_contacts_only: true,
+        block_unknown_calls: true,
+        nudges_off: false,
+        quiet_from_min: 21 * 60,
+        quiet_to_min: 7 * 60,
+    };
+    let policy = |version: u64, flags: u8, until: u64| {
+        let mut p = Policy {
+            child: child.account,
+            policy_key: [0; 32],
+            policy_version: version,
+            flags,
+            unlink_at_s: until,
+            client_rules: seal_rules(&secret, child.account.as_bytes(), version, &rules).unwrap(),
+            signature: [0; 64],
+        };
+        key.sign(&mut p);
+        p
+    };
+    let until = unlink_at(2014, 3, 16).unwrap();
+    let first = policy(1, NO_REQUESTS | HIDDEN | GROUP_APPROVAL, until);
+    // Only the child's primary installs the first policy.
+    let st = |r: (u16, Bytes)| r.0;
+    assert_eq!(
+        st(parent_api
+            .send("PUT", "/v1/supervision", Some(&first.encode()))
+            .await
+            .unwrap()),
+        403
+    );
+    assert_eq!(
+        st(child_linked
+            .send("PUT", "/v1/supervision", Some(&first.encode()))
+            .await
+            .unwrap()),
+        403
+    );
+    // A policy whose signature is not the key's is refused.
+    let mut forged = first.clone();
+    forged.flags = 0;
+    assert_eq!(
+        st(child_primary
+            .send("PUT", "/v1/supervision", Some(&forged.encode()))
+            .await
+            .unwrap()),
+        403
+    );
+    assert_eq!(
+        st(child_primary
+            .send("PUT", "/v1/supervision", Some(&first.encode()))
+            .await
+            .unwrap()),
+        204
+    );
+    let (_, b) = child_linked
+        .send("GET", "/v1/account/settings", None)
+        .await
+        .unwrap();
+    let v = json(&b);
+    assert_eq!(
+        (
+            &v["supervised"],
+            &v["discoverable"],
+            &v["requests"],
+            &v["groups"]
+        ),
+        (
+            &serde_json::json!(true),
+            &serde_json::json!(false),
+            &serde_json::json!("nobody"),
+            &serde_json::json!("contacts")
+        )
+    );
+    // The child's app reads the policy as signed and checks it itself.
+    let (code, raw) = child_linked
+        .send("GET", "/v1/supervision", None)
+        .await
+        .unwrap();
+    assert_eq!((code, Policy::decode(&raw).unwrap()), (200, first.clone()));
+    // Not even the primary may loosen a locked rule.
+    for (path, body) in [
+        ("/v1/account/discoverable", &br#"{"on":true}"#[..]),
+        ("/v1/account/requests", &br#"{"from":"everyone"}"#[..]),
+        ("/v1/account/groups", &br#"{"from":"everyone"}"#[..]),
+    ] {
+        let (code, b) = child_primary.send("PUT", path, Some(body)).await.unwrap();
+        assert_eq!(
+            (code, json(&b)["error"].as_str()),
+            (403, Some("supervised")),
+            "{path}"
+        );
+    }
+    // A replayed or older policy is refused; the parent's newer one (from the parent's own
+    // device: the signature is the authority) applies.
+    assert_eq!(
+        st(parent_api
+            .send("PUT", "/v1/supervision", Some(&first.encode()))
+            .await
+            .unwrap()),
+        409
+    );
+    let second = policy(2, NO_REQUESTS, until);
+    assert_eq!(
+        st(parent_api
+            .send("PUT", "/v1/supervision", Some(&second.encode()))
+            .await
+            .unwrap()),
+        204
+    );
+    assert_eq!(
+        st(child_primary
+            .send("PUT", "/v1/account/discoverable", Some(br#"{"on":true}"#))
+            .await
+            .unwrap()),
+        204,
+        "no longer locked"
+    );
+    // The server holds the policy key, rules, version and date: no parent account or birth date.
+    let row = s
+        .registry
+        .db()
+        .query1(
+            "SELECT * FROM ONLY superv:[$a];",
+            vec![(
+                "a".into(),
+                songbird_surreal::Value::Bytes(Bytes::copy_from_slice(child.account.as_bytes())),
+            )],
+        )
+        .await
+        .unwrap();
+    let text = format!("{row:?}");
+    assert!(!text.contains(&format!("{:?}", parent.account.as_bytes())));
+    let fields: BTreeSet<String> = match &row {
+        songbird_surreal::Value::Map(m) => m.iter().map(|(k, _)| k.clone()).collect(),
+        _ => BTreeSet::new(),
+    };
+    assert_eq!(
+        fields,
+        ["flags", "id", "pkey", "policy", "pv", "unlink_at"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    // The parent unlinks: the locks lift.
+    let end = policy(3, UNLINK, until);
+    assert_eq!(
+        st(parent_api
+            .send("PUT", "/v1/supervision", Some(&end.encode()))
+            .await
+            .unwrap()),
+        204
+    );
+    assert_eq!(
+        st(child_primary
+            .send(
+                "PUT",
+                "/v1/account/requests",
+                Some(br#"{"from":"everyone"}"#)
+            )
+            .await
+            .unwrap()),
+        204
+    );
+    assert_eq!(
+        st(child_linked
+            .send("GET", "/v1/supervision", None)
+            .await
+            .unwrap()),
+        404
+    );
+
+    // A policy whose date has passed ends without the parent (the worker's sweep).
+    let other = person(&s, 1).await;
+    let other_api = other.devices[0].api(&s);
+    let k2 = PolicyKey::generate().unwrap();
+    let mut p = Policy {
+        child: other.account,
+        policy_key: [0; 32],
+        policy_version: 1,
+        flags: HIDDEN,
+        unlink_at_s: 1,
+        client_rules: Vec::new(),
+        signature: [0; 64],
+    };
+    k2.sign(&mut p);
+    assert_eq!(
+        st(other_api
+            .send("PUT", "/v1/supervision", Some(&p.encode()))
+            .await
+            .unwrap()),
+        204
+    );
+    let due = s.registry.supervisions_due(100).await.unwrap();
+    assert!(due.contains(&other.account));
+    for c in due {
+        s.registry.end_supervision(&c).await.unwrap();
+    }
+    assert_eq!(
+        st(other_api
+            .send("PUT", "/v1/account/discoverable", Some(br#"{"on":true}"#))
+            .await
+            .unwrap()),
+        204
+    );
 }

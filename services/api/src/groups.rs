@@ -33,6 +33,34 @@ use songbird_groups::{Group, GroupError, Limits, Record};
 use songbird_types::{AccountId, DeviceId};
 
 use crate::devices::Outcome;
+
+/// What a group add may need to carry (Prompt 9): the `Group-Add-Access-Key` header (the XOR of
+/// the access keys of every added account that takes adds from contacts only, D-0103) and the
+/// `Group-Add-Approval` header (a parent's approvals for supervised children, D-0105:
+/// comma-separated hex of `expires_s u64 | signature [64]`, at most 8).
+#[derive(Debug, Clone, Default)]
+pub struct AddProofs {
+    /// The combined access key.
+    pub add_key: Option<[u8; 16]>,
+    /// Approvals: expiry and signature.
+    pub approvals: Vec<(u64, [u8; 64])>,
+}
+
+impl AddProofs {
+    /// Parses the approvals header (malformed entries are ignored: they approve nothing).
+    #[must_use]
+    pub fn approvals_from(header: Option<&str>) -> Vec<(u64, [u8; 64])> {
+        header
+            .map(|h| {
+                h.split(',')
+                    .take(8)
+                    .filter_map(|x| hex::decode(x.trim()).ok())
+                    .filter_map(|b| songbird_proto::supervision::split_approval(&b).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
 use crate::messages::Messages;
 
 /// Request format version.
@@ -264,21 +292,19 @@ impl Groups {
         }
     }
 
-    /// `POST /v1/groups/commit`; `add_key` is the `Group-Add-Access-Key` header: the XOR of
-    /// the access keys of every added account that accepts group adds from contacts only
-    /// (Prompt 9, D-0103).
+    /// `POST /v1/groups/commit`, with the proofs a group add may need (Prompt 9).
     pub(crate) async fn commit(
         &self,
         registry: &songbird_accounts::Registry,
         m: &Messages,
         device: DeviceId,
         body: Bytes,
-        add_key: Option<[u8; 16]>,
+        proofs: AddProofs,
     ) -> Outcome {
         let Some((group, bundle)) = split(&body) else {
             return Outcome::Malformed("request");
         };
-        self.store_commit(registry, m, device, group, bundle, None, add_key)
+        self.store_commit(registry, m, device, group, bundle, None, proofs)
             .await
     }
 
@@ -293,9 +319,34 @@ impl Groups {
         device: &DeviceId,
         group: &[u8; 16],
         joined: &[[u8; 16]],
-        add_key: Option<[u8; 16]>,
+        proofs: &AddProofs,
     ) -> Result<(), Outcome> {
         let dir = m.path.directory();
+        // A supervised child whose policy needs the parent's approval for groups (D-0105): every
+        // add of its devices, its own joins included, carries an approval for this group signed by
+        // the parent's policy key, not expired and at most a week ahead.
+        let now_s = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        for a in joined {
+            let account = AccountId::from_bytes(*a);
+            let Some(key) = dir.access(&account).approval_key else {
+                continue;
+            };
+            let approved = proofs.approvals.iter().any(|(expires, sig)| {
+                *expires > now_s
+                    && *expires <= now_s.saturating_add(songbird_proto::supervision::MAX_APPROVAL_S)
+                    && songbird_keys::ed25519_verify(
+                        &key,
+                        &songbird_proto::supervision::approval_bytes(group, &account, *expires),
+                        sig,
+                    )
+            });
+            if !approved {
+                return Err(Outcome::Forbidden("approval"));
+            }
+        }
+        let add_key = proofs.add_key;
         let committer = dir.listed_account(device);
         let mut combined = [0u8; 16];
         let mut gated = false;
@@ -347,7 +398,7 @@ impl Groups {
         group: [u8; 16],
         bundle: &[u8],
         link: Option<([u8; 16], bool)>,
-        add_key: Option<[u8; 16]>,
+        proofs: AddProofs,
     ) -> Outcome {
         let Ok(parts) = Bundle::parse(bundle, self.limits.max_bundle) else {
             return Outcome::Malformed("malformed");
@@ -424,7 +475,7 @@ impl Groups {
             return Outcome::Unavailable;
         };
         let joined = joined_accounts(m, &applied.added);
-        if let Err(o) = Self::check_adds(registry, m, &device, &group, &joined, add_key).await {
+        if let Err(o) = Self::check_adds(registry, m, &device, &group, &joined, &proofs).await {
             return o;
         }
         let from = applied.from_epoch;
@@ -1193,6 +1244,7 @@ impl Groups {
         m: &Messages,
         device: DeviceId,
         body: Bytes,
+        proofs: AddProofs,
     ) -> Outcome {
         let Some((handle, rest)) = split(&body) else {
             return Outcome::Malformed("request");
@@ -1214,7 +1266,7 @@ impl Groups {
             o.group,
             bundle,
             Some((handle, o.usable)),
-            None,
+            proofs,
         )
         .await
     }

@@ -5013,7 +5013,9 @@ dependencies = [
  "proptest",
  "prost",
  "serde_json",
+ "songbird-keys",
  "songbird-proto",
+ "songbird-types",
  "thiserror 2.0.21",
  "zeroize",
 ]

@@ -1602,3 +1602,92 @@ async fn group_adds_from_contacts_only_need_the_access_key() {
     let (st, reply) = commit(&s, 0, &b).await;
     assert_eq!(st, 200, "{reply}");
 }
+
+/// Prompt 9, M4 (D-0105): a supervised child whose policy needs the parent's approval for groups
+/// is added only with an approval for that group, signed by the parent's policy key and not
+/// expired; contact keys alone are not enough.
+#[tokio::test]
+async fn a_supervised_child_joins_a_group_only_with_the_parents_approval() {
+    use songbird_content::supervision::PolicyKey;
+    use songbird_proto::supervision::{GROUP_APPROVAL, Policy};
+    let Some(mut s) = stack(2).await else { return };
+    let child = 1;
+    let account = s.people[child].mls.account;
+    let parent = PolicyKey::generate().unwrap();
+    let mut p = Policy {
+        child: account,
+        policy_key: [0; 32],
+        policy_version: 1,
+        flags: GROUP_APPROVAL,
+        unlink_at_s: 4_000_000_000,
+        client_rules: Vec::new(),
+        signature: [0; 64],
+    };
+    parent.sign(&mut p);
+    let access = [0x41; 16];
+    s.registry
+        .put_profile(&account, 1, b"profile", &access, false)
+        .await
+        .unwrap();
+    s.registry
+        .put_supervision(&p, &p.encode(), true)
+        .await
+        .unwrap();
+    s.shared
+        .directory
+        .store(Directory::from_registry(&s.registry).await.unwrap());
+    create(&mut s, 0).await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    // The contact key alone, an approval for another group, an expired one, one too far ahead,
+    // and one signed by another key: all refused.
+    let (st, reply) = approval_commit(&mut s, child, access, None).await;
+    assert_eq!((st, &reply[..]), (403, &br#"{"error":"approval"}"#[..]));
+    for bad in [
+        parent.approve(&[9; 16], account.as_bytes(), now + 600),
+        parent.approve(&GID, account.as_bytes(), now - 1),
+        parent.approve(&GID, account.as_bytes(), now + 30 * 24 * 3600),
+        PolicyKey::generate()
+            .unwrap()
+            .approve(&GID, account.as_bytes(), now + 600),
+    ] {
+        assert_eq!(
+            approval_commit(&mut s, child, access, Some(bad)).await.0,
+            403
+        );
+    }
+    // The parent's approval for this group: added.
+    let ok = parent.approve(&GID, account.as_bytes(), now + 600);
+    let (st, reply) = approval_commit(&mut s, child, access, Some(ok)).await;
+    assert_eq!(st, 200, "{}", String::from_utf8_lossy(&reply));
+}
+
+/// Alice adds person `who` with the contact key and an optional approval; a refused commit is
+/// discarded from Alice's group state.
+async fn approval_commit(
+    s: &mut Stack,
+    who: usize,
+    access: [u8; 16],
+    approval: Option<Vec<u8>>,
+) -> (u16, Bytes) {
+    let kp = published(s, who, 0).await;
+    let b = body(&s.people[0].mls.add(&[kp]));
+    let (authz, hash) = s.people[0].api.sign("POST", "/v1/groups/commit", Some(&b));
+    let mut req = hyper::Request::builder()
+        .method("POST")
+        .uri("/v1/groups/commit")
+        .header("host", API)
+        .header(songbird_api::auth::AUTHORIZATION, authz)
+        .header(songbird_api::auth::CONTENT_SHA256, hash.unwrap())
+        .header("group-add-access-key", hex::encode(access));
+    if let Some(a) = approval {
+        req = req.header("group-add-approval", hex::encode(a));
+    }
+    let out = s.people[0].api.raw(req, Bytes::from(b)).await.unwrap();
+    if out.0 != 200 {
+        s.people[0].mls.discard();
+    }
+    out
+}

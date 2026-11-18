@@ -97,6 +97,7 @@ server in plaintext. Adding to this list requires the owner's approval.
 | **Group adds from contacts only** (Prompt 9, D-0103): one bit on the account row (`grp_contacts`), in the directory snapshot of `api` and `delivery`; at a commit, whether the adder proved contact (the access key, already listed, compared and dropped) | Refuse group adds of the account by people who are not its contacts | Until changed; with the account; the comparison in memory only | Prompt 9 (M2), D-0103; **awaiting the owner's approval** |
 | **Sealed presence batches** (Prompt 9, D-0104): which devices (and so accounts) receive presence events, when, the batch's size, and the source IP address of the request; **no sender** | Route presence to the contacts that hold the access keys | Memory only, while routed; never stored or logged; the per-range throttle record is keyed (HMAC of the range) | Prompt 9 (M3), D-0104; **awaiting the owner's approval** |
 | **That a nudge happened between two accounts** (Prompt 9, D-0104): the sending device (its connection) and the recipient device, in memory; keyed budget records in `valkey-hot` (`q:n:` HMAC of the pair, `q:m:` HMAC of the sender) with the next allowed time | Hold nudges to budgets per pair and per sender | Memory only while routed; budget records at most an hour | Prompt 9 (M3), D-0104; **awaiting the owner's approval** |
+| **Parental supervision of a child account** (Prompt 9, D-0105; `superv`, SurrealDB): the parent's **policy key** for this child (Ed25519, made for this child alone, not linked to the parent's account by the server), the enforced rules (no requests, group approval, not discoverable), the policy version, the **unlink date**, the signed policy with its encrypted client rules; on the account row the locks and the approval key. **No parent account, device or birth date.** In memory: which device carried a parent's update | Enforce the rules the server can see; let the child's app show and check every rule | Until unlinked by the parent, the date, or the child's account deletion; in registry backups | Prompt 9 (M4), D-0105; **awaiting the owner's approval** |
 
 Prompt 1 adds two operational views, neither of which is user data on the server:
 
@@ -557,6 +558,12 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
 | Invisible mode leaking anything | I | Contacts, server | The rules send nothing at all when invisible (no online, offline or reply) | proptest `invisible_never_sends_anything`; live: the server's count does not move |
 | Presence floods | D | Malicious client | Per-range budget counted per device addressed; batch at most 1,024 devices and 512 KiB; ephemeral inboxes bounded and dropped first | `presence_batch_latency` (the budget refuses after 20,000 devices) |
 | Nudge harassment | D | Contact, stranger | Budgets per pair and per sender in `valkey-hot` (fail closed); blocks drop nudges; recipients can turn nudges off per contact | `nudges_are_held_to_their_budgets_and_blocks_drop_them` |
+| A child loosening a parent's rules (discoverable, requests, group adds) | E | The child, a stolen child device | Locks on the account row checked in each write's transaction, for every device including the primary | `a_parents_policy_locks_rules_and_only_the_parent_or_the_date_ends_it` (403 `supervised`) |
+| A forged, replayed or older policy | S, T | The child, anyone | Ed25519 by the policy key in force over a domain-separated encoding; versions only grow; the first policy only from the child's primary | same test (403 `signature`, 409 `version`, 403 `primary`) |
+| Adding a supervised child to a group without the parent | E | Stranger, contact | An approval signed by the parent's key for that group, at most a week ahead, for every add including the child's own joins | `a_supervised_child_joins_a_group_only_with_the_parents_approval` |
+| A parent reading messages, calls or contacts, or the server linking parent and child accounts | I | Parent, server | The policy is all a parent writes; client rules encrypted under the link secret; the server stores a per-child key, no parent account; the child's app shows every rule | the same test (the `superv` row's fields); PROTOCOL §10.6 |
+| Supervision outliving the age of consent | — (GDPR Art. 8) | — | The unlink date set at linking; the worker ends it without the parent | same test (the date passes, the locks lift) |
+| A swapped key at linking (someone in between) | S | Attacker relaying QR codes | Linking in person; both devices show the same six-digit code over the key, the secret and the child | `link_code`; PROTOCOL §10.6 |
 
 ## 4. Server-enforced settings
 
@@ -569,9 +576,39 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
 | Who may add me to groups: everyone or contacts (Prompt 9, D-0103) | Contacts: any listed device; everyone: the primary | `POST /v1/groups/commit` (403 `access` without the added accounts' combined access key, unless they asked to join) |
 | Inactivity period: 6, 12 or 24 months (Prompt 3, D-0047) | The primary | The worker's sweep (warnings, then deletion) |
 | Plan and entitlements | — (Prompt 11) | Reserved: entitlements arrive with Prompt 11; nothing is stored for them yet |
-| Parental supervision of a child account | The parent's policy key (Prompt 9, M4) | Added by M4 |
+| Parental supervision of a child account (Prompt 9, D-0105): no message requests, group adds with the parent's approval, not discoverable | The parent's signature by the policy key (the first policy installed by the child's primary); the unlink date | The account row's locks (every write of those settings), `POST /v1/groups/commit` and `/v1/groups/join` (403 `approval`), the worker (the date) |
 
 ## 5. Compliance notes (GDPR, age of digital consent per EU country)
+
+**Article 8 GDPR** lets each member state set the age of digital consent between 13 and 16; 16
+applies where a state set none. Songbird uses it for one thing: the default age at which a
+parent's supervision ends by itself (PROTOCOL §10.6). The child's device computes the date from
+the age the child enters at linking; the birth date never leaves the device, and the server
+stores only the date.
+
+| Country | Age | | Country | Age | | Country | Age |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Austria | 14 | | Germany | 16 | | Netherlands | 16 |
+| Belgium | 13 | | Greece | 15 | | Poland | 16 |
+| Bulgaria | 14 | | Hungary | 16 | | Portugal | 13 |
+| Croatia | 16 | | Ireland | 16 | | Romania | 16 |
+| Cyprus | 14 | | Italy | 14 | | Slovakia | 16 |
+| Czechia | 15 | | Latvia | 13 | | Slovenia | 15 |
+| Denmark | 13 | | Lithuania | 14 | | Spain | 14 |
+| Estonia | 13 | | Luxembourg | 16 | | Sweden | 13 |
+| Finland | 13 | | Malta | 13 | | | |
+| France | 15 | | | | | | |
+
+The values are in `songbird_content::supervision::CONSENT_AGES`. **Status: to confirm with
+counsel against each national law before release.** On 2026-11-18 a web search confirmed the
+range, the default of 16, and Austria 14, Belgium 13, Bulgaria 14, France 15, Germany,
+Ireland and the Netherlands 16; the rest come from the national implementations as last
+published, and Bird & Bird's tracker (`childreninthedigitalworld.twobirds.com`) is the reference
+to check them against. Any other country gets 16.
+
+Supervision rests on the child's and the parent's in-person agreement (both confirm on their
+own devices), not on consent to processing: the server processes no more of a supervised child's
+data than of any account, plus the policy row in §1.
 
 ## 6. Open risks
 

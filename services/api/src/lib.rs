@@ -430,9 +430,13 @@ impl App {
                 | "/v1/communities/state"
                 | "/v1/communities/delete",
             ) => self.groups(req).await,
-            (_, "/v1/account/settings" | "/v1/account/discoverable" | "/v1/account/groups") => {
-                self.account_settings(req).await
-            }
+            (
+                _,
+                "/v1/account/settings"
+                | "/v1/account/discoverable"
+                | "/v1/account/groups"
+                | "/v1/supervision",
+            ) => self.account_settings(req).await,
             (_, p) if p.starts_with("/v1/account/") => self.factors(req).await,
             (_, p) if p.starts_with("/v1/kt/") => self.kt(req).await,
             (_, p) if p.starts_with("/v1/provisioning") || p.starts_with("/v1/devices") => {
@@ -725,7 +729,14 @@ impl App {
         let path = req.uri().path().to_owned();
         // Prompt 9 (D-0103): proof that the committer is a contact of every added account that
         // takes group adds from contacts only.
-        let add_key = header_key(&req, "group-add-access-key");
+        let proofs = groups::AddProofs {
+            add_key: header_key(&req, "group-add-access-key"),
+            approvals: groups::AddProofs::approvals_from(
+                req.headers()
+                    .get("group-add-approval")
+                    .and_then(|v| v.to_str().ok()),
+            ),
+        };
         let (device, body) = self.authenticate_body(req, groups::MAX_BODY).await?;
         let row = self
             .registry
@@ -766,14 +777,14 @@ impl App {
             .flatten();
         let outcome = match path.as_str() {
             "/v1/groups" => g.create(r, m, device, body).await,
-            "/v1/groups/commit" => g.commit(r, m, device, body, add_key).await,
+            "/v1/groups/commit" => g.commit(r, m, device, body, proofs).await,
             "/v1/groups/propose" => g.propose(r, m, device, body).await,
             "/v1/groups/meta" => g.meta(r, device, body).await,
             "/v1/groups/log" => g.log(r, m, device, body).await,
             "/v1/groups/links" => g.create_link(r, device, body).await,
             "/v1/groups/links/revoke" => g.revoke_link(r, device, body).await,
             "/v1/groups/links/open" => g.open(r, body).await,
-            "/v1/groups/join" => g.join(r, m, device, body).await,
+            "/v1/groups/join" => g.join(r, m, device, body, proofs).await,
             "/v1/groups/requests" => g.request(r, m, device, body).await,
             "/v1/groups/requests/list" => g.requests(r, device, body).await,
             "/v1/groups/requests/decline" => g.decline(r, device, body).await,
@@ -966,6 +977,12 @@ impl App {
             }
             (&Method::PUT, "/v1/account/groups") => {
                 account::set_groups(&self.registry, &row, &body).await
+            }
+            (&Method::PUT, "/v1/supervision") => {
+                account::put_supervision(&self.registry, &row, &body).await
+            }
+            (&Method::GET, "/v1/supervision") => {
+                account::get_supervision(&self.registry, &row).await
             }
             _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
         };

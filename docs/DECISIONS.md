@@ -165,6 +165,37 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0105 — Prompt 9, milestone 4: parental supervision with a per-child policy key
+
+- Date: 2026-11-18
+- Status: accepted for the milestone (agent, under the approved plan D-0101); its threat-model rows
+  and the compliance table await the owner
+- Decided by: agent (with owner approval of the plan, question 8: no parent identity or birth date
+  on the server; a supervised child may delete their own account)
+- Context: parental controls with in-person linking, a policy signed by the parent, server
+  enforcement of what it can see (requests, discoverability, group adds), clients enforcing the
+  rest, unlinking by the parent or at an age set at linking, GDPR Article 8.
+- Options considered: storing the parent's account and checking that its devices sign (the server
+  would learn who parents whom) or a fresh policy key per child (chosen); client rules in the clear
+  (the server would learn quiet hours and the like) or encrypted under a secret shared in person
+  (chosen); updates only through the child's devices (a child could withhold them) or from any
+  device, authorized by the signature (chosen).
+- Evidence: `a_parents_policy_locks_rules_and_only_the_parent_or_the_date_ends_it` (gate P09: the
+  first policy only from the child's primary, forged 403, locks 403 `supervised` for every device,
+  replay 409, the parent's update applies, the `superv` row's fields, unlinking, the date);
+  `a_supervised_child_joins_a_group_only_with_the_parents_approval` (groups gate: no approval,
+  another group, expired, too far ahead, another key: 403; the parent's: 200); unit tests of the
+  policy encoding, client rules, unlink dates and the consent table.
+- Decision:
+  - `songbird_proto::supervision` (policy and approval formats); `songbird_accounts::supervision`
+    (`superv`, locks `sv_*` and `grp_approval` on the account row, `put_supervision`,
+    `supervisions_due`, `end_supervision`); locks checked in `set_flag` and `set_requests_off`.
+  - `PUT` and `GET /v1/supervision`; `Group-Add-Approval` on commits and joins; the worker's sweep.
+  - `songbird_content::supervision`: `PolicyKey` (sign, approve), `ClientRules` (sealed under the
+    link secret), `link_code`, `unlink_at`, `CONSENT_AGES`.
+- Consequences: the app (M6) runs the parent's and child's flows on these. The consent table must
+  be confirmed by counsel before release (THREAT_MODEL §5).
+
 ## D-0104 — Prompt 9, milestone 3: sealed presence batches, nudges in an attention class
 
 - Date: 2026-11-18

@@ -539,6 +539,23 @@ impl Worker {
         Ok(())
     }
 
+    /// Parental supervision that reached its end date (Prompt 9, M4, D-0105): the policy goes and
+    /// the child's settings unlock, without the parent.
+    pub async fn supervision(&self) {
+        let due = match self.registry.supervisions_due(SWEEP_BATCH).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(error = %e, "supervision pass failed");
+                return;
+            }
+        };
+        for child in &due {
+            if let Err(e) = self.registry.end_supervision(child).await {
+                tracing::warn!(error = %e, "ending a supervision failed");
+            }
+        }
+    }
+
     /// Inactivity deletion (Prompt 3, M7, D-0056): a wake-up push to every device of an
     /// account a month and a week before its period ends (the app wakes, makes a request and
     /// the account counts as used again), then the account's deletion through the outbox, as if
@@ -719,6 +736,7 @@ impl Worker {
             Err(e) => tracing::warn!(error = %e, "avatar sweep failed"),
         }
         self.inactivity().await;
+        self.supervision().await;
         // Key transparency (Prompt 3, D-0057): publish what changed as one akd epoch.
         if let Some(kt) = &self.kt
             && let Err(e) = kt.publish_pending(&self.registry, SWEEP_BATCH).await

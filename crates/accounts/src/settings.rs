@@ -19,6 +19,10 @@ use crate::db::DbError;
 use crate::{Registry, RegistryError, bytes, var};
 
 /// What the server enforces for an account.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "one flag per setting, as the API answers them"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ServerSettings {
     /// Found by username lookups.
@@ -29,6 +33,8 @@ pub struct ServerSettings {
     pub requests_off: bool,
     /// Inactivity period (months).
     pub inactivity_months: u32,
+    /// The account is supervised by a parent (Prompt 9, M4).
+    pub supervised: bool,
 }
 
 impl Registry {
@@ -43,7 +49,8 @@ impl Registry {
         let v = self
             .db
             .query1(
-                "SELECT hidden, grp_contacts, requests_off, inactive_months ?? 12 AS months
+                "SELECT hidden, grp_contacts, requests_off, inactive_months ?? 12 AS months,
+                   superv:[$a].pkey != NONE AS supervised
                    FROM ONLY account:[$a] WHERE deleting = false;",
                 vec![var("a", bytes(account.as_bytes()))],
             )
@@ -61,6 +68,7 @@ impl Registry {
                 .and_then(Value::as_i64)
                 .and_then(|m| u32::try_from(m).ok())
                 .unwrap_or(12),
+            supervised: flag("supervised"),
         })
     }
 
@@ -75,7 +83,8 @@ impl Registry {
         on: bool,
         primary: bool,
     ) -> Result<(), RegistryError> {
-        self.set_flag(account, "hidden", !on, on, primary).await
+        self.set_flag(account, "hidden", "sv_hidden", !on, on, primary)
+            .await
     }
 
     /// Sets whether group adds need the account's access key. Turning it off (loosening) needs
@@ -89,16 +98,25 @@ impl Registry {
         contacts: bool,
         primary: bool,
     ) -> Result<(), RegistryError> {
-        self.set_flag(account, "grp_contacts", contacts, !contacts, primary)
-            .await
+        self.set_flag(
+            account,
+            "grp_contacts",
+            "sv_groups",
+            contacts,
+            !contacts,
+            primary,
+        )
+        .await
     }
 
     /// Writes a boolean field; `loosens` is checked against `primary` in the transaction, and
     /// only when the value actually changes (re-sending the current value is anyone's).
-    async fn set_flag(
+    /// `lock` is the supervision field that forbids loosening it (Prompt 9, M4, D-0105).
+    pub(crate) async fn set_flag(
         &self,
         account: &AccountId,
         field: &'static str,
+        lock: &'static str,
         value: bool,
         loosens: bool,
         primary: bool,
@@ -107,6 +125,8 @@ impl Registry {
         let sql = format!(
             "BEGIN TRANSACTION;
              IF account:[$a].deleting != false {{ THROW 'songbird:gone' }};
+             IF $loosens AND (account:[$a].{field} ?? false) != $v
+               AND (account:[$a].{lock} ?? false) {{ THROW 'songbird:supervised' }};
              IF $loosens AND !$primary AND (account:[$a].{field} ?? false) != $v {{
                THROW 'songbird:primary' }};
              UPDATE account:[$a] SET {field} = $v RETURN NONE;
@@ -128,6 +148,9 @@ impl Registry {
         match r {
             Ok(_) => Ok(()),
             Err(DbError::Statement(k)) if k == "Thrown:primary" => Err(RegistryError::NotPrimary),
+            Err(DbError::Statement(k)) if k == "Thrown:supervised" => {
+                Err(RegistryError::Supervised)
+            }
             Err(DbError::Statement(k)) if k == "Thrown:gone" => Err(RegistryError::NotFound),
             Err(DbError::Statement(k)) if k == crate::db::TRANSACTION_CONFLICT => {
                 Err(RegistryError::Busy)

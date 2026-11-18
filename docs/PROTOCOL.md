@@ -2221,6 +2221,50 @@ happened between two accounts, never its content. A nudge to an offline contact 
 receiving app shakes the window (desktop) or vibrates, unless nudges are off, globally or for
 that contact. The stored `DataMessage.nudge` kind is superseded and never sent.
 
+### 10.6 Parental supervision (M4, D-0105)
+
+**Linking, in person.** The parent's device makes a fresh Ed25519 **policy key** for this child
+(never linked to the parent's account) and a 32-byte link secret, and shows both in a QR code; the
+child's device scans it and shows its own (the child's account). Both screens show the same
+six-digit code (`SHA-256("songbird.v1/link-code\0" ‖ policy key ‖ link secret ‖ child)`, first 4
+bytes mod 10⁶), which parent and child compare and confirm. The child enters their age; the
+child's device computes the unlink date from it and the country's age of digital consent
+(THREAT_MODEL §5); the birth date never leaves the device.
+
+**The policy** (`songbird_proto::supervision::Policy`):
+
+```text
+version u8 (1) | child [16] | policy_key [32] | policy_version u64 | flags u8
+  | unlink_at_s u64 | clen u16 | client_rules (0..=512) | signature [64]
+signature = Ed25519(policy key, "songbird.v1/supervision\0" ‖ every byte before it)
+```
+
+| Flag | The server enforces |
+| --- | --- |
+| `0x01` no message requests | `requests_off` set and locked |
+| `0x02` group adds need approval | `grp_contacts` set and locked; every commit adding the child's devices (its own joins included) carries an approval |
+| `0x04` not discoverable | `hidden` set and locked |
+| `0x80` unlink | supervision ends; the locks lift, the settings stay for the child to change |
+
+`client_rules` is AES-256-GCM-SIV ciphertext under a key from the link secret (HKDF, salt
+`"songbird.v1/supervision"`, info `"client-rules"`; AAD `"songbird.v1/client-rules\0" ‖ child ‖
+be64(version)`): approving each new contact, declining calls from non-contacts, nudges off, quiet
+hours. Only the two devices read it; the child's app enforces it and shows it.
+
+| Request | Who | Answers |
+| --- | --- | --- |
+| `PUT /v1/supervision` (the policy) | The first: the child's primary (the child consents; the parent's signature proves the parent does). Later ones: any signed device, authorized by the parent's signature against the key in force, so the server never learns which account carries them | 204; 403 `primary` (a first from another device), 403 `signature`; 409 `exists` (a first when one is in force), 409 `version` (not newer, or another key) |
+| `GET /v1/supervision` | The child's devices | the policy as signed; 404 when none |
+
+- A locked setting answers 403 `supervised` to every device of the child, the primary included.
+- **Group approvals:** `Group-Add-Approval: hex(expires_s u64 | signature [64])` (several
+  comma-separated, at most 8), the signature by the policy key over
+  `"songbird.v1/group-approval\0" ‖ group [16] ‖ child [16] ‖ expires_s`; valid only if not
+  expired and at most a week ahead. Without one: 403 `approval`.
+- **The date:** the worker removes a policy past `unlink_at_s` and lifts its locks.
+- **The child may delete their own account** (the owner's decision): the policy goes with it.
+- `GET /v1/account/settings` reports `"supervised"`.
+
 ## 11. Backup format and vault access (Prompt 10)
 
 ## 12. Versioning and compatibility rules

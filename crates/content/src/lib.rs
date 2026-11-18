@@ -26,6 +26,7 @@ pub mod presence;
 pub mod profile;
 pub mod schema;
 pub mod state;
+pub mod supervision;
 pub mod validate;
 
 use aws_lc_rs::constant_time::verify_slices_are_equal;

@@ -455,6 +455,7 @@ fn gated(limits: RequestLimits) -> (Fixture, Arc<MemoryGate>) {
         open: false,
         requests_off: false,
         groups_contacts: false,
+        approval_key: None,
     };
     let gate = Arc::new(MemoryGate::new(limits));
     let mut f = Fixture::new();

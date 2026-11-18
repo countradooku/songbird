@@ -166,6 +166,7 @@ async fn stack(people: usize) -> Option<Stack> {
                     open: i == 3,
                     requests_off: false,
                     groups_contacts: false,
+                    approval_key: None,
                 },
             )
         })

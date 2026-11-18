@@ -5,6 +5,9 @@
 - Status: **approved by the owner on 2026-11-18** ("Approve all"), every recommendation (D-0094).
   Still the owner's: where alerts go (question 4); the Apple steps (question 2) and the Firebase
   Android app (question 5) before M4 and M5.
+- Progress (2026-11-18): M1, M2, M3 and M6 built and tested (D-0095 to D-0098); M4 and M5 first
+  part (D-0099). The rest of M4 and M5 (host projects, owner's Apple and Firebase steps,
+  real-provider checks) is **deferred by the owner until the whole app is built**.
 - Base: `main` at `2836b4a` (Prompt 7 done, PR #62; the app, PR #63; the registry fix, PR #64).
 - Way of working (as Prompt 7): one branch and one PR (`claude/p08-push`). Each milestone gets
   its own commit, tests, report `docs/reports/P08-Mn.md`, decision record (D-0095 onward) and

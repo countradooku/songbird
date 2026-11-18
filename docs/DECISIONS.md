@@ -20,6 +20,11 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 8, M4 and M5 rest (D-0099): **deferred by the owner on 2026-11-18 until the whole app
+  is built** ("lets do this after we have the whole app built"): the Xcode and Gradle host
+  projects (APNs token, PushKit with CallKit, FCM, UnifiedPush, ConnectionService), the Apple
+  bundle IDs and filtering entitlement, the Firebase Android app, and the real-provider checks
+  (APNs sandbox wake-up, VoIP on a physical iPhone, FCM on the emulator).
 - Prompt 8, M1 to M3 (D-0095 to D-0097; reports `P08-M1.md` to `P08-M3.md`): built and tested;
   **awaiting the owner**: three threat-model §1 rows (`SILENT`; push registrations in their own
   database; a ring's timing seen by Apple).

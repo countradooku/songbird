@@ -154,6 +154,46 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0098 — Prompt 8, milestone 6: desktop notifications decided on the device; close to the tray; the real login item
+
+- Date: 2026-11-18
+- Status: accepted (agent, under D-0094's approved plan, finding 10); report `docs/reports/P08-M6.md`
+- Decided by: agent
+- Context: desktops use no push service (D-0094): the app keeps its connection while it runs.
+  The app had the tray icon and the settings switches, but nothing raised a notification, closing
+  the window ended the app, and "Open at login" was a mock (NSH 0.5 had no API; 0.6 has one).
+- Decision (`apps/ui`):
+  - **One rule set, pure** (`features::notify::decide`): a message notifies unless its kind is
+    switched off (direct, groups), the chat is muted, or the user is reading that chat with the
+    window focused; reactions follow their own switches; a call rings even in a muted chat and
+    even in the open chat; hidden content shows "Songbird" and "New message" / "Incoming call"
+    only; no sound when sounds are off. The mobile notification extensions use the same rules
+    (M4, M5).
+  - **Decided at arrival.** The store tells the notifier at once (`Store::arrive`,
+    `on_arrival`), not through an effect: an effect runs later, with the chat and settings as
+    they are then (a headless test caught a muted chat notifying because it was unmuted before
+    the effect ran), and sees only the last of two messages in one batch.
+  - The notifier asks for permission once, keeps the badge at the unread count, and opens the
+    chat (and the window) a pressed notification is about.
+  - **Close to the tray:** while the tray icon shows, closing the main window hides it
+    (`close_on_press: false`, `on_close_press` → `hide`), and the app stays connected; quit from
+    the tray menu or the app menu. Without the icon, closing works as the system's does. The tray
+    choice is remembered.
+  - **Open at login** through NSH 0.6 (`set_launch_at_login`, `launch_at_login`), read again
+    whenever the switch shows; a refusal puts the switch back with a toast.
+  - Dev-dependencies `nsh-engine` and `nsh-testing` 0.6.0 (the same release as `nsh-core`, NSH's
+    own test harness) for tests on the real engine, headless.
+- Evidence: 121 app tests pass; six rule tests (`a_message_notifies_with_its_chat_and_text`,
+  `muted_chats_stay_quiet_but_calls_still_ring`, `each_switch_turns_its_kind_off`,
+  `the_chat_being_read_is_not_notified_but_a_background_one_is`,
+  `hidden_content_shows_no_name_and_no_text`, `sounds_follow_the_setting`) and one on the engine
+  (`the_store_s_events_reach_the_notifier`: a message from someone else notifies; the user's own,
+  one in a muted chat and one in the chat being read do not; two in one batch both notify; a ring
+  does).
+- Not verified: a notification on screen from the running app on macOS, Windows and Linux (the
+  headless engine does not capture system notifications); the plan's screenshots are still to
+  take.
+
 ## D-0097 — Prompt 8, milestone 3: push credentials provably in `push` alone; alert rules and monitoring
 
 - Date: 2026-11-18

@@ -76,27 +76,48 @@ pub async fn open_channel() -> Result<Waiting, Problem> {
     Ok(Waiting { channel, key })
 }
 
+impl Waiting {
+    /// Waits for the sealed message on this channel (up to its ten-minute
+    /// life) and opens it with this device's provisioning key.
+    pub(crate) async fn receive(&self) -> Result<Vec<u8>, Problem> {
+        let ep = endpoint();
+        let path = format!("/v1/provisioning/{}", wire::hex(&self.channel));
+        // Each read waits up to 25 s on the server.
+        for _ in 0..24 {
+            let (status, body) = send(HttpRequest::new("GET", format!("{}{path}", ep.api))).await?;
+            match status {
+                200 => {
+                    return provisioning::open(&self.key, &body)
+                        .map_err(|_| problem("The message from the other phone didn't open."));
+                }
+                204 => {}
+                _ => return Err(explain(status, &body)),
+            }
+        }
+        Err(problem("The code expired. Show a new one."))
+    }
+
+    /// A channel that was never opened on a server (tests).
+    #[cfg(test)]
+    pub(crate) fn for_test(channel: Vec<u8>) -> Self {
+        Self {
+            channel,
+            key: ProvisioningKey::generate().expect("key"),
+        }
+    }
+
+    /// The public key the other phone seals to.
+    #[must_use]
+    pub fn public(&self) -> [u8; 32] {
+        self.key.public()
+    }
+}
+
 /// Waits for the main phone's message, then links this device with keys of
 /// its own. The account, the device and the storage key are saved here.
 pub async fn complete(w: Waiting) -> Result<(), Problem> {
     let ep = endpoint();
-    let path = format!("/v1/provisioning/{}", wire::hex(&w.channel));
-    // Each read waits up to 25 s on the server; ten minutes in all (the channel's life).
-    let mut envelope = None;
-    for _ in 0..24 {
-        let (status, body) = send(HttpRequest::new("GET", format!("{}{path}", ep.api))).await?;
-        match status {
-            200 => {
-                envelope = Some(body);
-                break;
-            }
-            204 => {}
-            _ => return Err(explain(status, &body)),
-        }
-    }
-    let envelope = envelope.ok_or_else(|| problem("The code expired. Show a new one."))?;
-    let plain = provisioning::open(&w.key, &envelope)
-        .map_err(|_| problem("The message from your phone didn't open."))?;
+    let plain = w.receive().await?;
     let p = Provision::decode(&plain)
         .map_err(|_| problem("The message from your phone was damaged."))?;
     if p.server_name != ep.api_name {

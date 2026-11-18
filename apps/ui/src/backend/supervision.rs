@@ -28,7 +28,8 @@ use songbird_content::supervision::{
 use songbird_proto::supervision::{GROUP_APPROVAL, HIDDEN, NO_REQUESTS, Policy, UNLINK};
 use songbird_types::AccountId;
 
-use super::{Problem, wire};
+use super::{Problem, link::Waiting, wire};
+use crate::features::devices::codes;
 use crate::store::{ChildContact, ParentalRules};
 
 const K_PARENT: &str = "sb.supervision_parent";
@@ -143,15 +144,10 @@ pub fn public(l: &ParentLink) -> Option<[u8; 32]> {
     PolicyKey::from_seed(&l.seed).ok().map(|k| k.public())
 }
 
-/// What the parent's QR code holds: the policy key and the link secret.
-/// mock: the QR drawing is a stand-in (`ui::qr_code`), and the child
-/// scans it with a camera the host projects add.
+/// What the parent's QR code holds: the policy key and the link secret
+/// (`SONGBIRD:SUPERVISE:…`, read only by the child's live camera).
 pub fn qr_payload(l: &ParentLink) -> String {
-    format!(
-        "songbird://supervise#{}.{}",
-        wire::hex(&public(l).unwrap_or_default()),
-        wire::hex(&l.secret)
-    )
+    codes::supervise_code(&public(l).unwrap_or_default(), &l.secret)
 }
 
 /// The six digits both screens show.
@@ -352,6 +348,156 @@ pub fn rules_in_force(p: &Policy, secret: Option<&[u8; 32]>) -> Vec<String> {
     out
 }
 
+// ---------------------------------------------------------------- linking, live (D-0107)
+//
+// 1. The parent's device shows `SONGBIRD:SUPERVISE:<policy key>:<secret>`.
+// 2. The child's phone scans it, takes the child's age, opens a
+//    provisioning channel and shows `SONGBIRD:CHILD:<account>:<unlink
+//    date>:<channel>:<X25519 key>`; the birth date stays on the phone.
+// 3. The parent's device scans that; both show the same six digits.
+// 4. On the parent's "same code", the first policy (version 1) is signed
+//    and sealed to the child's key in the channel (the server relays
+//    ciphertext it can't read, as for device linking).
+// 5. The child's phone opens it, checks it is for this account, signed by
+//    the key it scanned, with the date it computed, and installs it as the
+//    primary (`PUT /v1/supervision`).
+
+/// This device's account (live).
+fn my_account() -> Option<[u8; 16]> {
+    super::live()
+        .with_untracked(|l| l.account.clone())
+        .and_then(|a| wire::unhex(&a))
+        .and_then(|b| b.try_into().ok())
+}
+
+/// The child's side while linking: what it scanned, what it shows, the
+/// channel it waits on.
+#[derive(Debug)]
+pub struct ChildLinking {
+    pub key: [u8; 32],
+    pub secret: [u8; 32],
+    pub account: [u8; 16],
+    pub birth_year: i32,
+    pub birth_month: u32,
+    pub country: String,
+    pub unlink_at_s: u64,
+    waiting: Waiting,
+}
+
+impl ChildLinking {
+    /// The code the parent's device scans.
+    #[must_use]
+    pub fn code(&self) -> String {
+        codes::child_code(
+            &self.account,
+            self.unlink_at_s,
+            &self.waiting.channel,
+            &self.waiting.public(),
+        )
+    }
+
+    /// The six digits both screens show.
+    #[must_use]
+    pub fn digits(&self) -> String {
+        link_code(&self.key, &self.secret, &self.account)
+    }
+}
+
+/// On the child's phone, after scanning the parent's code: a channel for
+/// the first policy, and the date supervision ends from the child's age.
+pub async fn start_child(
+    key: [u8; 32],
+    secret: [u8; 32],
+    age: u8,
+    country: String,
+) -> Result<ChildLinking, Problem> {
+    let account = my_account().ok_or_else(|| Problem("This phone isn't registered yet.".into()))?;
+    let now = nsh_core::time::unix_ms().max(0.0) as u64;
+    let (birth_year, birth_month) = born(age, now);
+    let unlink_at_s = ends(birth_year, birth_month, &country).unwrap_or(0);
+    let waiting = super::link::open_channel().await?;
+    Ok(ChildLinking {
+        key,
+        secret,
+        account,
+        birth_year,
+        birth_month,
+        country,
+        unlink_at_s,
+        waiting,
+    })
+}
+
+/// Checks a first policy the child's phone received.
+fn accept_first(c: &ChildLinking, plain: &[u8]) -> Result<Policy, Problem> {
+    let p = Policy::decode(plain)
+        .map_err(|_| Problem("The rules from your parent's phone were damaged.".into()))?;
+    let ok = verify(&p, Some(&c.key))
+        && *p.child.as_bytes() == c.account
+        && p.unlink_at_s == c.unlink_at_s
+        && p.policy_version == 1
+        && p.flags & UNLINK == 0;
+    if ok {
+        Ok(p)
+    } else {
+        Err(Problem(
+            "These rules don't match the code you scanned, so they weren't applied.".into(),
+        ))
+    }
+}
+
+/// On the child's phone: waits for the parent's first policy, checks it,
+/// installs it and keeps the scanned key and secret.
+pub async fn finish_child(c: ChildLinking) -> Result<Policy, Problem> {
+    let plain = c.waiting.receive().await?;
+    let p = accept_first(&c, &plain)?;
+    upload(&p).await?;
+    save_child(&ChildLink {
+        policy_key: c.key,
+        secret: c.secret,
+        birth_year: c.birth_year,
+        birth_month: c.birth_month,
+        country: c.country,
+    });
+    Ok(p)
+}
+
+/// On the parent's device: the six digits for the child whose code it scanned.
+#[must_use]
+pub fn digits_for(l: &ParentLink, child: &[u8; 16]) -> String {
+    link_code(&public(l).unwrap_or_default(), &l.secret, child)
+}
+
+/// On the parent's device, after both screens showed the same code: the
+/// first policy for that child, sealed to the child's key in its channel.
+pub async fn send_first(
+    rules: &ParentalRules,
+    child: [u8; 16],
+    unlink_at_s: u64,
+    channel: Vec<u8>,
+    key: [u8; 32],
+) -> Result<(), Problem> {
+    let mut l = parent_link()
+        .filter(|l| l.version == 0)
+        .ok_or_else(|| Problem("Start linking again from Parental controls.".into()))?;
+    l.child = child;
+    l.unlink_at_s = unlink_at_s;
+    let p = next_policy(&mut l, rules, false)
+        .ok_or_else(|| Problem("The rules couldn't be signed.".into()))?;
+    let sealed = songbird_keys::provisioning::seal(&key, &p.encode())
+        .map_err(|_| Problem("Your child's code has a key that isn't valid.".into()))?;
+    let path = format!("/v1/provisioning/{}", wire::hex(&channel));
+    let (status, body) = super::signed("PUT", &path, Some(sealed), false).await?;
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        // Not sent: the link may start over with the same key.
+        l.version = 0;
+        save_parent(&l);
+        Err(super::explain(status, &body))
+    }
+}
+
 // ---------------------------------------------------------------- the server
 
 /// `PUT /v1/supervision`: the first policy (from the child's primary) or a
@@ -455,6 +601,54 @@ mod tests {
         assert!(last.policy_version > first.policy_version);
         assert!(verify(&last, None));
         assert_eq!(rules_in_force(&last, Some(&l.secret)).len(), 1);
+    }
+
+    /// The child's phone takes only the first policy for this account,
+    /// signed by the key it scanned, with the date it computed.
+    #[test]
+    fn a_child_accepts_only_the_first_policy_meant_for_it() {
+        let mut parent = link();
+        let child = ChildLinking {
+            key: public(&parent).expect("key"),
+            secret: parent.secret,
+            account: [7; 16],
+            birth_year: 2015,
+            birth_month: 3,
+            country: "RO".into(),
+            unlink_at_s: 1_900_000_000,
+            waiting: Waiting::for_test(vec![1; 16]),
+        };
+        parent.child = [7; 16];
+        parent.unlink_at_s = 1_900_000_000;
+        let first = sign_policy(&parent, &rules(), false, 1).expect("policy");
+        assert!(accept_first(&child, &first.encode()).is_ok());
+        assert_eq!(child.digits(), code(&parent));
+        assert!(matches!(
+            codes::parse(&child.code()),
+            Some(codes::Scanned::Child { account, unlink_at_s: 1_900_000_000, .. }) if account == [7; 16]
+        ));
+        let refused = |p: &ParentLink, version: u64, unlink: bool| {
+            let p = sign_policy(p, &rules(), unlink, version).expect("policy");
+            accept_first(&child, &p.encode()).is_err()
+        };
+        assert!(refused(&parent, 2, false), "not the first");
+        assert!(refused(&parent, 1, true), "an unlinking");
+        let other_child = ParentLink {
+            child: [8; 16],
+            ..parent.clone()
+        };
+        assert!(refused(&other_child, 1, false), "another account");
+        let other_date = ParentLink {
+            unlink_at_s: 2_000_000_000,
+            ..parent.clone()
+        };
+        assert!(refused(&other_date, 1, false), "another date");
+        let other_key = ParentLink {
+            seed: [9; 32],
+            ..parent.clone()
+        };
+        assert!(refused(&other_key, 1, false), "another key");
+        assert!(accept_first(&child, b"junk").is_err());
     }
 
     #[test]

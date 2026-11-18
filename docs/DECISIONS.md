@@ -167,6 +167,16 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0115 — Camera, milestone 5: photos in chat, the camera in calls
+
+- Date: 2026-11-18
+- Status: accepted by the agent within the approved plan (D-0110); report `docs/reports/CAM-M5.md`
+- Decided by: agent
+- Decision: the chat's camera sheet takes a photo through the session (stripped JPEG in memory,
+  sent as an image message, bytes never on disk); a call's self-view shows the live camera while
+  video is on and flips lenses. Sending the bytes and call frames wait for app-core (marked mock).
+- Open: video clips (with the microphone module and encryption as they are written).
+
 ## D-0114 — Camera, milestone 4: Windows (Media Foundation) and Linux (V4L2)
 
 - Date: 2026-11-18

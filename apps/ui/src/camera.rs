@@ -15,7 +15,10 @@ use std::{
 };
 
 use nsh_core::{platform::Lifecycle, prelude::*};
-use songbird_camera::{Access, Backend, Capture, Config, Event, Frame, Lens, Purpose, Sink, Unavailable, mailbox};
+use songbird_camera::{
+    Access, Backend, Capture, CaptureError, Config, Event, Frame, Lens, Purpose, Sink, Still, Unavailable,
+    mailbox,
+};
 
 use crate::ui::*;
 
@@ -59,6 +62,7 @@ pub fn install_for_app() {
 /// code after a moment, as the mocked flows did before the camera existed.
 fn demo() -> songbird_camera::fake::FakeCamera {
     let fake = songbird_camera::fake::FakeCamera::new();
+    fake.photo_gives(Ok(Still { bytes: Vec::new(), mime: "image/jpeg", width: 3, height: 4 }));
     DEMO.with(|d| *d.borrow_mut() = Some(fake.clone()));
     fake
 }
@@ -116,7 +120,12 @@ pub struct Session {
     chosen: Rc<RefCell<Option<String>>>,
     /// Where the system prompt's answer arrives, from any thread.
     answers: mailbox::Sender<Access>,
+    /// Where a photo arrives, from any thread, and who waits for it.
+    photos: mailbox::Sender<Result<Still, CaptureError>>,
+    photo_done: Rc<RefCell<Option<PhotoDone>>>,
 }
+
+type PhotoDone = Box<dyn FnOnce(Result<Still, CaptureError>)>;
 
 /// A session for `purpose` on the current screen. `on_code` gets each distinct code text a
 /// [`Purpose::ScanCode`] session reads.
@@ -142,6 +151,19 @@ pub fn use_session(
             }
         });
     }
+    let (photos, taken) = mailbox::channel::<Result<Still, CaptureError>>(1);
+    let photo_done: Rc<RefCell<Option<PhotoDone>>> = Rc::new(RefCell::new(None));
+    {
+        // A photo, back on the engine thread, to whoever asked for it.
+        let photo_done = photo_done.clone();
+        spawn(async move {
+            while let Some(result) = taken.recv().await {
+                if let Some(done) = photo_done.borrow_mut().take() {
+                    done(result);
+                }
+            }
+        });
+    }
     let session = Session {
         shown: signal(Shown::Starting),
         preview: signal(None),
@@ -151,6 +173,8 @@ pub fn use_session(
         retries,
         chosen: Rc::new(RefCell::new(None)),
         answers,
+        photos,
+        photo_done,
     };
     let on_code: Rc<dyn Fn(String)> = Rc::new(on_code);
 
@@ -275,6 +299,23 @@ impl Session {
         backend.request_access(Box::new(move |answer| {
             if let Some(tx) = tx.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
                 tx.send(answer);
+            }
+        }));
+    }
+
+    /// Takes a photo ([`Purpose::Photo`] sessions); `done` runs on the engine thread. A photo
+    /// asked for while one is on its way replaces the earlier callback.
+    pub fn take_photo(&self, done: impl FnOnce(Result<Still, CaptureError>) + 'static) {
+        let mut capture = self.capture.borrow_mut();
+        let Some(c) = capture.as_mut() else {
+            drop(capture);
+            return done(Err(CaptureError::NotRunning));
+        };
+        *self.photo_done.borrow_mut() = Some(Box::new(done));
+        let tx = Mutex::new(Some(self.photos.clone()));
+        c.capture_photo(Box::new(move |r| {
+            if let Some(tx) = tx.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+                tx.send(r);
             }
         }));
     }
@@ -421,6 +462,25 @@ pub fn camera_view(session: &Session, size: f32, caption: impl Into<SharedString
             ),
         })
     }))
+}
+
+/// Whether the platform draws a live preview (`songbird/camera`); a demo or test camera does
+/// not.
+pub fn has_live_preview() -> bool {
+    current().is_some_and(|c| c.native_preview)
+}
+
+/// The live preview filling its parent (a call's self-view), shown while the session runs.
+pub fn preview_fill(session: &Session) -> View {
+    let preview = session.preview;
+    view().absolute().inset_0().child(
+        native("songbird/camera")
+            .prop("session", move || preview.get().map_or(serde_json::Value::Null, serde_json::Value::from))
+            .prop("purpose", serde_json::Value::from(format!("{:?}", session.purpose)))
+            .flex_1()
+            .role(AccessibilityRole::Image)
+            .label("Your camera"),
+    )
 }
 
 fn state(glyph: Icon, title: &'static str, message: String, action: Option<AnyElement>) -> AnyElement {

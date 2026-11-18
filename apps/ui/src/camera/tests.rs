@@ -227,3 +227,64 @@ fn the_front_lens_is_found_by_facing() {
         Some("w")
     );
 }
+
+static PHOTO: LazyLock<FakeCamera> = LazyLock::new(|| {
+    let cam = FakeCamera::new();
+    cam.photo_gives(Ok(songbird_camera::Still { bytes: vec![0xFF, 0xD8, 0xFF, 0xD9], mime: "image/jpeg", width: 640, height: 480 }));
+    cam
+});
+#[component]
+fn PhotoProbe() -> impl IntoElement {
+    install(Some(Arc::new(PHOTO.clone())), false);
+    let got = signal(String::from("none"));
+    let session = use_session(Purpose::Photo, || true, |_| {});
+    let shown = session.shown;
+    view()
+        .child(text(move || format!("state: {}", label(&shown.get()))))
+        .child(text(move || format!("photo: {}", got.get())))
+        .child(button_text("Shoot", move || {
+            session.take_photo(move |r| {
+                got.set(match r {
+                    Ok(s) => format!("{}x{} {}", s.width, s.height, s.bytes.len()),
+                    Err(e) => format!("{e:?}"),
+                });
+            });
+        }))
+}
+
+#[test]
+fn a_photo_comes_back_on_the_engine_thread() -> Result<(), String> {
+    let mut app = start::<PhotoProbe>();
+    app.wait_for("text:state: running back")?;
+    app.press("Shoot")?;
+    app.wait_for("text:photo: 640x480 4")?;
+    assert_eq!(PHOTO.log(), ["open Photo back", "photo"]);
+    Ok(())
+}
+
+static VIDEO: LazyLock<FakeCamera> = LazyLock::new(FakeCamera::new);
+#[component]
+fn VideoProbe() -> impl IntoElement {
+    install(Some(Arc::new(VIDEO.clone())), false);
+    let on = signal(false);
+    let _session = use_session(Purpose::Call, move || on.get(), |_| {});
+    view()
+        .child(text(move || format!("video: {}", on.get())))
+        .child(button_text("Toggle", move || on.update(|v| *v = !*v)))
+}
+
+#[test]
+fn a_call_s_camera_follows_its_video_switch() -> Result<(), String> {
+    let mut app = start::<VideoProbe>();
+    app.wait_for("text:video: false")?;
+    assert_eq!(VIDEO.running(), 0, "no camera before video is on");
+    app.press("Toggle")?;
+    app.wait_for("text:video: true")?;
+    app.settle();
+    assert_eq!(VIDEO.running_purposes(), vec![Purpose::Call]);
+    app.press("Toggle")?;
+    app.wait_for("text:video: false")?;
+    app.settle();
+    assert_eq!(VIDEO.running(), 0, "{:?}", VIDEO.log());
+    Ok(())
+}

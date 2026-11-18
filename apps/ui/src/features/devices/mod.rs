@@ -538,3 +538,55 @@ fn device_sheet(s: Store, open: Signal<bool>, selected: Signal<Option<Device>>) 
         })),
     )
 }
+
+#[cfg(test)]
+mod camera_flow {
+    //! Linking by camera (D-0110, D-0111): only a link code read by the live camera leads to
+    //! the confirmation, the camera stops while it shows, and only "Link device" links.
+
+    use std::sync::{Arc, LazyLock};
+
+    use nsh_engine::{EngineConfig, Root};
+    use nsh_testing::Headless;
+    use songbird_camera::fake::FakeCamera;
+
+    use super::*;
+
+    static CAM: LazyLock<FakeCamera> = LazyLock::new(FakeCamera::new);
+
+    #[component]
+    fn LinkProbe() -> impl IntoElement {
+        let s = Store::new();
+        crate::store::install(s);
+        crate::camera::install(Some(Arc::new(CAM.clone())), false);
+        let open = signal(true);
+        view()
+            .child(text(move || format!("devices: {}", s.devices.with(Vec::len))))
+            .child(link_sheet(s, open))
+    }
+
+    #[test]
+    fn a_link_code_asks_first_and_anything_else_is_ignored() -> Result<(), String> {
+        let mut app = Headless::start(EngineConfig::new(Root::of::<LinkProbe>())).map_err(|e| e.to_string())?;
+        app.wait_for("Looking for a code…")?;
+        let before = app.screen().texts().iter().find(|t| t.starts_with("devices: ")).map(ToString::to_string);
+        // A group invite link and garbage: nothing happens.
+        CAM.show_code("https://songbird.chat/g/0123456789abcdef#k=abc");
+        CAM.show_code("hello");
+        app.settle();
+        assert!(!app.shows("Link a new device?"));
+        assert_eq!(CAM.running(), 1);
+        // A link code: the confirmation, with the camera stopped.
+        CAM.show_code(&codes::link_code(&[0x11; 16], &[0x22; 32]));
+        app.wait_for("Link a new device?")?;
+        app.wait_for("text:/read and send all your messages/")?;
+        assert_eq!(CAM.running(), 0, "{:?}", CAM.log());
+        let after_scan = app.screen().texts().iter().find(|t| t.starts_with("devices: ")).map(ToString::to_string);
+        assert_eq!(before, after_scan, "nothing is linked before the press");
+        app.press("Link device")?;
+        app.wait_for_gone("Link a new device?", std::time::Duration::from_secs(2))?;
+        let after = app.screen().texts().iter().find(|t| t.starts_with("devices: ")).map(ToString::to_string);
+        assert_ne!(before, after, "linked after the press");
+        Ok(())
+    }
+}

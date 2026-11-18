@@ -20,6 +20,13 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 9 plan (`P09-plan.md`, D-0101): **awaiting the owner.** Scope set by the owner on
+  2026-11-18: every setting on the app's Settings screens made real, except those later prompts
+  own. Ten questions, recommendations first: scope inventory, record integrity (manifest),
+  sealed presence, last seen without server state, app lock by passcode now, server-enforced
+  "who can add me to groups", profile visibility choices, parental controls without the
+  parent's identity (and whether a child may delete their account), defaults, agent decisions.
+
 - Prompt 8, M4 and M5 rest (D-0099): **deferred by the owner on 2026-11-18 until the whole app
   is built** ("lets do this after we have the whole app built"): the Xcode and Gradle host
   projects (APNs token, PushKit with CallKit, FCM, UnifiedPush, ConnectionService), the Apple
@@ -160,6 +167,45 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0101 — Prompt 9: the plan, and the owner's decisions it needs
+
+- Date: 2026-11-18
+- Status: proposed (awaiting the owner)
+- Decided by: owner, on the agent's plan `docs/reports/P09-plan.md`
+- Context: Prompt 9 asks for encrypted settings sync, server-enforced settings, presence and
+  last seen, statuses, nudges, scenes and sound stickers, contacts sync and parental controls.
+  The owner widened the scope on 2026-11-18: every setting on the app's Settings screens made
+  real, except those later prompts own (backups, Prompt 10; plans, Prompt 11; WhatsApp, Prompt
+  14). What exists: message requests and the inactivity period (server-enforced), profiles
+  (one encrypted blob), the ephemeral lane (one device per frame, identified, ungated), a
+  stored `Nudge` kind, pack kinds for scenes, sounds and emoticons, and a mocked app whose
+  settings are neither saved nor synced. Missing: an account record store, an HLC, username
+  discoverability, a profile-changed signal, batched presence, an attention class, contacts,
+  parental controls, app-core.
+- Options considered and evidence: in the plan ("What Prompt 9 starts from", "Findings", "Every
+  setting, and where it lands").
+- Decisions asked of the owner (recommendations first):
+  1. the scope inventory as written; host-only rows (biometrics, screenshot blocking, app
+     switcher, passkeys) after the whole app is built;
+  2. fresh record IDs per write and an encrypted manifest in the same compare-and-swap;
+  3. presence sealed, batched and gated by the recipients' access keys;
+  4. last seen through the ephemeral lane only, no new server state;
+  5. app lock by an in-app passcode now;
+  6. a server-enforced "contacts only" bit for group adds, proved by the access key;
+  7. "My contacts" and "Nobody" for photo, about and status;
+  8. parental controls with a per-child policy key unlinked to the parent's account, rule bits,
+     a version and an unlink date, never the parent's identity or the birth date; and whether a
+     supervised child may delete their own account (recommended yes);
+  9. WhatsApp's defaults (contacts see last seen and online; receipts and typing on).
+- Agent decisions, unless the owner objects: `crates/sync` shared with app-core; HLC with a
+  24-hour clamp and 90-day tombstones; Padmé padding and write counters; AES-256-GCM-SIV under
+  per-record keys; the storage key in provisioning v2 and rotated on device removal; caps
+  measured in M1; custom wallpapers as storage objects; nudges identified in an attention class
+  with pair and sender budgets, the stored `Nudge` kind removed; discoverability off keeps links
+  and QR codes working; `SettingsSync` and `starred` sync replaced by records; the pack item
+  limit lowered to 16 MiB; proxy dialing in `crates/client`; one branch and one PR.
+- Consequences: nothing is built until the owner answers. M1 (the record store) starts first.
 
 ## D-0100 — Prompt 8: the security review's fixes
 

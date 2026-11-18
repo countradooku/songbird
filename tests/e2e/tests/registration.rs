@@ -159,7 +159,9 @@ async fn registered_accounts_connect_and_talk_without_an_operator() {
         calls: None,
         server_name: API.into(),
         push_store: Arc::new(
-            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
         ),
         registry: Arc::clone(&registry),
         s3: songbird_s3::Client::new(songbird_s3::Config::new(

@@ -62,7 +62,10 @@ async fn env() -> Option<Env> {
         user: std::env::var("SONGBIRD_TEST_SURREALDB_USER").unwrap_or_else(|_| "root".into()),
         pass: std::env::var("SONGBIRD_TEST_SURREALDB_PASS").expect("SONGBIRD_TEST_SURREALDB_PASS"),
         namespace: "test".into(),
-        database: format!("pushout_{}", DeviceId::random().unwrap().to_hex_unredacted()),
+        database: format!(
+            "pushout_{}",
+            DeviceId::random().unwrap().to_hex_unredacted()
+        ),
         timeout: Duration::from_secs(10),
         max_message_bytes: 16 << 20,
     };
@@ -254,7 +257,13 @@ fn breaker() -> BreakerConfig {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_provider_outage_ends_with_every_device_woken() {
     let Some(env) = env().await else { return };
-    let r = rig(&env, Duration::from_secs(2), breaker(), Duration::from_secs(30)).await;
+    let r = rig(
+        &env,
+        Duration::from_secs(2),
+        breaker(),
+        Duration::from_secs(30),
+    )
+    .await;
     let devices = register(&env.store, 200, false).await;
     r.fcm.outage(Behaviour::Unavailable);
     let running = songbird_push::spawn(
@@ -325,7 +334,13 @@ async fn a_black_holed_provider_ends_with_every_device_woken() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rate_limiting_is_honoured_then_delivered() {
     let Some(env) = env().await else { return };
-    let r = rig(&env, Duration::from_secs(2), breaker(), Duration::from_secs(30)).await;
+    let r = rig(
+        &env,
+        Duration::from_secs(2),
+        breaker(),
+        Duration::from_secs(30),
+    )
+    .await;
     let devices = register(&env.store, 1, false).await;
     r.fcm.push(Behaviour::RateLimited {
         retry_after: Some(1),
@@ -389,7 +404,10 @@ fn a_crashed_push_service_loses_no_wake_up() {
     }
     doomed.shutdown_background();
     let before = r.fcm.requests().len();
-    assert!(before > 0 && before < devices.len(), "{before} sent before the crash");
+    assert!(
+        before > 0 && before < devices.len(),
+        "{before} sent before the crash"
+    );
     r.fcm.recover();
     // A new instance (another consumer name in the same group).
     main.block_on(async {
@@ -424,7 +442,13 @@ async fn m2_numbers() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(20_000);
-    let r = rig(&env, Duration::from_secs(5), breaker(), Duration::from_secs(30)).await;
+    let r = rig(
+        &env,
+        Duration::from_secs(5),
+        breaker(),
+        Duration::from_secs(30),
+    )
+    .await;
     let devices = register(&env.store, n, true).await;
     let running = songbird_push::spawn(
         Arc::clone(&r.queue),
@@ -467,6 +491,40 @@ async fn m2_numbers() {
     );
     let distinct: HashSet<&str> = reqs.iter().map(|q| q.path.as_str()).collect();
     assert_eq!(distinct.len(), n);
+
+    // Steady load without a backlog: 1,000 wake-ups/s for 5 s, one job at a time, each timed
+    // from its own enqueue to the provider's having it.
+    let before = r.apns.request_count();
+    let steady: Vec<Job> = jobs(&devices[..5_000]);
+    let mut sent_at = Vec::with_capacity(steady.len());
+    let mut tick = tokio::time::interval(Duration::from_millis(1));
+    for j in &steady {
+        tick.tick().await;
+        sent_at.push(Instant::now());
+        r.queue.enqueue(std::slice::from_ref(j)).await.unwrap();
+    }
+    eventually("the steady load sent", 60, async || {
+        r.apns.request_count() >= before + steady.len()
+    })
+    .await;
+    let reqs = r.apns.requests();
+    let at: std::collections::HashMap<String, Instant> = reqs[before..]
+        .iter()
+        .map(|q| (q.path.trim_start_matches("/3/device/").to_owned(), q.at))
+        .collect();
+    let mut lat: Vec<Duration> = devices[..5_000]
+        .iter()
+        .zip(&sent_at)
+        .map(|((_, tok), t0)| at[tok].duration_since(*t0))
+        .collect();
+    lat.sort();
+    let pct = |p: f64| lat[((lat.len() as f64 * p) as usize).min(lat.len() - 1)];
+    println!(
+        "M2 steady 1,000/s: enqueue→provider p50 {:?} p99 {:?} max {:?}",
+        pct(0.50),
+        pct(0.99),
+        lat[lat.len() - 1]
+    );
     running.stop().await;
 }
 
@@ -479,4 +537,3 @@ impl Rig {
         self.apns.requests().len() <= before + 1
     }
 }
-

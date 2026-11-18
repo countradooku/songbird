@@ -1209,7 +1209,10 @@ mod tests {
         assert!(base(SEND_FLAG_SILENT | SEND_FLAG_ACCESS, &[0; 16]).is_ok());
         assert!(!matches!(
             base(0, &[]),
-            Ok(ClientFrame::Send(SendFrame { hints: SendHints { silent: true, .. }, .. }))
+            Ok(ClientFrame::Send(SendFrame {
+                hints: SendHints { silent: true, .. },
+                ..
+            }))
         ));
         // The disappearing hint: 1 s to 30 days.
         let exp = |s: u32| base(SEND_FLAG_EXPIRES, &s.to_be_bytes());

@@ -121,7 +121,9 @@ async fn stack() -> Option<Stack> {
         calls: None,
         server_name: API.into(),
         push_store: Arc::new(
-            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
         ),
         registry: Arc::clone(&registry),
         s3: s3.clone(),
@@ -184,7 +186,9 @@ async fn stack() -> Option<Stack> {
     let worker = Worker {
         block_keys: None,
         push_store: Arc::new(
-            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
         ),
         registry: Arc::clone(&registry),
         s3: s3.clone(),

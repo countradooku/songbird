@@ -271,9 +271,7 @@ impl Registry {
         self.export_lists(account, &mut out).await?;
         out.insert(
             "devices".into(),
-            self.export_devices(account, push)
-                .await?
-                .into(),
+            self.export_devices(account, push).await?.into(),
         );
         out.insert("not_attributable".into(), not_attributable());
         Ok(serde_json::Value::Object(out))

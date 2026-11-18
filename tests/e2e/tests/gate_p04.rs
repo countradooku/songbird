@@ -228,7 +228,9 @@ async fn stack(limits: RequestLimits) -> Option<Stack> {
         )),
         server_name: API.into(),
         push_store: Arc::new(
-            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
         ),
         registry: Arc::clone(&registry),
         s3: s3.clone(),
@@ -288,7 +290,9 @@ async fn stack(limits: RequestLimits) -> Option<Stack> {
     let worker = songbird_worker::Worker {
         block_keys: Some(keys.clone()),
         push_store: Arc::new(
-            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
         ),
         registry: Arc::clone(&registry),
         s3,

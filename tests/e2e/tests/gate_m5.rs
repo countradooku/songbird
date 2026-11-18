@@ -239,7 +239,9 @@ async fn account_deletion_is_verified_across_every_store() {
         calls: None,
         server_name: API.into(),
         push_store: Arc::new(
-            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
         ),
         registry: Arc::clone(&registry),
         s3: s3.clone(),
@@ -370,7 +372,9 @@ async fn account_deletion_is_verified_across_every_store() {
     let worker = Worker {
         block_keys: None,
         push_store: Arc::new(
-            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
         ),
         registry: Arc::clone(&registry),
         s3: s3.clone(),
@@ -440,7 +444,12 @@ async fn account_deletion_is_verified_across_every_store() {
     assert!(r.is_empty(), "{r:?}");
     // Push registrations live in their own database (D-0095): none of Alice's left there.
     assert_eq!(
-        songbird_accounts::PushStore::beside(&registry).await.unwrap().count(&index).await.unwrap(),
+        songbird_accounts::PushStore::beside(&registry)
+            .await
+            .unwrap()
+            .count(&index)
+            .await
+            .unwrap(),
         0
     );
     assert!(registry.device(&a1.id).await.unwrap().is_none());
@@ -563,7 +572,9 @@ async fn device_removal_is_verified_across_every_store_and_spares_the_rest() {
         calls: None,
         server_name: API.into(),
         push_store: Arc::new(
-            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
         ),
         registry: Arc::clone(&registry),
         s3: s3.clone(),
@@ -678,7 +689,9 @@ async fn device_removal_is_verified_across_every_store_and_spares_the_rest() {
     let worker = Worker {
         block_keys: None,
         push_store: Arc::new(
-            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
         ),
         registry: Arc::clone(&registry),
         s3: s3.clone(),
@@ -839,7 +852,9 @@ async fn an_offline_device_receives_a_push_end_to_end() {
         calls: None,
         server_name: API.into(),
         push_store: Arc::new(
-            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
         ),
         registry: Arc::clone(&registry),
         s3,
@@ -887,7 +902,11 @@ async fn an_offline_device_receives_a_push_end_to_end() {
     apns_cfg.base_url = apns_mock.url();
     apns_cfg.http = ca.http_config();
     let handler = songbird_push::Handler::new(
-        Arc::new(songbird_accounts::PushStore::beside(&registry).await.unwrap()),
+        Arc::new(
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
+        ),
         &PUSH_INDEX,
         &push_key,
         songbird_push::Providers {
@@ -1121,7 +1140,9 @@ async fn m5_numbers() {
         calls: None,
         server_name: API.into(),
         push_store: Arc::new(
-            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
         ),
         registry: Arc::clone(&registry),
         s3,

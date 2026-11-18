@@ -88,7 +88,9 @@ async fn stack() -> Option<Stack> {
         calls: None,
         server_name: SERVER.into(),
         push_store: Arc::new(
-            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
         ),
         registry,
         s3,

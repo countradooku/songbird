@@ -263,11 +263,17 @@ async fn a_black_holed_provider_times_out_opens_the_breaker_and_recovers() {
     for _ in 0..3 {
         let t = tokio::time::Instant::now();
         assert_eq!(f.apns.send(&alert()).await, Outcome::Retry { after: None });
-        assert!(t.elapsed() < Duration::from_secs(1), "bounded by the timeout");
+        assert!(
+            t.elapsed() < Duration::from_secs(1),
+            "bounded by the timeout"
+        );
     }
     assert_eq!(f.apns.breaker_state(), BreakerState::Open);
     let sent = f.mock.requests().len();
-    assert!(matches!(f.apns.send(&alert()).await, Outcome::Retry { after: Some(_) }));
+    assert!(matches!(
+        f.apns.send(&alert()).await,
+        Outcome::Retry { after: Some(_) }
+    ));
     assert_eq!(f.mock.requests().len(), sent, "no request while open");
     f.mock.recover();
     tokio::time::sleep(Duration::from_millis(350)).await;

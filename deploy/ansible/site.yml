@@ -33,3 +33,10 @@
   roles:
     - secrets
     - songbird
+
+- name: Monitoring (Prometheus and Alertmanager on the bastion, D-0097)
+  hosts: bastion
+  become: true
+  roles:
+    - secrets
+    - monitoring

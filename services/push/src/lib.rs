@@ -294,7 +294,8 @@ impl Handler {
             Sent::Retry { after } => {
                 // A ring is retried only while it can still ring in time.
                 if let Some(until) = ring {
-                    let wait = after.map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+                    let wait =
+                        after.map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
                     if unix_ms().saturating_add(wait) > until {
                         self.metrics.rings_expired.inc();
                         return Outcome::Done;

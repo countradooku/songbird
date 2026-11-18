@@ -306,7 +306,10 @@ async fn offline_devices_get_one_constant_wake_up() {
     assert_eq!(v.header("apns-expiration"), Some("0"));
     assert_eq!(v.body, b"{}");
     // On FCM and Web Push a ring is the very same message as a wake-up.
-    queue.enqueue(&[job(&android, true), job(&unified, true)]).await.unwrap();
+    queue
+        .enqueue(&[job(&android, true), job(&unified, true)])
+        .await
+        .unwrap();
     eventually("rings on FCM and Web Push", async || {
         fcm_mock.requests().len() == 3 && web_mock.requests().len() == 3
     })
@@ -331,22 +334,12 @@ async fn offline_devices_get_one_constant_wake_up() {
     apns_mock.push(Behaviour::Unregistered);
     queue.enqueue(&[job(&gone, false)]).await.unwrap();
     eventually("the unregistered token deleted", async || {
-        env.registry
-            .get(&gone.index)
-            .await
-            .unwrap()
-            .is_none()
+        env.registry.get(&gone.index).await.unwrap().is_none()
     })
     .await;
     assert_eq!(metrics.count(Kind::Apns, "unregistered"), 1);
     // The other registrations stay.
-    assert!(
-        env.registry
-            .get(&apple.index)
-            .await
-            .unwrap()
-            .is_some()
-    );
+    assert!(env.registry.get(&apple.index).await.unwrap().is_some());
 
     // 4. A provider outage (503) is retried and the push arrives later.
     fcm_mock.push(Behaviour::Unavailable);
@@ -417,7 +410,12 @@ async fn offline_devices_get_one_constant_wake_up() {
     );
     let mut backlog = Vec::with_capacity(10_000);
     for _ in 0..10_000 {
-        backlog.push(Job::new(Work::Push { device: DeviceId::random().unwrap() }).unwrap());
+        backlog.push(
+            Job::new(Work::Push {
+                device: DeviceId::random().unwrap(),
+            })
+            .unwrap(),
+        );
     }
     for chunk in backlog.chunks(512) {
         queue.enqueue(chunk).await.unwrap();

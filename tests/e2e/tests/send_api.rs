@@ -187,7 +187,9 @@ async fn stack(limits: Limits, sends_per_sec: u32, send_burst: u32) -> Option<St
         calls: None,
         server_name: API.into(),
         push_store: Arc::new(
-            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
         ),
         registry,
         // Unused by these tests (attachments and deletion are M5's).
@@ -635,7 +637,10 @@ async fn a_silent_send_is_stored_and_delivered_but_wakes_nobody() {
     assert_eq!(s.app.metrics.send.routes_offline.get(), 1);
     assert_eq!(s.app.metrics.send.routes_silent.get(), 1);
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(s.pushes.try_recv().is_err(), "a silent send woke the device");
+    assert!(
+        s.pushes.try_recv().is_err(),
+        "a silent send woke the device"
+    );
     // An ordinary send still wakes her.
     assert_eq!(
         bob.put_message(&frame(key(), vec![to(s.alice.id, "message")]))

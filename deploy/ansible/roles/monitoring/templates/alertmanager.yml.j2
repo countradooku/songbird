@@ -1,0 +1,32 @@
+# Managed by Ansible ({{ songbird_env }}). Where alerts go is the owner's choice (D-0094 §4):
+# set `alert_email_to` with the SMTP relay settings in SOPS, or `alert_webhook_url` (a ntfy topic
+# or a Matrix hook). Neither set: alerts are visible in Alertmanager's UI only.
+global:
+  resolve_timeout: 5m
+{% if secrets.alert_smtp_smarthost | default('') not in ['', 'CHANGE_ME'] %}
+  smtp_smarthost: "{{ secrets.alert_smtp_smarthost }}"
+  smtp_from: "{{ secrets.alert_smtp_from }}"
+  smtp_auth_username: "{{ secrets.alert_smtp_username }}"
+  smtp_auth_password: "{{ secrets.alert_smtp_password }}"
+  smtp_require_tls: true
+{% endif %}
+
+route:
+  receiver: owner
+  group_by: [alertname, provider]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: owner
+{% if secrets.alert_email_to | default('') not in ['', 'CHANGE_ME'] %}
+    email_configs:
+      - to: "{{ secrets.alert_email_to }}"
+        send_resolved: true
+{% endif %}
+{% if secrets.alert_webhook_url | default('') not in ['', 'CHANGE_ME'] %}
+    webhook_configs:
+      - url: "{{ secrets.alert_webhook_url }}"
+        send_resolved: true
+{% endif %}

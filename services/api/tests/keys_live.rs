@@ -79,7 +79,9 @@ async fn stack(k: Option<KeySettings>) -> Option<Stack> {
         calls: None,
         server_name: SERVER.into(),
         push_store: Arc::new(
-            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
         ),
         registry,
         s3: songbird_s3::Client::new(songbird_s3::Config::new(

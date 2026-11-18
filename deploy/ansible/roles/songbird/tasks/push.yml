@@ -1,0 +1,41 @@
+---
+# The push service's secrets (D-0036, D-0097). Push provider credentials (the APNs .p8, the FCM
+# service account, the VAPID key) and the push X25519 key exist on this host only as these files,
+# readable by the push container's uid only, and mounted into the push container only. The
+# credential-scope check (cargo xtask secret-scope) fails CI if any other file in deploy/
+# names them; verify-push-credentials.yml checks the running containers after every rollout.
+- name: Push secrets directory (push's uid only)
+  ansible.builtin.file:
+    path: /etc/songbird/secrets/push
+    state: directory
+    owner: "65532"
+    group: "65532"
+    mode: "0700"
+
+- name: Push secrets (provider credentials only where the provider is on)
+  ansible.builtin.copy:
+    dest: "/etc/songbird/secrets/push/{{ item.name }}"
+    content: "{{ item.value }}"
+    owner: "65532"
+    group: "65532"
+    mode: "0400"
+  loop: >-
+    {{ [
+         {'name': 'push_key', 'value': secrets.push_x25519_key},
+         {'name': 'push_index_secret', 'value': secrets.push_index_secret},
+         {'name': 'push_db_password', 'value': secrets.push_db_password_push},
+         {'name': 'jobs_secret', 'value': secrets.jobs_secret},
+         {'name': 'valkey_jobs_password', 'value': secrets.valkey_jobs_password},
+       ]
+       + ([{'name': 'apns_key.p8', 'value': secrets.push_apns_key_p8}] if push_providers.apns else [])
+       + ([{'name': 'fcm_service_account.json', 'value': secrets.push_fcm_service_account_json}] if push_providers.fcm else [])
+       + ([{'name': 'vapid_key.pem', 'value': secrets.push_vapid_key_pem}] if push_providers.webpush else []) }}
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+
+- name: Push configuration
+  ansible.builtin.template:
+    src: push.toml.j2
+    dest: /etc/songbird/push.toml
+    mode: "0644"

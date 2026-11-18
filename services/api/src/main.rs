@@ -371,8 +371,10 @@ async fn build(
     let registry = Arc::new(songbird_accounts::Registry::connect(db).await?);
     let push_store = Arc::new(match &s.push_tokens {
         Some(p) => {
-            songbird_accounts::PushStore::connect(songbird_accounts::Db::connect(p.config()?).await?)
-                .await?
+            songbird_accounts::PushStore::connect(
+                songbird_accounts::Db::connect(p.config()?).await?,
+            )
+            .await?
         }
         None => songbird_accounts::PushStore::beside(&registry).await?,
     });

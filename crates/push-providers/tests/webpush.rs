@@ -238,9 +238,24 @@ async fn hanging_and_reset_requests_are_retries() {
     let f = fixture(true).await;
     f.mock.push(Behaviour::Hang);
     let t = tokio::time::Instant::now();
-    assert_eq!(f.wp.send(&f.sub.target(format!("{}/wpush/v2/x", f.mock.url()))).await, Outcome::Retry { after: None });
-    assert!(t.elapsed() < Duration::from_secs(4), "bounded by the timeout");
+    assert_eq!(
+        f.wp.send(&f.sub.target(format!("{}/wpush/v2/x", f.mock.url())))
+            .await,
+        Outcome::Retry { after: None }
+    );
+    assert!(
+        t.elapsed() < Duration::from_secs(4),
+        "bounded by the timeout"
+    );
     f.mock.push(Behaviour::Reset);
-    assert!(matches!(f.wp.send(&f.sub.target(format!("{}/wpush/v2/x", f.mock.url()))).await, Outcome::Retry { .. }));
-    assert_eq!(f.wp.send(&f.sub.target(format!("{}/wpush/v2/x", f.mock.url()))).await, Outcome::Delivered);
+    assert!(matches!(
+        f.wp.send(&f.sub.target(format!("{}/wpush/v2/x", f.mock.url())))
+            .await,
+        Outcome::Retry { .. }
+    ));
+    assert_eq!(
+        f.wp.send(&f.sub.target(format!("{}/wpush/v2/x", f.mock.url())))
+            .await,
+        Outcome::Delivered
+    );
 }

@@ -1,0 +1,110 @@
+# promtool test rules deploy/monitoring/tests/songbird.test.yml (CI: the monitoring job).
+rule_files:
+  - ../rules/songbird.yml
+evaluation_interval: 1m
+tests:
+  - name: a dead letter pages; a quiet queue does not
+    interval: 1m
+    input_series:
+      - series: 'songbird_jobs_dead_lettered_total{instance="worker-1:9103",job="songbird"}'
+        values: '0 0 0 1 1 1'
+      - series: 'songbird_jobs_dead_lettered_total{instance="worker-2:9103",job="songbird"}'
+        values: '0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: JobsDeadLettered
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: JobsDeadLettered
+        exp_alerts:
+          - exp_labels: { severity: page, instance: "worker-1:9103", job: songbird }
+            exp_annotations:
+              summary: "worker-1:9103: jobs went to the dead-letter stream"
+              runbook: docs/RUNBOOKS/jobs-push-api-worker.md#dead-letters-jdead-growing-any-stream
+
+  - name: a provider that only retries for 10 minutes pages; one that recovers does not
+    interval: 1m
+    input_series:
+      - series: 'songbird_push_results_total{instance="w1",job="songbird",provider="apns",result="retried"}'
+        values: '0+10x30'
+      - series: 'songbird_push_results_total{instance="w1",job="songbird",provider="apns",result="sent"}'
+        values: '100x30'
+      - series: 'songbird_push_results_total{instance="w1",job="songbird",provider="fcm",result="retried"}'
+        values: '0+10x30'
+      - series: 'songbird_push_results_total{instance="w1",job="songbird",provider="fcm",result="sent"}'
+        values: '0+5x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: PushProviderDown
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: PushProviderDown
+        exp_alerts:
+          - exp_labels: { severity: page, instance: w1, provider: apns }
+            exp_annotations:
+              summary: "apns has been failing for 10 minutes"
+              runbook: docs/RUNBOOKS/jobs-push-api-worker.md#push-provider-outage-or-rate-limiting
+
+  - name: permanent failures, late rings, unopenable registrations, dropped wake-ups
+    interval: 1m
+    input_series:
+      - series: 'songbird_push_results_total{instance="w1",job="songbird",provider="fcm",result="failed"}'
+        values: '0 0 2 2'
+      - series: 'songbird_push_rings_expired_total{instance="w1",job="songbird"}'
+        values: '0 3 9 9'
+      - series: 'songbird_push_registrations_unopenable_total{instance="w1",job="songbird"}'
+        values: '0 0 0 1'
+      - series: 'songbird_delivery_push_dropped_total{instance="e1",job="songbird"}'
+        values: '0 4 4 4'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: PushPermanentFailures
+        exp_alerts:
+          - exp_labels: { severity: page, instance: w1, provider: fcm }
+            exp_annotations:
+              summary: "fcm refuses pushes (credentials or request)"
+              runbook: docs/RUNBOOKS/jobs-push-api-worker.md#push-provider-outage-or-rate-limiting
+      - eval_time: 3m
+        alertname: PushRingsTooLate
+        exp_alerts:
+          - exp_labels: { severity: warn, instance: w1, job: songbird }
+            exp_annotations:
+              summary: "call rings dropped because they could no longer ring in time"
+              runbook: docs/RUNBOOKS/jobs-push-api-worker.md#call-rings-too-late
+      - eval_time: 3m
+        alertname: PushRegistrationsUnopenable
+        exp_alerts:
+          - exp_labels: { severity: page, instance: w1, job: songbird }
+            exp_annotations:
+              summary: "push registrations do not open with this push key"
+              runbook: docs/RUNBOOKS/jobs-push-api-worker.md#dead-letters-jdead-growing-any-stream
+      - eval_time: 2m
+        alertname: WakeUpsDropped
+        exp_alerts:
+          - exp_labels: { severity: warn, instance: e1, job: songbird }
+            exp_annotations:
+              summary: "e1: wake-ups dropped; messages are safe in the mailbox"
+              runbook: docs/RUNBOOKS/jobs-push-api-worker.md#push-jobs-dropped-delivery_push_dropped-rising
+
+  - name: registry busy and a service down
+    interval: 1m
+    input_series:
+      - series: 'songbird_registry_busy_total{instance="e1",job="songbird"}'
+        values: '0 5 20 20'
+      - series: 'up{instance="e1:9102",job="songbird"}'
+        values: '1 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: RegistryBusy
+        exp_alerts:
+          - exp_labels: { severity: warn, instance: e1, job: songbird }
+            exp_annotations:
+              summary: "e1: registry write conflicts outlast the retry budget"
+              runbook: docs/RUNBOOKS/jobs-push-api-worker.md#registry-busy-write-conflicts-outlasting-the-retry-budget-d-0093
+      - eval_time: 4m
+        alertname: ServiceDown
+        exp_alerts:
+          - exp_labels: { severity: page, instance: "e1:9102", job: songbird }
+            exp_annotations:
+              summary: "e1:9102 is not answering its metrics endpoint"
+              runbook: docs/RUNBOOKS/deploy-and-rollback.md

@@ -268,7 +268,10 @@ async fn hanging_and_reset_requests_are_retries() {
     f.mock.push(Behaviour::Hang);
     let t = tokio::time::Instant::now();
     assert_eq!(f.fcm.send(&target()).await, Outcome::Retry { after: None });
-    assert!(t.elapsed() < Duration::from_secs(4), "bounded by the timeout");
+    assert!(
+        t.elapsed() < Duration::from_secs(4),
+        "bounded by the timeout"
+    );
     f.mock.push(Behaviour::Reset);
     assert!(matches!(f.fcm.send(&target()).await, Outcome::Retry { .. }));
     assert_eq!(f.fcm.send(&target()).await, Outcome::Delivered);

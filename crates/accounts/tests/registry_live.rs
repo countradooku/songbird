@@ -186,8 +186,14 @@ async fn push_registrations_live_apart_and_old_rows_move_once() {
             .query(
                 "UPSERT push_token:[$p] SET sealed = $s, at = time::now() RETURN NONE;",
                 vec![
-                    ("p".into(), songbird_surreal::Value::Bytes(i.to_vec().into())),
-                    ("s".into(), songbird_surreal::Value::Bytes(sealed.to_vec().into())),
+                    (
+                        "p".into(),
+                        songbird_surreal::Value::Bytes(i.to_vec().into()),
+                    ),
+                    (
+                        "s".into(),
+                        songbird_surreal::Value::Bytes(sealed.to_vec().into()),
+                    ),
                 ],
             )
             .await
@@ -196,8 +202,14 @@ async fn push_registrations_live_apart_and_old_rows_move_once() {
     // The device behind `newer` registered again since, in the new store.
     p.put(&newer, b"new-b").await.unwrap();
     assert_eq!(p.move_from_registry(&r).await.unwrap(), 2);
-    assert_eq!(p.get(&old).await.unwrap().as_deref(), Some(b"old-a".as_slice()));
-    assert_eq!(p.get(&newer).await.unwrap().as_deref(), Some(b"new-b".as_slice()));
+    assert_eq!(
+        p.get(&old).await.unwrap().as_deref(),
+        Some(b"old-a".as_slice())
+    );
+    assert_eq!(
+        p.get(&newer).await.unwrap().as_deref(),
+        Some(b"new-b".as_slice())
+    );
     // Nothing is left in the registry's database, and a second run moves nothing.
     let left = r
         .db()
@@ -771,10 +783,7 @@ async fn bundles_claim_one_time_keys_skip_the_requester_and_fall_back_to_last_re
     assert_eq!(r.prekey_counts(&alice.device).await.unwrap(), (1, 1));
     // Deletion leaves no prekey behind.
     r.delete_account_rows(&alice.account).await.unwrap();
-    let left = r
-        .remnants(&alice.account, &[alice.device])
-        .await
-        .unwrap();
+    let left = r.remnants(&alice.account, &[alice.device]).await.unwrap();
     assert!(left.is_empty(), "{left:?}");
 }
 
@@ -954,10 +963,7 @@ async fn key_packages_are_single_use_expire_and_fall_back_to_last_resort() {
     // The sweep removes the expired row; deletion removes the rest.
     assert!(r.delete_expired_key_packages(100).await.unwrap() >= 1);
     r.delete_account_rows(&alice.account).await.unwrap();
-    let left = r
-        .remnants(&alice.account, &[alice.device])
-        .await
-        .unwrap();
+    let left = r.remnants(&alice.account, &[alice.device]).await.unwrap();
     assert!(left.is_empty(), "{left:?}");
 }
 

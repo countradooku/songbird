@@ -340,10 +340,7 @@ impl Worker {
             .map(|d| push_index(&self.push_index_secret, d))
             .collect();
         self.delivery.forget(&devices).await?;
-        self.push_store
-            .delete(&index)
-            .await
-            .map_err(unavailable)?;
+        self.push_store.delete(&index).await.map_err(unavailable)?;
         let grants = self
             .registry
             .grants_of(&devices)
@@ -448,10 +445,7 @@ impl Worker {
             .map(|d| push_index(&self.push_index_secret, d))
             .collect();
         self.delivery.forget(&devices).await?;
-        self.push_store
-            .delete(&index)
-            .await
-            .map_err(unavailable)?;
+        self.push_store.delete(&index).await.map_err(unavailable)?;
         let grants = self
             .registry
             .grants_of(&devices)
@@ -525,10 +519,7 @@ impl Worker {
             for (account, devices) in list {
                 let jobs: Vec<Job> = devices
                     .iter()
-                    .filter_map(|d| {
-                        Job::new(Work::Push { device: *d })
-                        .ok()
-                    })
+                    .filter_map(|d| Job::new(Work::Push { device: *d }).ok())
                     .collect();
                 if self.queue.enqueue(&jobs).await.is_ok() {
                     let _ = self.registry.mark_warned(account, level).await;

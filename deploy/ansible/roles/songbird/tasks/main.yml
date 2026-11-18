@@ -10,7 +10,12 @@
     src: service.toml.j2
     dest: "/etc/songbird/{{ item }}.toml"
     mode: "0644"
-  loop: "{{ songbird_services }}"
+  loop: "{{ songbird_services | reject('equalto', 'push') | list }}"
+
+# The push service: its own configuration and the only push credentials (D-0097).
+- name: Push service secrets and configuration
+  ansible.builtin.include_tasks: push.yml
+  when: "'push' in songbird_services"
 
 - name: Log in to the image registry (read-only token; skipped when the packages are public)
   community.docker.docker_login:
@@ -34,9 +39,11 @@
     security_opts: [no-new-privileges]
     ulimits: ["nofile:{{ open_files_limit }}:{{ open_files_limit }}"]
     stop_timeout: 60
-    volumes:
-      - "/etc/songbird/{{ item }}.toml:/etc/songbird/config.toml:ro"
-      - "{{ songbird_pki_dir }}/{{ item }}:/etc/songbird/tls:ro"
+    # Push credentials are mounted into the push container and no other (D-0097).
+    volumes: >-
+      {{ ['/etc/songbird/' ~ item ~ '.toml:/etc/songbird/config.toml:ro',
+          songbird_pki_dir ~ '/' ~ item ~ ':/etc/songbird/tls:ro']
+         + (['/etc/songbird/secrets/push:/run/songbird/secrets:ro'] if item == 'push' else []) }}
     labels:
       songbird.version: "{{ songbird_version }}"
   loop: "{{ songbird_services }}"
@@ -58,6 +65,9 @@
   register: metrics
   failed_when: "'songbird_telemetry_refused_callsites_total 0' not in metrics.content"
   loop: "{{ songbird_services }}"
+
+- name: Push credentials are in the push container only (D-0097)
+  ansible.builtin.include_tasks: verify-push-credentials.yml
 
 # Written only after every service is healthy, so rollout.yml always has a known-good version to
 # roll back to, including after the first install by site.yml.

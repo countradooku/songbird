@@ -51,6 +51,17 @@ impl Stream {
         }
     }
 
+    /// The stream's place in [`Stream::ALL`].
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Push => 0,
+            Self::Ring => 1,
+            Self::Cleanup => 2,
+            Self::Deletion => 3,
+        }
+    }
+
     /// The Valkey key of the stream's delayed (retry) set.
     #[must_use]
     pub const fn delayed_key(self) -> &'static str {
@@ -73,6 +84,29 @@ impl Stream {
         }
     }
 }
+
+/// Jobs dead-lettered, process-wide (every stream): aggregates only, no labels (invariant 6).
+static DEAD_LETTERED: AtomicU64 = AtomicU64::new(0);
+/// Jobs sent back for a retry, process-wide.
+static RETRIED: AtomicU64 = AtomicU64::new(0);
+
+/// A process-wide counter a service exports: (name, help, its value at scrape).
+pub type CounterSpec = (&'static str, &'static str, fn() -> u64);
+
+/// The job queue's counters for a consuming service to export (`songbird_jobs_*`; alert rules in
+/// `deploy/monitoring/rules/songbird.yml`, runbook "Dead letters", D-0097).
+pub const METRICS: [CounterSpec; 2] = [
+    (
+        "jobs_dead_lettered",
+        "Jobs moved to the dead-letter stream (any stream)",
+        || DEAD_LETTERED.load(Ordering::Relaxed),
+    ),
+    (
+        "jobs_retried",
+        "Jobs sent back for a retry after a transient failure",
+        || RETRIED.load(Ordering::Relaxed),
+    ),
+];
 
 /// Key of the dead-letter stream.
 pub const DEAD_KEY: &str = "j:dead";
@@ -212,8 +246,12 @@ return 1
 pub struct Queue {
     /// Commands (enqueue, acknowledge, retry, reclaim).
     conn: ValkeyConn,
-    /// Blocking reads only.
-    reader: ValkeyConn,
+    /// Blocking reads only: one connection per stream, opened at its first read. Valkey runs a
+    /// connection's commands in order, so one shared reader would make every consumer wait out
+    /// the others' `BLOCK` on an empty stream (D-0096: it held `j:push` to ~850 jobs/s behind an
+    /// idle `j:ring`, and the worker's cleanup behind its deletions).
+    readers: [tokio::sync::OnceCell<ValkeyConn>; Stream::ALL.len()],
+    client: redis::Client,
     sealer: Sealer,
     cfg: QueueConfig,
     stats: Arc<QueueStats>,
@@ -307,10 +345,10 @@ impl Queue {
         cfg: QueueConfig,
     ) -> Result<Self, QueueError> {
         let conn = ValkeyConn::connect(client.clone()).await?;
-        let reader = ValkeyConn::connect(client).await?;
         Ok(Self {
             conn,
-            reader,
+            readers: Default::default(),
+            client,
             sealer: Sealer::new(secret).map_err(|_| QueueError::Seal)?,
             cfg,
             stats: Arc::new(QueueStats::default()),
@@ -383,8 +421,13 @@ impl Queue {
     /// # Errors
     /// [`QueueError`].
     pub async fn read(&self, stream: Stream, count: usize) -> Result<Vec<Delivery>, QueueError> {
-        let v: Value = self
-            .reader
+        let reader = self
+            .readers
+            .get(stream.index())
+            .ok_or(QueueError::Protocol("stream index"))?
+            .get_or_try_init(|| ValkeyConn::connect(self.client.clone()))
+            .await?;
+        let v: Value = reader
             .query(
                 redis::cmd("XREADGROUP")
                     .arg("GROUP")
@@ -491,6 +534,7 @@ impl Queue {
                     )
                     .await?;
                 self.stats.retried.fetch_add(1, Ordering::Relaxed);
+                RETRIED.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }
             Outcome::Dead => self.dead(d).await,
@@ -524,6 +568,7 @@ impl Queue {
             )
             .await?;
         self.stats.dead.fetch_add(1, Ordering::Relaxed);
+        DEAD_LETTERED.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -644,6 +689,13 @@ impl Queue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_indexes_match_all() {
+        for (i, s) in Stream::ALL.iter().enumerate() {
+            assert_eq!(s.index(), i);
+        }
+    }
 
     #[test]
     fn backoff_stays_under_its_cap() {

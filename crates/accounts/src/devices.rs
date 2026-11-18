@@ -3,7 +3,7 @@
 //! Every change to an account's set of devices writes its account row (`dgen`) in the same
 //! transaction, so two concurrent changes to one account conflict in SurrealDB and one retries:
 //! the device limit holds under races (the live tests race it). Retries back off with jitter,
-//! within a time budget ([`crate::Backoff`], D-0093).
+//! within a time budget (`Backoff` in the crate root, D-0093).
 //!
 //! A linked device is **pending** until the account identity key vouches for it in a signed
 //! list: it can authenticate (to finish setting up and upload its keys) but no one is asked to

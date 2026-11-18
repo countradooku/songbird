@@ -9,6 +9,7 @@ pub mod desktop;
 pub mod devices;
 pub mod gallery;
 pub mod groups;
+pub mod lock;
 pub mod media;
 pub mod notify;
 pub mod onboarding;

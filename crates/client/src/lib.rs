@@ -57,6 +57,10 @@ pub struct ClientConfig {
     pub server_name: String,
     /// TLS settings; `None` for plain TCP (development and tests only).
     pub tls: Option<Arc<rustls::ClientConfig>>,
+    /// Reach the endpoint through a Songbird proxy (`docs/PROTOCOL.md` §1.1; Prompt 9): TLS to
+    /// the proxy, and the usual TLS session to the endpoint inside it, which the proxy cannot
+    /// read. Needs [`ClientConfig::tls`].
+    pub proxy: Option<ProxyRoute>,
     /// Frame limits (must match the server's).
     pub limits: Limits,
     /// Reconnect backoff.
@@ -93,6 +97,7 @@ impl ClientConfig {
             addr: addr.into(),
             server_name: server_name.into(),
             tls: None,
+            proxy: None,
             limits: Limits::DEFAULT,
             backoff: BackoffConfig::default(),
             ack_delay: Duration::from_millis(10),
@@ -102,6 +107,52 @@ impl ClientConfig {
             send_log_capacity: 100_000,
             send_log_max_age: Duration::from_hours(30 * 24),
             new_device_grace: Duration::ZERO,
+        }
+    }
+}
+
+/// TLS 1.3 settings trusting Mozilla's roots (`webpki-roots`): for public endpoints and the
+/// proxies people run. `None` only if the TLS library refuses TLS 1.3 (it does not).
+#[must_use]
+pub fn web_tls() -> Option<Arc<rustls::ClientConfig>> {
+    let roots = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .ok()
+        .map(|b| Arc::new(b.with_root_certificates(roots).with_no_client_auth()))
+}
+
+/// A Songbird proxy to dial (from a proxy link, `songbird_types::proxy_link`).
+#[derive(Clone)]
+pub struct ProxyRoute {
+    /// `host:port` of the proxy.
+    pub addr: String,
+    /// The proxy's host name: its TLS certificate's name and the outer session's SNI.
+    pub host: String,
+    /// TLS settings for the outer session (the system's roots, normally).
+    pub tls: Arc<rustls::ClientConfig>,
+}
+
+impl std::fmt::Debug for ProxyRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyRoute").finish_non_exhaustive()
+    }
+}
+
+impl ProxyRoute {
+    /// The route a proxy link names, with `tls` for the outer session.
+    #[must_use]
+    pub fn from_link(
+        link: &songbird_types::proxy_link::ProxyLink,
+        tls: Arc<rustls::ClientConfig>,
+    ) -> Self {
+        Self {
+            addr: format!("{}:{}", link.host, link.port),
+            host: link.host.clone(),
+            tls,
         }
     }
 }
@@ -451,9 +502,13 @@ struct Task {
     started: std::time::Instant,
 }
 
+type Tls<S> = tokio_rustls::client::TlsStream<S>;
+
 enum Conn {
     Plain(Box<WebSocketStream<TcpStream>>),
-    Tls(Box<WebSocketStream<tokio_rustls::client::TlsStream<TcpStream>>>),
+    Tls(Box<WebSocketStream<Tls<TcpStream>>>),
+    /// Through a proxy: the endpoint's TLS inside the proxy's.
+    Proxied(Box<WebSocketStream<Tls<Tls<TcpStream>>>>),
 }
 
 /// A send waiting for its result.
@@ -570,6 +625,7 @@ impl Task {
             let outcome = match self.connect().await {
                 Ok(Conn::Plain(ws)) => self.session(*ws).await,
                 Ok(Conn::Tls(ws)) => self.session(*ws).await,
+                Ok(Conn::Proxied(ws)) => self.session(*ws).await,
                 Err(()) => Outcome::Error,
             };
             for (_, p) in self.pending.drain() {
@@ -659,7 +715,68 @@ impl Task {
             .build()
     }
 
+    /// Through the proxy: TCP and TLS to the proxy (its own name), then the endpoint's TLS inside
+    /// it. The channel binding is the inner session's, so the proxy (or anyone holding the outer
+    /// session) cannot relay the authentication.
+    async fn connect_proxied(&mut self, proxy: ProxyRoute) -> Result<Conn, ()> {
+        let t = self.cfg.handshake_timeout;
+        let Some(inner_tls) = self.cfg.tls.clone() else {
+            return Err(());
+        };
+        let tcp = tokio::time::timeout(t, TcpStream::connect(&proxy.addr))
+            .await
+            .map_err(drop)?
+            .map_err(drop)?;
+        tcp.set_nodelay(true).map_err(drop)?;
+        let outer_name =
+            rustls_pki_types::ServerName::try_from(proxy.host.clone()).map_err(drop)?;
+        let outer = tokio::time::timeout(
+            t,
+            tokio_rustls::TlsConnector::from(proxy.tls).connect(outer_name, tcp),
+        )
+        .await
+        .map_err(drop)?
+        .map_err(drop)?;
+        let host = self.cfg.server_name.clone();
+        let name = rustls_pki_types::ServerName::try_from(host.clone()).map_err(drop)?;
+        let stream = tokio::time::timeout(
+            t,
+            tokio_rustls::TlsConnector::from(inner_tls).connect(name, outer),
+        )
+        .await
+        .map_err(drop)?
+        .map_err(drop)?;
+        self.channel_binding = stream
+            .get_ref()
+            .1
+            .export_keying_material(
+                [0u8; songbird_proto::auth::CHANNEL_BINDING_LEN],
+                songbird_proto::auth::EXPORTER_LABEL,
+                None,
+            )
+            .map_err(drop)?;
+        let client = WebSocketClient::<Http1>::new(self.ws_config());
+        let (ws, hs) = tokio::time::timeout(
+            t,
+            client.connect_raw(
+                stream,
+                &host,
+                songbird_proto::PATH,
+                Some(songbird_proto::SUBPROTOCOL),
+            ),
+        )
+        .await
+        .map_err(drop)?
+        .map_err(drop)?;
+        check_protocol(hs.protocol.as_deref())?;
+        Ok(Conn::Proxied(Box::new(ws)))
+    }
+
     async fn connect(&mut self) -> Result<Conn, ()> {
+        if let Some(proxy) = self.cfg.proxy.clone() {
+            self.channel_binding = songbird_proto::auth::NO_CHANNEL_BINDING;
+            return self.connect_proxied(proxy).await;
+        }
         let t = self.cfg.handshake_timeout;
         let tcp = tokio::time::timeout(t, TcpStream::connect(&self.cfg.addr))
             .await

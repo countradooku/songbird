@@ -30,8 +30,8 @@ pub use groups_press::{Press, press_surface};
 pub use icons::{Icon, icon};
 pub use onboarding_kit::{
     MONO, StatusTone, busy_bar, code_cells, flow_layout, flow_lead, flow_title, hero_icon,
-    key_blocks, numbered_step, numeric_code, page_dots, progress_bar, qr_code, scanner,
-    status_line, step_segments,
+    key_blocks, numbered_step, numeric_code, page_dots, passcode_cells, progress_bar, qr_code,
+    scanner, status_line, step_segments,
 };
 pub use parts::{
     EDGE_FADE, ICON_TILE, INSET_AVATAR, INSET_ICON, INSET_PLAIN, Leading, Photo, Row, Tick, Tone,

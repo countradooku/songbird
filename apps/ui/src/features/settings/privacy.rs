@@ -419,12 +419,15 @@ pub fn app_lock() {
         let on = move || settings.with(|x| x.app_lock);
         view()
             .child(view().pt_4().child(group(vec![toggle_row(
-                "Unlock with Face ID or PIN",
-                Some("Songbird asks for your device's Face ID, fingerprint or passcode when you open it."),
+                "Lock with a passcode",
+                Some("Songbird asks for six digits when you open it. They stay on this device. Face ID and fingerprints are coming."),
                 on,
                 move |v| {
-                    // mock: the platform's biometric prompt confirms first.
-                    s.settings_update(|x| x.app_lock = v);
+                    if v {
+                        crate::features::lock::set_passcode_page();
+                    } else {
+                        crate::features::lock::turn_off_page();
+                    }
                 },
             )])))
             .child(when(on, move || {

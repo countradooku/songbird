@@ -5002,6 +5002,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
+ "webpki-roots 1.0.12",
 ]
 
 [[package]]
@@ -5093,6 +5094,7 @@ dependencies = [
  "songbird-link",
  "songbird-mailbox",
  "songbird-proto",
+ "songbird-proxy",
  "songbird-push",
  "songbird-push-providers",
  "songbird-router",

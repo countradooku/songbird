@@ -569,8 +569,7 @@ fn rules() {
             .child(super::foot(
                 "No notifications during quiet hours, except calls from you.",
             ))
-            .child(
-                view().pt_4().child(group(vec![
+            .child(view().pt_4().child(group(vec![
                     Row::new("Unlink")
                         .icon(Icon::LogOut)
                         .danger()
@@ -586,8 +585,7 @@ fn rules() {
                             )
                         })
                         .build(),
-                ])),
-            )
+                ])))
             .into_element()
     });
 }
@@ -665,7 +663,7 @@ pub fn proxy() {
                                         .font_weight(FontWeight::SEMIBOLD),
                                 )
                                 .child(muted(move || match current() {
-                                    Some(h) => format!("Connected through {h}"),
+                                    Some(h) => format!("Going through {h}"),
                                     None => "Connecting to Songbird directly".into(),
                                 })),
                         )
@@ -675,11 +673,11 @@ pub fn proxy() {
                             move |on| {
                                 if on {
                                     match parsed() {
-                                        Some(h) => s.settings_update(|x| x.proxy = Some(h)),
+                                        Some(h) => s.set_proxy(Some(h)),
                                         None => toast("Paste a proxy link first"),
                                     }
                                 } else {
-                                    s.settings_update(|x| x.proxy = None);
+                                    s.set_proxy(None);
                                 }
                             },
                         )),
@@ -703,12 +701,12 @@ pub fn proxy() {
                     invalid,
                 ))
                 .child(view().flex_row().child(
-                    // mock: app-core reconnects through the proxy (Prompt 1, censorship-resistant proxy).
+                    // The connection starts again through the proxy (Prompt 9).
                     btn("Connect", Variant::Primary, BtnSize::Md, move || {
                         if let Some(h) = parsed() {
-                            s.settings_update(|x| x.proxy = Some(h.clone()));
+                            s.set_proxy(Some(h.clone()));
                             link.set(String::new());
-                            toast(format!("Connected through {h}"));
+                            toast(format!("Using the proxy {h}"));
                         }
                     })
                     .disabled(move || parsed().is_none()),

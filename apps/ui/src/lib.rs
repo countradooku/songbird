@@ -61,12 +61,14 @@ fn native(registry: &mut Registry) {
 pub fn App() -> impl IntoElement {
     let s = Store::new();
     store::install(s);
-    backend::restore();
     // Settings saved on this device, and the encrypted records synced from
-    // the account's other devices (Prompt 9).
+    // the account's other devices (Prompt 9); before the connection, which
+    // reads the proxy setting.
     backend::records::restore(s);
+    backend::restore();
     backend::records::periodic(s);
     s.refresh_server_settings();
+    features::lock::install(s);
     theming::follow_settings(s);
     features::desktop::install_shortcuts();
     features::notify::install(features::desktop::current_chat);
@@ -77,12 +79,19 @@ pub fn App() -> impl IntoElement {
         .bg(move || ui::c::background())
         .text_color(move || ui::c::foreground())
         .child(
-            when(onboarded, || {
-                when(ui::wide, shell::desktop).otherwise(shell::phone)
-            })
-            .otherwise(features::onboarding::flow),
+            view()
+                .flex_1()
+                // Screen readers skip the app while it's locked (Prompt 9).
+                .accessibility_elements_hidden(move || features::lock::locked().get().0)
+                .child(
+                    when(onboarded, || {
+                        when(ui::wide, shell::desktop).otherwise(shell::phone)
+                    })
+                    .otherwise(features::onboarding::flow),
+                ),
         )
         .child(features::desktop::jump::layer())
+        .child(features::lock::layer())
         .child(features::calls::call_layer())
         .child(ui::toast_layer())
 }

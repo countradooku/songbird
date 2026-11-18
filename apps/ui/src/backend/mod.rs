@@ -18,6 +18,7 @@
 //!   and acknowledge them).
 
 pub mod account;
+pub mod lock;
 pub mod records;
 pub mod wire;
 mod ws;

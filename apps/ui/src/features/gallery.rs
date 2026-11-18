@@ -366,8 +366,7 @@ fn skins() -> View {
                     move |v| seg.set(v),
                 ))
                 .child(search_field("Search", q))
-                .child(
-                    view().mx(px(-16.0)).child(group(vec![
+                .child(view().mx(px(-16.0)).child(group(vec![
                         Row::new("Privacy")
                             .icon(Icon::Lock)
                             .chevron()
@@ -380,8 +379,7 @@ fn skins() -> View {
                             move || on.get(),
                             move |v| on.set(v),
                         ),
-                    ])),
-                )
+                    ])))
         })
     };
     section(

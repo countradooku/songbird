@@ -383,6 +383,40 @@ pub fn code_cells(
     invalid: impl Fn() -> bool + Copy + 'static,
     on_submit: impl Fn() + 'static,
 ) -> View {
+    cells(
+        label, length, group, value, clean, invalid, on_submit, false,
+    )
+}
+
+/// A passcode typed into six cells that show dots, never digits (the app
+/// lock, Prompt 9): the same field as [`code_cells`], masked, a number pad
+/// on phones.
+pub fn passcode_cells(
+    label: &'static str,
+    value: Signal<String>,
+    invalid: impl Fn() -> bool + Copy + 'static,
+    on_submit: impl Fn() + 'static,
+) -> View {
+    fn digits(t: &str) -> String {
+        t.chars().filter(char::is_ascii_digit).take(6).collect()
+    }
+    cells(label, 6, 3, value, digits, invalid, on_submit, true)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the two public forms share one body"
+)]
+fn cells(
+    label: &'static str,
+    length: usize,
+    group: usize,
+    value: Signal<String>,
+    clean: fn(&str) -> String,
+    invalid: impl Fn() -> bool + Copy + 'static,
+    on_submit: impl Fn() + 'static,
+    masked: bool,
+) -> View {
     const PER_ROW: usize = 3;
     let focused = signal(false);
     let blocks = length.div_ceil(group);
@@ -417,19 +451,23 @@ pub fn code_cells(
             .children((0..group).map(move |k| {
                 let i = b * group + k;
                 let ch = move || value.with(|v| v.chars().nth(i));
-                text(move || ch().map(String::from).unwrap_or_else(|| "·".into()))
-                    .w(px(14.0))
-                    .text_center()
-                    .font_family(MONO)
-                    .text_size(px(font::TITLE))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(move || {
-                        if ch().is_some() {
-                            c::foreground()
-                        } else {
-                            c::muted_fg()
-                        }
-                    })
+                text(move || match ch() {
+                    Some(_) if masked => "●".into(),
+                    Some(c) => String::from(c),
+                    None => "·".into(),
+                })
+                .w(px(14.0))
+                .text_center()
+                .font_family(MONO)
+                .text_size(px(font::TITLE))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(move || {
+                    if ch().is_some() {
+                        c::foreground()
+                    } else {
+                        c::muted_fg()
+                    }
+                })
             }))
     };
     view()
@@ -456,6 +494,12 @@ pub fn code_cells(
                 .on_focus(move || focused.set(true))
                 .on_blur(move || focused.set(false))
                 .label(label)
+                .keyboard_type(if masked {
+                    KeyboardType::Number
+                } else {
+                    KeyboardType::Default
+                })
+                .masked(masked)
                 .auto_capitalize(AutoCapitalize::Characters)
                 .auto_correct(false)
                 .submit_behavior(SubmitBehavior::Submit)

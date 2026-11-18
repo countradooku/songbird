@@ -226,24 +226,24 @@ pub fn matches(query: &str, title: &str, keywords: &str) -> bool {
 /// A proxy link's host: `https://songbird.chat/proxy#host:port`, a
 /// `songbird://proxy?host=…` link, or a bare host. `None` if it is not one.
 pub fn proxy_host(link: &str) -> Option<String> {
+    // The protocol's own parser (PROTOCOL §1.1): an app link, a web link on
+    // Songbird's domain, or a bare `host[:port]` typed by hand. The web
+    // domain is the owner's open decision D-0011; `songbird.chat` until then.
     let link = link.trim();
-    let host = if let Some(rest) = link.split_once("/proxy#").map(|(_, h)| h) {
-        rest
-    } else if let Some((_, q)) = link.split_once("proxy?host=") {
-        q.split('&').next().unwrap_or_default()
-    } else if !link.contains('/') && !link.contains(' ') {
-        link
+    let full = if link.contains("://") {
+        link.to_string()
     } else {
-        return None;
+        format!("songbird://proxy#{link}")
     };
-    let name = host.split(':').next().unwrap_or_default();
-    let valid = name.contains('.')
-        && !name.starts_with('.')
-        && !name.ends_with('.')
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
-    valid.then(|| host.to_lowercase())
+    let parsed = songbird_types::proxy_link::ProxyLink::parse(&full, &["songbird.chat"]).ok()?;
+    // A dotted name: a proxy is a public host.
+    parsed.host.contains('.').then(|| {
+        if parsed.port == songbird_types::proxy_link::DEFAULT_PORT {
+            parsed.host
+        } else {
+            format!("{}:{}", parsed.host, parsed.port)
+        }
+    })
 }
 
 /// The new place of a list moved by `delta` (−1 up, +1 down), clamped.
@@ -359,6 +359,15 @@ impl Store {
             months,
             crate::backend::account::set_inactivity(months),
         );
+    }
+
+    /// Uses a proxy (`Some(host[:port])`) or connects directly; a live
+    /// connection starts again the new way (Prompt 9).
+    pub fn set_proxy(&self, proxy: Option<String>) {
+        self.settings_update(|x| x.proxy = proxy);
+        if crate::backend::is_live() && crate::backend::registered() {
+            crate::backend::connect();
+        }
     }
 
     /// Takes the server's copy of its settings (at start, when live).
@@ -537,13 +546,18 @@ mod tests {
     #[test]
     fn proxy_links() {
         assert_eq!(
-            proxy_host("https://songbird.chat/proxy#relay.example.org:443").as_deref(),
-            Some("relay.example.org:443")
+            proxy_host("https://songbird.chat/proxy#relay.example.org:8443").as_deref(),
+            Some("relay.example.org:8443")
         );
         assert_eq!(
-            proxy_host("songbird://proxy?host=Relay.Example.org&x=1").as_deref(),
+            proxy_host("songbird://proxy#Relay.Example.org:443").as_deref(),
             Some("relay.example.org")
         );
+        assert_eq!(
+            proxy_host("https://evil.example/proxy#relay.example.org"),
+            None
+        );
+        assert_eq!(proxy_host("songbird://proxy?host=relay.example.org"), None);
         assert_eq!(
             proxy_host("relay.example.org").as_deref(),
             Some("relay.example.org")

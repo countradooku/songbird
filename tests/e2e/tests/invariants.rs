@@ -959,3 +959,102 @@ async fn send_path_device_lists_and_shared_bodies() {
     assert!(!RejectReason::StaleEpoch.is_retryable());
     s.stop().await;
 }
+
+/// Prompt 9, M5: the client dials a Songbird proxy from its link and reaches delivery through it:
+/// TLS to the proxy, the delivery node's TLS inside it (the channel binding is the inner
+/// session's, so authentication works through the relay and the proxy reads nothing).
+#[tokio::test]
+async fn a_client_reaches_delivery_through_a_proxy_link() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let ca_key = rcgen::KeyPair::generate().unwrap();
+    let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca = ca_params.self_signed(&ca_key).unwrap();
+    let leaf_key = rcgen::KeyPair::generate().unwrap();
+    let issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
+    let leaf = rcgen::CertificateParams::new(vec![SERVER_NAME.to_owned()])
+        .unwrap()
+        .signed_by(&leaf_key, &issuer)
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let write_key = |path: &std::path::Path, pem: String| {
+        std::fs::write(path, pem).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    };
+    let chain = dir.path().join("chain.pem");
+    let keyf = dir.path().join("key.pem");
+    std::fs::write(&chain, leaf.pem()).unwrap();
+    write_key(&keyf, leaf_key.serialize_pem());
+    let s = start(2, |c| {
+        c.tls = Some(songbird_delivery::config::TlsSettings {
+            cert_chain: chain.clone(),
+            key: songbird_types::SecretRef::File(keyf.clone()),
+        });
+    })
+    .await;
+
+    // The proxy, with its own certificate, relaying SERVER_NAME to the delivery node.
+    let proxy_ck = rcgen::generate_simple_self_signed(vec!["proxy.test".to_owned()]).unwrap();
+    let pcert = dir.path().join("proxy.pem");
+    let pkey = dir.path().join("proxy-key.pem");
+    std::fs::write(&pcert, proxy_ck.cert.pem()).unwrap();
+    write_key(&pkey, proxy_ck.signing_key.serialize_pem());
+    let config = songbird_proxy::config::ProxyConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        tls: songbird_proxy::config::TlsConfig {
+            cert: pcert,
+            key: songbird_types::SecretRef::File(pkey),
+        },
+        upstream: vec![songbird_proxy::config::Upstream {
+            sni: SERVER_NAME.into(),
+            address: s.addr.to_string(),
+        }],
+        limits: songbird_proxy::config::Limits::default(),
+    };
+    let acceptor = songbird_proxy::relay::tls_acceptor(&config.tls).unwrap();
+    let listener = tokio::net::TcpListener::bind(config.listen).await.unwrap();
+    let paddr = listener.local_addr().unwrap();
+    tokio::spawn(songbird_proxy::relay::Relay::new(config, acceptor).serve(
+        listener,
+        std::future::pending(),
+        Duration::from_secs(1),
+    ));
+
+    // The link a user would open; "proxy.test" resolves only in this test, so the route's
+    // address is the listener's (the parsed host is the outer session's name).
+    let link = songbird_types::proxy_link::ProxyLink::parse(
+        &format!("songbird://proxy#proxy.test:{}", paddr.port()),
+        &[],
+    )
+    .unwrap();
+    let mut proxy_roots = rustls::RootCertStore::empty();
+    proxy_roots.add(proxy_ck.cert.der().clone()).unwrap();
+    let outer = Arc::new(
+        rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(proxy_roots)
+        .with_no_client_auth(),
+    );
+    let mut route = songbird_client::ProxyRoute::from_link(&link, outer);
+    route.addr = paddr.to_string();
+    let mut cfg: ClientConfig = s.client_config();
+    cfg.tls = Some(cfg_tls_for_raw(&s, &ca));
+    let direct = cfg.clone();
+    cfg.proxy = Some(route);
+    let (a, _ae) = s.connect_with(0, cfg, ResumeState::default()).await;
+    let (_b, mut be) = s.connect_with(1, direct, ResumeState::default()).await;
+    a.send(key(), vec![to(s.device(1), "through the proxy")])
+        .await
+        .unwrap();
+    assert_eq!(
+        next_delivery(&mut be).await.1.as_ref(),
+        b"through the proxy"
+    );
+}

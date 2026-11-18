@@ -178,6 +178,11 @@ pub fn store() -> Store {
         .expect("the root provides the store")
 }
 
+/// The store, when the root has made one (the backend's tasks).
+pub fn try_store() -> Option<Store> {
+    use_context::<Store>().or_else(|| ROOT.with(|r| r.get()))
+}
+
 /// Makes `s` the app's store (the root, once).
 pub fn install(s: Store) {
     ROOT.with(|r| r.set(Some(s)));

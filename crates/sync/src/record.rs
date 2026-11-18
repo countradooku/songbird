@@ -15,8 +15,9 @@
 //!
 //! # Record plaintext
 //!
-//! `be32(len) ‖ RecordPlain (protobuf) ‖ zeros`, to the Padmé length of [`MIN_RECORD_PADDED`] to
-//! [`MAX_RECORD_PADDED`] bytes (`songbird_proto::storage`). `RecordPlain` carries the logical
+//! `be32(len) ‖ RecordPlain (protobuf) ‖ zeros`, to the Padmé length of
+//! [`MIN_RECORD_PADDED`](songbird_proto::storage::MIN_RECORD_PADDED) to [`MAX_RECORD_PADDED`]
+//! bytes (`songbird_proto::storage`). `RecordPlain` carries the logical
 //! key, the stamp, whether it is a tombstone, and the value.
 //!
 //! # Manifest

@@ -57,6 +57,8 @@ hyper-util.workspace = true
 http-body-util.workspace = true
 futures-sink.workspace = true
 rcgen.workspace = true
+# The proxy relay, dialed by the client (Prompt 9: the proxy setting).
+songbird-proxy = { path = "../../services/proxy" }
 rustls.workspace = true
 rustls-pki-types.workspace = true
 tokio-rustls.workspace = true

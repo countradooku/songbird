@@ -22,7 +22,9 @@ pub const MAX_LINKED: usize = 4;
 
 /// The safety-number screen for a contact, pushed.
 pub fn safety_number(contact: ContactId) {
-    nav::push(format!("safety:{contact}"), move || page("Safety number", safety_body(contact)));
+    nav::push(format!("safety:{contact}"), move || {
+        page("Safety number", safety_body(contact))
+    });
 }
 
 fn first_name(name: &str) -> String {
@@ -32,7 +34,13 @@ fn first_name(name: &str) -> String {
 fn safety_body(contact: ContactId) -> AnyElement {
     let s = store();
     let Some(person) = s.contact(contact) else {
-        return empty_state(Icon::User, "Contact not found", "They may have been removed.", None).into_element();
+        return empty_state(
+            Icon::User,
+            "Contact not found",
+            "They may have been removed.",
+            None,
+        )
+        .into_element();
     };
     let me = s.me.get_untracked();
     let first = first_name(&person.name);
@@ -165,7 +173,13 @@ fn safety_body(contact: ContactId) -> AnyElement {
     view()
         .flex_1()
         .child(page_scroll(content))
-        .child(scan_sheet(s, contact, scanning, first, person.safety_number.clone()))
+        .child(scan_sheet(
+            s,
+            contact,
+            scanning,
+            first,
+            person.safety_number.clone(),
+        ))
         .into_element()
 }
 
@@ -336,21 +350,35 @@ fn devices_body() -> AnyElement {
                 .max_w(px(360.0)),
         )
         .child(
-            btn_with_icon("Link a device", Some(Icon::QrCode), Variant::Primary, BtnSize::Md, move || {
-                link_open.set(true)
-            })
+            btn_with_icon(
+                "Link a device",
+                Some(Icon::QrCode),
+                Variant::Primary,
+                BtnSize::Md,
+                move || link_open.set(true),
+            )
             .disabled(full),
         )
-        .child(when(full, || muted("You've linked 4 devices. Log one out to link another.").text_center()));
+        .child(when(full, || {
+            muted("You've linked 4 devices. Log one out to link another.").text_center()
+        }));
 
     let list = dynamic(move || {
         let devices = devices_here(s.devices.get());
         untracked(move || {
             group(devices.into_iter().map(move |d| {
                 let leading = icon_tile(device_icon(d.kind));
-                let subtitle = if d.this_device { "Active now".to_string() } else { d.last_active.clone() };
+                let subtitle = if d.this_device {
+                    "Active now".to_string()
+                } else {
+                    d.last_active.clone()
+                };
                 let row = Row::new(d.name.clone()).leading(leading).subtitle(subtitle);
-                let row = if d.this_device { row.trailing(tag("This device")) } else { row.chevron() };
+                let row = if d.this_device {
+                    row.trailing(tag("This device"))
+                } else {
+                    row.chevron()
+                };
                 row.on_press(move || {
                     selected.set(Some(d.clone()));
                     detail_open.set(true);
@@ -385,6 +413,8 @@ fn devices_body() -> AnyElement {
 /// (D-0110): never from a photo, a pasted text or a link.
 fn link_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
     let found = signal(None::<String>);
+    // The main phone is sealing and waiting for the new device.
+    let linking = signal(false);
     app_sheet(
         open,
         "Link a device",
@@ -416,7 +446,7 @@ fn link_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
                     let code = found.get();
                     let session = session.clone();
                     untracked(move || match code {
-                        Some(_code) => view()
+                        Some(code) => view()
                             .gap_4()
                             .items_center()
                             .child(hero_icon(Icon::Laptop))
@@ -438,13 +468,34 @@ fn link_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
                                     .flex_row()
                                     .gap_2()
                                     .child(btn("Cancel", Variant::Ghost, BtnSize::Md, move || open.set(false)))
-                                    .child(btn("Link device", Variant::Primary, BtnSize::Md, move || {
-                                        // mock: app-core links with the scanned code (Prompt 9's
-                                        // `backend::link::link_from_code`).
-                                        let name = s.link_scanned_device();
-                                        open.set(false);
-                                        toast(format!("{name} is linked"));
-                                    })),
+                                    .child(
+                                        btn("Link device", Variant::Primary, BtnSize::Md, move || {
+                                            if !(crate::backend::is_live() && crate::backend::registered()) {
+                                                // mock: the preview's device list.
+                                                let name = s.link_scanned_device();
+                                                open.set(false);
+                                                toast(format!("{name} is linked"));
+                                                return;
+                                            }
+                                            linking.set(true);
+                                            let code = code.clone();
+                                            spawn(async move {
+                                                // Seals the account and the storage key to the
+                                                // new device, then names it in a signed list once
+                                                // its keys prove the confirmation key.
+                                                let result = crate::backend::link::link_from_code(&code).await;
+                                                let _ = linking.try_set(false);
+                                                match result {
+                                                    Ok(()) => {
+                                                        let _ = open.try_set(false);
+                                                        toast("Your new device is linked");
+                                                    }
+                                                    Err(p) => toast(p.to_string()),
+                                                }
+                                            });
+                                        })
+                                        .disabled(move || linking.get()),
+                                    ),
                             )
                             .into_element(),
                         None => view()
@@ -467,7 +518,11 @@ fn link_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
 }
 
 /// A device's sheet: rename it, or log it out.
-fn device_sheet(s: Store, open: Signal<bool>, selected: Signal<Option<Device>>) -> nsh_base::SheetElement {
+fn device_sheet(
+    s: Store,
+    open: Signal<bool>,
+    selected: Signal<Option<Device>>,
+) -> nsh_base::SheetElement {
     let name = signal(String::new());
     app_sheet(
         open,
@@ -561,15 +616,23 @@ mod camera_flow {
         crate::camera::install(Some(Arc::new(CAM.clone())), false);
         let open = signal(true);
         view()
-            .child(text(move || format!("devices: {}", s.devices.with(Vec::len))))
+            .child(text(move || {
+                format!("devices: {}", s.devices.with(Vec::len))
+            }))
             .child(link_sheet(s, open))
     }
 
     #[test]
     fn a_link_code_asks_first_and_anything_else_is_ignored() -> Result<(), String> {
-        let mut app = Headless::start(EngineConfig::new(Root::of::<LinkProbe>())).map_err(|e| e.to_string())?;
+        let mut app = Headless::start(EngineConfig::new(Root::of::<LinkProbe>()))
+            .map_err(|e| e.to_string())?;
         app.wait_for("Looking for a code…")?;
-        let before = app.screen().texts().iter().find(|t| t.starts_with("devices: ")).map(ToString::to_string);
+        let before = app
+            .screen()
+            .texts()
+            .iter()
+            .find(|t| t.starts_with("devices: "))
+            .map(ToString::to_string);
         // A group invite link and garbage: nothing happens.
         CAM.show_code("https://songbird.chat/g/0123456789abcdef#k=abc");
         CAM.show_code("hello");
@@ -581,11 +644,21 @@ mod camera_flow {
         app.wait_for("Link a new device?")?;
         app.wait_for("text:/read and send all your messages/")?;
         assert_eq!(CAM.running(), 0, "{:?}", CAM.log());
-        let after_scan = app.screen().texts().iter().find(|t| t.starts_with("devices: ")).map(ToString::to_string);
+        let after_scan = app
+            .screen()
+            .texts()
+            .iter()
+            .find(|t| t.starts_with("devices: "))
+            .map(ToString::to_string);
         assert_eq!(before, after_scan, "nothing is linked before the press");
         app.press("Link device")?;
         app.wait_for_gone("Link a new device?", std::time::Duration::from_secs(2))?;
-        let after = app.screen().texts().iter().find(|t| t.starts_with("devices: ")).map(ToString::to_string);
+        let after = app
+            .screen()
+            .texts()
+            .iter()
+            .find(|t| t.starts_with("devices: "))
+            .map(ToString::to_string);
         assert_ne!(before, after, "linked after the press");
         Ok(())
     }

@@ -19,5 +19,7 @@ use crate::{
 /// Opens the full-screen viewer on `msg`, with the chat's other photos
 /// and videos a swipe or an arrow key away.
 pub fn open_viewer(chat: ChatId, msg: MsgId) {
-    nav::push(format!("viewer:{chat}"), move || viewer::viewer_page(chat, msg));
+    nav::push(format!("viewer:{chat}"), move || {
+        viewer::viewer_page(chat, msg)
+    });
 }

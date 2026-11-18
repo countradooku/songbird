@@ -154,6 +154,7 @@ impl Requests {
         }
         match registry.set_requests_off(&row.account, off).await {
             Ok(()) => Outcome::Done,
+            Err(RegistryError::Supervised) => Outcome::Forbidden("supervised"),
             Err(_) => Outcome::Unavailable,
         }
     }

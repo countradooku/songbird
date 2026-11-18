@@ -45,7 +45,59 @@ message Content {
     SyncMessage sync = 13;
     RequestResponse request_response = 14;
     CallMessage call = 15;       // call signalling (Prompt 7, PROTOCOL §8)
+    ProfileChanged profile_changed = 16; // fetch my profile again (Prompt 9, PROTOCOL §10.4)
+    Presence presence = 17;    // sealed, never stored (PROTOCOL §10.5)
+    Attention attention = 18;  // the attention class, never stored (PROTOCOL §10.5)
   }
+}
+
+// Presence and last seen, sent sealed to allowed contacts (PROTOCOL §10.5).
+message Presence {
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    STATE_ONLINE = 1;
+    STATE_AWAY = 2;
+    STATE_BUSY = 3;
+    STATE_OFFLINE = 4; // with last_seen_ms (0 when not shared)
+  }
+  State state = 1;
+  uint64 last_seen_ms = 2; // to the minute
+  bool wants_reply = 3;    // just came online: online contacts answer once
+}
+
+// An attention event (Yahoo's buzz), in the server's attention class.
+message Attention {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_NUDGE = 1;
+  }
+  Kind kind = 1;
+}
+
+// Sent sealed, stored and SILENT to contacts after a profile change.
+message ProfileChanged {
+  uint64 version = 1; // the new profile version; > 0
+}
+
+// The encrypted profile's plaintext (PROTOCOL §10.4). Fields the user shares with nobody are
+// left out; only contacts hold the profile key.
+message ProfilePlain {
+  string name = 1;        // at most 128 bytes
+  string about = 2;       // at most 280 bytes
+  Status status = 3;
+  Avatar avatar = 4;
+  repeated string links = 5; // at most 5, each 1 to 256 bytes
+}
+
+message Status {
+  string text = 1;        // at most 140 bytes
+  string emoji = 2;       // at most 32 bytes
+  uint64 expires_ms = 3;  // 0: until changed
+}
+
+message Avatar {
+  bytes id = 1;  // 32 bytes: the object `PUT /v1/profile/avatar` answered
+  bytes key = 2; // 32 bytes
 }
 
 // A reference to a message: its author's account and its message ID.
@@ -260,6 +312,7 @@ message TimerChange {
 }
 
 // A nudge (Prompt 9 gives it behaviour). Rate-limited on the client.
+// Superseded by Content.attention (Prompt 9): never sent; kept so old vectors decode.
 message Nudge {}
 
 message CallEvent {
@@ -371,7 +424,14 @@ message SyncMessage {
     BlockListSync blocked = 7;
     CallHistorySync call_history = 8;
     RequestResponse request_response = 9;
+    StorageSync storage = 10;
   }
+}
+
+// The account record store (Prompt 9, PROTOCOL §10.1).
+message StorageSync {
+  bytes key = 1;     // empty, or a new 32-byte storage key after a rotation
+  bool changed = 2;  // the store changed: fetch it now
 }
 
 // What this device sent, so the others show it too.
@@ -409,8 +469,8 @@ message ChatState {
   bool marked_unread = 5;
 }
 
-// Settings that follow the user across devices (Prompt 9 adds the rest). Unset fields are
-// unchanged.
+// Superseded by the account record store (Prompt 9, PROTOCOL §10): apps keep settings there.
+// Unset fields are unchanged.
 message SettingsSync {
   optional bool read_receipts = 1;
   optional bool typing_indicators = 2;

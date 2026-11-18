@@ -9,7 +9,7 @@ use nsh_core::{element::ImageSrc, prelude::*};
 use crate::{
     features::chat as chat_feature,
     nav,
-    store::{Body, Chat, ChatId, Message, MsgId, Store, store, day_label, clock},
+    store::{Body, Chat, ChatId, Message, MsgId, Store, clock, day_label, store},
     ui::*,
 };
 
@@ -17,20 +17,30 @@ use crate::{
 
 /// The chat's photos and videos, oldest first.
 pub fn media_ids(messages: &[Message]) -> Vec<MsgId> {
-    messages.iter().filter(|m| matches!(m.body, Body::Image { .. } | Body::Video { .. })).map(|m| m.id).collect()
+    messages
+        .iter()
+        .filter(|m| matches!(m.body, Body::Image { .. } | Body::Video { .. }))
+        .map(|m| m.id)
+        .collect()
 }
 
 /// The item `delta` steps from `current`, if there is one.
 pub fn step(ids: &[MsgId], current: MsgId, delta: i32) -> Option<MsgId> {
     let at = ids.iter().position(|&i| i == current)? as i64 + delta as i64;
-    (0..ids.len() as i64).contains(&at).then(|| ids[at as usize])
+    (0..ids.len() as i64)
+        .contains(&at)
+        .then(|| ids[at as usize])
 }
 
 /// The largest `w`:`h` box inside `avail_w` × `avail_h`.
 pub fn fit(w: u32, h: u32, avail_w: f32, avail_h: f32) -> (f32, f32) {
     let ratio = w.max(1) as f32 / h.max(1) as f32;
     let (aw, ah) = (avail_w.max(80.0), avail_h.max(80.0));
-    if aw / ah > ratio { (ah * ratio, ah) } else { (aw, aw / ratio) }
+    if aw / ah > ratio {
+        (ah * ratio, ah)
+    } else {
+        (aw, aw / ratio)
+    }
 }
 
 /// Why media from this chat can't be saved to the device, if it can't.
@@ -53,7 +63,10 @@ fn duration(secs: u32) -> String {
 /// The viewer, as a pushed page with its own dark header.
 pub(super) fn viewer_page(chat: ChatId, start: MsgId) -> Screen {
     let s = store();
-    let items = computed(move || s.messages.with(|m| m.get(&chat).map(|v| media_ids(v)).unwrap_or_default()));
+    let items = computed(move || {
+        s.messages
+            .with(|m| m.get(&chat).map(|v| media_ids(v)).unwrap_or_default())
+    });
     let current = signal(start);
     let msg = computed(move || s.message(chat, current.get()));
     let zoom = signal(1.0_f32);
@@ -70,7 +83,16 @@ pub(super) fn viewer_page(chat: ChatId, start: MsgId) -> Screen {
         if reduced {
             scale.set(z);
         } else {
-            scale.timing(z, motion::FAST, Easing::Bezier(motion::SETTLE.0, motion::SETTLE.1, motion::SETTLE.2, motion::SETTLE.3));
+            scale.timing(
+                z,
+                motion::FAST,
+                Easing::Bezier(
+                    motion::SETTLE.0,
+                    motion::SETTLE.1,
+                    motion::SETTLE.2,
+                    motion::SETTLE.3,
+                ),
+            );
         }
     };
     let go = move |delta: i32| {
@@ -108,11 +130,15 @@ pub(super) fn viewer_page(chat: ChatId, start: MsgId) -> Screen {
 
     let counter = move || {
         let ids = items.get();
-        let at = ids.iter().position(|&i| i == current.get()).map_or(0, |i| i + 1);
+        let at = ids
+            .iter()
+            .position(|&i| i == current.get())
+            .map_or(0, |i| i + 1);
         format!("{at} of {}", ids.len())
     };
     let has = move |delta: i32| step(&items.get(), current.get(), delta).is_some();
-    let is_video = move || msg.with(|m| matches!(m.as_ref().map(|m| &m.body), Some(Body::Video { .. })));
+    let is_video =
+        move || msg.with(|m| matches!(m.as_ref().map(|m| &m.body), Some(Body::Video { .. })));
 
     let stage = view()
         .flex_1()
@@ -121,7 +147,8 @@ pub(super) fn viewer_page(chat: ChatId, start: MsgId) -> Screen {
         .overflow_hidden()
         .pan_values(Some(&drag), None)
         .on_pan_end(move |e: &PanEvent| {
-            let swiped = zoom.get_untracked() <= 1.0 && (e.translation.x.0.abs() > 72.0 || e.velocity_x.abs() > 600.0);
+            let swiped = zoom.get_untracked() <= 1.0
+                && (e.translation.x.0.abs() > 72.0 || e.velocity_x.abs() > 600.0);
             if swiped {
                 let delta = if e.translation.x.0 < 0.0 { 1 } else { -1 };
                 drag.set(0.0);
@@ -129,7 +156,13 @@ pub(super) fn viewer_page(chat: ChatId, start: MsgId) -> Screen {
             } else if reduced {
                 drag.set(0.0);
             } else {
-                drag.spring(0.0, Spring { velocity: Some(e.velocity_x), ..Spring::default() });
+                drag.spring(
+                    0.0,
+                    Spring {
+                        velocity: Some(e.velocity_x),
+                        ..Spring::default()
+                    },
+                );
             }
         })
         .pinch_value(&scale)
@@ -147,8 +180,16 @@ pub(super) fn viewer_page(chat: ChatId, start: MsgId) -> Screen {
                 .justify_between()
                 .px_3()
                 .pointer_events(PointerEvents::BoxNone)
-                .child(dark_btn(Icon::Back, "Previous", move || go(-1)).disabled(move || !has(-1)).bg(move || c::on_call().opacity(0.16)))
-                .child(dark_btn(Icon::ChevronRight, "Next", move || go(1)).disabled(move || !has(1)).bg(move || c::on_call().opacity(0.16)))
+                .child(
+                    dark_btn(Icon::Back, "Previous", move || go(-1))
+                        .disabled(move || !has(-1))
+                        .bg(move || c::on_call().opacity(0.16)),
+                )
+                .child(
+                    dark_btn(Icon::ChevronRight, "Next", move || go(1))
+                        .disabled(move || !has(1))
+                        .bg(move || c::on_call().opacity(0.16)),
+                )
         }));
 
     nsh_base::nav_page()
@@ -166,7 +207,11 @@ pub(super) fn viewer_page(chat: ChatId, start: MsgId) -> Screen {
                 .child(caption(msg))
                 .child(when(is_video, move || scrubber(msg, playing, position)))
                 .child(action_bar(s, chat, msg, current, items, forward_open))
-                .child(app_sheet(forward_open, "Forward to…", forward_sheet(s, chat, current, forward_open))),
+                .child(app_sheet(
+                    forward_open,
+                    "Forward to…",
+                    forward_sheet(s, chat, current, forward_open),
+                )),
         )
 }
 
@@ -178,8 +223,20 @@ fn top_bar(
     zoom: Signal<f32>,
     set_zoom: impl Fn(f32) + Copy + 'static,
 ) -> View {
-    let who = move || msg.with(|m| m.as_ref().map(|m| s.contact_name(m.from)).unwrap_or_default());
-    let when = move || msg.with(|m| m.as_ref().map(|m| format!("{}, {}", day_label(m.at), clock(m.at))).unwrap_or_default());
+    let who = move || {
+        msg.with(|m| {
+            m.as_ref()
+                .map(|m| s.contact_name(m.from))
+                .unwrap_or_default()
+        })
+    };
+    let when = move || {
+        msg.with(|m| {
+            m.as_ref()
+                .map(|m| format!("{}, {}", day_label(m.at), clock(m.at)))
+                .unwrap_or_default()
+        })
+    };
     view()
         .h(px(56.0))
         .flex_row()
@@ -191,7 +248,12 @@ fn top_bar(
             view()
                 .flex_1()
                 .min_w(px(0.0))
-                .child(text(who).text_size(px(font::body())).font_weight(FontWeight::SEMIBOLD).number_of_lines(1))
+                .child(
+                    text(who)
+                        .text_size(px(font::body()))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .number_of_lines(1),
+                )
                 .child(
                     text(move || format!("{} · {}", when(), counter()))
                         .text_size(px(font::SMALL))
@@ -204,7 +266,12 @@ fn top_bar(
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .child(glyph_btn(ZOOM_OUT, "Zoom out", move || set_zoom(zoom.get_untracked() - 0.5)).disabled(move || zoom.get() <= 1.0))
+                .child(
+                    glyph_btn(ZOOM_OUT, "Zoom out", move || {
+                        set_zoom(zoom.get_untracked() - 0.5)
+                    })
+                    .disabled(move || zoom.get() <= 1.0),
+                )
                 .child(
                     text(move || format!("{}%", (zoom.get() * 100.0).round() as u32))
                         .w(px(48.0))
@@ -212,17 +279,40 @@ fn top_bar(
                         .text_size(px(font::SMALL))
                         .tabular_nums(),
                 )
-                .child(glyph_btn(ZOOM_IN, "Zoom in", move || set_zoom(zoom.get_untracked() + 0.5)).disabled(move || zoom.get() >= 4.0))
+                .child(
+                    glyph_btn(ZOOM_IN, "Zoom in", move || {
+                        set_zoom(zoom.get_untracked() + 0.5)
+                    })
+                    .disabled(move || zoom.get() >= 4.0),
+                )
         }))
 }
 
 /// The photo or video stand-in at its aspect ratio, with its description.
 /// Fades in when it changes; follows the finger while swiped.
-fn picture(s: Store, chat: ChatId, id: MsgId, scale: AnimatedValue, drag: AnimatedValue, playing: Signal<bool>) -> View {
-    let Some(m) = s.message(chat, id) else { return view() };
+fn picture(
+    s: Store,
+    chat: ChatId,
+    id: MsgId,
+    scale: AnimatedValue,
+    drag: AnimatedValue,
+    playing: Signal<bool>,
+) -> View {
+    let Some(m) = s.message(chat, id) else {
+        return view();
+    };
     let (w, h, alt, video) = match &m.body {
         Body::Image { w, h, alt, .. } => (*w, *h, alt.clone(), false),
-        Body::Video { caption, .. } => (16, 9, if caption.is_empty() { "A video".to_string() } else { caption.clone() }, true),
+        Body::Video { caption, .. } => (
+            16,
+            9,
+            if caption.is_empty() {
+                "A video".to_string()
+            } else {
+                caption.clone()
+            },
+            true,
+        ),
         _ => (1, 1, String::new(), false),
     };
     // The same mock photo as the bubble and the media grid: the message's
@@ -250,26 +340,40 @@ fn picture(s: Store, chat: ChatId, id: MsgId, scale: AnimatedValue, drag: Animat
         .bind_scale(&scale)
         .bind_translate_x(&drag)
         .role(AccessibilityRole::Image)
-        .label(if video { format!("Video: {alt}") } else { format!("Photo: {alt}") })
-        .child(image(src).absolute().inset_0().object_fit(ResizeMode::Cover).accessibility_elements_hidden(true))
+        .label(if video {
+            format!("Video: {alt}")
+        } else {
+            format!("Photo: {alt}")
+        })
+        .child(
+            image(src)
+                .absolute()
+                .inset_0()
+                .object_fit(ResizeMode::Cover)
+                .accessibility_elements_hidden(true),
+        )
         .child(video.then(|| {
-            view()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .child(
-                    press_surface(Press::OnDark, move || playing.update(|p| *p = !*p))
-                        .accessibility_label(move || Some(SharedString::from(if playing.get() { "Pause" } else { "Play" })))
-                        .size(px(64.0))
-                        .rounded_full()
-                        .bg(move || c::call_bg().opacity(0.6))
-                        .items_center()
-                        .justify_center()
-                        .child(dynamic(move || {
-                            let p = playing.get();
-                            untracked(move || icon(if p { Icon::Pause } else { Icon::Play }, 28.0).into_element())
-                        })),
-                )
+            view().flex_1().items_center().justify_center().child(
+                press_surface(Press::OnDark, move || playing.update(|p| *p = !*p))
+                    .accessibility_label(move || {
+                        Some(SharedString::from(if playing.get() {
+                            "Pause"
+                        } else {
+                            "Play"
+                        }))
+                    })
+                    .size(px(64.0))
+                    .rounded_full()
+                    .bg(move || c::call_bg().opacity(0.6))
+                    .items_center()
+                    .justify_center()
+                    .child(dynamic(move || {
+                        let p = playing.get();
+                        untracked(move || {
+                            icon(if p { Icon::Pause } else { Icon::Play }, 28.0).into_element()
+                        })
+                    })),
+            )
         }))
 }
 
@@ -280,19 +384,14 @@ fn caption(msg: Memo<Option<Message>>) -> View {
             _ => String::new(),
         })
     };
-    view()
-        .px_4()
-        .py_2()
-        .min_h(px(36.0))
-        .items_center()
-        .child(
-            text(text_of)
-                .max_w(px(640.0))
-                .text_center()
-                .text_size(px(font::body()))
-                .line_height(px(font::body() * 1.4))
-                .number_of_lines(3),
-        )
+    view().px_4().py_2().min_h(px(36.0)).items_center().child(
+        text(text_of)
+            .max_w(px(640.0))
+            .text_center()
+            .text_size(px(font::body()))
+            .line_height(px(font::body() * 1.4))
+            .number_of_lines(3),
+    )
 }
 
 /// Mock scrubber: play or pause, position and length.
@@ -308,8 +407,16 @@ fn scrubber(msg: Memo<Option<Message>>, playing: Signal<bool>, position: Signal<
         .px_4()
         .pb_2()
         .child(
-            dark_btn(Icon::Play, "Play or pause", move || playing.update(|p| *p = !*p))
-                .accessibility_label(move || Some(SharedString::from(if playing.get() { "Pause" } else { "Play" }))),
+            dark_btn(Icon::Play, "Play or pause", move || {
+                playing.update(|p| *p = !*p)
+            })
+            .accessibility_label(move || {
+                Some(SharedString::from(if playing.get() {
+                    "Pause"
+                } else {
+                    "Play"
+                }))
+            }),
         )
         .child(
             text(move || duration((position.get() * secs() as f32) as u32))
@@ -325,9 +432,18 @@ fn scrubber(msg: Memo<Option<Message>>, playing: Signal<bool>, position: Signal<
                 .bg(move || c::overlay())
                 .role(AccessibilityRole::Progressbar)
                 .label(move || format!("{}% played", (position.get() * 100.0) as u32))
-                .child(view().h_full().w(move || relative(position.get())).bg(move || c::on_call())),
+                .child(
+                    view()
+                        .h_full()
+                        .w(move || relative(position.get()))
+                        .bg(move || c::on_call()),
+                ),
         )
-        .child(text(move || duration(secs())).text_size(px(font::CAPTION)).tabular_nums())
+        .child(
+            text(move || duration(secs()))
+                .text_size(px(font::CAPTION))
+                .tabular_nums(),
+        )
 }
 
 /// Reply, Forward, Star, Save, Delete. Save explains itself when off.
@@ -343,9 +459,14 @@ fn action_bar(
     let starred = move || msg.with(|m| m.as_ref().is_some_and(|m| m.starred));
     let delete = move || {
         let id = current.get_untracked();
-        let video = msg.with_untracked(|m| matches!(m.as_ref().map(|m| &m.body), Some(Body::Video { .. })));
+        let video =
+            msg.with_untracked(|m| matches!(m.as_ref().map(|m| &m.body), Some(Body::Video { .. })));
         confirm(
-            if video { "Delete this video?" } else { "Delete this photo?" },
+            if video {
+                "Delete this video?"
+            } else {
+                "Delete this photo?"
+            },
             "It's removed from this device. Others in the chat still have it.",
             "Delete for me",
             move || {
@@ -368,21 +489,43 @@ fn action_bar(
                 .gap_1()
                 .px_2()
                 .pt_2()
-                .child(bar_action(Icon::Reply, || "Reply".into(), move || {
-                    chat_feature::reply_to(chat, current.get_untracked());
-                }))
-                .child(bar_action(Icon::Forward, || "Forward".into(), move || forward_open.set(true)))
+                .child(bar_action(
+                    Icon::Reply,
+                    || "Reply".into(),
+                    move || {
+                        chat_feature::reply_to(chat, current.get_untracked());
+                    },
+                ))
+                .child(bar_action(
+                    Icon::Forward,
+                    || "Forward".into(),
+                    move || forward_open.set(true),
+                ))
                 .child(
-                    bar_action(Icon::Star, move || if starred() { "Unstar".into() } else { "Star".into() }, move || {
-                        s.toggle_star(chat, current.get_untracked());
-                    })
+                    bar_action(
+                        Icon::Star,
+                        move || {
+                            if starred() {
+                                "Unstar".into()
+                            } else {
+                                "Star".into()
+                            }
+                        },
+                        move || {
+                            s.toggle_star(chat, current.get_untracked());
+                        },
+                    )
                     .selected(starred),
                 )
                 .child(
-                    bar_action(Icon::Download, || "Save".into(), move || {
-                        // mock: app-core exports the decrypted file to the photo library.
-                        toast("Saved to your photos");
-                    })
+                    bar_action(
+                        Icon::Download,
+                        || "Save".into(),
+                        move || {
+                            // mock: app-core exports the decrypted file to the photo library.
+                            toast("Saved to your photos");
+                        },
+                    )
                     .disabled(move || blocked().is_some()),
                 )
                 .child(bar_action(Icon::Trash, || "Delete".into(), delete)),
@@ -413,11 +556,19 @@ fn bar_action(
         .gap_1()
         .rounded(move || radius::control())
         .child(icon(glyph, 22.0))
-        .child(text(move || label()).text_size(px(font::CAPTION)).font_weight(FontWeight::MEDIUM))
+        .child(
+            text(move || label())
+                .text_size(px(font::CAPTION))
+                .font_weight(FontWeight::MEDIUM),
+        )
 }
 
 /// A round icon button, light on dark.
-fn dark_btn(glyph: Icon, label: &'static str, on_press: impl Fn() + 'static) -> nsh_base::ButtonElement {
+fn dark_btn(
+    glyph: Icon,
+    label: &'static str,
+    on_press: impl Fn() + 'static,
+) -> nsh_base::ButtonElement {
     let side = if is_desktop() { 36.0 } else { 44.0 };
     press_surface(Press::OnDark, on_press)
         .accessibility_label(label)
@@ -429,10 +580,15 @@ fn dark_btn(glyph: Icon, label: &'static str, on_press: impl Fn() + 'static) -> 
 }
 
 const ZOOM_IN: &str = r#"<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M11 8v6"/><path d="M8 11h6"/>"#;
-const ZOOM_OUT: &str = r#"<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/>"#;
+const ZOOM_OUT: &str =
+    r#"<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/>"#;
 
 /// A dark button with a glyph `icons.rs` lacks (zoom in and out, Lucide).
-fn glyph_btn(shapes: &'static str, label: &'static str, on_press: impl Fn() + 'static) -> nsh_base::ButtonElement {
+fn glyph_btn(
+    shapes: &'static str,
+    label: &'static str,
+    on_press: impl Fn() + 'static,
+) -> nsh_base::ButtonElement {
     let src = ImageSrc::svg_markup(&format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{shapes}</svg>"#
     ));
@@ -448,7 +604,12 @@ fn glyph_btn(shapes: &'static str, label: &'static str, on_press: impl Fn() + 's
 /// Recent chats to forward to.
 fn forward_sheet(s: Store, from: ChatId, current: Signal<MsgId>, open: Signal<bool>) -> View {
     view().child(dynamic(move || {
-        let chats: Vec<Chat> = s.inbox().into_iter().filter(|c| c.id != from).take(8).collect();
+        let chats: Vec<Chat> = s
+            .inbox()
+            .into_iter()
+            .filter(|c| c.id != from)
+            .take(8)
+            .collect();
         untracked(move || {
             view()
                 .gap_2()
@@ -464,7 +625,9 @@ fn forward_sheet(s: Store, from: ChatId, current: Signal<MsgId>, open: Signal<bo
                         })
                         .build()
                 })))
-                .child(footnote("Forwarded media is marked as forwarded. It stays end-to-end encrypted."))
+                .child(footnote(
+                    "Forwarded media is marked as forwarded. It stays end-to-end encrypted.",
+                ))
                 .into_element()
         })
     }))

@@ -21,6 +21,8 @@ sockudo-ws.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros", "io-util"] }
 tokio-rustls.workspace = true
+# Mozilla's roots for proxies and public endpoints (Prompt 9: the proxy setting).
+webpki-roots.workspace = true
 
 [lints]
 workspace = true

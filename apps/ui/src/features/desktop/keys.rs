@@ -31,20 +31,90 @@ pub struct Shortcut {
 }
 
 pub const SHORTCUTS: &[Shortcut] = &[
-    Shortcut { keys: "mod+k", label: "Jump to a chat, person or setting", group: "Chats", command: Command::JumpTo },
-    Shortcut { keys: "mod+f", label: "Search chats", group: "Chats", command: Command::Search },
-    Shortcut { keys: "mod+n", label: "New chat", group: "Chats", command: Command::NewChat },
-    Shortcut { keys: "mod+shift+u", label: "Mark as read", group: "Chats", command: Command::MarkRead },
-    Shortcut { keys: "mod+]", label: "Next chat", group: "Navigation", command: Command::NextChat },
-    Shortcut { keys: "mod+[", label: "Previous chat", group: "Navigation", command: Command::PreviousChat },
-    Shortcut { keys: "ctrl+tab", label: "Next chat", group: "Navigation", command: Command::NextChat },
-    Shortcut { keys: "ctrl+shift+tab", label: "Previous chat", group: "Navigation", command: Command::PreviousChat },
-    Shortcut { keys: "mod+1", label: "Chats", group: "Navigation", command: Command::Tab(0) },
-    Shortcut { keys: "mod+2", label: "Calls", group: "Navigation", command: Command::Tab(1) },
-    Shortcut { keys: "mod+3", label: "Spaces", group: "Navigation", command: Command::Tab(2) },
-    Shortcut { keys: "mod+4", label: "You", group: "Navigation", command: Command::Tab(3) },
-    Shortcut { keys: "mod+,", label: "Settings", group: "Navigation", command: Command::Settings },
-    Shortcut { keys: "mod+/", label: "Keyboard shortcuts", group: "Help", command: Command::Shortcuts },
+    Shortcut {
+        keys: "mod+k",
+        label: "Jump to a chat, person or setting",
+        group: "Chats",
+        command: Command::JumpTo,
+    },
+    Shortcut {
+        keys: "mod+f",
+        label: "Search chats",
+        group: "Chats",
+        command: Command::Search,
+    },
+    Shortcut {
+        keys: "mod+n",
+        label: "New chat",
+        group: "Chats",
+        command: Command::NewChat,
+    },
+    Shortcut {
+        keys: "mod+shift+u",
+        label: "Mark as read",
+        group: "Chats",
+        command: Command::MarkRead,
+    },
+    Shortcut {
+        keys: "mod+]",
+        label: "Next chat",
+        group: "Navigation",
+        command: Command::NextChat,
+    },
+    Shortcut {
+        keys: "mod+[",
+        label: "Previous chat",
+        group: "Navigation",
+        command: Command::PreviousChat,
+    },
+    Shortcut {
+        keys: "ctrl+tab",
+        label: "Next chat",
+        group: "Navigation",
+        command: Command::NextChat,
+    },
+    Shortcut {
+        keys: "ctrl+shift+tab",
+        label: "Previous chat",
+        group: "Navigation",
+        command: Command::PreviousChat,
+    },
+    Shortcut {
+        keys: "mod+1",
+        label: "Chats",
+        group: "Navigation",
+        command: Command::Tab(0),
+    },
+    Shortcut {
+        keys: "mod+2",
+        label: "Calls",
+        group: "Navigation",
+        command: Command::Tab(1),
+    },
+    Shortcut {
+        keys: "mod+3",
+        label: "Spaces",
+        group: "Navigation",
+        command: Command::Tab(2),
+    },
+    Shortcut {
+        keys: "mod+4",
+        label: "You",
+        group: "Navigation",
+        command: Command::Tab(3),
+    },
+    Shortcut {
+        keys: "mod+,",
+        label: "Settings",
+        group: "Navigation",
+        command: Command::Settings,
+    },
+    Shortcut {
+        keys: "mod+/",
+        label: "Keyboard shortcuts",
+        group: "Help",
+        command: Command::Shortcuts,
+    },
 ];
 
 /// Shown in the cheat sheet only: keys the platform or a screen handles.
@@ -56,7 +126,10 @@ pub const EXTRA: &[(&str, &str, &str)] = &[
 
 /// The keystroke the menus show for `command` (its first binding).
 pub fn keys_for(command: Command) -> Option<&'static str> {
-    SHORTCUTS.iter().find(|s| s.command == command).map(|s| s.keys)
+    SHORTCUTS
+        .iter()
+        .find(|s| s.command == command)
+        .map(|s| s.keys)
 }
 
 /// The next (`step` 1) or previous (`step` -1) item of `ids` after

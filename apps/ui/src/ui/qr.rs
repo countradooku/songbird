@@ -36,7 +36,11 @@ impl Matrix {
 pub fn encode(text: &str) -> Option<Matrix> {
     let code = QrCode::with_error_correction_level(text.as_bytes(), EcLevel::M).ok()?;
     let width = code.width();
-    let dark = code.to_colors().into_iter().map(|c| c == Color::Dark).collect();
+    let dark = code
+        .to_colors()
+        .into_iter()
+        .map(|c| c == Color::Dark)
+        .collect();
     Some(Matrix { width, dark })
 }
 
@@ -91,7 +95,11 @@ pub fn qr_code(data: &str, size: f32) -> View {
         }
         None => (String::new(), size),
     };
-    plate(svg(ImageSrc::svg_markup(&markup)).size(px(side)).into_element())
+    plate(
+        svg(ImageSrc::svg_markup(&markup))
+            .size(px(side))
+            .into_element(),
+    )
 }
 
 /// A code whose text changes (an invite link that can be reset), `module` points per module.
@@ -105,10 +113,12 @@ pub fn qr_code_live(data: impl Fn() -> String + 'static, module: f32) -> View {
     #[allow(clippy::cast_precision_loss)]
     let side = move || px(module * (width() + 2 * QUIET) as f32);
     plate(
-        svg(move || ImageSrc::svg_markup(&encode(&data()).map(|m| svg_markup(&m)).unwrap_or_default()))
-            .w(side.clone())
-            .h(side)
-            .into_element(),
+        svg(move || {
+            ImageSrc::svg_markup(&encode(&data()).map(|m| svg_markup(&m)).unwrap_or_default())
+        })
+        .w(side.clone())
+        .h(side)
+        .into_element(),
     )
 }
 

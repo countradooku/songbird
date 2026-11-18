@@ -26,7 +26,7 @@ use songbird_mailbox::Mailbox;
 use songbird_proto::auth::CHANNEL_BINDING_LEN;
 use songbird_proto::frame::{self, RejectReason, SendFrame, SendStatus};
 use songbird_proto::{ClientFrame, CloseCode, NONCE_LEN, PROTOCOL_VERSION, ServerFrame, control};
-use songbird_router::{InboxSizes, Live, Routed, Router};
+use songbird_router::{InboxSizes, Live, Routed, Router, class};
 use songbird_types::DeviceId;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
@@ -357,9 +357,14 @@ impl<M: Mailbox, R: Router> Session<M, R> {
                 Some(first) = inbox.live.recv() => {
                     self.on_live(ws, first, &mut inbox.live, write_timeout).await
                 }
-                Some(payload) = inbox.ephemeral.recv() => {
-                    self.buf.reserve(1 + payload.len());
-                    ServerFrame::Ephemeral { payload }.encode(&mut self.buf);
+                Some(tagged) = inbox.ephemeral.recv() => {
+                    // The class the server wrote (D-0108); anything else is dropped.
+                    let frame = match class::untag(&tagged) {
+                        Some((class::EPHEMERAL, payload)) => ServerFrame::Ephemeral { payload },
+                        Some((class::ATTENTION, payload)) => ServerFrame::Attention { payload },
+                        _ => continue,
+                    };
+                    frame.encode(&mut self.buf);
                     let b = self.buf.split().freeze();
                     self.send_now(ws, b, write_timeout).await
                 }
@@ -554,14 +559,59 @@ impl<M: Mailbox, R: Router> Session<M, R> {
                 let m = &self.shared.metrics;
                 if self.ephemerals.take(now).is_err() {
                     m.ephemeral_dropped.inc();
-                } else if self.shared.router.route_ephemeral(&to, payload).await == Routed::Queued {
+                } else if self
+                    .shared
+                    .router
+                    .route_ephemeral(&to, class::tag(class::EPHEMERAL, &payload))
+                    .await
+                    == Routed::Queued
+                {
                     m.ephemeral_routed.inc();
                 } else {
                     m.ephemeral_dropped.inc();
                 }
                 Ok(())
             }
+            ClientFrame::Attention { to, payload } => {
+                self.attention(to, payload, now).await;
+                Ok(())
+            }
             ClientFrame::Auth(_) => Err(Exit::Close(CloseCode::ProtocolError, None)),
+        }
+    }
+
+    /// An attention event (a nudge, Prompt 9, D-0104): the connection's ephemeral bucket, then
+    /// the cluster-wide budgets per (sender, recipient) account pair and per sender, and the
+    /// recipient's blocks. Dropped silently otherwise, like any ephemeral event: the sender
+    /// learns nothing about the recipient. Fails closed without the gate.
+    async fn attention(&mut self, to: DeviceId, payload: Bytes, now: std::time::Instant) {
+        let m = &self.shared.metrics;
+        if self.ephemerals.take(now).is_err() {
+            m.attention_dropped.inc();
+            return;
+        }
+        let accounts = {
+            let dir = self.shared.directory.load();
+            dir.listed_account(&self.device)
+                .zip(dir.listed_account(&to))
+        };
+        let admitted = match (accounts, self.shared.policy.gate.as_ref()) {
+            (Some((from, dest)), Some(gate)) => {
+                gate.attention(&from, &dest).await == songbird_send::Admit::Allow
+            }
+            _ => false,
+        };
+        if admitted
+            && self
+                .shared
+                .router
+                .route_ephemeral(&to, class::tag(class::ATTENTION, &payload))
+                .await
+                == Routed::Queued
+        {
+            m.attention_routed.inc();
+        } else {
+            m.attention_dropped.inc();
         }
     }
 

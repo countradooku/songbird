@@ -23,14 +23,16 @@
 //! | `POST /v1/calls`, `/v1/calls/group`, `/v1/calls/join`, `/v1/calls/links…` | Calls: LiveKit rooms and tokens, call links ([`calls`]) |
 //! | `PUT /v1/messages` | A WebSocket `Send` frame, for clients with no open socket; answers its `SendResult` ([`messages`]) |
 //!
-//! Every request but the two registration steps, opening and reading a provisioning channel and
-//! linking is signed by the device ([`auth`]); there are no
+//! Every request but the two registration steps, opening and reading a provisioning channel,
+//! linking and a parent's later policy (`PUT /v1/supervision/update`, authorized by the policy's
+//! signature, D-0108) is signed by the device ([`auth`]); there are no
 //! tokens or cookies. Registration is paid for with proof of work and throttled per IP range. Bodies are
 //! bounded before they are read. Responses carry status codes and small JSON; errors say nothing
 //! about whether a device, account or object exists beyond what the caller already proved.
 //! Nothing here logs identifiers or object names (invariant 6).
 #![forbid(unsafe_code)]
 
+pub mod account;
 pub mod admin;
 pub mod auth;
 pub mod calls;
@@ -50,6 +52,7 @@ pub mod registration;
 pub mod reports;
 pub mod requests;
 pub mod server;
+pub mod storage;
 pub mod usernames;
 
 use std::sync::Arc;
@@ -107,6 +110,8 @@ pub struct ApiMetrics {
     pub devices: devices::DeviceMetrics,
     /// Profiles and sealed sender.
     pub profiles: profiles::ProfileMetrics,
+    /// The account record store (Prompt 9).
+    pub storage: storage::StorageMetrics,
     /// Blocks and the request policy.
     pub blocks: requests::RequestsMetrics,
     /// Reports.
@@ -172,6 +177,7 @@ impl ApiMetrics {
         self.keys.register(m)?;
         self.devices.register(m)?;
         self.profiles.register(m)?;
+        self.storage.register(m)?;
         self.blocks.register(m)?;
         self.reports.register(m)?;
         self.media.register(m)?;
@@ -216,6 +222,8 @@ pub struct App {
     pub devices: Option<devices::Devices>,
     /// Encrypted profiles and sealed sender (absent: those endpoints answer 503).
     pub profiles: Option<profiles::Profiles>,
+    /// The account record store (absent: those endpoints answer 503).
+    pub storage: Option<storage::Storage>,
     /// Key transparency (absent: those endpoints answer 503).
     pub kt: Option<kt::Transparency>,
     /// Blocks and the message-request policy (absent: those endpoints answer 503).
@@ -325,6 +333,10 @@ impl App {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the dispatch table: one arm per endpoint family"
+    )]
     async fn route(self: &Arc<Self>, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
         let path = req.uri().path().to_owned();
         let method = req.method().clone();
@@ -358,8 +370,12 @@ impl App {
                 self.delete_account(device).await
             }
             (&Method::PUT, "/v1/messages") => self.put_message(req).await,
+            (_, p) if p == "/v1/storage" || p.starts_with("/v1/storage/") => {
+                self.storage(req).await
+            }
             (_, p)
                 if p == "/v1/messages/sealed"
+                    || p == "/v1/ephemeral/sealed"
                     || p == "/v1/certificate"
                     || p == "/v1/profile"
                     || p.starts_with("/v1/profile/") =>
@@ -415,6 +431,14 @@ impl App {
                 | "/v1/communities/state"
                 | "/v1/communities/delete",
             ) => self.groups(req).await,
+            (
+                _,
+                "/v1/account/settings"
+                | "/v1/account/discoverable"
+                | "/v1/account/groups"
+                | "/v1/supervision",
+            ) => self.account_settings(req).await,
+            (_, "/v1/supervision/update") => self.supervision_update(req).await,
             (_, p) if p.starts_with("/v1/account/") => self.factors(req).await,
             (_, p) if p.starts_with("/v1/kt/") => self.kt(req).await,
             (_, p) if p.starts_with("/v1/provisioning") || p.starts_with("/v1/devices") => {
@@ -463,14 +487,7 @@ impl App {
                     .get::<registration::Peer>()
                     .map(|x| x.0)
                     .ok_or_else(unavailable)?;
-                let key = req
-                    .headers()
-                    .get("unidentified-access-key")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| {
-                        let mut k = [0u8; 16];
-                        hex::decode_to_slice(v, &mut k).ok().map(|()| k)
-                    });
+                let key = header_key(&req, "unidentified-access-key");
                 let max = self
                     .messages
                     .as_ref()
@@ -485,6 +502,17 @@ impl App {
                     body,
                 )
                 .await
+            }
+            (&Method::PUT, "/v1/ephemeral/sealed") => {
+                let peer = req
+                    .extensions()
+                    .get::<registration::Peer>()
+                    .map(|x| x.0)
+                    .ok_or_else(unavailable)?;
+                let key = header_key(&req, "unidentified-access-key");
+                let body = bounded_body(req, songbird_proto::ephemeral::MAX_BODY).await?;
+                p.sealed_presence(&self.hot, self.messages.as_ref(), peer, key, &body)
+                    .await
             }
             (&Method::GET, "/v1/certificate") => {
                 let (device, _) = self.authenticate_json(req).await?;
@@ -532,6 +560,80 @@ impl App {
         Ok(profile_outcome(out))
     }
 
+    /// `/v1/storage…` ([`storage`]): a listed (not pending) device of the account only.
+    async fn storage(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let st = self.storage.as_ref().ok_or_else(unavailable)?;
+        let method = req.method().clone();
+        let path = req.uri().path().to_owned();
+        let object = |p: &str| {
+            let mut id = [0u8; 32];
+            hex::decode_to_slice(p.trim_start_matches("/v1/storage/object/"), &mut id)
+                .map(|()| id)
+                .map_err(|_| Refusal::Status(StatusCode::NOT_FOUND))
+        };
+        let (device, body) = match (&method, path.as_str()) {
+            (&Method::PUT, "/v1/storage") => {
+                self.authenticate_body(req, st.settings.max_write_body())
+                    .await?
+            }
+            (&Method::PUT, "/v1/storage/object") => {
+                self.authenticate_body(req, songbird_proto::storage::MAX_OBJECT)
+                    .await?
+            }
+            (&Method::POST, "/v1/storage/read") => {
+                self.authenticate_body(
+                    req,
+                    2 + songbird_proto::storage::MAX_READ * songbird_proto::storage::ID_LEN,
+                )
+                .await?
+            }
+            (&Method::GET, "/v1/storage" | "/v1/storage/ids") => {
+                self.authenticate_json(req).await?
+            }
+            (&Method::GET | &Method::DELETE, p) if p.starts_with("/v1/storage/object/") => {
+                self.authenticate_json(req).await?
+            }
+            _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
+        };
+        let row = self
+            .registry
+            .device(&device)
+            .await
+            .map_err(|_| unavailable())?
+            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+        if row.pending {
+            return Ok(pending_refusal());
+        }
+        let a = row.account;
+        let out = match (&method, path.as_str()) {
+            (&Method::GET, "/v1/storage") => st.head(&self.registry, &self.hot, &a).await,
+            (&Method::GET, "/v1/storage/ids") => st.ids(&self.registry, &self.hot, &a).await,
+            (&Method::POST, "/v1/storage/read") => {
+                st.read(&self.registry, &self.hot, &a, &body).await
+            }
+            (&Method::PUT, "/v1/storage") => st.write(&self.registry, &self.hot, &a, &body).await,
+            (&Method::PUT, "/v1/storage/object") => {
+                st.put_object(&self.registry, &self.hot, &self.s3, &a, body)
+                    .await
+            }
+            (&Method::GET, p) => {
+                let id = object(p)?;
+                if let Err(o) = st.object_allowed(&self.registry, &self.hot, &a, &id).await {
+                    return Ok(profile_outcome(o));
+                }
+                return self.serve_object(&storage::object_name(&id)).await;
+            }
+            (&Method::DELETE, p) => {
+                let id = object(p)?;
+                st.delete_object(&self.registry, &self.hot, &self.s3, &a, &id)
+                    .await
+            }
+            _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
+        };
+        Ok(profile_outcome(out))
+    }
+
     /// `/v1/kt/…` ([`kt`]): signed like every device request.
     async fn kt(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
         let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
@@ -570,7 +672,12 @@ impl App {
 
     /// An avatar object, streamed.
     async fn serve_avatar(&self, id: &[u8; 32]) -> Result<Response<Body>, Refusal> {
-        let got = match self.s3.get_object(&profiles::avatar_name(id), None).await {
+        self.serve_object(&profiles::avatar_name(id)).await
+    }
+
+    /// An object from `RustFS`, streamed.
+    async fn serve_object(&self, name: &str) -> Result<Response<Body>, Refusal> {
+        let got = match self.s3.get_object(name, None).await {
             Ok(g) => g,
             Err(songbird_s3::Error::NotFound) => {
                 return Err(Refusal::Status(StatusCode::NOT_FOUND));
@@ -622,6 +729,16 @@ impl App {
         let m = self.messages.as_ref().ok_or_else(unavailable)?;
         let g = m.groups.as_ref().ok_or_else(unavailable)?;
         let path = req.uri().path().to_owned();
+        // Prompt 9 (D-0103): proof that the committer is a contact of every added account that
+        // takes group adds from contacts only.
+        let proofs = groups::AddProofs {
+            add_key: header_key(&req, "group-add-access-key"),
+            approvals: groups::AddProofs::approvals_from(
+                req.headers()
+                    .get("group-add-approval")
+                    .and_then(|v| v.to_str().ok()),
+            ),
+        };
         let (device, body) = self.authenticate_body(req, groups::MAX_BODY).await?;
         let row = self
             .registry
@@ -662,14 +779,14 @@ impl App {
             .flatten();
         let outcome = match path.as_str() {
             "/v1/groups" => g.create(r, m, device, body).await,
-            "/v1/groups/commit" => g.commit(r, m, device, body).await,
+            "/v1/groups/commit" => g.commit(r, m, device, body, proofs).await,
             "/v1/groups/propose" => g.propose(r, m, device, body).await,
             "/v1/groups/meta" => g.meta(r, device, body).await,
             "/v1/groups/log" => g.log(r, m, device, body).await,
             "/v1/groups/links" => g.create_link(r, device, body).await,
             "/v1/groups/links/revoke" => g.revoke_link(r, device, body).await,
             "/v1/groups/links/open" => g.open(r, body).await,
-            "/v1/groups/join" => g.join(r, m, device, body).await,
+            "/v1/groups/join" => g.join(r, m, device, body, proofs).await,
             "/v1/groups/requests" => g.request(r, m, device, body).await,
             "/v1/groups/requests/list" => g.requests(r, device, body).await,
             "/v1/groups/requests/decline" => g.decline(r, device, body).await,
@@ -841,6 +958,58 @@ impl App {
             _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
         };
         Ok(device_outcome(out))
+    }
+
+    /// Server-enforced settings (Prompt 9, M2, D-0103; [`account`]).
+    async fn account_settings(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let method = req.method().clone();
+        let path = req.uri().path().to_owned();
+        let (device, body) = self.authenticate_json(req).await?;
+        let row = self
+            .registry
+            .device(&device)
+            .await
+            .map_err(|_| unavailable())?
+            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+        let out = match (&method, path.as_str()) {
+            (&Method::GET, "/v1/account/settings") => account::get(&self.registry, &row).await,
+            (&Method::PUT, "/v1/account/discoverable") => {
+                account::set_discoverable(&self.registry, &row, &body).await
+            }
+            (&Method::PUT, "/v1/account/groups") => {
+                account::set_groups(&self.registry, &row, &body).await
+            }
+            (&Method::PUT, "/v1/supervision") => {
+                account::put_supervision(&self.registry, &row, &body).await
+            }
+            (&Method::GET, "/v1/supervision") => {
+                account::get_supervision(&self.registry, &row).await
+            }
+            _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
+        };
+        Ok(device_outcome(out))
+    }
+
+    /// `PUT /v1/supervision/update`, unsigned, throttled per IP range ([`account`], D-0108).
+    async fn supervision_update(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        if req.method() != Method::PUT {
+            return Err(Refusal::Status(StatusCode::METHOD_NOT_ALLOWED));
+        }
+        let p = self.profiles.as_ref().ok_or_else(unavailable)?;
+        let peer = req
+            .extensions()
+            .get::<registration::Peer>()
+            .map(|p| p.0)
+            .ok_or_else(unavailable)?;
+        if let Err(o) = p.policy_budget(&self.hot, peer).await {
+            return Ok(profile_outcome(o));
+        }
+        let body = bounded_body(req, songbird_proto::supervision::MAX_POLICY_LEN).await?;
+        Ok(device_outcome(
+            account::update_supervision(&self.registry, &body).await,
+        ))
     }
 
     /// `/v1/provisioning…` and `/v1/devices…` ([`devices`]).
@@ -1442,6 +1611,7 @@ fn profile_outcome(o: profiles::Outcome) -> Response<Body> {
         Outcome::Conflict(what) => {
             json(StatusCode::CONFLICT, &serde_json::json!({ "error": what }))
         }
+        Outcome::ConflictJson(v) => json(StatusCode::CONFLICT, &v),
         Outcome::Forbidden(what) => {
             json(StatusCode::FORBIDDEN, &serde_json::json!({ "error": what }))
         }
@@ -1455,6 +1625,17 @@ fn profile_outcome(o: profiles::Outcome) -> Response<Body> {
         }
         Outcome::Unavailable => empty(StatusCode::SERVICE_UNAVAILABLE),
     }
+}
+
+/// A 16-byte key in a header, as 32 hex characters.
+fn header_key(req: &Request<Incoming>, name: &str) -> Option<[u8; 16]> {
+    req.headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            let mut k = [0u8; 16];
+            hex::decode_to_slice(v, &mut k).ok().map(|()| k)
+        })
 }
 
 /// 403 for an account-wide change from a pending device (D-0052).

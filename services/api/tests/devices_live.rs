@@ -131,6 +131,7 @@ async fn stack(d: DeviceSettings) -> Option<Stack> {
         registration: None,
         usernames: None,
         keys: None,
+        storage: None,
         kt: Some(
             songbird_api::kt::Transparency::new(
                 songbird_api::config::KtSettings {
@@ -286,6 +287,7 @@ async fn link_flow(
         device,
         confirm_key,
         server_name: SERVER.into(),
+        storage_key: Some([0x5b; 32]),
     };
     let sealed = provisioning::seal(&qr.public(), &msg.encode().unwrap()).unwrap();
     assert_eq!(

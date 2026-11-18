@@ -58,8 +58,12 @@ pub mod kt;
 pub mod packs;
 pub mod profile;
 pub mod reports;
+pub mod settings;
+pub mod storage;
+pub mod supervision;
 pub use db::{Db, DbError, SurrealSettings};
 pub use push_store::PushStore;
+pub use storage::{StorageCaps, StorageWriteError};
 
 /// Ed25519 public key length.
 pub const AUTH_KEY_LEN: usize = 32;
@@ -278,6 +282,29 @@ UPSERT directory:v SET version = version ?? 1 RETURN NONE;
 DEFINE TABLE IF NOT EXISTS store SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS generation ON store TYPE int;
 UPSERT store:g SET generation = generation ?? 1 RETURN NONE;
+DEFINE FIELD IF NOT EXISTS st_v ON account TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS st_m ON account TYPE option<bytes>;
+DEFINE TABLE IF NOT EXISTS srec SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS account ON srec TYPE bytes;
+DEFINE FIELD IF NOT EXISTS blob ON srec TYPE bytes;
+DEFINE FIELD IF NOT EXISTS size ON srec TYPE int;
+DEFINE INDEX IF NOT EXISTS srec_account ON srec FIELDS account;
+DEFINE TABLE IF NOT EXISTS sobj SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS account ON sobj TYPE bytes;
+DEFINE INDEX IF NOT EXISTS sobj_account ON sobj FIELDS account;
+DEFINE FIELD IF NOT EXISTS hidden ON account TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS grp_contacts ON account TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS sv_requests ON account TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS sv_hidden ON account TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS sv_groups ON account TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS grp_approval ON account TYPE option<bytes>;
+DEFINE TABLE IF NOT EXISTS superv SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS pkey ON superv TYPE bytes;
+DEFINE FIELD IF NOT EXISTS pv ON superv TYPE int;
+DEFINE FIELD IF NOT EXISTS flags ON superv TYPE int;
+DEFINE FIELD IF NOT EXISTS policy ON superv TYPE bytes;
+DEFINE FIELD IF NOT EXISTS unlink_at ON superv TYPE datetime;
+DEFINE INDEX IF NOT EXISTS superv_unlink ON superv FIELDS unlink_at;
 ";
 
 /// Registry failures. They carry no identifiers.
@@ -347,6 +374,12 @@ pub enum RegistryError {
     /// (the API answers 503).
     #[error("busy: concurrent changes, retry later")]
     Busy,
+    /// A parent's policy locks this setting (Prompt 9, D-0105).
+    #[error("locked by supervision")]
+    Supervised,
+    /// A later policy would move the unlink date later (Prompt 9, D-0108).
+    #[error("the unlink date may only come earlier")]
+    Later,
 }
 
 /// One device's stored keys (opaque stored forms, `songbird_proto::keys`).
@@ -631,6 +664,8 @@ pub struct Remnants {
     pub group_requests: u64,
     /// Group prune marks still naming the devices (D-0075).
     pub group_marks: u64,
+    /// Storage records and storage object records of the account (Prompt 9, D-0102).
+    pub storage: u64,
 }
 
 impl Remnants {
@@ -1064,23 +1099,52 @@ impl Registry {
         &self,
         hash: &[u8; 32],
     ) -> Result<Option<UsernameRow>, RegistryError> {
-        // One statement, the same work whether or not the username exists: an absent username
-        // reads the key of an account ID that cannot exist (all zeros), so the answer's timing
-        // does not depend on existence.
+        self.lookup_username_via(hash, None).await
+    }
+
+    /// [`Registry::lookup_username`] for a lookup that may come through a username link
+    /// (`link`, its handle): an account that is not discoverable (Prompt 9, D-0103) is found
+    /// only through one of its own links.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn lookup_username_via(
+        &self,
+        hash: &[u8; 32],
+        link: Option<&[u8; 16]>,
+    ) -> Result<Option<UsernameRow>, RegistryError> {
+        // One statement, the same work whether or not the username exists or a link is given:
+        // an absent username or link reads rows of IDs that cannot exist (all zeros), so the
+        // answer's timing does not depend on them.
         let v = self
             .db
-            .query1(
-                "RETURN [username:[$h].account, account:[username:[$h].account ?? $zero].ukey,
-                   account:[username:[$h].account ?? $zero].deleting];",
-                vec![var("h", bytes(hash)), var("zero", bytes(&[0u8; 16]))],
+            .query(
+                "LET $acc = username:[$h].account ?? $zero;
+                 RETURN [username:[$h].account, account:[$acc].ukey, account:[$acc].deleting,
+                   account:[$acc].hidden, ulink:[$l].account];",
+                vec![
+                    var("h", bytes(hash)),
+                    var("zero", bytes(&[0u8; 16])),
+                    var("l", bytes(link.unwrap_or(&[0u8; 16]))),
+                ],
             )
             .await?;
-        let r = rows(v);
+        let r = v
+            .into_iter()
+            .next_back()
+            .and_then(Value::into_array)
+            .unwrap_or_default();
         let Some(account) = r.first().and_then(id16).map(AccountId::from_bytes) else {
             return Ok(None);
         };
         // An account being deleted is found by nobody.
         if matches!(r.get(2), Some(Value::Bool(true))) {
+            return Ok(None);
+        }
+        // Not discoverable: only through one of its own links.
+        if matches!(r.get(3), Some(Value::Bool(true)))
+            && r.get(4).and_then(id16) != Some(*account.as_bytes())
+        {
             return Ok(None);
         }
         let key = r.get(1).and_then(|k| k.as_bytes().cloned());
@@ -1950,6 +2014,9 @@ impl Registry {
                  DELETE passkey WHERE account = $a RETURN NONE;
                  DELETE avatar WHERE account = $a RETURN NONE;
                  DELETE grp_req WHERE acct = $a RETURN NONE;
+                 DELETE srec WHERE account = $a RETURN NONE;
+                 DELETE superv:[$a] RETURN NONE;
+                 DELETE sobj WHERE account = $a RETURN NONE;
                  UPDATE grp_prune SET gone = array::complement(gone, $devs)
                    WHERE gone CONTAINSANY $devs RETURN NONE;
                  DELETE account:[$a] RETURN NONE;
@@ -1991,7 +2058,10 @@ impl Registry {
                    + count(SELECT id FROM mlskp WHERE device IN $ds)
                    + count(SELECT id FROM mlskp_used WHERE device IN $ds);
                  RETURN count(SELECT id FROM grp_req WHERE acct = $a);
-                 RETURN count(SELECT id FROM grp_prune WHERE gone CONTAINSANY $ds);",
+                 RETURN count(SELECT id FROM grp_prune WHERE gone CONTAINSANY $ds);
+                 RETURN count(SELECT id FROM srec WHERE account = $a)
+                   + count(SELECT id FROM sobj WHERE account = $a)
+                   + count(SELECT id FROM superv:[$a]);",
                 vec![
                     var("a", bytes(account.as_bytes())),
                     var("ds", Value::Array(ds)),
@@ -2013,6 +2083,7 @@ impl Registry {
             prekeys: n(5)?,
             group_requests: n(6)?,
             group_marks: n(7)?,
+            storage: n(8)?,
         })
     }
 

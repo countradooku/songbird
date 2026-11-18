@@ -10,6 +10,8 @@ license.workspace = true
 [dependencies]
 # The attachment format's sizes are the server's grant arithmetic (Prompt 6, D-0080).
 songbird-proto.workspace = true
+# Account IDs in supervision policies (Prompt 9, D-0105).
+songbird-types.workspace = true
 aws-lc-rs.workspace = true
 prost.workspace = true
 thiserror.workspace = true
@@ -17,6 +19,8 @@ thiserror.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# Verifies the supervision signatures the way the server does.
+songbird-keys.workspace = true
 hex.workspace = true
 proptest.workspace = true
 serde_json.workspace = true

@@ -194,3 +194,20 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn a_storage_sync_carries_no_key_or_a_whole_one() {
+    use crate::schema::{StorageSync, SyncMessage, sync_message};
+    let with = |key: Vec<u8>| Content {
+        body: Some(Body::Sync(SyncMessage {
+            kind: Some(sync_message::Kind::Storage(StorageSync {
+                key,
+                changed: true,
+            })),
+        })),
+        ..text_content("")
+    };
+    assert!(validate::content(&with(Vec::new())).is_ok());
+    assert!(validate::content(&with(vec![7; KEY_LEN])).is_ok());
+    assert!(validate::content(&with(vec![7; 31])).is_err());
+}

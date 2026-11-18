@@ -77,7 +77,13 @@ pub fn roles_page(chat: ChatId) {
         let s = store();
         let ch = computed(move || s.chat(chat));
         let manage = move || ch.with(|c| c.as_ref().is_some_and(can_manage));
-        let blocked_line = move || ch.with(|c| c.as_ref().map(|c| ask_line(s, c, "change these")).unwrap_or_default());
+        let blocked_line = move || {
+            ch.with(|c| {
+                c.as_ref()
+                    .map(|c| ask_line(s, c, "change these"))
+                    .unwrap_or_default()
+            })
+        };
         let row = move |p: &'static Permission| {
             switch_row(
                 p.title,
@@ -148,7 +154,13 @@ pub fn invite_link_page(chat: ChatId) {
         let s = store();
         let ch = computed(move || s.chat(chat));
         let manage = move || ch.with(|c| c.as_ref().is_some_and(can_manage));
-        let link = move || ch.with(|c| c.as_ref().map(|c| c.invite_link.clone()).unwrap_or_default());
+        let link = move || {
+            ch.with(|c| {
+                c.as_ref()
+                    .map(|c| c.invite_link.clone())
+                    .unwrap_or_default()
+            })
+        };
         let settings = move || s.invite_settings(chat);
         let reset = move || {
             confirm(
@@ -161,7 +173,13 @@ pub fn invite_link_page(chat: ChatId) {
                 },
             );
         };
-        let blocked_line = move || ch.with(|c| c.as_ref().map(|c| ask_line(s, c, "change the link's settings")).unwrap_or_default());
+        let blocked_line = move || {
+            ch.with(|c| {
+                c.as_ref()
+                    .map(|c| ask_line(s, c, "change the link's settings"))
+                    .unwrap_or_default()
+            })
+        };
         page(
             "Invite via link",
             page_scroll(
@@ -268,7 +286,13 @@ pub fn invite_link_page(chat: ChatId) {
 fn disabled_unless(enabled: impl Fn() -> bool + Copy + 'static, control: impl IntoElement) -> View {
     view()
         .opacity(move || if enabled() { 1.0_f32 } else { 0.5 })
-        .pointer_events(move || if enabled() { PointerEvents::Auto } else { PointerEvents::None })
+        .pointer_events(move || {
+            if enabled() {
+                PointerEvents::Auto
+            } else {
+                PointerEvents::None
+            }
+        })
         .child(control)
 }
 
@@ -281,7 +305,11 @@ pub fn join_requests_page(chat: ChatId) {
             glide();
             s.answer_request(chat, id, approve);
             let name = s.contact_name(Some(id));
-            toast(if approve { format!("{name} joined") } else { format!("Request from {name} rejected") });
+            toast(if approve {
+                format!("{name} joined")
+            } else {
+                format!("Request from {name} rejected")
+            });
         };
         page(
             "Join requests",

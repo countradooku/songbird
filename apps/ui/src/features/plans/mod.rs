@@ -43,7 +43,10 @@ struct PaywallRequest {
 /// its price, and "Not now" (which returns where the user was). Never call
 /// it for security or core messaging, and never on a timer.
 pub fn paywall(feature: &str) {
-    global::<PaywallRequest>().set(PaywallRequest { pending: true, feature: feature.to_string().into() });
+    global::<PaywallRequest>().set(PaywallRequest {
+        pending: true,
+        feature: feature.to_string().into(),
+    });
     nav::push("plans", plans_page);
 }
 
@@ -94,13 +97,11 @@ fn plans_body() -> AnyElement {
         .self_center()
         .child(current_plan(s))
         .child(section_title("Choose how you pay"))
-        .child(
-            view().px_4().child(segmented(
-                vec![(Billing::Monthly, "Monthly"), (Billing::Yearly, "Yearly")],
-                move || billing.get(),
-                move |b| billing.set(b),
-            )),
-        )
+        .child(view().px_4().child(segmented(
+            vec![(Billing::Monthly, "Monthly"), (Billing::Yearly, "Yearly")],
+            move || billing.get(),
+            move |b| billing.set(b),
+        )))
         .child(
             view()
                 .px_4()
@@ -108,7 +109,9 @@ fn plans_body() -> AnyElement {
                 .gap_3()
                 .when(!narrow, |v| v.flex_row().items_stretch())
                 .children(PLANS.iter().filter(|p| p.plan != Plan::Free).map(move |p| {
-                    plan_card(p.plan, billing, current, start_purchase).when(!narrow, |v| v.flex_1()).into_element()
+                    plan_card(p.plan, billing, current, start_purchase)
+                        .when(!narrow, |v| v.flex_1())
+                        .into_element()
                 })),
         )
         .child(crate::features::settings::foot(move || {
@@ -154,9 +157,19 @@ fn plans_body() -> AnyElement {
         .child(app_sheet(
             wall_open,
             "Songbird Plus",
-            paywall_sheet(wall_feature, billing, wall_open, wall_external, start_purchase),
+            paywall_sheet(
+                wall_feature,
+                billing,
+                wall_open,
+                wall_external,
+                start_purchase,
+            ),
         ))
-        .child(app_sheet(buy_open, provider(os()).name, purchase_sheet(s, buying, billing, buy_open)))
+        .child(app_sheet(
+            buy_open,
+            provider(os()).name,
+            purchase_sheet(s, buying, billing, buy_open),
+        ))
         .into_element()
 }
 
@@ -183,9 +196,19 @@ fn current_plan(s: Store) -> View {
                         let plan = s.plan();
                         let (billing, cancels) = ext.with(|e| (e.billing, e.cancels_at_period_end));
                         match (plan, cancels) {
-                            (Plan::Free, _) => "Everything you need to talk privately. Plus adds a few extras.".to_string(),
-                            (_, false) => format!("{} · renews on {}", price_label(plan, billing), period_end(billing)),
-                            (_, true) => format!("Ends on {}. You won't be charged again.", period_end(billing)),
+                            (Plan::Free, _) => {
+                                "Everything you need to talk privately. Plus adds a few extras."
+                                    .to_string()
+                            }
+                            (_, false) => format!(
+                                "{} · renews on {}",
+                                price_label(plan, billing),
+                                period_end(billing)
+                            ),
+                            (_, true) => format!(
+                                "Ends on {}. You won't be charged again.",
+                                period_end(billing)
+                            ),
                         }
                     })),
             ),
@@ -203,7 +226,16 @@ fn plan_card(
     let is_current = move || current() == plan;
     select_card(is_current)
         .label(move || {
-            format!("{}, {}{}", p.name, price_label(plan, billing.get()), if is_current() { ", your current plan" } else { "" })
+            format!(
+                "{}, {}{}",
+                p.name,
+                price_label(plan, billing.get()),
+                if is_current() {
+                    ", your current plan"
+                } else {
+                    ""
+                }
+            )
         })
         .child(
             view()
@@ -217,7 +249,11 @@ fn plan_card(
                         .font_weight(FontWeight::BOLD)
                         .role(AccessibilityRole::Header),
                 )
-                .child(view().style_when(move || !is_current(), |st| st.hidden()).child(tag("Current plan"))),
+                .child(
+                    view()
+                        .style_when(move || !is_current(), |st| st.hidden())
+                        .child(tag("Current plan")),
+                ),
         )
         .child(
             text(move || price_label(plan, billing.get()))
@@ -228,23 +264,23 @@ fn plan_card(
         )
         .child(muted(p.tagline))
         .child(
-            view()
-                .gap_2()
-                .pt_1()
-                .pb_2()
-                .children(p.includes.iter().map(|f| bullet(Icon::Check, c::primary, *f))),
+            view().gap_2().pt_1().pb_2().children(
+                p.includes
+                    .iter()
+                    .map(|f| bullet(Icon::Check, c::primary, *f)),
+            ),
         )
         .child(view().flex_grow(1.0))
-        .child(
-            view()
-                .style_when(is_current, |st| st.hidden())
-                .child(btn(
-                    format!("Get {}…", p.name),
-                    if plan == Plan::Plus { Variant::Primary } else { Variant::Outline },
-                    BtnSize::Md,
-                    move || start_purchase(plan),
-                )),
-        )
+        .child(view().style_when(is_current, |st| st.hidden()).child(btn(
+            format!("Get {}…", p.name),
+            if plan == Plan::Plus {
+                Variant::Primary
+            } else {
+                Variant::Outline
+            },
+            BtnSize::Md,
+            move || start_purchase(plan),
+        )))
 }
 
 /// The calm promise: what never costs anything.
@@ -265,8 +301,16 @@ fn always_free() -> View {
                             .role(AccessibilityRole::Header),
                     ),
             )
-            .child(view().gap_1().children(ALWAYS_FREE.iter().map(|f| bullet(Icon::Lock, c::muted_fg, *f))))
-            .child(muted("A paid plan never changes how your messages are protected.")),
+            .child(
+                view().gap_1().children(
+                    ALWAYS_FREE
+                        .iter()
+                        .map(|f| bullet(Icon::Lock, c::muted_fg, *f)),
+                ),
+            )
+            .child(muted(
+                "A paid plan never changes how your messages are protected.",
+            )),
     )
 }
 
@@ -297,25 +341,39 @@ fn paywall_sheet(
                 .role(AccessibilityRole::Header),
         )
         .child(muted("Plus includes, and you can cancel any time:"))
-        .child(view().gap_2().children(plus.includes.iter().map(|f| bullet(Icon::Check, c::primary, *f))))
         .child(
-            text(move || {
-                format!("{}.", price_line(Plan::Plus).unwrap_or_default())
-            })
-            .text_size(px(font::SMALL))
-            .line_height(px(18.0))
-            .text_color(move || c::muted_fg()),
+            view().gap_2().children(
+                plus.includes
+                    .iter()
+                    .map(|f| bullet(Icon::Check, c::primary, *f)),
+            ),
+        )
+        .child(
+            text(move || format!("{}.", price_line(Plan::Plus).unwrap_or_default()))
+                .text_size(px(font::SMALL))
+                .line_height(px(18.0))
+                .text_color(move || c::muted_fg()),
         )
         .child(
             view()
                 .flex_row()
                 .gap_3()
                 .pt_1()
-                .child(view().flex_1().child(btn("Not now", Variant::Outline, BtnSize::Lg, not_now)))
-                .child(view().flex_1().child(btn("Get Plus…", Variant::Primary, BtnSize::Lg, move || {
-                    let _ = billing;
-                    start_purchase(Plan::Plus)
-                }))),
+                .child(view().flex_1().child(btn(
+                    "Not now",
+                    Variant::Outline,
+                    BtnSize::Lg,
+                    not_now,
+                )))
+                .child(view().flex_1().child(btn(
+                    "Get Plus…",
+                    Variant::Primary,
+                    BtnSize::Lg,
+                    move || {
+                        let _ = billing;
+                        start_purchase(Plan::Plus)
+                    },
+                ))),
         )
 }
 
@@ -323,7 +381,12 @@ fn paywall_sheet(
 /// own sheet, on Android Play Billing's; on Windows and Linux the EU
 /// provider's checkout. Here it is drawn by the app so the flow can be
 /// reviewed.
-fn purchase_sheet(s: Store, buying: Signal<Option<Plan>>, billing: Signal<Billing>, open: Signal<bool>) -> View {
+fn purchase_sheet(
+    s: Store,
+    buying: Signal<Option<Plan>>,
+    billing: Signal<Billing>,
+    open: Signal<bool>,
+) -> View {
     let ext = extras();
     let busy = move || ext.with(|e| e.purchasing);
     let plan = move || buying.get().unwrap_or(Plan::Plus);
@@ -354,12 +417,20 @@ fn purchase_sheet(s: Store, buying: Signal<Option<Plan>>, billing: Signal<Billin
             move || billing.get(),
             move |b| billing.set(b),
         ))
-        .child(muted(format!("{} Prices in your store may vary.", prov.manage)))
+        .child(muted(format!(
+            "{} Prices in your store may vary.",
+            prov.manage
+        )))
         .child(
             view()
                 .flex_row()
                 .gap_3()
-                .child(view().flex_1().child(btn("Cancel", Variant::Secondary, BtnSize::Lg, move || open.set(false))))
+                .child(view().flex_1().child(btn(
+                    "Cancel",
+                    Variant::Secondary,
+                    BtnSize::Lg,
+                    move || open.set(false),
+                )))
                 .child(
                     view().flex_1().child(
                         btn(
@@ -373,7 +444,10 @@ fn purchase_sheet(s: Store, buying: Signal<Option<Plan>>, billing: Signal<Billin
                                 let p = plan();
                                 s.purchase(p, billing.get_untracked(), move || {
                                     open.set(false);
-                                    toast(format!("You're on Songbird {}. Thank you for supporting Songbird.", info(p).name));
+                                    toast(format!(
+                                        "You're on Songbird {}. Thank you for supporting Songbird.",
+                                        info(p).name
+                                    ));
                                 });
                             },
                         )
@@ -567,35 +641,32 @@ pub fn family_page() -> Screen {
         }));
     page(
         "Family",
-        view()
-            .flex_1()
-            .child(page_scroll(body))
-            .child(app_sheet(
-                invite_open,
-                "Invite to Family",
-                view()
-                    .px_4()
-                    .pb_2()
-                    .gap_3()
-                    .child(labelled_field(
-                        "Name",
-                        field("Their name", name),
-                        "They get a link to join. You can remove them at any time.",
-                        || false,
-                    ))
-                    .child(
-                        btn("Send invite", Variant::Primary, BtnSize::Lg, move || {
-                            let n = name.get_untracked().trim().to_string();
-                            if n.is_empty() {
-                                return;
-                            }
-                            s.family_invite(n.clone());
-                            invite_open.set(false);
-                            toast(format!("Invite sent to {n}"));
-                        })
-                        .disabled(move || name.with(|n| n.trim().is_empty())),
-                    ),
-            )),
+        view().flex_1().child(page_scroll(body)).child(app_sheet(
+            invite_open,
+            "Invite to Family",
+            view()
+                .px_4()
+                .pb_2()
+                .gap_3()
+                .child(labelled_field(
+                    "Name",
+                    field("Their name", name),
+                    "They get a link to join. You can remove them at any time.",
+                    || false,
+                ))
+                .child(
+                    btn("Send invite", Variant::Primary, BtnSize::Lg, move || {
+                        let n = name.get_untracked().trim().to_string();
+                        if n.is_empty() {
+                            return;
+                        }
+                        s.family_invite(n.clone());
+                        invite_open.set(false);
+                        toast(format!("Invite sent to {n}"));
+                    })
+                    .disabled(move || name.with(|n| n.trim().is_empty())),
+                ),
+        )),
     )
 }
 
@@ -624,7 +695,13 @@ pub fn announcement_card() -> AnyElement {
                 .px_4()
                 .py_2()
                 .opacity(move || if leaving.get() { 0.0_f32 } else { 1.0 })
-                .translate_y(move || if leaving.get() && !reduced { px(-4.0) } else { px(0.0) })
+                .translate_y(move || {
+                    if leaving.get() && !reduced {
+                        px(-4.0)
+                    } else {
+                        px(0.0)
+                    }
+                })
                 .transition_all()
                 .duration(motion::FAST)
                 .ease_in()
@@ -650,7 +727,10 @@ pub fn announcement_card() -> AnyElement {
                         .child(icon_btn(Icon::Close, "Dismiss", move || {
                             s.dismiss_announcement(id);
                             leaving.set(true);
-                            set_timeout(std::time::Duration::from_millis(motion::FAST as u64), move || gone.set(true));
+                            set_timeout(
+                                std::time::Duration::from_millis(motion::FAST as u64),
+                                move || gone.set(true),
+                            );
                         })),
                 )
         },

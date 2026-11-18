@@ -59,7 +59,10 @@ impl Step {
     /// Whether Back leaves it. Not while the account is being made, and
     /// not back over it once it exists.
     pub(crate) fn can_go_back(self) -> bool {
-        !matches!(self, Step::Welcome | Step::Creating | Step::ClaimUsername | Step::Profile)
+        !matches!(
+            self,
+            Step::Welcome | Step::Creating | Step::ClaimUsername | Step::Profile
+        )
     }
 }
 
@@ -100,7 +103,8 @@ impl Flow {
     }
 
     pub(crate) fn step(&self) -> Step {
-        self.history.with(|h| h.last().copied().unwrap_or(Step::Welcome))
+        self.history
+            .with(|h| h.last().copied().unwrap_or(Step::Welcome))
     }
 
     pub(crate) fn go(&self, step: Step) {
@@ -134,7 +138,9 @@ impl Flow {
     /// Whether Back shows: the step allows it and an inner flow does not
     /// hide it.
     pub(crate) fn back_shown(&self) -> bool {
-        self.step().can_go_back() && self.history.with(|h| h.len() > 1) && !self.host.hide_back.get()
+        self.step().can_go_back()
+            && self.history.with(|h| h.len() > 1)
+            && !self.host.hide_back.get()
     }
 
     pub(crate) fn back(&self) {
@@ -228,9 +234,10 @@ fn top_bar(f: Flow) -> View {
         .pr_3()
         .h(px(52.0))
         .child(
-            view()
-                .size(px(side))
-                .child(icon_btn(Icon::Back, "Back", move || f.back()).style_when(move || !back_shown(), |s| s.hidden())),
+            view().size(px(side)).child(
+                icon_btn(Icon::Back, "Back", move || f.back())
+                    .style_when(move || !back_shown(), |s| s.hidden()),
+            ),
         )
         .child(
             view()
@@ -238,7 +245,9 @@ fn top_bar(f: Flow) -> View {
                 .flex_row()
                 .pl_2()
                 .style_when(move || step.get().progress().is_none(), |s| s.hidden())
-                .child(step_segments(STEPS, move || step.get().progress().unwrap_or(0))),
+                .child(step_segments(STEPS, move || {
+                    step.get().progress().unwrap_or(0)
+                })),
         )
         // The progress ends on the content's trailing edge (24pt in):
         // the bar's 12pt inset, the 8pt gap and this 4pt.
@@ -274,7 +283,11 @@ fn step_region(s: Store, f: Flow) -> View {
                 Step::LinkDevice => returning::link_device(s, f),
                 Step::LostKey => returning::lost_key(f),
             };
-            view().flex_1().bind_motion(&enter).child(body).into_element()
+            view()
+                .flex_1()
+                .bind_motion(&enter)
+                .child(body)
+                .into_element()
         })
     }))
 }

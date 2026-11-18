@@ -25,6 +25,7 @@ mod info;
 mod list;
 pub(crate) mod logic;
 mod message_info;
+mod scene;
 mod sheets;
 pub(crate) mod theme;
 mod voice;
@@ -103,7 +104,9 @@ fn ask(chat: ChatId, what: Ask) {
 fn take_pending(cv: Conv) {
     let pending = global::<Pending>();
     effect(move || {
-        let Some((chat, what)) = pending.get().0 else { return };
+        let Some((chat, what)) = pending.get().0 else {
+            return;
+        };
         if chat != cv.chat {
             return;
         }
@@ -157,7 +160,9 @@ pub(crate) fn looping(ms: f32, delay: f32) -> KeyframeTiming {
 }
 
 /// A screen-reader label that follows the state.
-pub(crate) fn say<S: Into<SharedString>>(f: impl Fn() -> S + 'static) -> impl Fn() -> Option<SharedString> + 'static {
+pub(crate) fn say<S: Into<SharedString>>(
+    f: impl Fn() -> S + 'static,
+) -> impl Fn() -> Option<SharedString> + 'static {
     move || Some(f().into())
 }
 
@@ -289,7 +294,10 @@ impl Conv {
     /// A group, community or channel (sender names, receipts per member).
     pub fn is_group(self) -> bool {
         self.s.chat(self.chat).is_some_and(|c| {
-            matches!(c.kind, ChatKind::Group | ChatKind::Community | ChatKind::Channel { .. })
+            matches!(
+                c.kind,
+                ChatKind::Group | ChatKind::Community | ChatKind::Channel { .. }
+            )
         })
     }
 
@@ -299,7 +307,8 @@ impl Conv {
             toast("That message is no longer in this chat");
             return;
         };
-        self.list.scroll_to_index(index as u32, percentage(0.5), px(0.0), true);
+        self.list
+            .scroll_to_index(index as u32, percentage(0.5), px(0.0), true);
         self.highlight.set(Some(id));
         let highlight = self.highlight;
         set_timeout(Duration::from_millis(1400), move || {
@@ -339,7 +348,9 @@ impl Conv {
     }
 
     pub fn start_edit(self, id: MsgId) {
-        let Some(m) = self.s.message(self.chat, id).filter(logic::editable) else { return };
+        let Some(m) = self.s.message(self.chat, id).filter(logic::editable) else {
+            return;
+        };
         batch(|| {
             self.menu.set(None);
             self.reply.set(None);
@@ -352,7 +363,8 @@ impl Conv {
     pub fn cancel_edit(self) {
         batch(|| {
             self.editing.set(None);
-            self.draft.set(self.s.chat(self.chat).map(|c| c.draft).unwrap_or_default());
+            self.draft
+                .set(self.s.chat(self.chat).map(|c| c.draft).unwrap_or_default());
         });
     }
 
@@ -366,7 +378,8 @@ impl Conv {
             self.s.edit_message_text(self.chat, id, text);
             batch(|| {
                 self.editing.set(None);
-                self.draft.set(self.s.chat(self.chat).map(|c| c.draft).unwrap_or_default());
+                self.draft
+                    .set(self.s.chat(self.chat).map(|c| c.draft).unwrap_or_default());
             });
             return;
         }
@@ -444,13 +457,21 @@ impl Conv {
         let text = self.s.messages.with_untracked(|m| {
             m.get(&chat)
                 .map(|v| {
-                    v.iter().filter(|x| ids.contains(&x.id)).map(logic::copy_text).collect::<Vec<_>>().join("\n")
+                    v.iter()
+                        .filter(|x| ids.contains(&x.id))
+                        .map(logic::copy_text)
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 })
                 .unwrap_or_default()
         });
         set_clipboard(text);
         self.menu.set(None);
-        toast(if ids.len() > 1 { "Messages copied" } else { "Message copied" });
+        toast(if ids.len() > 1 {
+            "Messages copied"
+        } else {
+            "Message copied"
+        });
     }
 
     /// Closes the topmost thing open (Escape).
@@ -501,7 +522,12 @@ fn watch(cv: Conv) {
         seen.replace((count, last_id));
         let Some(last) = last else { return };
         if last_id != was_last && matches!(last.body, Body::Nudge) {
-            let nudges = s.settings.with_untracked(|x| x.nudges);
+            // Off globally, or for this person: no shake (PROTOCOL §10.5).
+            let nudges = s.settings.with_untracked(|x| x.nudges)
+                && last
+                    .from
+                    .and_then(|from| s.contact(from))
+                    .is_none_or(|c| !c.nudges_off);
             if nudges || last.mine() {
                 shake(cv);
             }
@@ -516,10 +542,43 @@ fn watch(cv: Conv) {
     });
 }
 
+/// Sends a nudge. The first one this device ever sends is confirmed first,
+/// so a nudge never happens by surprise (D-0101 question 9); the answer is
+/// kept on this device.
+pub(crate) fn send_nudge(s: Store, chat: ChatId) {
+    if crate::backend::nudge::confirmed() {
+        s.nudge_with_echo(chat);
+        return;
+    }
+    let name = s
+        .peer(chat)
+        .map(|p| {
+            p.name
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .unwrap_or_else(|| "Their".into());
+    ask_first(
+        "Send a nudge?",
+        format!(
+            "{name}'s chat window shakes, or their phone vibrates, to get their attention. They can turn nudges off for you. Songbird only asks this once."
+        ),
+        "Send nudge",
+        move || {
+            crate::backend::nudge::set_confirmed();
+            s.nudge_with_echo(chat);
+        },
+    );
+}
+
 /// The nudge: the conversation shakes once (no motion when reduced).
 fn shake(cv: Conv) {
-    let spec = MotionSpec::new(timing(420.0, Easing::EaseOut))
-        .values(MotionChannel::TranslateX, [0.0, -9.0, 9.0, -7.0, 7.0, -4.0, 4.0, 0.0]);
+    let spec = MotionSpec::new(timing(420.0, Easing::EaseOut)).values(
+        MotionChannel::TranslateX,
+        [0.0, -9.0, 9.0, -7.0, 7.0, -4.0, 4.0, 0.0],
+    );
     let _ = cv.shake.play(spec);
 }
 
@@ -530,7 +589,11 @@ fn keys(cv: Conv) {
         return;
     }
     on_key("escape", move |_| cv.dismiss());
-    let options = KeyOptions { when: When::Always, pass_through: true, ..KeyOptions::default() };
+    let options = KeyOptions {
+        when: When::Always,
+        pass_through: true,
+        ..KeyOptions::default()
+    };
     on_key_with("up", options, move |_| {
         if cv.draft.with_untracked(String::is_empty)
             && cv.editing.get_untracked().is_none()
@@ -553,7 +616,11 @@ fn edge_scrim(cv: Conv, top: bool) -> View {
     // The solid part ends where the capsule's own band ends.
     let solid = move || {
         let h = inset.get();
-        if h <= 0.0 { 0.0 } else { (h / (h + SCRIM_TAIL)).clamp(0.0, 1.0) }
+        if h <= 0.0 {
+            0.0
+        } else {
+            (h / (h + SCRIM_TAIL)).clamp(0.0, 1.0)
+        }
     };
     let v = view()
         .absolute()
@@ -563,7 +630,11 @@ fn edge_scrim(cv: Conv, top: bool) -> View {
         .z_index(1)
         .pointer_events(PointerEvents::None)
         .accessibility_elements_hidden(true);
-    let v = if top { v.top_0().bg_linear_to_b() } else { v.bottom_0().bg_linear_to_t() };
+    let v = if top {
+        v.top_0().bg_linear_to_b()
+    } else {
+        v.bottom_0().bg_linear_to_t()
+    };
     v.gradient_from(move || cv.canvas())
         .gradient_via(move || cv.canvas().opacity(0.92))
         .gradient_via_position(move || Percentage(solid()))
@@ -577,7 +648,12 @@ pub fn conversation(chat: ChatId) -> AnyElement {
         return view()
             .flex_1()
             .bg(move || c::chat_bg())
-            .child(empty_state(Icon::Chats, "Chat not found", "This chat was deleted.", None))
+            .child(empty_state(
+                Icon::Chats,
+                "Chat not found",
+                "This chat was deleted.",
+                None,
+            ))
             .into_element();
     }
     let cv = Conv::new(chat, s);
@@ -606,6 +682,8 @@ pub fn conversation(chat: ChatId) -> AnyElement {
                 .flex_1()
                 .overflow_hidden()
                 .bind_motion(&cv.shake)
+                // The chat's scene, behind the messages (Prompt 9).
+                .child(scene::scene_layer(chat))
                 .child(list::message_list(cv))
                 // Scroll-edge fades: messages dissolve under the floating
                 // header and composer instead of being cut at the pane's
@@ -622,7 +700,9 @@ pub fn conversation(chat: ChatId) -> AnyElement {
                         .right_0()
                         // Above the scroll-edge fades (z 1).
                         .z_index(2)
-                        .on_layout(move |b: &Bounds<Points>| set_if_changed(cv.top_inset, b.size.height.0))
+                        .on_layout(move |b: &Bounds<Points>| {
+                            set_if_changed(cv.top_inset, b.size.height.0)
+                        })
                         .child(header::header(cv)),
                 )
                 .child(
@@ -632,7 +712,9 @@ pub fn conversation(chat: ChatId) -> AnyElement {
                         .left_0()
                         .right_0()
                         .z_index(2)
-                        .on_layout(move |b: &Bounds<Points>| set_if_changed(cv.bottom_inset, b.size.height.0))
+                        .on_layout(move |b: &Bounds<Points>| {
+                            set_if_changed(cv.bottom_inset, b.size.height.0)
+                        })
                         .child(composer::bottom(cv)),
                 ),
         )
@@ -641,19 +723,26 @@ pub fn conversation(chat: ChatId) -> AnyElement {
     // Desktops: files dropped on the conversation are sent to it (A13).
     // Wrapped last, so the drop overlay sits above everything.
     let root = if is_desktop() {
-        crate::features::desktop::on_file_drop(root, format!("Drop to send to {title}"), move |files| {
-            for f in files {
-                // mock: app-core encrypts and uploads the file (A7 attachments).
-                s.send(
-                    chat,
-                    crate::store::Body::File { name: f.name.clone(), size: "—".into(), kind: f.mime.clone() },
-                    None,
-                );
-            }
-        })
+        crate::features::desktop::on_file_drop(
+            root,
+            format!("Drop to send to {title}"),
+            move |files| {
+                for f in files {
+                    // mock: app-core encrypts and uploads the file (A7 attachments).
+                    s.send(
+                        chat,
+                        crate::store::Body::File {
+                            name: f.name.clone(),
+                            size: "—".into(),
+                            kind: f.mime.clone(),
+                        },
+                        None,
+                    );
+                }
+            },
+        )
     } else {
         root
     };
-    root
-        .into_element()
+    root.into_element()
 }

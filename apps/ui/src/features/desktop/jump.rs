@@ -58,7 +58,10 @@ pub enum Act {
 pub enum Lead {
     /// The chat's own picture.
     Chat(ChatId),
-    Person { name: String, seed: u64 },
+    Person {
+        name: String,
+        seed: u64,
+    },
     Glyph(Icon),
 }
 
@@ -88,7 +91,13 @@ pub struct Hit {
 
 impl Hit {
     fn of(c: &Candidate, cut: Option<(usize, usize)>) -> Self {
-        Hit { target: c.target, title: c.title.clone(), hint: c.hint.clone(), lead: c.lead.clone(), cut }
+        Hit {
+            target: c.target,
+            title: c.title.clone(),
+            hint: c.hint.clone(),
+            lead: c.lead.clone(),
+            cut,
+        }
     }
 
     /// The title in three parts: before, the match, after.
@@ -106,7 +115,11 @@ impl Hit {
 
     /// What screen readers say for the row.
     pub fn spoken(&self) -> String {
-        if self.hint.is_empty() { self.title.clone() } else { format!("{}, {}", self.title, self.hint) }
+        if self.hint.is_empty() {
+            self.title.clone()
+        } else {
+            format!("{}, {}", self.title, self.hint)
+        }
     }
 }
 
@@ -237,7 +250,9 @@ pub fn score(title: &str, keywords: &str, q: &[char]) -> Option<(u8, Option<(usi
         };
         if words.iter().all(|w| found(w)) {
             let first = words[0];
-            let cut = (0..t.len()).find(|&i| word_start(&t, i) && starts_with(&t, i, first)).map(|i| (i, first.len()));
+            let cut = (0..t.len())
+                .find(|&i| word_start(&t, i) && starts_with(&t, i, first))
+                .map(|i| (i, first.len()));
             return Some((4, cut));
         }
     }
@@ -249,10 +264,16 @@ fn ranked(pool: &[Candidate], q: &[char], max: usize) -> Vec<(u8, Hit)> {
     let mut found: Vec<(u8, usize, Hit)> = pool
         .iter()
         .enumerate()
-        .filter_map(|(i, c)| score(&c.title, &c.keywords, q).map(|(rank, cut)| (rank, i, Hit::of(c, cut))))
+        .filter_map(|(i, c)| {
+            score(&c.title, &c.keywords, q).map(|(rank, cut)| (rank, i, Hit::of(c, cut)))
+        })
         .collect();
     found.sort_by_key(|(rank, i, _)| (*rank, *i));
-    found.into_iter().take(max).map(|(rank, _, hit)| (rank, hit)).collect()
+    found
+        .into_iter()
+        .take(max)
+        .map(|(rank, _, hit)| (rank, hit))
+        .collect()
 }
 
 /// What the card shows for `query`.
@@ -265,17 +286,34 @@ pub fn results(query: &str, pool: &Pool) -> Results {
     let q = folded_query(query);
     if q.is_empty() {
         let mut sections = Vec::new();
-        let recent: Vec<Hit> =
-            pool.chats.iter().take(pool.recent.min(MAX_RECENT)).map(|c| Hit::of(c, None)).collect();
+        let recent: Vec<Hit> = pool
+            .chats
+            .iter()
+            .take(pool.recent.min(MAX_RECENT))
+            .map(|c| Hit::of(c, None))
+            .collect();
         if !recent.is_empty() {
-            sections.push(Section { title: "Recent", hits: recent });
+            sections.push(Section {
+                title: "Recent",
+                hits: recent,
+            });
         }
-        let suggested: Vec<Hit> =
-            pool.suggested.iter().filter_map(|&i| pool.actions.get(i)).map(|c| Hit::of(c, None)).collect();
+        let suggested: Vec<Hit> = pool
+            .suggested
+            .iter()
+            .filter_map(|&i| pool.actions.get(i))
+            .map(|c| Hit::of(c, None))
+            .collect();
         if !suggested.is_empty() {
-            sections.push(Section { title: "Actions", hits: suggested });
+            sections.push(Section {
+                title: "Actions",
+                hits: suggested,
+            });
         }
-        return Results { sections, note: None };
+        return Results {
+            sections,
+            note: None,
+        };
     }
     let mut found: Vec<(u8, usize, Section)> = [
         ("Chats", &pool.chats, MAX_CHATS),
@@ -287,7 +325,14 @@ pub fn results(query: &str, pool: &Pool) -> Results {
     .filter_map(|(order, (title, pool, max))| {
         let hits = ranked(pool, &q, max);
         let best = hits.first()?.0;
-        Some((best, order, Section { title, hits: hits.into_iter().map(|(_, h)| h).collect() }))
+        Some((
+            best,
+            order,
+            Section {
+                title,
+                hits: hits.into_iter().map(|(_, h)| h).collect(),
+            },
+        ))
     })
     .collect();
     found.sort_by_key(|(best, order, _)| (*best, *order));
@@ -307,7 +352,10 @@ pub fn results(query: &str, pool: &Pool) -> Results {
             note: Some(format!("No matches for “{shown}”")),
         };
     }
-    Results { sections: found.into_iter().map(|(_, _, s)| s).collect(), note: None }
+    Results {
+        sections: found.into_iter().map(|(_, _, s)| s).collect(),
+        note: None,
+    }
 }
 
 // ---------------------------------------------------------------- the pool from the store
@@ -351,7 +399,9 @@ fn pool(s: Store) -> Pool {
             .collect()
     });
     let username = |c: &Chat| match c.kind {
-        ChatKind::Direct(p) | ChatKind::WhatsApp(p) => s.contact(p).map(|p| p.username).unwrap_or_default(),
+        ChatKind::Direct(p) | ChatKind::WhatsApp(p) => {
+            s.contact(p).map(|p| p.username).unwrap_or_default()
+        }
         _ => String::new(),
     };
     let chats: Vec<Candidate> = inbox
@@ -359,7 +409,11 @@ fn pool(s: Store) -> Pool {
         .filter(|c| !c.locked)
         .chain(rest.iter())
         .map(|c| Candidate {
-            target: if c.kind == ChatKind::Community { Target::Space(c.id) } else { Target::Chat(c.id) },
+            target: if c.kind == ChatKind::Community {
+                Target::Space(c.id)
+            } else {
+                Target::Chat(c.id)
+            },
             title: c.title.clone(),
             keywords: username(c),
             hint: chat_hint(c).into(),
@@ -383,37 +437,117 @@ fn pool(s: Store) -> Pool {
                 title: p.name.clone(),
                 keywords: format!("@{}", p.username),
                 hint: "Person".into(),
-                lead: Lead::Person { name: p.name.clone(), seed: p.id },
+                lead: Lead::Person {
+                    name: p.name.clone(),
+                    seed: p.id,
+                },
             })
             .collect()
     });
     people.sort_by_key(|p| fold(&p.title).into_iter().collect::<String>());
 
     let mut actions = vec![
-        action(Act::NewChat, "New chat", "message start conversation contact compose write", Icon::Compose, Some("mod+n")),
-        action(Act::NewGroup, "New group", "create members people", Icon::Users, None),
-        action(Act::NewSpace, "New space", "create community communities groups", Icon::Spaces, None),
-        action(Act::FindChannels, "Find channels", "follow directory browse news", Icon::Megaphone, None),
-        action(Act::MarkAllRead, "Mark all as read", "unread clear seen", Icon::Check, None),
-        action(Act::Tab(0), "Go to Chats", "inbox list", Icon::Chats, Some("mod+1")),
-        action(Act::Tab(1), "Go to Calls", "history phone video", Icon::Calls, Some("mod+2")),
-        action(Act::Tab(2), "Go to Spaces", "communities groups channels", Icon::Spaces, Some("mod+3")),
-        action(Act::Tab(3), "Go to You", "profile settings me", Icon::You, Some("mod+4")),
-        action(Act::Shortcuts, "Keyboard shortcuts", "keys help cheat sheet", Icon::Keyboard, Some("mod+/")),
+        action(
+            Act::NewChat,
+            "New chat",
+            "message start conversation contact compose write",
+            Icon::Compose,
+            Some("mod+n"),
+        ),
+        action(
+            Act::NewGroup,
+            "New group",
+            "create members people",
+            Icon::Users,
+            None,
+        ),
+        action(
+            Act::NewSpace,
+            "New space",
+            "create community communities groups",
+            Icon::Spaces,
+            None,
+        ),
+        action(
+            Act::FindChannels,
+            "Find channels",
+            "follow directory browse news",
+            Icon::Megaphone,
+            None,
+        ),
+        action(
+            Act::MarkAllRead,
+            "Mark all as read",
+            "unread clear seen",
+            Icon::Check,
+            None,
+        ),
+        action(
+            Act::Tab(0),
+            "Go to Chats",
+            "inbox list",
+            Icon::Chats,
+            Some("mod+1"),
+        ),
+        action(
+            Act::Tab(1),
+            "Go to Calls",
+            "history phone video",
+            Icon::Calls,
+            Some("mod+2"),
+        ),
+        action(
+            Act::Tab(2),
+            "Go to Spaces",
+            "communities groups channels",
+            Icon::Spaces,
+            Some("mod+3"),
+        ),
+        action(
+            Act::Tab(3),
+            "Go to You",
+            "profile settings me",
+            Icon::You,
+            Some("mod+4"),
+        ),
+        action(
+            Act::Shortcuts,
+            "Keyboard shortcuts",
+            "keys help cheat sheet",
+            Icon::Keyboard,
+            Some("mod+/"),
+        ),
     ];
-    actions.extend(features::settings::jump_pages().into_iter().map(|p| Candidate {
-        target: Target::Action(Act::Settings(p.title)),
-        title: p.label,
-        keywords: format!("settings {}", p.keywords),
-        hint: String::new(),
-        lead: Lead::Glyph(p.glyph),
-    }));
+    actions.extend(
+        features::settings::jump_pages()
+            .into_iter()
+            .map(|p| Candidate {
+                target: Target::Action(Act::Settings(p.title)),
+                title: p.label,
+                keywords: format!("settings {}", p.keywords),
+                hint: String::new(),
+                lead: Lead::Glyph(p.glyph),
+            }),
+    );
     // Empty query: making something new, then the settings people change most.
-    let suggested = ["New chat", "New group", "New space", "Settings: Privacy", "Settings: Appearance", "Linked devices"]
-        .iter()
-        .filter_map(|t| actions.iter().position(|a| a.title == *t))
-        .collect();
-    Pool { chats, people, actions, recent, suggested }
+    let suggested = [
+        "New chat",
+        "New group",
+        "New space",
+        "Settings: Privacy",
+        "Settings: Appearance",
+        "Linked devices",
+    ]
+    .iter()
+    .filter_map(|t| actions.iter().position(|a| a.title == *t))
+    .collect();
+    Pool {
+        chats,
+        people,
+        actions,
+        recent,
+        suggested,
+    }
 }
 
 /// Opens what a result points at.
@@ -519,9 +653,13 @@ fn palette() -> AnyElement {
     let card_in = motion().entering(
         MotionSpec::new(timing(motion::FAST))
             .values(MotionChannel::Opacity, [0.0, 1.0])
-            .values(MotionChannel::Scale, [if reduced { 1.0 } else { 0.98 }, 1.0]),
+            .values(
+                MotionChannel::Scale,
+                [if reduced { 1.0 } else { 0.98 }, 1.0],
+            ),
     );
-    let dim_in = motion().entering(MotionSpec::new(timing(motion::FAST)).values(MotionChannel::Opacity, [0.0, 1.0]));
+    let dim_in = motion()
+        .entering(MotionSpec::new(timing(motion::FAST)).values(MotionChannel::Opacity, [0.0, 1.0]));
     let leaving = stored(false);
 
     // Esc and a press outside: the card and the dim fade out, faster than
@@ -530,7 +668,8 @@ fn palette() -> AnyElement {
         if leaving.replace(true) {
             return;
         }
-        let out = MotionSpec::new(timing(motion::INSTANT)).values(MotionChannel::Opacity, [1.0, 0.0]);
+        let out =
+            MotionSpec::new(timing(motion::INSTANT)).values(MotionChannel::Opacity, [1.0, 0.0]);
         let _ = dim_in.play(out.clone());
         let end = card_in.play(out);
         spawn(async move {
@@ -540,12 +679,18 @@ fn palette() -> AnyElement {
     };
     // A choice: the card goes at once and the destination takes over.
     let choose = move |i: usize| {
-        let Some(target) = found.with_untracked(|r| r.rows().get(i).map(|h| h.target)) else { return };
+        let Some(target) = found.with_untracked(|r| r.rows().get(i).map(|h| h.target)) else {
+            return;
+        };
         shown().set(JumpOpen(false));
         open(s, target);
     };
 
-    let keys = |when| KeyOptions { when, repeat: true, ..KeyOptions::default() };
+    let keys = |when| KeyOptions {
+        when,
+        repeat: true,
+        ..KeyOptions::default()
+    };
     on_key_with("down", keys(When::Always), move |_| {
         let n = count.get_untracked();
         if n > 0 {
@@ -558,10 +703,22 @@ fn palette() -> AnyElement {
             lit.update(|i| *i = (*i + n - 1) % n);
         }
     });
-    on_key_with("enter", KeyOptions { when: When::Always, ..KeyOptions::default() }, move |_| {
-        choose(lit.get_untracked())
-    });
-    on_key_with("escape", KeyOptions { when: When::Always, ..KeyOptions::default() }, move |_| dismiss());
+    on_key_with(
+        "enter",
+        KeyOptions {
+            when: When::Always,
+            ..KeyOptions::default()
+        },
+        move |_| choose(lit.get_untracked()),
+    );
+    on_key_with(
+        "escape",
+        KeyOptions {
+            when: When::Always,
+            ..KeyOptions::default()
+        },
+        move |_| dismiss(),
+    );
 
     overlay()
         .absolute()
@@ -695,7 +852,11 @@ fn row(
     // The highlighted row stays in view as the keys move past the edge.
     effect(move || {
         if on() {
-            me.reveal(RevealOptions::default().vertical(ScrollAlignment::Nearest).animated(false));
+            me.reveal(
+                RevealOptions::default()
+                    .vertical(ScrollAlignment::Nearest)
+                    .animated(false),
+            );
         }
     });
     let (before, matched, after) = hit.parts();
@@ -723,7 +884,13 @@ fn row(
         .h(px(ROW_H))
         .px(px(10.0))
         .rounded(move || radius::control())
-        .bg(move || if on() { c::accent() } else { AdaptiveColor::TRANSPARENT })
+        .bg(move || {
+            if on() {
+                c::accent()
+            } else {
+                AdaptiveColor::TRANSPARENT
+            }
+        })
         .child(lead(&hit.lead))
         .child(title)
         .child((!hit.hint.is_empty()).then(|| {
@@ -738,14 +905,20 @@ fn row(
 /// The 24pt lane that leads a row: a chat's picture, a person's avatar, or
 /// a 16pt glyph centred in it, so every title starts on one line.
 fn lead(lead: &Lead) -> View {
-    let lane = view().size(px(LEAD)).items_center().justify_center().accessibility_elements_hidden(true);
+    let lane = view()
+        .size(px(LEAD))
+        .items_center()
+        .justify_center()
+        .accessibility_elements_hidden(true);
     match lead {
         Lead::Chat(id) => match store().chat(*id) {
             Some(chat) => lane.child(features::groups::chat_avatar_for(&chat, LEAD)),
             None => lane,
         },
         Lead::Person { name, seed } => lane.child(avatar(name.clone(), *seed, LEAD)),
-        Lead::Glyph(glyph) => lane.text_color(move || c::muted_fg()).child(icon(*glyph, GLYPH)),
+        Lead::Glyph(glyph) => lane
+            .text_color(move || c::muted_fg())
+            .child(icon(*glyph, GLYPH)),
     }
 }
 
@@ -760,7 +933,12 @@ fn footer() -> View {
             .items_center()
             .gap_1()
             .children(caps.into_iter().map(key_cap))
-            .child(text(what).pl_1().text_size(px(font::CAPTION)).text_color(move || c::muted_fg()))
+            .child(
+                text(what)
+                    .pl_1()
+                    .text_size(px(font::CAPTION))
+                    .text_color(move || c::muted_fg()),
+            )
     };
     view()
         .flex_row()
@@ -783,11 +961,23 @@ mod tests {
     }
 
     fn chat(id: ChatId, title: &str) -> Candidate {
-        Candidate { target: Target::Chat(id), title: title.into(), keywords: String::new(), hint: "Chat".into(), lead: Lead::Chat(id) }
+        Candidate {
+            target: Target::Chat(id),
+            title: title.into(),
+            keywords: String::new(),
+            hint: "Chat".into(),
+            lead: Lead::Chat(id),
+        }
     }
 
     fn act(act: Act, title: &str, keywords: &str) -> Candidate {
-        Candidate { target: Target::Action(act), title: title.into(), keywords: keywords.into(), hint: String::new(), lead: Lead::Glyph(Icon::Plus) }
+        Candidate {
+            target: Target::Action(act),
+            title: title.into(),
+            keywords: keywords.into(),
+            hint: String::new(),
+            lead: Lead::Glyph(Icon::Plus),
+        }
     }
 
     fn sample() -> Pool {
@@ -804,13 +994,24 @@ mod tests {
                 title: "Andrei Stan".into(),
                 keywords: "@andrei".into(),
                 hint: "Person".into(),
-                lead: Lead::Person { name: "Andrei Stan".into(), seed: 9 },
+                lead: Lead::Person {
+                    name: "Andrei Stan".into(),
+                    seed: 9,
+                },
             }],
             actions: vec![
                 act(Act::NewChat, "New chat", "message"),
                 act(Act::NewGroup, "New group", "create"),
-                act(Act::Settings("Privacy"), "Settings: Privacy", "settings blocked last seen"),
-                act(Act::Settings("Appearance"), "Settings: Appearance", "settings theme dark"),
+                act(
+                    Act::Settings("Privacy"),
+                    "Settings: Privacy",
+                    "settings blocked last seen",
+                ),
+                act(
+                    Act::Settings("Appearance"),
+                    "Settings: Appearance",
+                    "settings theme dark",
+                ),
             ],
             recent: 3,
             suggested: vec![0, 1],
@@ -830,7 +1031,10 @@ mod tests {
         assert_eq!(score("Ana Popescu", "", &q("ana")).map(|s| s.0), Some(1));
         assert_eq!(score("Mihai Ana", "", &q("ana")).map(|s| s.0), Some(2));
         assert_eq!(score("Banana", "", &q("ana")).map(|s| s.0), Some(3));
-        assert_eq!(score("Settings: Appearance", "theme dark", &q("dark")).map(|s| s.0), Some(4));
+        assert_eq!(
+            score("Settings: Appearance", "theme dark", &q("dark")).map(|s| s.0),
+            Some(4)
+        );
         assert_eq!(score("Ana", "", &q("zq")), None);
         assert_eq!(score("Ana", "", &q("   ")), None);
     }
@@ -839,13 +1043,23 @@ mod tests {
     fn the_cut_falls_on_the_title_in_chars() {
         let (rank, cut) = score("Ioana Ștefănescu", "", &q("STEF")).unwrap();
         assert_eq!((rank, cut), (2, Some((6, 4))));
-        let hit = Hit { target: Target::Chat(4), title: "Ioana Ștefănescu".into(), hint: String::new(), lead: Lead::Chat(4), cut };
-        assert_eq!(hit.parts(), ("Ioana ".into(), "Ștef".into(), "ănescu".into()));
+        let hit = Hit {
+            target: Target::Chat(4),
+            title: "Ioana Ștefănescu".into(),
+            hint: String::new(),
+            lead: Lead::Chat(4),
+            cut,
+        };
+        assert_eq!(
+            hit.parts(),
+            ("Ioana ".into(), "Ștef".into(), "ănescu".into())
+        );
     }
 
     #[test]
     fn several_words_find_across_title_and_keywords() {
-        let (rank, cut) = score("Settings: Privacy", "blocked last seen", &q("set  blocked")).unwrap();
+        let (rank, cut) =
+            score("Settings: Privacy", "blocked last seen", &q("set  blocked")).unwrap();
         assert_eq!(rank, 4);
         assert_eq!(cut, Some((0, 3)));
         assert_eq!(score("Settings: Privacy", "blocked", &q("set zz")), None);

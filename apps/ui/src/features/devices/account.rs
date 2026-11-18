@@ -99,12 +99,27 @@ fn body() -> AnyElement {
                         "Turn off your PIN?",
                         "Anyone who gets your recovery key or a linked device could then link a new device without it.",
                         "Turn off",
-                        move || s.settings_update(|x| x.two_step_pin = false),
+                        move || {
+                            if crate::backend::is_live() && crate::backend::registered() {
+                                spawn(async move {
+                                    match crate::backend::account::clear_pin().await {
+                                        Ok(()) => s.settings_update(|x| x.two_step_pin = false),
+                                        Err(p) => toast(p.0),
+                                    }
+                                });
+                            } else {
+                                s.settings_update(|x| x.two_step_pin = false);
+                            }
+                        },
                     );
                 }
             },
         ),
-        Row::new("Change PIN").icon(Icon::Key).chevron().on_press(move || pin_open.set(true)).build(),
+        Row::new("Change PIN")
+            .icon(Icon::Key)
+            .chevron()
+            .on_press(move || pin_open.set(true))
+            .build(),
     ]);
 
     let passkeys = dynamic(move || {
@@ -120,9 +135,12 @@ fn body() -> AnyElement {
                         .subtitle("Added today")
                         .trailing(
                             icon_btn(Icon::Trash, "Remove passkey", move || {
-                                confirm("Remove this passkey?", "You can't sign in with it any more.", "Remove", move || {
-                                    s.remove_passkey(i)
-                                })
+                                confirm(
+                                    "Remove this passkey?",
+                                    "You can't sign in with it any more.",
+                                    "Remove",
+                                    move || s.remove_passkey(i),
+                                )
                             })
                             .text_color(move || c::destructive()),
                         )
@@ -130,22 +148,26 @@ fn body() -> AnyElement {
                 })
                 .collect();
             rows.push(
-                Row::new(if busy { "Waiting for your device…" } else { "Add a passkey" })
-                    .icon(Icon::Plus)
-                    .on_press(move || {
-                        if adding_passkey.get_untracked() {
-                            return;
+                Row::new(if busy {
+                    "Waiting for your device…"
+                } else {
+                    "Add a passkey"
+                })
+                .icon(Icon::Plus)
+                .on_press(move || {
+                    if adding_passkey.get_untracked() {
+                        return;
+                    }
+                    adding_passkey.set(true);
+                    // mock: the platform's passkey sheet (app-core `add_passkey`).
+                    set_timeout(Duration::from_millis(1400), move || {
+                        if adding_passkey.try_set(false) {
+                            s.add_passkey();
+                            toast("Passkey added");
                         }
-                        adding_passkey.set(true);
-                        // mock: the platform's passkey sheet (app-core `add_passkey`).
-                        set_timeout(Duration::from_millis(1400), move || {
-                            if adding_passkey.try_set(false) {
-                                s.add_passkey();
-                                toast("Passkey added");
-                            }
-                        });
-                    })
-                    .build(),
+                    });
+                })
+                .build(),
             );
             group(rows).into_element()
         })
@@ -244,18 +266,24 @@ pub fn account_switcher(open: Signal<bool>) -> AnyElement {
             let me = s.me.get();
             let others = extra.with(|a| a.others.clone());
             untracked(move || {
-                let mut rows = vec![Row::new(me.name.clone())
-                    .leading(avatar(me.name.clone(), me.seed, 36.0))
-                    .subtitle(format!("@{}", me.username))
-                    .trailing(
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .gap_1()
-                            .child(icon(Icon::Check, 16.0).text_color(move || c::primary()))
-                            .child(text("Current").text_size(px(font::SMALL)).text_color(move || c::muted_fg())),
-                    )
-                    .build()];
+                let mut rows = vec![
+                    Row::new(me.name.clone())
+                        .leading(avatar(me.name.clone(), me.seed, 36.0))
+                        .subtitle(format!("@{}", me.username))
+                        .trailing(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                .child(icon(Icon::Check, 16.0).text_color(move || c::primary()))
+                                .child(
+                                    text("Current")
+                                        .text_size(px(font::SMALL))
+                                        .text_color(move || c::muted_fg()),
+                                ),
+                        )
+                        .build(),
+                ];
                 for (i, a) in others.into_iter().enumerate() {
                     let name = a.name.clone();
                     rows.push(
@@ -287,21 +315,34 @@ pub fn account_switcher(open: Signal<bool>) -> AnyElement {
     .into_element()
 }
 
-/// Setting or changing the PIN: twice, at least 4 digits.
+/// Setting or changing the PIN: twice, 6 to 12 digits (the server's rule).
 fn pin_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
     let pin = signal(String::new());
     let again = signal(String::new());
     let digits = |p: &str| p.chars().filter(char::is_ascii_digit).collect::<String>();
-    let long_enough = move || pin.with(|p| p.len() >= 4);
+    let long_enough = move || pin.with(|p| (6..=12).contains(&p.len()));
     let same = move || pin.get() == again.get();
     let save = move || {
         if long_enough() && same() {
-            // mock: app-core `set_pin` (Argon2id verifier on the server).
-            s.settings_update(|x| x.two_step_pin = true);
-            pin.set(String::new());
-            again.set(String::new());
-            open.set(false);
-            toast("PIN saved");
+            let chosen = pin.get_untracked();
+            let done = move || {
+                s.settings_update(|x| x.two_step_pin = true);
+                pin.set(String::new());
+                again.set(String::new());
+                open.set(false);
+                toast("PIN saved");
+            };
+            // The server keeps only a salted Argon2id verifier (Prompt 3).
+            if crate::backend::is_live() && crate::backend::registered() {
+                spawn(async move {
+                    match crate::backend::account::set_pin(chosen).await {
+                        Ok(()) => done(),
+                        Err(p) => toast(p.0),
+                    }
+                });
+            } else {
+                done();
+            }
         }
     };
     app_sheet(
@@ -314,13 +355,13 @@ fn pin_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
             .child(muted("Choose a PIN you'll remember. Songbird asks for it now and then, so you don't forget it."))
             .child(labelled_field(
                 "New PIN",
-                field("At least 4 digits", pin)
+                field("6 to 12 digits", pin)
                     .on_change(move |t: &str| pin.set(digits(t)))
                     .masked(true)
                     .keyboard_type(KeyboardType::Number)
                     .max_length(12),
-                move || if pin.with(|p| !p.is_empty() && p.len() < 4) { "Use at least 4 digits." } else { "" },
-                move || pin.with(|p| !p.is_empty() && p.len() < 4),
+                move || if pin.with(|p| !p.is_empty() && !(6..=12).contains(&p.len())) { "Use 6 to 12 digits." } else { "" },
+                move || pin.with(|p| !p.is_empty() && !(6..=12).contains(&p.len())),
             ))
             .child(labelled_field(
                 "Confirm PIN",
@@ -343,7 +384,13 @@ fn pin_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
 fn delete_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
     let typed = signal(String::new());
     let username = move || s.me.with(|m| m.username.clone());
-    let matches = move || typed.with(|t| t.trim().trim_start_matches('@').eq_ignore_ascii_case(&username()));
+    let matches = move || {
+        typed.with(|t| {
+            t.trim()
+                .trim_start_matches('@')
+                .eq_ignore_ascii_case(&username())
+        })
+    };
     app_sheet(
         open,
         "Delete account",

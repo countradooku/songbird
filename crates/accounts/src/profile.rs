@@ -44,7 +44,8 @@ impl Registry {
     ///
     /// # Errors
     /// [`RegistryError::Rollback`]; [`RegistryError::NotPrimary`] for a linked device opening the
-    /// account.
+    /// account; [`RegistryError::Supervised`] for opening an account whose parent turned message
+    /// requests off (an open account would let strangers in without a request, D-0108).
     pub async fn put_profile_as(
         &self,
         account: &AccountId,
@@ -62,6 +63,7 @@ impl Registry {
                  IF (account:[$a].profile_v ?? -1) >= $v { THROW 'songbird:rollback' };
                  IF $o AND !$primary AND !(account:[$a].uak_open ?? false) {
                    THROW 'songbird:primary' };
+                 IF $o AND (account:[$a].sv_requests ?? false) { THROW 'songbird:supervised' };
                  UPDATE account:[$a] SET profile = $p, profile_v = $v, uak = $k, uak_open = $o
                    RETURN NONE;
                  UPDATE directory:v SET version += 1 RETURN NONE;
@@ -80,6 +82,9 @@ impl Registry {
             Ok(_) => Ok(()),
             Err(DbError::Statement(k)) if k == "Thrown:rollback" => Err(RegistryError::Rollback),
             Err(DbError::Statement(k)) if k == "Thrown:primary" => Err(RegistryError::NotPrimary),
+            Err(DbError::Statement(k)) if k == "Thrown:supervised" => {
+                Err(RegistryError::Supervised)
+            }
             Err(DbError::Statement(k)) if k == crate::db::TRANSACTION_CONFLICT => {
                 Err(RegistryError::Rollback)
             }

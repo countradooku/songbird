@@ -148,6 +148,7 @@ async fn stack_full(
         registration: None,
         usernames: None,
         keys: None,
+        storage: None,
         kt: None,
         profiles: None,
         devices: None,

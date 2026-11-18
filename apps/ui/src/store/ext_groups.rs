@@ -16,7 +16,10 @@ use super::{Body, Chat, ChatId, ChatKind, ContactId, Member, Minutes, NOW, Role,
 
 /// The user's role in a chat; `None` when the user is not a member.
 pub fn my_role(chat: &Chat) -> Option<Role> {
-    chat.members.iter().find(|m| m.contact.is_none()).map(|m| m.role)
+    chat.members
+        .iter()
+        .find(|m| m.contact.is_none())
+        .map(|m| m.role)
 }
 
 /// Owners and admins manage a group (permissions, members, invites).
@@ -28,7 +31,10 @@ pub fn can_manage(chat: &Chat) -> bool {
 /// the first admin. Never the user.
 pub fn who_to_ask(chat: &Chat) -> Option<(ContactId, Role)> {
     let pick = |role: Role| {
-        chat.members.iter().find(|m| m.role == role).and_then(|m| m.contact.map(|c| (c, role)))
+        chat.members
+            .iter()
+            .find(|m| m.role == role)
+            .and_then(|m| m.contact.map(|c| (c, role)))
     };
     pick(Role::Owner).or_else(|| pick(Role::Admin))
 }
@@ -57,7 +63,11 @@ pub fn sorted_members(chat: &Chat, name: impl Fn(Option<ContactId>) -> String) -
             .is_none()
             .cmp(&a.contact.is_none())
             .then(rank(a.role).cmp(&rank(b.role)))
-            .then_with(|| name(a.contact).to_lowercase().cmp(&name(b.contact).to_lowercase()))
+            .then_with(|| {
+                name(a.contact)
+                    .to_lowercase()
+                    .cmp(&name(b.contact).to_lowercase())
+            })
     });
     out
 }
@@ -131,7 +141,11 @@ pub fn invite_summary(s: &InviteSettings) -> String {
         None => "No limit on joins".to_string(),
         Some(n) => {
             let left = n.saturating_sub(s.used);
-            if left == 1 { "1 join left".to_string() } else { format!("{left} joins left") }
+            if left == 1 {
+                "1 join left".to_string()
+            } else {
+                format!("{left} joins left")
+            }
         }
     };
     format!("{expiry} · {uses}")
@@ -162,11 +176,36 @@ pub struct DirectoryChannel {
 /// sample entries.
 pub fn directory() -> Vec<DirectoryChannel> {
     vec![
-        DirectoryChannel { id: 9001, name: "Songbird News", about: "Product updates from the Songbird team.", followers: 18_420 },
-        DirectoryChannel { id: 9002, name: "Cluj Events", about: "Concerts, talks and markets in Cluj-Napoca, weekly.", followers: 6_210 },
-        DirectoryChannel { id: 9003, name: "Privacy Weekly", about: "One calm read about privacy every Friday.", followers: 41_870 },
-        DirectoryChannel { id: 9004, name: "Romanian Recipes", about: "Sarmale, cozonac and everything in between.", followers: 12_905 },
-        DirectoryChannel { id: 9005, name: "EU Digital Rights", about: "What new EU rules mean for you, in plain words.", followers: 3_340 },
+        DirectoryChannel {
+            id: 9001,
+            name: "Songbird News",
+            about: "Product updates from the Songbird team.",
+            followers: 18_420,
+        },
+        DirectoryChannel {
+            id: 9002,
+            name: "Cluj Events",
+            about: "Concerts, talks and markets in Cluj-Napoca, weekly.",
+            followers: 6_210,
+        },
+        DirectoryChannel {
+            id: 9003,
+            name: "Privacy Weekly",
+            about: "One calm read about privacy every Friday.",
+            followers: 41_870,
+        },
+        DirectoryChannel {
+            id: 9004,
+            name: "Romanian Recipes",
+            about: "Sarmale, cozonac and everything in between.",
+            followers: 12_905,
+        },
+        DirectoryChannel {
+            id: 9005,
+            name: "EU Digital Rights",
+            about: "What new EU rules mean for you, in plain words.",
+            followers: 3_340,
+        },
     ]
 }
 
@@ -180,7 +219,11 @@ pub fn followers_label(n: u32) -> String {
         }
         out.push(ch);
     }
-    if n == 1 { "1 follower".into() } else { format!("{out} followers") }
+    if n == 1 {
+        "1 follower".into()
+    } else {
+        format!("{out} followers")
+    }
 }
 
 // ------------------------------------------------------------------ packs
@@ -195,8 +238,12 @@ pub enum PackKind {
 }
 
 impl PackKind {
-    pub const ALL: [PackKind; 4] =
-        [PackKind::Stickers, PackKind::Scenes, PackKind::SoundStickers, PackKind::Emoticons];
+    pub const ALL: [PackKind; 4] = [
+        PackKind::Stickers,
+        PackKind::Scenes,
+        PackKind::SoundStickers,
+        PackKind::Emoticons,
+    ];
     pub fn label(self) -> &'static str {
         match self {
             PackKind::Stickers => "Stickers",
@@ -231,7 +278,9 @@ pub fn parse_pack_link(link: &str) -> Result<String, &'static str> {
         .trim()
         .strip_prefix("https://songbird.chat/pack/")
         .ok_or("This isn't a Songbird pack link.")?;
-    let (id, key) = rest.split_once('#').ok_or("This link has no pack key. Ask for the full link.")?;
+    let (id, key) = rest
+        .split_once('#')
+        .ok_or("This link has no pack key. Ask for the full link.")?;
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err("This isn't a Songbird pack link.");
     }
@@ -250,11 +299,41 @@ fn seed_packs() -> Vec<Pack> {
         items: items.iter().map(|s| s.to_string()).collect(),
     };
     vec![
-        pack(1, PackKind::Stickers, "Night owls", "Songbird", &["🦉", "🌙", "⭐", "😴", "☕", "📚", "🕯️", "🌌"]),
-        pack(2, PackKind::Stickers, "Cheers", "Ioana Ștefănescu", &["🙌", "🥂", "🎉", "👏", "💐", "🎂", "🥳", "✨"]),
-        pack(3, PackKind::Scenes, "Snowy evening", "Songbird", &["❄️", "🏔️", "🌲", "🔥"]),
-        pack(4, PackKind::SoundStickers, "Birdsong", "Songbird", &["🐦", "🎶", "🔔", "🥁"]),
-        pack(5, PackKind::Emoticons, "Classic faces", "Songbird", &["🙂", "😉", "😂", "😮", "😢", "😡", "😎", "🤔"]),
+        pack(
+            1,
+            PackKind::Stickers,
+            "Night owls",
+            "Songbird",
+            &["🦉", "🌙", "⭐", "😴", "☕", "📚", "🕯️", "🌌"],
+        ),
+        pack(
+            2,
+            PackKind::Stickers,
+            "Cheers",
+            "Ioana Ștefănescu",
+            &["🙌", "🥂", "🎉", "👏", "💐", "🎂", "🥳", "✨"],
+        ),
+        pack(
+            3,
+            PackKind::Scenes,
+            "Snowy evening",
+            "Songbird",
+            &["❄️", "🏔️", "🌲", "🔥"],
+        ),
+        pack(
+            4,
+            PackKind::SoundStickers,
+            "Birdsong",
+            "Songbird",
+            &["🐦", "🎶", "🔔", "🥁"],
+        ),
+        pack(
+            5,
+            PackKind::Emoticons,
+            "Classic faces",
+            "Songbird",
+            &["🙂", "😉", "😂", "😮", "😢", "😡", "😎", "🤔"],
+        ),
     ]
 }
 
@@ -350,7 +429,11 @@ pub fn format_bytes(bytes: u64) -> String {
         v /= 1000.0;
         unit += 1;
     }
-    if v >= 100.0 { format!("{v:.0} {}", UNITS[unit]) } else { format!("{v:.1} {}", UNITS[unit]) }
+    if v >= 100.0 {
+        format!("{v:.0} {}", UNITS[unit])
+    } else {
+        format!("{v:.1} {}", UNITS[unit])
+    }
 }
 
 /// Each chat's total, largest first (ties by chat id).
@@ -495,9 +578,16 @@ impl Store {
     ///
     /// mock: app-core reads the group's verified change log (D-0070).
     pub fn member_history(&self, chat: ChatId) -> Vec<MemberChange> {
-        let Some(c) = self.chat(chat) else { return Vec::new() };
+        let Some(c) = self.chat(chat) else {
+            return Vec::new();
+        };
         let mut out: Vec<MemberChange> = groups_state().with(|g| {
-            g.history.iter().rev().filter(|(id, _)| *id == chat).map(|(_, m)| m.clone()).collect()
+            g.history
+                .iter()
+                .rev()
+                .filter(|(id, _)| *id == chat)
+                .map(|(_, m)| m.clone())
+                .collect()
         });
         let creator = c
             .members
@@ -514,17 +604,33 @@ impl Store {
             let at = -60 * 24 * (30 - i as i64 * 3);
             // "You" starts a line; mid-sentence the user is "you".
             let subject = self.contact_name(m.contact);
-            let name = if m.contact.is_none() { "you".to_string() } else { subject.clone() };
-            if i % 2 == 0 {
-                past.push(MemberChange { at, text: format!("{subject} joined using the invite link") });
+            let name = if m.contact.is_none() {
+                "you".to_string()
             } else {
-                past.push(MemberChange { at, text: format!("{creator_name} added {name}") });
+                subject.clone()
+            };
+            if i % 2 == 0 {
+                past.push(MemberChange {
+                    at,
+                    text: format!("{subject} joined using the invite link"),
+                });
+            } else {
+                past.push(MemberChange {
+                    at,
+                    text: format!("{creator_name} added {name}"),
+                });
             }
             if m.role == Role::Admin {
-                past.push(MemberChange { at: at + 60, text: format!("{creator_name} made {name} an admin") });
+                past.push(MemberChange {
+                    at: at + 60,
+                    text: format!("{creator_name} made {name} an admin"),
+                });
             }
         }
-        past.push(MemberChange { at: -60 * 24 * 40, text: format!("{creator_name} created the group") });
+        past.push(MemberChange {
+            at: -60 * 24 * 40,
+            text: format!("{creator_name} created the group"),
+        });
         past.sort_by(|a, b| b.at.cmp(&a.at));
         out.extend(past);
         out
@@ -551,7 +657,13 @@ impl Store {
     // -------------------------------------------------------------- invite links
 
     pub fn invite_settings(&self, chat: ChatId) -> InviteSettings {
-        groups_state().with(|g| g.invites.iter().find(|(c, _)| *c == chat).map(|(_, s)| *s).unwrap_or_default())
+        groups_state().with(|g| {
+            g.invites
+                .iter()
+                .find(|(c, _)| *c == chat)
+                .map(|(_, s)| *s)
+                .unwrap_or_default()
+        })
     }
 
     pub fn set_invite_settings(&self, chat: ChatId, f: impl FnOnce(&mut InviteSettings)) {
@@ -577,26 +689,43 @@ impl Store {
         let id = self.id();
         let mut c = seed::chat(id, ChatKind::Community, &title);
         c.about = about;
-        c.members = vec![Member { contact: None, role: Role::Owner }];
+        c.members = vec![Member {
+            contact: None,
+            role: Role::Owner,
+        }];
         let ann = self.id();
         let mut a = seed::chat(ann, ChatKind::Group, "Announcements");
         a.community = Some(id);
         a.announcement_only = true;
-        a.members = vec![Member { contact: None, role: Role::Owner }];
+        a.members = vec![Member {
+            contact: None,
+            role: Role::Owner,
+        }];
         self.chats.update(|cs| {
             cs.push(c);
             cs.push(a);
         });
-        self.push_message(ann, None, Body::System(format!("You created the community “{title}”")));
+        self.push_message(
+            ann,
+            None,
+            Body::System(format!("You created the community “{title}”")),
+        );
         id
     }
 
     /// The groups of a community: Announcements first, then by title.
     pub fn community_groups(&self, community: ChatId) -> Vec<Chat> {
-        let mut gs: Vec<Chat> = self
-            .chats
-            .with(|cs| cs.iter().filter(|c| c.community == Some(community)).cloned().collect());
-        gs.sort_by(|a, b| b.announcement_only.cmp(&a.announcement_only).then(a.title.cmp(&b.title)));
+        let mut gs: Vec<Chat> = self.chats.with(|cs| {
+            cs.iter()
+                .filter(|c| c.community == Some(community))
+                .cloned()
+                .collect()
+        });
+        gs.sort_by(|a, b| {
+            b.announcement_only
+                .cmp(&a.announcement_only)
+                .then(a.title.cmp(&b.title))
+        });
         gs
     }
 
@@ -605,7 +734,11 @@ impl Store {
     pub fn link_group(&self, community: ChatId, group: ChatId) {
         self.update_chat(group, |c| c.community = Some(community));
         let name = self.chat(community).map(|c| c.title).unwrap_or_default();
-        self.push_message(group, None, Body::System(format!("You added this group to the community “{name}”")));
+        self.push_message(
+            group,
+            None,
+            Body::System(format!("You added this group to the community “{name}”")),
+        );
     }
 
     /// Follows a channel from the directory, or returns the one followed.
@@ -614,7 +747,14 @@ impl Store {
             return id;
         }
         let id = self.id();
-        let mut c = seed::chat(id, ChatKind::Channel { followers: entry.followers + 1, admin: false }, entry.name);
+        let mut c = seed::chat(
+            id,
+            ChatKind::Channel {
+                followers: entry.followers + 1,
+                admin: false,
+            },
+            entry.name,
+        );
         c.about = entry.about.into();
         self.chats.update(|cs| cs.push(c));
         id
@@ -623,7 +763,9 @@ impl Store {
     /// The followed channel with this name.
     pub fn followed(&self, name: &str) -> Option<ChatId> {
         self.chats.with(|cs| {
-            cs.iter().find(|c| matches!(c.kind, ChatKind::Channel { .. }) && c.title == name).map(|c| c.id)
+            cs.iter()
+                .find(|c| matches!(c.kind, ChatKind::Channel { .. }) && c.title == name)
+                .map(|c| c.id)
         })
     }
 
@@ -635,9 +777,17 @@ impl Store {
 
     pub fn move_pack(&self, id: u64, up: bool) {
         groups_state().update(|g| {
-            let Some(i) = g.packs.iter().position(|p| p.id == id) else { return };
+            let Some(i) = g.packs.iter().position(|p| p.id == id) else {
+                return;
+            };
             let kind = g.packs[i].kind;
-            let same: Vec<usize> = g.packs.iter().enumerate().filter(|(_, p)| p.kind == kind).map(|(j, _)| j).collect();
+            let same: Vec<usize> = g
+                .packs
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.kind == kind)
+                .map(|(j, _)| j)
+                .collect();
             let at = same.iter().position(|&j| j == i).unwrap_or(0);
             let other = if up { at.checked_sub(1) } else { Some(at + 1) };
             if let Some(&j) = other.and_then(|o| same.get(o)) {
@@ -658,7 +808,12 @@ impl Store {
     pub fn install_pack(&self, link: String, kind: PackKind) -> Result<(), &'static str> {
         let id = parse_pack_link(&link)?;
         let state = groups_state();
-        state.update(|g| g.installing = Some(PackInstall { link: link.clone(), progress: 0.0 }));
+        state.update(|g| {
+            g.installing = Some(PackInstall {
+                link: link.clone(),
+                progress: 0.0,
+            })
+        });
         for step in 1..=10_u32 {
             set_timeout(Duration::from_millis(160 * step as u64), move || {
                 state.update(|g| {
@@ -679,7 +834,10 @@ impl Store {
                         kind,
                         name: name.clone(),
                         by: "Shared link".into(),
-                        items: ["🌻", "🌈", "🍀", "🐝", "🌊", "🍉"].iter().map(|s| s.to_string()).collect(),
+                        items: ["🌻", "🌈", "🍀", "🐝", "🌊", "🍉"]
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect(),
                     });
                 }
             });
@@ -698,7 +856,10 @@ impl Store {
     pub fn stored_files(&self) -> Vec<StoredFile> {
         let deleted = groups_state().with(|g| g.deleted_files.clone());
         self.chats.with(|cs| {
-            cs.iter().flat_map(files_for).filter(|f| !deleted.contains(&f.id)).collect()
+            cs.iter()
+                .flat_map(files_for)
+                .filter(|f| !deleted.contains(&f.id))
+                .collect()
         })
     }
 
@@ -773,14 +934,24 @@ mod tests {
 
     #[test]
     fn invite_summaries() {
-        assert_eq!(invite_summary(&InviteSettings::default()), "Never expires · No limit on joins");
-        let s = InviteSettings { expiry: InviteExpiry::Week, uses: InviteUses::Ten, used: 9 };
+        assert_eq!(
+            invite_summary(&InviteSettings::default()),
+            "Never expires · No limit on joins"
+        );
+        let s = InviteSettings {
+            expiry: InviteExpiry::Week,
+            uses: InviteUses::Ten,
+            used: 9,
+        };
         assert_eq!(invite_summary(&s), "Expires in 7 days · 1 join left");
     }
 
     #[test]
     fn pack_links() {
-        assert_eq!(parse_pack_link("https://songbird.chat/pack/ab12#k3y-long-enough"), Ok("ab12".into()));
+        assert_eq!(
+            parse_pack_link("https://songbird.chat/pack/ab12#k3y-long-enough"),
+            Ok("ab12".into())
+        );
         assert!(parse_pack_link("https://songbird.chat/pack/ab12").is_err());
         assert!(parse_pack_link("https://example.com/pack/ab12#key12345").is_err());
         assert!(parse_pack_link("https://songbird.chat/pack/a/b#key12345").is_err());

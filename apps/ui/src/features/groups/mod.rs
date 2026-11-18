@@ -27,8 +27,8 @@ use crate::{
 
 pub use admin::{invite_link_page, join_requests_page, member_changes_page, roles_page};
 pub use community::find_channels;
-pub use create::new_community;
 pub(crate) use create::check_circle;
+pub use create::new_community;
 
 // ------------------------------------------------------------------ entry points
 
@@ -38,10 +38,16 @@ pub fn spaces_tab() -> AnyElement {
     let s = store();
     let communities = move || {
         s.chats.with(|cs| {
-            cs.iter().filter(|c| matches!(c.kind, ChatKind::Community)).cloned().collect::<Vec<_>>()
+            cs.iter()
+                .filter(|c| matches!(c.kind, ChatKind::Community))
+                .cloned()
+                .collect::<Vec<_>>()
         })
     };
-    let none = move || s.chats.with(|cs| !cs.iter().any(|c| matches!(c.kind, ChatKind::Community)));
+    let none = move || {
+        s.chats
+            .with(|cs| !cs.iter().any(|c| matches!(c.kind, ChatKind::Community)))
+    };
     view()
         .flex_1()
         .child(app_header(
@@ -54,14 +60,20 @@ pub fn spaces_tab() -> AnyElement {
                 .pt_3()
                 .gap_4()
                 .child(when(none, intro_card).otherwise(move || {
-                    list_card([list_row(square_tile(Icon::Plus), "New space", None, None, new_community)
-                        .into_element()])
+                    list_card([list_row(
+                        square_tile(Icon::Plus),
+                        "New space",
+                        None,
+                        None,
+                        new_community,
+                    )
+                    .into_element()])
                 }))
-                .child(
-                    view().gap_4().child(each(communities, |c: &Chat| c.id, move |c, _| {
-                        community_block(s, c.get_untracked().id)
-                    })),
-                )
+                .child(view().gap_4().child(each(
+                    communities,
+                    |c: &Chat| c.id,
+                    move |c, _| community_block(s, c.get_untracked().id),
+                )))
                 .child(channels_section(s)),
         ))
         .into_element()
@@ -80,7 +92,9 @@ pub fn group_info(chat: ChatId) {
 
 /// A space's home, pushed.
 pub fn community_home(chat: ChatId) {
-    crate::nav::push(format!("community:{chat}"), move || community::home_page(chat));
+    crate::nav::push(format!("community:{chat}"), move || {
+        community::home_page(chat)
+    });
 }
 
 // ------------------------------------------------------------------ the tab's parts
@@ -114,13 +128,19 @@ fn community_block(s: Store, id: ChatId) -> View {
         let community = s.chat(id);
         let groups = s.community_groups(id);
         untracked(move || {
-            let Some(c) = community else { return view().into_element() };
+            let Some(c) = community else {
+                return view().into_element();
+            };
             let count = groups.len();
             let mut rows: Vec<AnyElement> = vec![
                 list_row(
                     chat_avatar(&c, LANE),
                     c.title.clone(),
-                    Some(if count == 1 { "1 group".into() } else { format!("{count} groups").into() }),
+                    Some(if count == 1 {
+                        "1 group".into()
+                    } else {
+                        format!("{count} groups").into()
+                    }),
                     Some(chevron().into_element()),
                     move || community_home(id),
                 )
@@ -141,7 +161,11 @@ pub(crate) fn group_row(s: Store, g: &Chat) -> AnyElement {
     let preview = s
         .last_message(id)
         .map(|m| {
-            let who = if m.from.is_none() { "You".to_string() } else { first_name(&s.contact_name(m.from)) };
+            let who = if m.from.is_none() {
+                "You".to_string()
+            } else {
+                first_name(&s.contact_name(m.from))
+            };
             if matches!(m.body, crate::store::Body::System(_)) {
                 m.body.preview()
             } else {
@@ -162,7 +186,10 @@ pub(crate) fn group_row(s: Store, g: &Chat) -> AnyElement {
 fn channels_section(s: Store) -> View {
     let channels = move || {
         s.chats.with(|cs| {
-            cs.iter().filter(|c| matches!(c.kind, ChatKind::Channel { .. })).cloned().collect::<Vec<_>>()
+            cs.iter()
+                .filter(|c| matches!(c.kind, ChatKind::Channel { .. }))
+                .cloned()
+                .collect::<Vec<_>>()
         })
     };
     view()
@@ -189,13 +216,21 @@ fn channels_section(s: Store) -> View {
                     })
                     .collect();
                 rows.push(
-                    list_row(square_tile(Icon::Search), "Find channels", None, Some(chevron().into_element()), find_channels)
-                        .into_element(),
+                    list_row(
+                        square_tile(Icon::Search),
+                        "Find channels",
+                        None,
+                        Some(chevron().into_element()),
+                        find_channels,
+                    )
+                    .into_element(),
                 );
                 list_card(rows).into_element()
             })
         }))
-        .child(footnote("Channels are one-way: admins post, followers read. Followers can't see each other."))
+        .child(footnote(
+            "Channels are one-way: admins post, followers read. Followers can't see each other.",
+        ))
 }
 
 // ------------------------------------------------------------------ shared parts
@@ -228,7 +263,9 @@ fn row_height() -> f32 {
 
 /// A trailing chevron in the muted ink.
 fn chevron() -> View {
-    view().text_color(move || c::muted_fg()).child(icon(Icon::ChevronRight, 18.0))
+    view()
+        .text_color(move || c::muted_fg())
+        .child(icon(Icon::ChevronRight, 18.0))
 }
 
 /// One row of the Spaces tab and a space's home: a 40pt
@@ -276,22 +313,28 @@ pub(crate) fn list_row(
 /// the text column, in the primary ink, so it reads as a link to the space
 /// rather than as another group.
 fn view_all(on_press: impl Fn() + 'static) -> nsh_base::ButtonElement {
-    press_surface(Press::Row, on_press).accessibility_label("View all").child(
-        view()
-            .flex_row()
-            .items_center()
-            .min_h(px(if is_desktop() { 44.0 } else { 52.0 }))
-            .pl(px(text_column()))
-            .pr_4()
-            .child(
-                text("View all")
-                    .flex_1()
-                    .text_size(px(font::body()))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(move || c::primary()),
-            )
-            .child(view().text_color(move || c::primary()).child(icon(Icon::ChevronRight, 18.0))),
-    )
+    press_surface(Press::Row, on_press)
+        .accessibility_label("View all")
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .min_h(px(if is_desktop() { 44.0 } else { 52.0 }))
+                .pl(px(text_column()))
+                .pr_4()
+                .child(
+                    text("View all")
+                        .flex_1()
+                        .text_size(px(font::body()))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(move || c::primary()),
+                )
+                .child(
+                    view()
+                        .text_color(move || c::primary())
+                        .child(icon(Icon::ChevronRight, 18.0)),
+                ),
+        )
 }
 
 /// A card of `list_row`s, the separators starting on the text column.
@@ -314,7 +357,9 @@ pub(crate) fn card_rows(rows: impl IntoIterator<Item = AnyElement>, inset: f32) 
         .border_1()
         .border_color(move || c::border())
         .children(rows.into_iter().enumerate().map(move |(i, row)| {
-            view().child(row).child((i + 1 < count).then(|| separator_inset(inset)))
+            view()
+                .child(row)
+                .child((i + 1 < count).then(|| separator_inset(inset)))
         }))
 }
 
@@ -328,7 +373,13 @@ pub(crate) fn community_mark(seed: u64, size: f32, ring: fn() -> AdaptiveColor) 
     // 16pt disc at list size (as the chat list's), growing with the mark;
     // even sizes so the glyph centres on whole points.
     let disc = ((size * 0.4 / 2.0).round() * 2.0).max(16.0);
-    let corner = move || if big { radius::sheet() } else { radius::control() };
+    let corner = move || {
+        if big {
+            radius::sheet()
+        } else {
+            radius::control()
+        }
+    };
     view()
         .size(px(size))
         .accessibility_elements_hidden(true)
@@ -338,9 +389,21 @@ pub(crate) fn community_mark(seed: u64, size: f32, ring: fn() -> AdaptiveColor) 
                 .rounded(corner)
                 .overflow_hidden()
                 .bg(move || c::avatar(seed))
-                .child(image(crate::ui::portrait::scenery(seed)).size(px(size)).object_fit(ResizeMode::Cover))
+                .child(
+                    image(crate::ui::portrait::scenery(seed))
+                        .size(px(size))
+                        .object_fit(ResizeMode::Cover),
+                )
                 // The hairline that keeps a light picture off a light surface.
-                .child(view().absolute().inset_0().rounded(corner).border_1().border_color(move || c::border()).opacity(0.6)),
+                .child(
+                    view()
+                        .absolute()
+                        .inset_0()
+                        .rounded(corner)
+                        .border_1()
+                        .border_color(move || c::border())
+                        .opacity(0.6),
+                ),
         )
         .child(
             view()
@@ -418,7 +481,11 @@ pub(crate) fn first_name(name: &str) -> String {
 pub(crate) fn ask_line(s: Store, chat: &Chat, what: &str) -> String {
     match who_to_ask(chat) {
         Some((contact, role)) => {
-            format!("Only admins can {what}. Ask {} ({}).", s.contact_name(Some(contact)), role.label())
+            format!(
+                "Only admins can {what}. Ask {} ({}).",
+                s.contact_name(Some(contact)),
+                role.label()
+            )
         }
         None => format!("Only admins can {what}."),
     }
@@ -469,7 +536,11 @@ pub(crate) fn page_scroll(content: impl IntoElement) -> Scroll {
 
 /// Keeps a page's content at a readable width in the wide detail pane.
 pub(crate) fn readable(content: impl IntoElement) -> View {
-    view().w_full().max_w(px(760.0)).self_center().child(content)
+    view()
+        .w_full()
+        .max_w(px(760.0))
+        .self_center()
+        .child(content)
 }
 
 /// A settings row with a switch that can be disabled (a member looking

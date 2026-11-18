@@ -8,6 +8,7 @@
 //! | `GET /v1/profile/avatar/<id>` | a device | An account's current avatar |
 //! | `GET /v1/certificate` | a listed device | A sender certificate (flag on) |
 //! | `PUT /v1/messages/sealed` | anyone with the access keys | A sealed send (flag on) |
+//! | `PUT /v1/ephemeral/sealed` | anyone with the access keys | A sealed batch of presence events (flag on; Prompt 9) |
 //!
 //! The server stores profiles and avatars as opaque ciphertext under keys it never holds. Sealed
 //! sends carry no device signature: they are authorized by the recipients' unidentified-access
@@ -47,6 +48,8 @@ pub struct ProfileMetrics {
     pub sealed_refused: songbird_service::telemetry::sharded::ShardedCounter,
     /// Requests refused by a throttle.
     pub throttled: songbird_service::telemetry::sharded::ShardedCounter,
+    /// Sealed presence batches accepted (Prompt 9).
+    pub presence: songbird_service::telemetry::sharded::ShardedCounter,
 }
 
 impl ProfileMetrics {
@@ -80,6 +83,11 @@ impl ProfileMetrics {
                 &self.sealed_refused,
             ),
             (
+                "api_sealed_presence",
+                "Sealed presence batches past the access check",
+                &self.presence,
+            ),
+            (
                 "api_profile_throttled",
                 "Profile and sealed-send requests refused by a throttle",
                 &self.throttled,
@@ -110,6 +118,8 @@ pub enum Outcome {
     NotFound,
     /// 409 with a reason.
     Conflict(&'static str),
+    /// 409 with a JSON body (the record store's current version).
+    ConflictJson(serde_json::Value),
     /// 403 with a reason.
     Forbidden(&'static str),
     /// 429 (microseconds).
@@ -242,6 +252,24 @@ impl Profiles {
         k
     }
 
+    /// The per-IP-range budget for unsigned parental policy updates
+    /// (`PUT /v1/supervision/update`, D-0108).
+    ///
+    /// # Errors
+    /// [`Outcome::Throttled`] or [`Outcome::Unavailable`].
+    pub async fn policy_budget(&self, hot: &ValkeyConn, peer: IpAddr) -> Result<(), Outcome> {
+        let s = &self.settings;
+        let range = range_of(peer, s.ipv4_prefix, s.ipv6_prefix);
+        self.throttle(
+            hot,
+            "v",
+            &range,
+            s.policy_updates_per_hour,
+            s.policy_update_burst,
+        )
+        .await
+    }
+
     async fn throttle(
         &self,
         hot: &ValkeyConn,
@@ -290,6 +318,7 @@ impl Profiles {
             }
             Err(RegistryError::Rollback) => Outcome::Conflict("version"),
             Err(RegistryError::NotPrimary) => Outcome::Forbidden("primary"),
+            Err(RegistryError::Supervised) => Outcome::Forbidden("supervised"),
             Err(_) => Outcome::Unavailable,
         }
     }
@@ -499,6 +528,93 @@ impl Profiles {
             tracing::warn!("sealed send not stored");
         }
         Outcome::Sent(crate::messages::result_frame(req_id, status))
+    }
+}
+
+impl Profiles {
+    /// `PUT /v1/ephemeral/sealed` (Prompt 9, M3, D-0104): a batch of never-stored events
+    /// (presence, last seen) authorized by the recipients' access keys, with no sender. 204
+    /// whatever reached whom: the sender never learns who is online.
+    pub async fn sealed_presence(
+        &self,
+        hot: &ValkeyConn,
+        messages: Option<&crate::messages::Messages>,
+        peer: IpAddr,
+        access_key: Option<[u8; 16]>,
+        body: &[u8],
+    ) -> Outcome {
+        let s = &self.settings;
+        if !s.sealed_sender {
+            return Outcome::NotFound;
+        }
+        let Some(m) = messages else {
+            return Outcome::Unavailable;
+        };
+        let Ok(batch) = songbird_proto::ephemeral::SealedBatch::decode(body) else {
+            return Outcome::Malformed("batch");
+        };
+        // Per IP range, counted per device addressed (cost-weighted GCRA on Valkey's clock).
+        let range = range_of(peer, s.ipv4_prefix, s.ipv6_prefix);
+        let interval_us = 3_600_000_000 / u64::from(s.presence_per_hour.max(1));
+        let wait = hot
+            .query::<i64>(
+                redis::cmd("EVAL")
+                    .arg(songbird_send::gate::GCRA_COST)
+                    .arg(1)
+                    .arg(self.record("e", &range))
+                    .arg(interval_us)
+                    .arg(interval_us.saturating_mul(u64::from(s.presence_burst.max(1))))
+                    .arg(batch.events.len()),
+            )
+            .await;
+        match wait.map(|w| u64::try_from(w).unwrap_or(0)) {
+            Ok(0) => {}
+            Ok(w) => {
+                self.metrics.throttled.inc();
+                return Outcome::Throttled(w);
+            }
+            Err(_) => return Outcome::Unavailable,
+        }
+        // The directory snapshot (it follows the registry within a second): no store round
+        // trip per recipient. Devices that are not listed are left out.
+        let dir = m.path.directory();
+        let mut events = Vec::with_capacity(batch.events.len());
+        let mut accounts = Vec::with_capacity(batch.events.len());
+        for (d, p) in batch.events {
+            if let Some(a) = dir.listed_account(&d) {
+                accounts.push(a);
+                events.push((d, Bytes::from(p)));
+            }
+        }
+        accounts.sort_unstable_by_key(|a| *a.as_bytes());
+        accounts.dedup();
+        let mut closed = Vec::with_capacity(accounts.len());
+        let mut missing = false;
+        for a in &accounts {
+            let access = dir.access(a);
+            if access.open {
+                continue;
+            }
+            match access.key {
+                Some(k) => closed.push(k),
+                None => missing = true,
+            }
+        }
+        let expected = songbird_keys::sealed::combine(closed.iter());
+        let presented = access_key.unwrap_or([0; 16]);
+        let ok = !missing
+            && (closed.is_empty()
+                || aws_lc_rs::constant_time::verify_slices_are_equal(&expected, &presented)
+                    .is_ok());
+        if !ok {
+            // Refused whole, with the same answer as a batch that reached everyone (D-0108):
+            // 204 says nothing about which device IDs are listed or which accounts are open.
+            self.metrics.sealed_refused.inc();
+            return Outcome::Done;
+        }
+        self.metrics.presence.inc();
+        let _queued = m.path.ephemeral(events).await;
+        Outcome::Done
     }
 }
 

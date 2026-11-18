@@ -28,8 +28,16 @@ pub(crate) fn thousands(n: u32) -> String {
 /// A group's subtitle: "5 people · 2 online" ("5 people" when nobody
 /// else is online).
 pub(crate) fn people_line(people: usize, online: usize) -> String {
-    let people = if people == 1 { "1 person".to_string() } else { format!("{people} people") };
-    if online == 0 { people } else { format!("{people} · {online} online") }
+    let people = if people == 1 {
+        "1 person".to_string()
+    } else {
+        format!("{people} people")
+    };
+    if online == 0 {
+        people
+    } else {
+        format!("{people} · {online} online")
+    }
 }
 
 /// What shows under the title.
@@ -37,7 +45,9 @@ fn subtitle(cv: Conv) -> impl Fn() -> (String, bool) + Copy + 'static {
     let s = cv.s;
     let chat = cv.chat;
     move || {
-        let Some(c) = s.chat(chat) else { return (String::new(), false) };
+        let Some(c) = s.chat(chat) else {
+            return (String::new(), false);
+        };
         if let Some(t) = c.typing.as_ref() {
             return match c.kind {
                 ChatKind::Direct(_) | ChatKind::WhatsApp(_) => (t.clone(), true),
@@ -48,7 +58,7 @@ fn subtitle(cv: Conv) -> impl Fn() -> (String, bool) + Copy + 'static {
             ChatKind::Direct(id) | ChatKind::WhatsApp(id) => match s.contact(id) {
                 Some(p) if p.blocked => "Blocked".into(),
                 Some(p) => {
-                    let presence = presence_label(&p.presence);
+                    let presence = presence_label(&s.presence_of(&p));
                     match (presence.is_empty(), p.status_line) {
                         (false, Some(st)) => format!("{presence} · {st}"),
                         (false, None) => presence,
@@ -63,7 +73,9 @@ fn subtitle(cv: Conv) -> impl Fn() -> (String, bool) + Copy + 'static {
                 let (people, online) = s.people_online(chat);
                 people_line(people, online)
             }
-            ChatKind::Channel { followers, .. } => format!("Channel · {} followers", thousands(followers)),
+            ChatKind::Channel { followers, .. } => {
+                format!("Channel · {} followers", thousands(followers))
+            }
         };
         (line, false)
     }
@@ -80,7 +92,9 @@ pub(crate) fn header(cv: Conv) -> AnyElement {
         .w_full()
         .px(px(floating::CAPSULE_INSET))
         .pb(px(floating::CAPSULE_INSET))
-        .when(!cv.wide, |v| v.pt_safe_area_plus(px(floating::CAPSULE_INSET)))
+        .when(!cv.wide, |v| {
+            v.pt_safe_area_plus(px(floating::CAPSULE_INSET))
+        })
         .when(cv.wide, |v| v.pt(px(floating::CAPSULE_INSET)))
         .pointer_events(PointerEvents::BoxNone)
         .child(when(cv.searching, move || search_bar(cv)).otherwise(move || title_bar(cv)))
@@ -98,8 +112,14 @@ fn title_bar(cv: Conv) -> View {
     let (s, chat) = (cv.s, cv.chat);
     let info = computed(move || s.chat(chat));
     let peer = computed(move || s.peer(chat));
-    let whatsapp = info.with_untracked(|c| c.as_ref().is_some_and(|c| matches!(c.kind, ChatKind::WhatsApp(_))));
-    let channel = info.with_untracked(|c| c.as_ref().is_some_and(|c| matches!(c.kind, ChatKind::Channel { .. })));
+    let whatsapp = info.with_untracked(|c| {
+        c.as_ref()
+            .is_some_and(|c| matches!(c.kind, ChatKind::WhatsApp(_)))
+    });
+    let channel = info.with_untracked(|c| {
+        c.as_ref()
+            .is_some_and(|c| matches!(c.kind, ChatKind::Channel { .. }))
+    });
     let direct = peer.with_untracked(Option::is_some);
     let calls = (!channel).then(|| {
         if cv.wide {
@@ -109,20 +129,45 @@ fn title_bar(cv: Conv) -> View {
             floating::capsule(
                 view()
                     .flex_row()
-                    .child(icon_btn(Icon::Video, "Video call", move || calls::start_call(chat, true)).size(px(h)).rounded_full())
-                    .child(icon_btn(Icon::Phone, "Voice call", move || calls::start_call(chat, false)).size(px(h)).rounded_full()),
+                    .child(
+                        icon_btn(Icon::Video, "Video call", move || {
+                            calls::start_call(chat, true)
+                        })
+                        .size(px(h))
+                        .rounded_full(),
+                    )
+                    .child(
+                        icon_btn(Icon::Phone, "Voice call", move || {
+                            calls::start_call(chat, false)
+                        })
+                        .size(px(h))
+                        .rounded_full(),
+                    ),
             )
         } else {
             // Phones keep the row for the name: the voice call here, the
             // video call in More.
-            round(Icon::Phone, "Voice call", move || calls::start_call(chat, false))
+            round(Icon::Phone, "Voice call", move || {
+                calls::start_call(chat, false)
+            })
         }
     });
     let more = {
         let h = floating::capsule_height();
-        floating::capsule(view().size(px(h)).items_center().justify_center().child(more_menu(cv, direct && !whatsapp)))
+        floating::capsule(
+            view()
+                .size(px(h))
+                .items_center()
+                .justify_center()
+                .child(more_menu(cv, direct && !whatsapp)),
+        )
     };
-    let right = view().flex_row().items_center().gap_2().child(calls).child(more);
+    let right = view()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(calls)
+        .child(more);
     if cv.wide {
         // The name capsule sits at the pane's centre: equal columns either
         // side, the actions in the right one.
@@ -133,7 +178,11 @@ fn title_bar(cv: Conv) -> View {
             .gap_2()
             .pointer_events(PointerEvents::BoxNone)
             .child(view().flex_1())
-            .child(name_capsule(cv, info, peer).flex_shrink(1.0).max_w(px(420.0)))
+            .child(
+                name_capsule(cv, info, peer)
+                    .flex_shrink(1.0)
+                    .max_w(px(420.0)),
+            )
             .child(view().flex_1().flex_row().justify_end().child(right));
     }
     view()
@@ -149,7 +198,11 @@ fn title_bar(cv: Conv) -> View {
 
 /// The chat's capsule: its avatar concentric with the capsule's round
 /// end, then the name and the subtitle, centred. It opens chat info.
-fn name_capsule(cv: Conv, info: Memo<Option<crate::store::Chat>>, peer: Memo<Option<crate::store::Contact>>) -> View {
+fn name_capsule(
+    cv: Conv,
+    info: Memo<Option<crate::store::Chat>>,
+    peer: Memo<Option<crate::store::Contact>>,
+) -> View {
     let chat = cv.chat;
     let h = floating::capsule_height();
     // 4pt around the avatar: its circle and the capsule's end share a
@@ -159,16 +212,26 @@ fn name_capsule(cv: Conv, info: Memo<Option<crate::store::Chat>>, peer: Memo<Opt
     let seed = info.with_untracked(|c| c.as_ref().map_or(0, |c| c.seed));
     let verified = move || peer.with(|p| p.as_ref().is_some_and(|p| p.verified));
     let muted = move || info.with(|c| c.as_ref().is_some_and(|c| c.muted));
-    let whatsapp = info.with_untracked(|c| c.as_ref().is_some_and(|c| matches!(c.kind, ChatKind::WhatsApp(_))));
+    let whatsapp = info.with_untracked(|c| {
+        c.as_ref()
+            .is_some_and(|c| matches!(c.kind, ChatKind::WhatsApp(_)))
+    });
     let direct = peer.with_untracked(Option::is_some);
-    let online = move || peer.with(|p| p.as_ref().is_some_and(|p| p.presence == crate::store::Presence::Online));
+    let online = move || {
+        peer.with(|p| {
+            p.as_ref()
+                .is_some_and(|p| p.presence == crate::store::Presence::Online)
+        })
+    };
     let timer = move || info.with(|c| c.as_ref().and_then(|c| c.disappearing));
     let sub = subtitle(cv);
     let reduced = motion::reduced();
     floating::capsule(
         pressable()
             .on_press(move || super::chat_info(chat))
-            .accessibility_label(super::say(move || format!("{}, {}, chat info", title(), sub().0)))
+            .accessibility_label(super::say(move || {
+                format!("{}, {}, chat info", title(), sub().0)
+            }))
             .h(px(h))
             .min_w(px(0.0))
             .flex_row()
@@ -183,9 +246,23 @@ fn name_capsule(cv: Conv, info: Memo<Option<crate::store::Chat>>, peer: Memo<Opt
             .transition()
             .duration(motion::INSTANT)
             .hover(|st| st.bg(move || c::foreground().opacity(0.05)))
-            .active(move |st| if reduced { st.opacity(0.85) } else { st.bg(move || c::foreground().opacity(0.08)) })
-            .focus_visible(|st| st.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
-            .child(if direct { avatar_presence(title(), seed, side, online) } else { group_avatar(title(), seed, side) })
+            .active(move |st| {
+                if reduced {
+                    st.opacity(0.85)
+                } else {
+                    st.bg(move || c::foreground().opacity(0.08))
+                }
+            })
+            .focus_visible(|st| {
+                st.outline(px(2.0))
+                    .outline_offset(px(2.0))
+                    .outline_color(move || c::ring())
+            })
+            .child(if direct {
+                avatar_presence(title(), seed, side, online)
+            } else {
+                group_avatar(title(), seed, side)
+            })
             .child(
                 view()
                     .flex_1()
@@ -209,9 +286,15 @@ fn name_capsule(cv: Conv, info: Memo<Option<crate::store::Chat>>, peer: Memo<Opt
                                     .role(AccessibilityRole::Header),
                             )
                             .child(when(verified, || {
-                                icon(Icon::ShieldCheck, 13.0).text_color(move || c::primary()).label("Verified")
+                                icon(Icon::ShieldCheck, 13.0)
+                                    .text_color(move || c::primary())
+                                    .label("Verified")
                             }))
-                            .child(when(muted, || icon(Icon::BellOff, 12.0).text_color(move || c::muted_fg()).label("Muted")))
+                            .child(when(muted, || {
+                                icon(Icon::BellOff, 12.0)
+                                    .text_color(move || c::muted_fg())
+                                    .label("Muted")
+                            }))
                             .child(whatsapp.then(|| tag("WhatsApp"))),
                     )
                     .child(
@@ -221,18 +304,28 @@ fn name_capsule(cv: Conv, info: Memo<Option<crate::store::Chat>>, peer: Memo<Opt
                             .justify_center()
                             .gap_1()
                             .max_w(relative(1.0))
-                            .child(when(move || timer().is_some(), move || {
-                                icon(Icon::Timer, 11.0)
-                                    .text_color(move || c::muted_fg())
-                                    .label(move || format!("Disappearing messages: {}", timer().map(|t| t.label()).unwrap_or("")))
-                            }))
+                            .child(when(
+                                move || timer().is_some(),
+                                move || {
+                                    icon(Icon::Timer, 11.0)
+                                        .text_color(move || c::muted_fg())
+                                        .label(move || {
+                                            format!(
+                                                "Disappearing messages: {}",
+                                                timer().map(|t| t.label()).unwrap_or("")
+                                            )
+                                        })
+                                },
+                            ))
                             .child(
                                 text(move || sub().0)
                                     .flex_shrink(1.0)
                                     .number_of_lines(1)
                                     .text_size(px(font::CAPTION))
                                     .line_height(px(15.0))
-                                    .text_color(move || if sub().1 { c::primary() } else { c::muted_fg() }),
+                                    .text_color(
+                                        move || if sub().1 { c::primary() } else { c::muted_fg() },
+                                    ),
                             ),
                     ),
             ),
@@ -246,11 +339,15 @@ fn more_menu(cv: Conv, nudge: bool) -> AnyElement {
     let peer = s.peer(chat);
     let group = peer.is_none();
     let muted = move || s.chat(chat).is_some_and(|c| c.muted);
-    let channel = s.chat(chat).is_some_and(|c| matches!(c.kind, ChatKind::Channel { .. }));
+    let channel = s
+        .chat(chat)
+        .is_some_and(|c| matches!(c.kind, ChatKind::Channel { .. }));
     let mut items = Vec::new();
     // Phones show one call in the header; the other is here.
     if !cv.wide && !channel {
-        items.push(menu_entry(Icon::Video, "Video call", false, move || calls::start_call(chat, true)));
+        items.push(menu_entry(Icon::Video, "Video call", false, move || {
+            calls::start_call(chat, true)
+        }));
     }
     items.extend([
         menu_entry(Icon::Search, "Search", false, move || {
@@ -260,16 +357,40 @@ fn more_menu(cv: Conv, nudge: bool) -> AnyElement {
                 cv.searching.set(true);
             });
         }),
-        menu_entry(Icon::Info, if group { "Group info" } else { "Contact info" }, false, move || super::chat_info(chat)),
-        menu_entry(Icon::Check, "Select messages", false, move || cv.selecting.set(true)),
-        menu_entry(Icon::BellOff, if muted() { "Unmute notifications" } else { "Mute notifications" }, false, move || {
-            s.toggle_mute(chat);
-            toast(if muted() { "Notifications muted" } else { "Notifications on" });
+        menu_entry(
+            Icon::Info,
+            if group { "Group info" } else { "Contact info" },
+            false,
+            move || super::chat_info(chat),
+        ),
+        menu_entry(Icon::Check, "Select messages", false, move || {
+            cv.selecting.set(true)
         }),
-        menu_entry(Icon::Timer, "Disappearing messages", false, move || cv.timer_open.set(true)),
+        menu_entry(
+            Icon::BellOff,
+            if muted() {
+                "Unmute notifications"
+            } else {
+                "Mute notifications"
+            },
+            false,
+            move || {
+                s.toggle_mute(chat);
+                toast(if muted() {
+                    "Notifications muted"
+                } else {
+                    "Notifications on"
+                });
+            },
+        ),
+        menu_entry(Icon::Timer, "Disappearing messages", false, move || {
+            cv.timer_open.set(true)
+        }),
     ]);
     if nudge {
-        items.push(menu_entry(Icon::Zap, "Send a nudge", false, move || s.nudge_with_echo(chat)));
+        items.push(menu_entry(Icon::Zap, "Send a nudge", false, move || {
+            super::send_nudge(s, chat)
+        }));
     }
     items.push(menu_rule());
     items.push(menu_entry(Icon::Trash, "Clear chat", true, move || {
@@ -339,7 +460,8 @@ fn search_bar(cv: Conv) -> View {
         if let Some(id) = hits.with_untracked(|h| h.get(n).copied()) {
             cv.hit.set(n);
             if let Some(i) = s.index_of(chat, id) {
-                cv.list.scroll_to_index(i as u32, percentage(0.5), px(0.0), true);
+                cv.list
+                    .scroll_to_index(i as u32, percentage(0.5), px(0.0), true);
             }
             list::flash(cv, id);
         }
@@ -399,18 +521,24 @@ fn search_bar(cv: Conv) -> View {
                         .text_color(move || c::muted_fg()),
                     )
                     .child(
-                        view()
-                            .style_with(|st| st.rotate(deg(180.0)))
-                            .child(icon_btn(Icon::ChevronDown, "Older match", move || {
+                        view().style_with(|st| st.rotate(deg(180.0))).child(
+                            icon_btn(Icon::ChevronDown, "Older match", move || {
                                 let n = hits.with_untracked(Vec::len);
                                 if n > 0 {
                                     show((cv.hit.get_untracked() + 1).min(n - 1));
                                 }
-                            }).size(px(h)).rounded_full()),
+                            })
+                            .size(px(h))
+                            .rounded_full(),
+                        ),
                     )
-                    .child(icon_btn(Icon::ChevronDown, "Newer match", move || {
-                        show(cv.hit.get_untracked().saturating_sub(1));
-                    }).size(px(h)).rounded_full()),
+                    .child(
+                        icon_btn(Icon::ChevronDown, "Newer match", move || {
+                            show(cv.hit.get_untracked().saturating_sub(1));
+                        })
+                        .size(px(h))
+                        .rounded_full(),
+                    ),
             )
             .flex_1(),
         )

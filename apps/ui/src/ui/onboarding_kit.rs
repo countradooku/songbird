@@ -92,7 +92,9 @@ pub fn progress_bar(label: &'static str, fraction: impl Fn() -> f32 + Copy + 'st
                 .bg(move || c::primary())
                 .origin_left()
                 .scale_x(move || fraction().clamp(0.0, 1.0))
-                .when(!motion::reduced(), |v| v.transition_transform().duration(motion::BASE).ease_out()),
+                .when(!motion::reduced(), |v| {
+                    v.transition_transform().duration(motion::BASE).ease_out()
+                }),
         )
 }
 
@@ -102,8 +104,12 @@ pub fn busy_bar(label: &'static str) -> View {
     let slide = motion();
     if !motion::reduced() {
         let _ = slide.play(
-            MotionSpec::new(KeyframeTiming::new(1200.0).easing(Easing::EaseInOut).infinite())
-                .values(MotionChannel::TranslateX, [-48.0, 320.0]),
+            MotionSpec::new(
+                KeyframeTiming::new(1200.0)
+                    .easing(Easing::EaseInOut)
+                    .infinite(),
+            )
+            .values(MotionChannel::TranslateX, [-48.0, 320.0]),
         );
     }
     // The track is tinted (accent), so the bar reads as working even in
@@ -143,7 +149,13 @@ pub fn step_segments(count: usize, current: impl Fn() -> usize + Copy + 'static)
                 .rounded_full()
                 // Inactive segments on the input tone: visible on a card in
                 // dark as in light.
-                .bg(move || if i <= current() { c::primary() } else { c::input() })
+                .bg(move || {
+                    if i <= current() {
+                        c::primary()
+                    } else {
+                        c::input()
+                    }
+                })
                 .transition_colors()
                 .duration(motion::BASE)
         }))
@@ -179,7 +191,9 @@ pub fn page_dots(
                         .w(move || px(if selected() { 22.0 } else { 8.0 }))
                         .rounded_full()
                         .bg(move || if selected() { c::primary() } else { c::input() })
-                        .when(!motion::reduced(), |v| v.transition_all().duration(motion::BASE).ease_in_out()),
+                        .when(!motion::reduced(), |v| {
+                            v.transition_all().duration(motion::BASE).ease_in_out()
+                        }),
                 )
         }))
 }
@@ -333,6 +347,40 @@ pub fn code_cells(
     invalid: impl Fn() -> bool + Copy + 'static,
     on_submit: impl Fn() + 'static,
 ) -> View {
+    cells(
+        label, length, group, value, clean, invalid, on_submit, false,
+    )
+}
+
+/// A passcode typed into six cells that show dots, never digits (the app
+/// lock, Prompt 9): the same field as [`code_cells`], masked, a number pad
+/// on phones.
+pub fn passcode_cells(
+    label: &'static str,
+    value: Signal<String>,
+    invalid: impl Fn() -> bool + Copy + 'static,
+    on_submit: impl Fn() + 'static,
+) -> View {
+    fn digits(t: &str) -> String {
+        t.chars().filter(char::is_ascii_digit).take(6).collect()
+    }
+    cells(label, 6, 3, value, digits, invalid, on_submit, true)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the two public forms share one body"
+)]
+fn cells(
+    label: &'static str,
+    length: usize,
+    group: usize,
+    value: Signal<String>,
+    clean: fn(&str) -> String,
+    invalid: impl Fn() -> bool + Copy + 'static,
+    on_submit: impl Fn() + 'static,
+    masked: bool,
+) -> View {
     const PER_ROW: usize = 3;
     let focused = signal(false);
     let blocks = length.div_ceil(group);
@@ -350,35 +398,53 @@ pub fn code_cells(
             .rounded(move || radius::control())
             .bg(move || c::card())
             .border_1()
-            .border_color(move || if invalid() { c::destructive() } else if next() { c::ring() } else { c::input() })
-            .style_when(next, |s| s.outline(px(1.0)).outline_color(move || c::ring()))
+            .border_color(move || {
+                if invalid() {
+                    c::destructive()
+                } else if next() {
+                    c::ring()
+                } else {
+                    c::input()
+                }
+            })
+            .style_when(next, |s| {
+                s.outline(px(1.0)).outline_color(move || c::ring())
+            })
             .transition_colors()
             .duration(motion::INSTANT)
             .children((0..group).map(move |k| {
                 let i = b * group + k;
                 let ch = move || value.with(|v| v.chars().nth(i));
-                text(move || ch().map(String::from).unwrap_or_else(|| "·".into()))
-                    .w(px(14.0))
-                    .text_center()
-                    .font_family(MONO)
-                    .text_size(px(font::TITLE))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(move || if ch().is_some() { c::foreground() } else { c::muted_fg() })
+                text(move || match ch() {
+                    Some(_) if masked => "●".into(),
+                    Some(c) => String::from(c),
+                    None => "·".into(),
+                })
+                .w(px(14.0))
+                .text_center()
+                .font_family(MONO)
+                .text_size(px(font::TITLE))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(move || {
+                    if ch().is_some() {
+                        c::foreground()
+                    } else {
+                        c::muted_fg()
+                    }
+                })
             }))
     };
     view()
         .relative()
         .w_full()
-        .child(
-            view()
-                .gap_2()
-                .accessibility_elements_hidden(true)
-                .children((0..blocks.div_ceil(PER_ROW)).map(move |row| {
-                    view().flex_row().gap_2().children(
-                        (row * PER_ROW..((row + 1) * PER_ROW).min(blocks)).map(block),
-                    )
-                })),
-        )
+        .child(view().gap_2().accessibility_elements_hidden(true).children(
+            (0..blocks.div_ceil(PER_ROW)).map(move |row| {
+                view()
+                    .flex_row()
+                    .gap_2()
+                    .children((row * PER_ROW..((row + 1) * PER_ROW).min(blocks)).map(block))
+            }),
+        ))
         .child(
             nsh_base::input()
                 .absolute()
@@ -392,6 +458,12 @@ pub fn code_cells(
                 .on_focus(move || focused.set(true))
                 .on_blur(move || focused.set(false))
                 .label(label)
+                .keyboard_type(if masked {
+                    KeyboardType::Number
+                } else {
+                    KeyboardType::Default
+                })
+                .masked(masked)
                 .auto_capitalize(AutoCapitalize::Characters)
                 .auto_correct(false)
                 .submit_behavior(SubmitBehavior::Submit)

@@ -24,8 +24,12 @@ const BACKDROPS: [(&str, &str); 10] = [
     ("#D7E1DC", "#A9BDB3"),
 ];
 
-const SKIN: [&str; 6] = ["#F3D3BD", "#E8B996", "#D29A72", "#B57A55", "#8C5A3C", "#6A4330"];
-const HAIR: [&str; 7] = ["#2B2220", "#4A3426", "#7A4E2D", "#B07A45", "#D8B46A", "#9A9A98", "#5B2E2A"];
+const SKIN: [&str; 6] = [
+    "#F3D3BD", "#E8B996", "#D29A72", "#B57A55", "#8C5A3C", "#6A4330",
+];
+const HAIR: [&str; 7] = [
+    "#2B2220", "#4A3426", "#7A4E2D", "#B07A45", "#D8B46A", "#9A9A98", "#5B2E2A",
+];
 const SHIRT: [&str; 8] = [
     "#2F5D57", "#3F4A6B", "#8A5A44", "#5B6B3A", "#6B3F5E", "#2E4F6E", "#7A6A4A", "#44474F",
 ];
@@ -55,8 +59,16 @@ fn markup(seed: u64) -> String {
     let me = seed == ME_SEED;
     // The user's own portrait is drawn on purpose, not rolled: a man with
     // short dark hair and a short beard (the mock profile is "Radu").
-    let hair = if me { HAIR[1] } else { HAIR[pick(3, HAIR.len())] };
-    let shirt = if me { SHIRT[5] } else { SHIRT[pick(4, SHIRT.len())] };
+    let hair = if me {
+        HAIR[1]
+    } else {
+        HAIR[pick(3, HAIR.len())]
+    };
+    let shirt = if me {
+        SHIRT[5]
+    } else {
+        SHIRT[pick(4, SHIRT.len())]
+    };
     let style = if me { 4 } else { pick(5, 6) };
     let glasses = !me && pick(6, 5) == 0;
     let id = format!("g{seed}");
@@ -64,22 +76,50 @@ fn markup(seed: u64) -> String {
     // Hair behind the head (long styles), the head, then hair on top.
     let (back, front) = match style {
         // Short, side part.
-        0 => (String::new(), format!(r#"<path d="M20 27c0-8 5.5-13 12-13s12 4.5 12 12c-3-3-7-4.5-12-4.5-4 0-8 1.8-12 5.5z" fill="{hair}"/>"#)),
+        0 => (
+            String::new(),
+            format!(
+                r#"<path d="M20 27c0-8 5.5-13 12-13s12 4.5 12 12c-3-3-7-4.5-12-4.5-4 0-8 1.8-12 5.5z" fill="{hair}"/>"#
+            ),
+        ),
         // Long, past the shoulders.
         1 => (
-            format!(r#"<path d="M18 30c0-10 6-16 14-16s14 6 14 16v16c0 3-2 5-5 5H23c-3 0-5-2-5-5z" fill="{hair}"/>"#),
-            format!(r#"<path d="M20 28c1-8 6-12.5 12-12.5S43 20 44 28c-4-5-8-6.5-12-6.5S24 23 20 28z" fill="{hair}"/>"#),
+            format!(
+                r#"<path d="M18 30c0-10 6-16 14-16s14 6 14 16v16c0 3-2 5-5 5H23c-3 0-5-2-5-5z" fill="{hair}"/>"#
+            ),
+            format!(
+                r#"<path d="M20 28c1-8 6-12.5 12-12.5S43 20 44 28c-4-5-8-6.5-12-6.5S24 23 20 28z" fill="{hair}"/>"#
+            ),
         ),
         // Bun.
-        2 => (String::new(), format!(r#"<circle cx="32" cy="12.5" r="5" fill="{hair}"/><path d="M20 27c0-7.5 5.5-12.5 12-12.5S44 19.5 44 27c-3.5-3.5-7.5-5-12-5s-8.5 1.5-12 5z" fill="{hair}"/>"#)),
+        2 => (
+            String::new(),
+            format!(
+                r#"<circle cx="32" cy="12.5" r="5" fill="{hair}"/><path d="M20 27c0-7.5 5.5-12.5 12-12.5S44 19.5 44 27c-3.5-3.5-7.5-5-12-5s-8.5 1.5-12 5z" fill="{hair}"/>"#
+            ),
+        ),
         // Curly crown.
-        3 => (String::new(), format!(r#"<g fill="{hair}"><circle cx="22.5" cy="23" r="4.5"/><circle cx="27" cy="17.5" r="5"/><circle cx="33" cy="15.5" r="5.2"/><circle cx="38.5" cy="18" r="4.8"/><circle cx="42" cy="23.5" r="4.2"/></g>"#)),
+        3 => (
+            String::new(),
+            format!(
+                r#"<g fill="{hair}"><circle cx="22.5" cy="23" r="4.5"/><circle cx="27" cy="17.5" r="5"/><circle cx="33" cy="15.5" r="5.2"/><circle cx="38.5" cy="18" r="4.8"/><circle cx="42" cy="23.5" r="4.2"/></g>"#
+            ),
+        ),
         // Short with a beard.
-        4 => (String::new(), format!(r#"<path d="M21 25.5c0-7 5-11.5 11-11.5s11 4.5 11 11.5c-3-2.2-6.5-3.2-11-3.2s-8 1-11 3.2z" fill="{hair}"/><path d="M22.5 31c0 7 4.3 11.5 9.5 11.5s9.5-4.5 9.5-11.5c-1.5 3-4 4.2-5 4.2-1.5-1.3-3-1.8-4.5-1.8s-3 .5-4.5 1.8c-1 0-3.5-1.2-5-4.2z" fill="{hair}"/>"#)),
+        4 => (
+            String::new(),
+            format!(
+                r#"<path d="M21 25.5c0-7 5-11.5 11-11.5s11 4.5 11 11.5c-3-2.2-6.5-3.2-11-3.2s-8 1-11 3.2z" fill="{hair}"/><path d="M22.5 31c0 7 4.3 11.5 9.5 11.5s9.5-4.5 9.5-11.5c-1.5 3-4 4.2-5 4.2-1.5-1.3-3-1.8-4.5-1.8s-3 .5-4.5 1.8c-1 0-3.5-1.2-5-4.2z" fill="{hair}"/>"#
+            ),
+        ),
         // Bob.
         _ => (
-            format!(r#"<path d="M19 29c0-9 5.8-14.5 13-14.5S45 20 45 29v7c0 2-1.5 3-3 3H22c-1.5 0-3-1-3-3z" fill="{hair}"/>"#),
-            format!(r#"<path d="M20.5 27.5c1.5-7 6-11 11.5-11s10 4 11.5 11c-5-1-9-3.5-11-6.5-2.5 3.5-6.5 5.5-12 6.5z" fill="{hair}"/>"#),
+            format!(
+                r#"<path d="M19 29c0-9 5.8-14.5 13-14.5S45 20 45 29v7c0 2-1.5 3-3 3H22c-1.5 0-3-1-3-3z" fill="{hair}"/>"#
+            ),
+            format!(
+                r#"<path d="M20.5 27.5c1.5-7 6-11 11.5-11s10 4 11.5 11c-5-1-9-3.5-11-6.5-2.5 3.5-6.5 5.5-12 6.5z" fill="{hair}"/>"#
+            ),
         ),
     };
     let specs = if glasses {
@@ -97,7 +137,13 @@ fn markup(seed: u64) -> String {
 fn scene(seed: u64) -> String {
     let pick = |lane: u64, n: usize| (mix(seed, lane) % n as u64) as usize;
     let (top, bottom) = BACKDROPS[pick(11, BACKDROPS.len())];
-    let hills = [("#5E8F7E", "#3F6E60"), ("#8C7A5B", "#6B5A3E"), ("#6C7FA8", "#4C5E86"), ("#A06F68", "#7D4F49"), ("#6E8A55", "#4F6A3A")];
+    let hills = [
+        ("#5E8F7E", "#3F6E60"),
+        ("#8C7A5B", "#6B5A3E"),
+        ("#6C7FA8", "#4C5E86"),
+        ("#A06F68", "#7D4F49"),
+        ("#6E8A55", "#4F6A3A"),
+    ];
     let (far, near) = hills[pick(12, hills.len())];
     let sun_x = 18 + pick(13, 28);
     let id = format!("s{seed}");
@@ -111,7 +157,11 @@ pub fn scenery(seed: u64) -> ImageSrc {
     thread_local! {
         static CACHE: RefCell<HashMap<u64, ImageSrc>> = RefCell::new(HashMap::new());
     }
-    CACHE.with_borrow_mut(|c| c.entry(seed).or_insert_with(|| ImageSrc::svg_markup(&scene(seed))).clone())
+    CACHE.with_borrow_mut(|c| {
+        c.entry(seed)
+            .or_insert_with(|| ImageSrc::svg_markup(&scene(seed)))
+            .clone()
+    })
 }
 
 /// The portrait as an image source, built once per seed.
@@ -119,7 +169,11 @@ pub fn portrait(seed: u64) -> ImageSrc {
     thread_local! {
         static CACHE: RefCell<HashMap<u64, ImageSrc>> = RefCell::new(HashMap::new());
     }
-    CACHE.with_borrow_mut(|c| c.entry(seed).or_insert_with(|| ImageSrc::svg_markup(&markup(seed))).clone())
+    CACHE.with_borrow_mut(|c| {
+        c.entry(seed)
+            .or_insert_with(|| ImageSrc::svg_markup(&markup(seed)))
+            .clone()
+    })
 }
 
 #[cfg(test)]
@@ -165,8 +219,14 @@ fn photo_markup(alt: &str, seed: u64, w: u32, h: u32) -> String {
             .map(|i| {
                 let x = vw * 0.56 + i as f32 * vw * 0.026;
                 let bh = vh * (0.09 + (mix(seed, i) % 5) as f32 * 0.012);
-                let col = ["#8A5A44", "#3F4A6B", "#5B6B3A", "#B07A45", "#6B3F5E", "#2E4F6E"][(mix(seed, i + 40) % 6) as usize];
-                format!(r#"<rect x="{x:.1}" y="{:.1}" width="{:.1}" height="{bh:.1}" fill="{col}"/>"#, vh * 0.42 - bh, vw * 0.022)
+                let col = [
+                    "#8A5A44", "#3F4A6B", "#5B6B3A", "#B07A45", "#6B3F5E", "#2E4F6E",
+                ][(mix(seed, i + 40) % 6) as usize];
+                format!(
+                    r#"<rect x="{x:.1}" y="{:.1}" width="{:.1}" height="{bh:.1}" fill="{col}"/>"#,
+                    vh * 0.42 - bh,
+                    vw * 0.022
+                )
             })
             .collect();
         format!(
@@ -271,7 +331,9 @@ fn photo_markup(alt: &str, seed: u64, w: u32, h: u32) -> String {
             b2 = vw * 0.7,
         )
     };
-    format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="{vw}" height="{vh}" viewBox="0 0 {vw} {vh}" preserveAspectRatio="xMidYMid slice">{body}</svg>"#)
+    format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{vw}" height="{vh}" viewBox="0 0 {vw} {vh}" preserveAspectRatio="xMidYMid slice">{body}</svg>"#
+    )
 }
 
 #[cfg(test)]

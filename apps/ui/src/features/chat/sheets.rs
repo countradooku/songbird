@@ -34,19 +34,29 @@ const EMOJI: [&str; 48] = [
 ];
 
 /// A grid of emoji as buttons; `pick` gets the one chosen.
-fn emoji_grid(set: &'static [&'static str], size: f32, pick: impl Fn(&'static str) + Copy + 'static) -> View {
+fn emoji_grid(
+    set: &'static [&'static str],
+    size: f32,
+    pick: impl Fn(&'static str) + Copy + 'static,
+) -> View {
     let cell = if is_desktop() { 44.0 } else { 48.0 };
-    view().flex_row().flex_wrap().px_3().pb_2().justify_center().children(set.iter().map(move |&e| {
-        pressable()
-            .on_press(move || pick(e))
-            .accessibility_label(e)
-            .size(px(cell))
-            .items_center()
-            .justify_center()
-            .rounded(move || radius::control())
-            .hover(|st| st.bg(move || c::accent()))
-            .child(text(e).text_size(px(size)))
-    }))
+    view()
+        .flex_row()
+        .flex_wrap()
+        .px_3()
+        .pb_2()
+        .justify_center()
+        .children(set.iter().map(move |&e| {
+            pressable()
+                .on_press(move || pick(e))
+                .accessibility_label(e)
+                .size(px(cell))
+                .items_center()
+                .justify_center()
+                .rounded(move || radius::control())
+                .hover(|st| st.bg(move || c::accent()))
+                .child(text(e).text_size(px(size)))
+        }))
 }
 
 fn emoji_sheet(cv: Conv) -> AnyElement {
@@ -107,7 +117,11 @@ fn tile(glyph: Icon, label: &'static str, f: impl Fn() + 'static) -> AnyElement 
         .child(
             text(label)
                 .number_of_lines(1)
-                .text_size(px(if is_desktop() { font::CAPTION } else { font::SMALL }))
+                .text_size(px(if is_desktop() {
+                    font::CAPTION
+                } else {
+                    font::SMALL
+                }))
                 .text_center()
                 .text_color(move || c::foreground()),
         )
@@ -119,40 +133,76 @@ fn tile(glyph: Icon, label: &'static str, f: impl Fn() + 'static) -> AnyElement 
 /// body. A sheet on phones; on desktops a popover above the paperclip.
 fn attach_sheet(cv: Conv) -> AnyElement {
     let open = cv.attach_open;
-    let then = move |f: fn(Conv)| move || {
-        open.set(false);
-        f(cv);
+    let then = move |f: fn(Conv)| {
+        move || {
+            open.set(false);
+            f(cv);
+        }
     };
-    let whatsapp = cv.s.chat(cv.chat).is_some_and(|c| matches!(c.kind, ChatKind::WhatsApp(_)));
+    let whatsapp =
+        cv.s.chat(cv.chat)
+            .is_some_and(|c| matches!(c.kind, ChatKind::WhatsApp(_)));
     let tiles = move || {
         let tiles = vec![
             // mock: the system photo picker; app-core encrypts and uploads.
-            tile(Icon::Image, "Photos", then(|cv| {
-                cv.send_body(Body::Image {
-                    caption: String::new(),
-                    alt: "A photo from your library: a street in the old town at dusk".into(),
-                    w: 4,
-                    h: 3,
-                    hd: cv.s.settings.with_untracked(|x| x.hd_uploads),
-                })
-            })),
+            tile(
+                Icon::Image,
+                "Photos",
+                then(|cv| {
+                    cv.send_body(Body::Image {
+                        caption: String::new(),
+                        alt: "A photo from your library: a street in the old town at dusk".into(),
+                        w: 4,
+                        h: 3,
+                        hd: cv.s.settings.with_untracked(|x| x.hd_uploads),
+                    })
+                }),
+            ),
             tile(Icon::Camera, "Camera", then(|cv| cv.camera_open.set(true))),
             // mock: the document picker.
-            tile(Icon::File, "Document", then(|cv| {
-                cv.send_body(Body::File { name: "Meeting notes.pdf".into(), size: "312 KB".into(), kind: "PDF".into() })
-            })),
+            tile(
+                Icon::File,
+                "Document",
+                then(|cv| {
+                    cv.send_body(Body::File {
+                        name: "Meeting notes.pdf".into(),
+                        size: "312 KB".into(),
+                        kind: "PDF".into(),
+                    })
+                }),
+            ),
             // mock: the location permission and a map picker.
-            tile(Icon::MapPin, "Location", then(|cv| {
-                cv.send_body(Body::Location { label: "Your current location · Cluj-Napoca".into(), live: false })
-            })),
-            tile(Icon::Contact, "Contact", then(|cv| cv.contact_open.set(true))),
+            tile(
+                Icon::MapPin,
+                "Location",
+                then(|cv| {
+                    cv.send_body(Body::Location {
+                        label: "Your current location · Cluj-Napoca".into(),
+                        live: false,
+                    })
+                }),
+            ),
+            tile(
+                Icon::Contact,
+                "Contact",
+                then(|cv| cv.contact_open.set(true)),
+            ),
             tile(Icon::Poll, "Poll", then(|cv| cv.poll_open.set(true))),
             tile(Icon::Calendar, "Event", then(|cv| cv.event_open.set(true))),
-            tile(Icon::Sticker, "Sticker", then(|cv| cv.sticker_open.set(true))),
+            tile(
+                Icon::Sticker,
+                "Sticker",
+                then(|cv| cv.sticker_open.set(true)),
+            ),
         ];
         if whatsapp {
             // WhatsApp's bridge carries no polls or events from Songbird yet.
-            tiles.into_iter().enumerate().filter(|(i, _)| *i != 5 && *i != 6).map(|(_, t)| t).collect()
+            tiles
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| *i != 5 && *i != 6)
+                .map(|(_, t)| t)
+                .collect()
         } else {
             tiles
         }
@@ -162,7 +212,9 @@ fn attach_sheet(cv: Conv) -> AnyElement {
             .gap_3()
             .child(view().flex_row().flex_wrap().children(tiles()))
             // Features WhatsApp chats lack are explained, never silently gone (A15).
-            .child(whatsapp.then(|| crate::features::whatsapp::unsupported_note("Polls and events")))
+            .child(
+                whatsapp.then(|| crate::features::whatsapp::unsupported_note("Polls and events")),
+            )
             .child(footnote("Files and photos are end-to-end encrypted too.").text_center())
     };
     if !cv.wide {
@@ -176,7 +228,10 @@ fn attach_sheet(cv: Conv) -> AnyElement {
         if !open.get() {
             return None;
         }
-        let (x, y, _, _) = cv.attach_at.get_untracked().unwrap_or((24.0, window().height.0 - 72.0, 32.0, 32.0));
+        let (x, y, _, _) =
+            cv.attach_at
+                .get_untracked()
+                .unwrap_or((24.0, window().height.0 - 72.0, 32.0, 32.0));
         let win = window();
         let left = x.min(win.width.0 - W - 8.0).max(8.0).round();
         let bottom = (win.height.0 - y + 8.0).max(8.0).round();
@@ -202,21 +257,25 @@ fn attach_sheet(cv: Conv) -> AnyElement {
                     ),
                 )
                 .child(
-                    overlay().absolute().left(px(left)).bottom(px(bottom)).child(
-                        view()
-                            .bind_motion(&pop)
-                            .w(px(W))
-                            .p_2()
-                            .pt_3()
-                            .rounded(move || radius::lg())
-                            .bg(move || c::popover())
-                            .border_1()
-                            .border_color(move || c::border())
-                            .shadow_lg()
-                            .role(AccessibilityRole::Dialog)
-                            .label("Share")
-                            .child(content()),
-                    ),
+                    overlay()
+                        .absolute()
+                        .left(px(left))
+                        .bottom(px(bottom))
+                        .child(
+                            view()
+                                .bind_motion(&pop)
+                                .w(px(W))
+                                .p_2()
+                                .pt_3()
+                                .rounded(move || radius::lg())
+                                .bg(move || c::popover())
+                                .border_1()
+                                .border_color(move || c::border())
+                                .shadow_lg()
+                                .role(AccessibilityRole::Dialog)
+                                .label("Share")
+                                .child(content()),
+                        ),
                 )
         }))
     })
@@ -228,7 +287,12 @@ fn poll_sheet(cv: Conv) -> AnyElement {
     let question = signal(String::new());
     let options: [Signal<String>; 4] = std::array::from_fn(|_| signal(String::new()));
     let multiple = signal(false);
-    let filled = move || options.iter().filter(|o| o.with(|t| !t.trim().is_empty())).count();
+    let filled = move || {
+        options
+            .iter()
+            .filter(|o| o.with(|t| !t.trim().is_empty()))
+            .count()
+    };
     let ready = move || question.with(|q| !q.trim().is_empty()) && filled() >= 2;
     let send = move || {
         let opts: Vec<(String, u32)> = options
@@ -259,15 +323,32 @@ fn poll_sheet(cv: Conv) -> AnyElement {
             .px_4()
             .pb_3()
             .gap_3()
-            .child(labelled_field("Question", field("Ask a question", question), "", || false))
+            .child(labelled_field(
+                "Question",
+                field("Ask a question", question),
+                "",
+                || false,
+            ))
             .child(
                 view()
                     .gap_2()
                     .child(section_title("Options").px_0().pt_0().pb_0())
-                    .children(options.iter().enumerate().map(|(i, &o)| field(format!("Option {}", i + 1), o))),
+                    .children(
+                        options
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &o)| field(format!("Option {}", i + 1), o)),
+                    ),
             )
-            .child(toggle_row("Allow multiple answers", None, move || multiple.get(), move |v| multiple.set(v)))
-            .child(btn("Send poll", Variant::Primary, BtnSize::Md, send).disabled(move || !ready())),
+            .child(toggle_row(
+                "Allow multiple answers",
+                None,
+                move || multiple.get(),
+                move |v| multiple.set(v),
+            ))
+            .child(
+                btn("Send poll", Variant::Primary, BtnSize::Md, send).disabled(move || !ready()),
+            ),
     )
     .into_element()
 }
@@ -277,7 +358,8 @@ fn event_sheet(cv: Conv) -> AnyElement {
     let title = signal(String::new());
     let when_ = signal(String::new());
     let place = signal(String::new());
-    let ready = move || title.with(|t| !t.trim().is_empty()) && when_.with(|t| !t.trim().is_empty());
+    let ready =
+        move || title.with(|t| !t.trim().is_empty()) && when_.with(|t| !t.trim().is_empty());
     let send = move || {
         cv.send_body(Body::Event {
             title: title.get_untracked().trim().into(),
@@ -300,10 +382,27 @@ fn event_sheet(cv: Conv) -> AnyElement {
             .px_4()
             .pb_3()
             .gap_3()
-            .child(labelled_field("Event name", field("Dinner at Mama's", title), "", || false))
-            .child(labelled_field("When", field("Sun 22 Nov, 13:00", when_), "", || false))
-            .child(labelled_field("Where (optional)", field("Add a place", place), "", || false))
-            .child(btn("Send event", Variant::Primary, BtnSize::Md, send).disabled(move || !ready())),
+            .child(labelled_field(
+                "Event name",
+                field("Dinner at Mama's", title),
+                "",
+                || false,
+            ))
+            .child(labelled_field(
+                "When",
+                field("Sun 22 Nov, 13:00", when_),
+                "",
+                || false,
+            ))
+            .child(labelled_field(
+                "Where (optional)",
+                field("Add a place", place),
+                "",
+                || false,
+            ))
+            .child(
+                btn("Send event", Variant::Primary, BtnSize::Md, send).disabled(move || !ready()),
+            ),
     )
     .into_element()
 }
@@ -312,21 +411,31 @@ fn event_sheet(cv: Conv) -> AnyElement {
 fn contact_sheet(cv: Conv) -> AnyElement {
     let open = cv.contact_open;
     let s = cv.s;
-    let people = s.contacts.with_untracked(|cs| cs.iter().filter(|c| !c.blocked).cloned().collect::<Vec<_>>());
+    let people = s.contacts.with_untracked(|cs| {
+        cs.iter()
+            .filter(|c| !c.blocked)
+            .cloned()
+            .collect::<Vec<_>>()
+    });
     app_sheet(
         open,
         "Share contact",
-        scroll().max_h(px(420.0)).child(view().pb_2().children(people.into_iter().map(move |p| {
-            let (name, username, seed) = (p.name.clone(), p.username.clone(), p.id);
-            Row::new(p.name.clone())
-                .leading(avatar(p.name.clone(), seed, 36.0))
-                .subtitle(format!("@{}", p.username))
-                .on_press(move || {
-                    open.set(false);
-                    cv.send_body(Body::Contact { name: name.clone(), username: username.clone() });
-                })
-                .build()
-        }))),
+        scroll()
+            .max_h(px(420.0))
+            .child(view().pb_2().children(people.into_iter().map(move |p| {
+                let (name, username, seed) = (p.name.clone(), p.username.clone(), p.id);
+                Row::new(p.name.clone())
+                    .leading(avatar(p.name.clone(), seed, 36.0))
+                    .subtitle(format!("@{}", p.username))
+                    .on_press(move || {
+                        open.set(false);
+                        cv.send_body(Body::Contact {
+                            name: name.clone(),
+                            username: username.clone(),
+                        });
+                    })
+                    .build()
+            }))),
     )
     .into_element()
 }
@@ -339,73 +448,150 @@ fn camera_sheet(cv: Conv) -> AnyElement {
     app_sheet(
         open,
         "Camera",
-        view().px_4().pb_4().gap_4().items_center().child(dynamic(move || {
-            let is_open = open.get();
-            untracked(move || {
-                if !is_open {
-                    busy.set(false);
-                    return view().into_element();
-                }
-                let session = crate::camera::use_session(songbird_camera::Purpose::Photo, || true, |_| {});
-                let shown = session.shown;
-                let running = move || matches!(shown.get(), crate::camera::Shown::Running(_));
-                let (flip, shoot) = (session.clone(), session.clone());
-                view()
-                    .gap_4()
-                    .items_center()
-                    .child(crate::camera::camera_view(&session, 280.0, ""))
-                    .child(when(running, move || {
-                        let (flip, shoot) = (flip.clone(), shoot.clone());
-                        view()
-                            .flex_row()
-                            .gap_3()
-                            .child(btn_with_icon("Flip", Some(Icon::FlipCamera), Variant::Ghost, BtnSize::Md, move || {
-                                flip.flip();
-                            }))
-                            .child(
-                                btn_with_icon("Take photo", Some(Icon::Camera), Variant::Primary, BtnSize::Md, move || {
-                                    busy.set(true);
-                                    shoot.take_photo(move |result| {
-                                        let _ = busy.try_set(false);
-                                        match result {
-                                            Ok(still) => {
-                                                open.set(false);
-                                                // mock: app-core encrypts the JPEG with the attachment
-                                                // format (Prompt 6) and uploads it; until then only its
-                                                // size reaches the message, and the bytes are dropped.
-                                                cv.send_body(Body::Image {
-                                                    caption: String::new(),
-                                                    alt: "A photo you took".into(),
-                                                    w: still.width.max(1),
-                                                    h: still.height.max(1),
-                                                    hd: false,
-                                                });
-                                            }
-                                            Err(_) => toast("The photo couldn't be taken"),
-                                        }
-                                    });
-                                })
-                                .disabled(move || busy.get()),
-                            )
-                    }))
-                    .into_element()
-            })
-        })),
+        view()
+            .px_4()
+            .pb_4()
+            .gap_4()
+            .items_center()
+            .child(dynamic(move || {
+                let is_open = open.get();
+                untracked(move || {
+                    if !is_open {
+                        busy.set(false);
+                        return view().into_element();
+                    }
+                    let session = crate::camera::use_session(
+                        songbird_camera::Purpose::Photo,
+                        || true,
+                        |_| {},
+                    );
+                    let shown = session.shown;
+                    let running = move || matches!(shown.get(), crate::camera::Shown::Running(_));
+                    let (flip, shoot) = (session.clone(), session.clone());
+                    view()
+                        .gap_4()
+                        .items_center()
+                        .child(crate::camera::camera_view(&session, 280.0, ""))
+                        .child(when(running, move || {
+                            let (flip, shoot) = (flip.clone(), shoot.clone());
+                            view()
+                                .flex_row()
+                                .gap_3()
+                                .child(btn_with_icon(
+                                    "Flip",
+                                    Some(Icon::FlipCamera),
+                                    Variant::Ghost,
+                                    BtnSize::Md,
+                                    move || {
+                                        flip.flip();
+                                    },
+                                ))
+                                .child(
+                                    btn_with_icon(
+                                        "Take photo",
+                                        Some(Icon::Camera),
+                                        Variant::Primary,
+                                        BtnSize::Md,
+                                        move || {
+                                            busy.set(true);
+                                            shoot.take_photo(move |result| {
+                                                let _ = busy.try_set(false);
+                                                match result {
+                                                    Ok(still) => {
+                                                        open.set(false);
+                                                        // mock: app-core encrypts the JPEG with the attachment
+                                                        // format (Prompt 6) and uploads it; until then only its
+                                                        // size reaches the message, and the bytes are dropped.
+                                                        cv.send_body(Body::Image {
+                                                            caption: String::new(),
+                                                            alt: "A photo you took".into(),
+                                                            w: still.width.max(1),
+                                                            h: still.height.max(1),
+                                                            hd: false,
+                                                        });
+                                                    }
+                                                    Err(_) => toast("The photo couldn't be taken"),
+                                                }
+                                            });
+                                        },
+                                    )
+                                    .disabled(move || busy.get()),
+                                )
+                        }))
+                        .into_element()
+                })
+            })),
     )
     .into_element()
 }
 
-const STICKERS: [&str; 12] = ["🦉", "🐦", "🦊", "🐻", "🐼", "🐸", "🌻", "🍀", "🎈", "🧁", "☕", "🚲"];
+const STICKERS: [&str; 12] = [
+    "🦉", "🐦", "🦊", "🐻", "🐼", "🐸", "🌻", "🍀", "🎈", "🧁", "☕", "🚲",
+];
 
 fn sticker_sheet(cv: Conv) -> AnyElement {
     let open = cv.sticker_open;
+    // Installed sound-sticker packs follow the built-in stickers.
+    let sound_packs = computed(|| {
+        crate::store::ext_groups::groups_state().with(|g| {
+            g.packs
+                .iter()
+                .filter(|p| p.kind == crate::store::ext_groups::PackKind::SoundStickers)
+                .map(|p| (p.name.clone(), p.items.clone()))
+                .collect::<Vec<_>>()
+        })
+    });
+    let cell = if is_desktop() { 44.0 } else { 48.0 };
     app_sheet(
         open,
         "Stickers",
-        emoji_grid(&STICKERS, 40.0, move |e| {
-            open.set(false);
-            cv.send_body(Body::Sticker { emoji: e.into(), pack: "Songbird friends".into() });
-        }),
+        view()
+            .child(emoji_grid(&STICKERS, 40.0, move |e| {
+                open.set(false);
+                cv.send_body(Body::Sticker {
+                    emoji: e.into(),
+                    pack: "Songbird friends".into(),
+                });
+            }))
+            .child(dynamic(move || {
+                let packs = sound_packs.get();
+                untracked(move || {
+                    view().children(packs.into_iter().map(move |(name, items)| {
+                        view()
+                            .child(section_title(format!("{name} · sound stickers")))
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .flex_wrap()
+                                    .px_3()
+                                    .pb_2()
+                                    .justify_center()
+                                    .children(items.into_iter().map(move |e| {
+                                        let (label, pick, pack) = (
+                                            format!("{e}, plays a sound"),
+                                            e.clone(),
+                                            name.clone(),
+                                        );
+                                        pressable()
+                                            .on_press(move || {
+                                                open.set(false);
+                                                cv.send_body(Body::Sticker {
+                                                    emoji: pick.clone(),
+                                                    pack: pack.clone(),
+                                                });
+                                            })
+                                            .accessibility_label(label)
+                                            .size(px(cell))
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(move || radius::control())
+                                            .hover(|st| st.bg(move || c::accent()))
+                                            .child(text(e).text_size(px(40.0)))
+                                    })),
+                            )
+                    }))
+                })
+            })),
     )
     .into_element()
 }
@@ -439,45 +625,72 @@ fn forward_sheet(cv: Conv) -> AnyElement {
         "Forward to…",
         view()
             .pb_2()
-            .child(footnote(format!("You can forward to up to {} chats at a time.", logic::FORWARD_LIMIT)).pb_2())
-            .child(scroll().max_h(px(380.0)).child(view().children(chats.into_iter().map(move |c| {
-                let id = c.id;
-                let on = move || chosen.with(|v| v.contains(&id));
-                let full = move || !on() && !logic::can_forward_to_more(chosen.with(Vec::len));
-                pressable()
-                    .on_press(move || {
-                        chosen.update(|v| {
-                            if let Some(i) = v.iter().position(|x| *x == id) {
-                                v.remove(i);
-                            } else if logic::can_forward_to_more(v.len()) {
-                                v.push(id);
-                            }
-                        })
-                    })
-                    .disabled(full)
-                    .selected(on)
-                    .accessibility_label(c.title.clone())
-                    .flex_row()
-                    .items_center()
-                    .gap_3()
-                    .px_4()
-                    .min_h(px(if is_desktop() { 48.0 } else { 56.0 }))
-                    .hover(|st| st.bg(move || c::accent()))
-                    .child(avatar(c.title.clone(), c.seed, 36.0))
-                    .child(text(c.title.clone()).flex_1().number_of_lines(1).text_size(px(font::body())))
-                    .child(
-                        view()
-                            .size(px(22.0))
-                            .rounded_full()
-                            .border_2()
+            .child(
+                footnote(format!(
+                    "You can forward to up to {} chats at a time.",
+                    logic::FORWARD_LIMIT
+                ))
+                .pb_2(),
+            )
+            .child(
+                scroll()
+                    .max_h(px(380.0))
+                    .child(view().children(chats.into_iter().map(move |c| {
+                        let id = c.id;
+                        let on = move || chosen.with(|v| v.contains(&id));
+                        let full =
+                            move || !on() && !logic::can_forward_to_more(chosen.with(Vec::len));
+                        pressable()
+                            .on_press(move || {
+                                chosen.update(|v| {
+                                    if let Some(i) = v.iter().position(|x| *x == id) {
+                                        v.remove(i);
+                                    } else if logic::can_forward_to_more(v.len()) {
+                                        v.push(id);
+                                    }
+                                })
+                            })
+                            .disabled(full)
+                            .selected(on)
+                            .accessibility_label(c.title.clone())
+                            .flex_row()
                             .items_center()
-                            .justify_center()
-                            .border_color(move || if on() { c::primary() } else { c::muted_fg() })
-                            .bg(move || if on() { c::primary() } else { AdaptiveColor::TRANSPARENT })
-                            .text_color(move || c::on_primary())
-                            .child(icon(Icon::Check, 14.0).opacity(move || if on() { 1.0_f32 } else { 0.0 })),
-                    )
-            }))))
+                            .gap_3()
+                            .px_4()
+                            .min_h(px(if is_desktop() { 48.0 } else { 56.0 }))
+                            .hover(|st| st.bg(move || c::accent()))
+                            .child(avatar(c.title.clone(), c.seed, 36.0))
+                            .child(
+                                text(c.title.clone())
+                                    .flex_1()
+                                    .number_of_lines(1)
+                                    .text_size(px(font::body())),
+                            )
+                            .child(
+                                view()
+                                    .size(px(22.0))
+                                    .rounded_full()
+                                    .border_2()
+                                    .items_center()
+                                    .justify_center()
+                                    .border_color(
+                                        move || if on() { c::primary() } else { c::muted_fg() },
+                                    )
+                                    .bg(move || {
+                                        if on() {
+                                            c::primary()
+                                        } else {
+                                            AdaptiveColor::TRANSPARENT
+                                        }
+                                    })
+                                    .text_color(move || c::on_primary())
+                                    .child(
+                                        icon(Icon::Check, 14.0)
+                                            .opacity(move || if on() { 1.0_f32 } else { 0.0 }),
+                                    ),
+                            )
+                    }))),
+            )
             .child(
                 view().px_4().pt_3().child(
                     btn(
@@ -576,7 +789,13 @@ pub(crate) fn timer_sheet(s: crate::store::Store, chat: ChatId, open: Signal<boo
                     .items_center()
                     .justify_center()
                     .border_color(move || if on() { c::primary() } else { c::muted_fg() })
-                    .child(view().size(px(10.0)).rounded_full().bg(move || c::primary()).opacity(move || if on() { 1.0_f32 } else { 0.0 })),
+                    .child(
+                        view()
+                            .size(px(10.0))
+                            .rounded_full()
+                            .bg(move || c::primary())
+                            .opacity(move || if on() { 1.0_f32 } else { 0.0 }),
+                    ),
             )
             .child(text(label).flex_1().text_size(px(font::body())))
             .into_element()

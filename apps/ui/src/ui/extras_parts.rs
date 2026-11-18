@@ -27,7 +27,11 @@ pub fn link(label: impl Into<SharedString>, url: &'static str) -> nsh_base::Butt
         .duration(motion::INSTANT)
         .hover(|s| s.opacity(0.8))
         .active(|s| s.opacity(0.6))
-        .focus_visible(|s| s.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
+        .focus_visible(|s| {
+            s.outline(px(2.0))
+                .outline_offset(px(2.0))
+                .outline_color(move || c::ring())
+        })
         .child(
             text(label)
                 .text_size(px(font::body()))
@@ -38,7 +42,11 @@ pub fn link(label: impl Into<SharedString>, url: &'static str) -> nsh_base::Butt
 
 /// A line of a list with a leading glyph: what a plan includes, what
 /// WhatsApp can see. `glyph` sets meaning by shape (check, minus, eye).
-pub fn bullet(glyph: Icon, tint: fn() -> AdaptiveColor, label: impl IntoReactive<SharedString>) -> View {
+pub fn bullet(
+    glyph: Icon,
+    tint: fn() -> AdaptiveColor,
+    label: impl IntoReactive<SharedString>,
+) -> View {
     view()
         .flex_row()
         .items_start()
@@ -89,7 +97,12 @@ fn cap(label: impl IntoReactive<SharedString>, size: f32) -> View {
             text(label)
                 .text_size(px(size))
                 .font_weight(FontWeight::MEDIUM)
-                .font_family(move || theme().font_mono.clone().unwrap_or_else(|| "monospace".into()))
+                .font_family(move || {
+                    theme()
+                        .font_mono
+                        .clone()
+                        .unwrap_or_else(|| "monospace".into())
+                })
                 .text_color(move || c::foreground()),
         )
 }
@@ -98,7 +111,11 @@ fn cap(label: impl IntoReactive<SharedString>, size: f32) -> View {
 /// at `+`; Apple's "⇧⌘U" peels its modifier symbols off the key.
 pub fn key_parts(shown: &str) -> Vec<String> {
     if shown.len() > 1 && shown.contains('+') && !shown.ends_with("++") {
-        return shown.split('+').filter(|p| !p.is_empty()).map(String::from).collect();
+        return shown
+            .split('+')
+            .filter(|p| !p.is_empty())
+            .map(String::from)
+            .collect();
     }
     let mut parts = Vec::new();
     let mut rest = shown;
@@ -125,11 +142,14 @@ pub fn key_combo(shown: &str) -> View {
         .role(AccessibilityRole::Text)
         .label(shown.to_string())
         .children(key_parts(shown).into_iter().map(|k| {
-            let size = if is_glyph(&k) { font::CAPTION + 4.0 } else { font::CAPTION };
+            let size = if is_glyph(&k) {
+                font::CAPTION + 4.0
+            } else {
+                font::CAPTION
+            };
             cap(k, size).accessibility_elements_hidden(true)
         }))
 }
-
 
 /// A selectable card: a plan, a provider. `selected` draws the primary
 /// ring (and the caller says it in words too).
@@ -138,13 +158,18 @@ pub fn select_card(selected: impl Fn() -> bool + Copy + 'static) -> View {
         .rounded(move || radius::lg())
         .bg(move || c::card())
         .border_1()
-        .border_color(move || if selected() { c::primary() } else { c::border() })
+        .border_color(move || {
+            if selected() {
+                c::primary()
+            } else {
+                c::border()
+            }
+        })
         .transition_colors()
         .duration(motion::BASE)
         .p_4()
         .gap_2()
 }
-
 
 #[cfg(test)]
 mod key_tests {

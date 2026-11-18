@@ -97,7 +97,10 @@ pub fn invite_code(seed: u64, i: u32) -> String {
 
 /// The personal invite link: opens a chat with the user after signup.
 pub fn personal_link(username: &str) -> String {
-    format!("https://songbird.chat/i/{}", username.trim_start_matches('@').to_lowercase())
+    format!(
+        "https://songbird.chat/i/{}",
+        username.trim_start_matches('@').to_lowercase()
+    )
 }
 
 const ANNOUNCEMENT_KEY: &str = "announcement-dismissed";
@@ -112,7 +115,10 @@ impl Store {
         let (used, left) = self.session.with(|s| (s.invites_used, s.invites_left));
         let seed = self.me.with(|m| m.seed);
         (0..used + left)
-            .map(|i| InviteCode { code: invite_code(seed, i), used: i < used })
+            .map(|i| InviteCode {
+                code: invite_code(seed, i),
+                used: i < used,
+            })
             .collect()
     }
 
@@ -137,7 +143,11 @@ impl Store {
                 e.billing = billing;
                 e.cancels_at_period_end = false;
                 if plan == Plan::Family && e.family.is_empty() {
-                    e.family = vec![FamilySeat { id: 1, name: "Ana Popescu".into(), pending: false }];
+                    e.family = vec![FamilySeat {
+                        id: 1,
+                        name: "Ana Popescu".into(),
+                        pending: false,
+                    }];
                 }
             });
             done();
@@ -168,7 +178,11 @@ impl Store {
         let id = nsh_core::time::unix_ms() as u64;
         extras().update(|e| {
             if e.family.len() < 5 {
-                e.family.push(FamilySeat { id, name, pending: true });
+                e.family.push(FamilySeat {
+                    id,
+                    name,
+                    pending: true,
+                });
             }
         });
     }
@@ -253,7 +267,10 @@ impl Store {
         self.settings_update(|x| x.launch_at_login = on);
         let s = *self;
         spawn(async move {
-            if nsh_core::element::desktop::set_launch_at_login(on).await.is_err() {
+            if nsh_core::element::desktop::set_launch_at_login(on)
+                .await
+                .is_err()
+            {
                 s.settings_update(|x| x.launch_at_login = !on);
                 crate::ui::toast(if on {
                     "Songbird could not be set to open at login"

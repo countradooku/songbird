@@ -22,7 +22,11 @@ fn scan_probe(cam: &FakeCamera) -> impl IntoElement {
             when(
                 move || open.get(),
                 move || {
-                    let session = use_session(Purpose::ScanCode, || true, move |c| codes.update(|v| v.push(c)));
+                    let session = use_session(
+                        Purpose::ScanCode,
+                        || true,
+                        move |c| codes.update(|v| v.push(c)),
+                    );
                     let shown = session.shown;
                     view()
                         .child(text(move || format!("state: {}", label(&shown.get()))))
@@ -93,7 +97,10 @@ fn the_camera_stops_in_the_background_and_comes_back() -> Result<(), String> {
     app.set_environment("foreground", |e| e.lifecycle = Lifecycle::Active)?;
     app.wait_for("text:state: running back")?;
     assert_eq!(BACKGROUND.running(), 1);
-    assert_eq!(BACKGROUND.log(), ["open ScanCode back", "stop", "open ScanCode back"]);
+    assert_eq!(
+        BACKGROUND.log(),
+        ["open ScanCode back", "stop", "open ScanCode back"]
+    );
     Ok(())
 }
 
@@ -117,7 +124,8 @@ fn the_prompt_comes_only_from_a_press() -> Result<(), String> {
     Ok(())
 }
 
-static DENIED: LazyLock<FakeCamera> = LazyLock::new(|| FakeCamera::new().access_is(Access::Denied, Access::Denied));
+static DENIED: LazyLock<FakeCamera> =
+    LazyLock::new(|| FakeCamera::new().access_is(Access::Denied, Access::Denied));
 #[component]
 fn DeniedProbe() -> impl IntoElement {
     scan_probe(&DENIED)
@@ -162,7 +170,8 @@ fn no_camera_says_so() -> Result<(), String> {
     Ok(())
 }
 
-static IN_USE: LazyLock<FakeCamera> = LazyLock::new(|| FakeCamera::new().fails_to_open(Unavailable::InUse));
+static IN_USE: LazyLock<FakeCamera> =
+    LazyLock::new(|| FakeCamera::new().fails_to_open(Unavailable::InUse));
 #[component]
 fn InUseProbe() -> impl IntoElement {
     scan_probe(&IN_USE)
@@ -230,7 +239,12 @@ fn the_front_lens_is_found_by_facing() {
 
 static PHOTO: LazyLock<FakeCamera> = LazyLock::new(|| {
     let cam = FakeCamera::new();
-    cam.photo_gives(Ok(songbird_camera::Still { bytes: vec![0xFF, 0xD8, 0xFF, 0xD9], mime: "image/jpeg", width: 640, height: 480 }));
+    cam.photo_gives(Ok(songbird_camera::Still {
+        bytes: vec![0xFF, 0xD8, 0xFF, 0xD9],
+        mime: "image/jpeg",
+        width: 640,
+        height: 480,
+    }));
     cam
 });
 #[component]

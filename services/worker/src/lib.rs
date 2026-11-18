@@ -269,6 +269,14 @@ pub enum Left {
     Rows,
 }
 
+/// A storage object's name (as `api` writes it, `songbird_api::storage::object_name`).
+fn storage_object_name(id: &[u8; 32]) -> String {
+    let mut name = String::with_capacity(66);
+    name.push_str("s/");
+    name.push_str(&ObjectKey(*id).to_hex_unredacted());
+    name
+}
+
 /// An avatar's object name (as `api` writes it, `songbird_api::profiles::avatar_name`).
 fn avatar_name(id: &[u8; 32]) -> String {
     let mut name = String::with_capacity(66);
@@ -320,6 +328,34 @@ impl Worker {
         }
     }
 
+    /// Deletes every avatar and storage object an account uploaded; returns their names (to
+    /// check that none is left).
+    async fn delete_owned_objects(&self, account: &AccountId) -> Result<Vec<String>, Left> {
+        let unavailable = |_| Left::Unavailable;
+        let avatars = self
+            .registry
+            .avatars_of(account)
+            .await
+            .map_err(unavailable)?;
+        let objects = self
+            .registry
+            .storage_objects_of(account)
+            .await
+            .map_err(unavailable)?;
+        let names: Vec<String> = avatars
+            .iter()
+            .map(avatar_name)
+            .chain(objects.iter().map(storage_object_name))
+            .collect();
+        for n in &names {
+            self.s3
+                .delete_object(n)
+                .await
+                .map_err(|_| Left::Unavailable)?;
+        }
+        Ok(names)
+    }
+
     /// Deletes an account from every store and verifies it (see the module documentation).
     ///
     /// # Errors
@@ -360,29 +396,15 @@ impl Worker {
         // Unfinished packs the devices were uploading (Prompt 6, D-0083). Finished packs are
         // linked to no one and live on (D-0079 §3).
         self.delete_packs_of(&devices).await?;
-        // Encrypted avatars (Prompt 3, M5): every object the account uploaded.
-        let avatars = self
-            .registry
-            .avatars_of(account)
-            .await
-            .map_err(unavailable)?;
-        for a in &avatars {
-            self.s3
-                .delete_object(&avatar_name(a))
-                .await
-                .map_err(|_| Left::Unavailable)?;
-        }
+        // Encrypted avatars (Prompt 3, M5) and storage objects (Prompt 9, M1).
+        let uploaded = self.delete_owned_objects(account).await?;
         // Every delivery node has dropped the devices: forget again what a racing send stored.
         tokio::time::sleep(self.propagation).await;
         self.delivery.forget(&devices).await?;
         if self.delivery.any_known(&devices).await? {
             return Err(Left::Mailbox);
         }
-        for name in grants
-            .iter()
-            .map(object_name)
-            .chain(avatars.iter().map(avatar_name))
-        {
+        for name in grants.iter().map(object_name).chain(uploaded) {
             if self
                 .s3
                 .head_object(&name)
@@ -515,6 +537,23 @@ impl Worker {
             return Err(Left::Rows);
         }
         Ok(())
+    }
+
+    /// Parental supervision that reached its end date (Prompt 9, M4, D-0105): the policy goes and
+    /// the child's settings unlock, without the parent.
+    pub async fn supervision(&self) {
+        let due = match self.registry.supervisions_due(SWEEP_BATCH).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(error = %e, "supervision pass failed");
+                return;
+            }
+        };
+        for child in &due {
+            if let Err(e) = self.registry.end_supervision(child).await {
+                tracing::warn!(error = %e, "ending a supervision failed");
+            }
+        }
     }
 
     /// Inactivity deletion (Prompt 3, M7, D-0056): a wake-up push to every device of an
@@ -697,6 +736,7 @@ impl Worker {
             Err(e) => tracing::warn!(error = %e, "avatar sweep failed"),
         }
         self.inactivity().await;
+        self.supervision().await;
         // Key transparency (Prompt 3, D-0057): publish what changed as one akd epoch.
         if let Some(kt) = &self.kt
             && let Err(e) = kt.publish_pending(&self.registry, SWEEP_BATCH).await

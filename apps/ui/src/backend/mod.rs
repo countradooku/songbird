@@ -15,17 +15,25 @@
 //! - account deletion (`DELETE /v1/account`);
 //! - the delivery connection (`crates/client`): authenticated, live status,
 //!   envelopes counted but left on the server (only app-core can decrypt
-//!   and acknowledge them).
+//!   and acknowledge them);
+//! - Prompt 9: settings and saved contacts as encrypted records
+//!   (`records`), the encrypted profile with the custom status (`profile`),
+//!   parental supervision policies (`supervision`). Presence (`presence`)
+//!   and nudges (`nudge`) are wired, and send once app-core knows contacts'
+//!   devices and seals for them.
 
+pub mod account;
+pub mod link;
+pub mod lock;
+pub mod nudge;
+pub mod presence;
+pub mod profile;
+pub mod records;
+pub mod supervision;
 pub mod wire;
 mod ws;
 
-use nsh_core::{
-    platform::HttpRequest,
-    prelude::*,
-    storage::Storage,
-    time::unix_ms,
-};
+use nsh_core::{platform::HttpRequest, prelude::*, storage::Storage, time::unix_ms};
 use serde_json::Value;
 
 pub use ws::{connect, disconnect};
@@ -186,7 +194,9 @@ fn seed(key: &str) -> Option<[u8; 32]> {
 
 /// This device's id and its authentication key's seed.
 pub(crate) fn device_key() -> Option<([u8; 16], [u8; 32])> {
-    let device: [u8; 16] = wire::unhex(&Storage::get_item(K_DEVICE)?)?.try_into().ok()?;
+    let device: [u8; 16] = wire::unhex(&Storage::get_item(K_DEVICE)?)?
+        .try_into()
+        .ok()?;
     Some((device, seed(K_DEVICE_SEED)?))
 }
 
@@ -213,16 +223,28 @@ fn explain(status: u16, body: &[u8]) -> Problem {
         .and_then(|v| v["error"].as_str().map(str::to_owned))
         .unwrap_or_default();
     problem(match (status, word.as_str()) {
-        (403, "invite") => "This code doesn't work. It may have been used already or expired. Ask your friend for a new one.",
+        (403, "invite") => {
+            "This code doesn't work. It may have been used already or expired. Ask your friend for a new one."
+        }
         (403, "challenge") => "The sign-up check expired. Try again.",
         (409, "taken") => "That username is taken. Try another one.",
         (400, "proof") => "That username can't be used.",
         (401, _) => "The server didn't recognise this device.",
         (403, "pending") => "This device is still waiting to be approved by your phone.",
         (403, "primary") => "Only your main phone can do that.",
+        (423, _) => "Too many wrong PINs. Wait a while, or set a new PIN on your main phone.",
         (429, _) => "Too many tries. Wait a moment and try again.",
         (503, _) => "The server isn't offering this yet.",
-        _ => return Problem(format!("The server answered {status}{}.", if word.is_empty() { String::new() } else { format!(" ({word})") })),
+        _ => {
+            return Problem(format!(
+                "The server answered {status}{}.",
+                if word.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({word})")
+                }
+            ));
+        }
     })
 }
 
@@ -242,19 +264,40 @@ async fn send(request: HttpRequest) -> Result<(u16, Vec<u8>), Problem> {
 }
 
 /// A request signed by this device (`authorization: Songbird …`).
-async fn signed(method: &str, path: &str, body: Option<Vec<u8>>, json: bool) -> Result<(u16, Vec<u8>), Problem> {
+pub(crate) async fn signed(
+    method: &str,
+    path: &str,
+    body: Option<Vec<u8>>,
+    json: bool,
+) -> Result<(u16, Vec<u8>), Problem> {
     let ep = endpoint();
-    let (device, seed) = device_key().ok_or_else(|| problem("This device isn't registered yet."))?;
+    let (device, seed) =
+        device_key().ok_or_else(|| problem("This device isn't registered yet."))?;
     let key = wire::ed25519(&seed).ok_or_else(|| problem("This device's key is damaged."))?;
-    let (auth, digest) =
-        wire::sign_request(&key, &device, &ep.api_name, method, path, unix_ms() as u64, body.as_deref());
-    let mut req = HttpRequest::new(method, format!("{}{path}", ep.api)).header("authorization", auth);
+    let (auth, digest) = wire::sign_request(
+        &key,
+        &device,
+        &ep.api_name,
+        method,
+        path,
+        unix_ms() as u64,
+        body.as_deref(),
+    );
+    let mut req =
+        HttpRequest::new(method, format!("{}{path}", ep.api)).header("authorization", auth);
     if let Some(d) = digest {
         req = req.header("x-songbird-content-sha256", d);
     }
     if let Some(b) = body {
         req = req
-            .header("content-type", if json { "application/json" } else { "application/octet-stream" })
+            .header(
+                "content-type",
+                if json {
+                    "application/json"
+                } else {
+                    "application/octet-stream"
+                },
+            )
             .header("content-length", b.len().to_string())
             .body(b);
     }
@@ -282,8 +325,11 @@ pub async fn register(invite: Option<String>, username: Option<String>) -> Resul
     let ep = endpoint();
     busy(Some("Getting a sign-up check from the server…"));
     let result = async {
-        let (status, challenge) =
-            send(HttpRequest::post(format!("{}/v1/registration/challenge", ep.api), Vec::new())).await?;
+        let (status, challenge) = send(HttpRequest::post(
+            format!("{}/v1/registration/challenge", ep.api),
+            Vec::new(),
+        ))
+        .await?;
         if status != 200 {
             return Err(explain(status, &challenge));
         }
@@ -308,7 +354,9 @@ pub async fn register(invite: Option<String>, username: Option<String>) -> Resul
             &device_seed,
         )
         .map_err(|e| match e {
-            wire::BuildError::Invite => problem("That code isn't in the right format. Codes are 24 letters and numbers."),
+            wire::BuildError::Invite => {
+                problem("That code isn't in the right format. Codes are 24 letters and numbers.")
+            }
             _ => problem("The sign-up request couldn't be built."),
         })?;
         busy(Some("Creating your account…"));
@@ -373,7 +421,9 @@ pub struct RemoteDevice {
 pub async fn devices() -> Result<Vec<RemoteDevice>, Problem> {
     let (status, body) = signed("GET", "/v1/devices", None, false).await?;
     let v = ok_json(status, &body)?;
-    let me = live().with_untracked(|l| l.device.clone()).unwrap_or_default();
+    let me = live()
+        .with_untracked(|l| l.device.clone())
+        .unwrap_or_default();
     Ok(v["devices"]
         .as_array()
         .map(|list| {
@@ -396,14 +446,20 @@ pub async fn devices() -> Result<Vec<RemoteDevice>, Problem> {
 pub async fn invite_allowance() -> Result<(u64, bool), Problem> {
     let (status, body) = signed("GET", "/v1/invites", None, false).await?;
     let v = ok_json(status, &body)?;
-    Ok((v["allowance"].as_u64().unwrap_or(0), v["invite_only"].as_bool().unwrap_or(true)))
+    Ok((
+        v["allowance"].as_u64().unwrap_or(0),
+        v["invite_only"].as_bool().unwrap_or(true),
+    ))
 }
 
 /// `POST /v1/invites`: a new code, shown once.
 pub async fn create_invite() -> Result<String, Problem> {
     let (status, body) = signed("POST", "/v1/invites", Some(b"{}".to_vec()), true).await?;
     let v = ok_json(status, &body)?;
-    v["code"].as_str().map(str::to_owned).ok_or_else(|| problem("The server's answer was incomplete."))
+    v["code"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| problem("The server's answer was incomplete."))
 }
 
 /// A GIF from the privacy proxy (`/v1/gifs/media/<token>` URLs: the GIF
@@ -427,7 +483,13 @@ pub async fn gifs(query: &str) -> Result<Vec<Gif>, Problem> {
     let (status, answer) = signed("POST", path, Some(body.to_string().into_bytes()), true).await?;
     let v = ok_json(status, &answer)?;
     let base = endpoint().api;
-    let abs = |u: &str| if u.starts_with('/') { format!("{base}{u}") } else { u.to_string() };
+    let abs = |u: &str| {
+        if u.starts_with('/') {
+            format!("{base}{u}")
+        } else {
+            u.to_string()
+        }
+    };
     Ok(v["gifs"]
         .as_array()
         .map(|list| {

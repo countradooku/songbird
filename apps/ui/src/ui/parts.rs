@@ -38,7 +38,11 @@ pub fn page_scroll(content: impl IntoElement) -> Scroll {
     scroll()
         .flex_1()
         .keyboard_dismiss_mode(KeyboardDismissMode::OnDrag)
-        .child(view().pb_safe_area_plus(px(if floating { 24.0 + FLOATING_BAR } else { 24.0 })).child(content))
+        .child(
+            view()
+                .pb_safe_area_plus(px(if floating { 24.0 + FLOATING_BAR } else { 24.0 }))
+                .child(content),
+        )
 }
 
 /// How much of the window's bottom Apple's floating tab bar covers
@@ -104,15 +108,25 @@ pub fn section_title(label: impl IntoReactive<SharedString>) -> Text {
     // the list subheader in primary; Fluent and Adwaita: a strong title.
     let t = text(label).role(AccessibilityRole::Header);
     let t = match sp.skin {
-        Skin::Apple => t.text_size(px(font::SMALL)).uppercase().letter_spacing(px(0.3)).text_color(move || c::muted_fg()),
-        Skin::Material => t.text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(move || c::primary()),
-        Skin::Fluent => t.text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(move || c::foreground()),
-        Skin::Adwaita => t.text_size(px(15.0)).font_weight(FontWeight::BOLD).text_color(move || c::foreground()),
+        Skin::Apple => t
+            .text_size(px(font::SMALL))
+            .uppercase()
+            .letter_spacing(px(0.3))
+            .text_color(move || c::muted_fg()),
+        Skin::Material => t
+            .text_size(px(14.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(move || c::primary()),
+        Skin::Fluent => t
+            .text_size(px(14.0))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(move || c::foreground()),
+        Skin::Adwaita => t
+            .text_size(px(15.0))
+            .font_weight(FontWeight::BOLD)
+            .text_color(move || c::foreground()),
     };
-    t
-        .px_4()
-        .pt_5()
-        .pb_2()
+    t.px_4().pt_5().pb_2()
 }
 
 /// Muted help text under a group.
@@ -138,7 +152,9 @@ pub fn heading(label: impl IntoReactive<SharedString>) -> Text {
 
 /// Body text of the platform size.
 pub fn body(label: impl IntoReactive<SharedString>) -> Text {
-    text(label).text_size(px(font::body())).line_height(px(font::body() * 1.4))
+    text(label)
+        .text_size(px(font::body()))
+        .line_height(px(font::body() * 1.4))
 }
 
 /// Muted secondary text.
@@ -176,23 +192,37 @@ pub fn group_with_inset(rows: impl IntoIterator<Item = AnyElement>, inset: f32) 
     // tile, 2pt apart, the group's outer corners large and the inner ones
     // small. The others: one card, rows split by the skin's separators.
     if sp.separator == SeparatorStyle::None {
-        return view().mx_4().gap(px(2.0)).children(rows.into_iter().enumerate().map(move |(i, row)| {
-            view()
-                .overflow_hidden()
-                .bg(move || c::card())
-                .rounded(px(4.0))
-                .when(i == 0, |v| v.rounded_t(px(r)))
-                .when(i + 1 == count, |v| v.rounded_b(px(r)))
-                .child(row)
-        }));
+        return view()
+            .mx_4()
+            .gap(px(2.0))
+            .children(rows.into_iter().enumerate().map(move |(i, row)| {
+                view()
+                    .overflow_hidden()
+                    .bg(move || c::card())
+                    .rounded(px(4.0))
+                    .when(i == 0, |v| v.rounded_t(px(r)))
+                    .when(i + 1 == count, |v| v.rounded_b(px(r)))
+                    .child(row)
+            }));
     }
-    let line = if sp.separator == SeparatorStyle::Full { 0.0 } else { inset };
+    let line = if sp.separator == SeparatorStyle::Full {
+        0.0
+    } else {
+        inset
+    };
     view()
         .mx_4()
         .rounded(px(r))
         .overflow_hidden()
         .bg(move || c::card())
-        .when(sp.card_stroke, |v| v.border(if sp.skin == Skin::Fluent { px(1.0) } else { hairline() }).border_color(move || c::border()))
+        .when(sp.card_stroke, |v| {
+            v.border(if sp.skin == Skin::Fluent {
+                px(1.0)
+            } else {
+                hairline()
+            })
+            .border_color(move || c::border())
+        })
         .children(rows.into_iter().enumerate().map(move |(i, row)| {
             view()
                 .child(row)
@@ -298,7 +328,13 @@ impl Row {
     pub fn build(self) -> AnyElement {
         let danger = self.danger;
         let pressable = self.on_press.is_some();
-        let ink = move || if danger { c::destructive() } else { c::foreground() };
+        let ink = move || {
+            if danger {
+                c::destructive()
+            } else {
+                c::foreground()
+            }
+        };
         let content = view()
             .flex_row()
             .items_center()
@@ -348,7 +384,11 @@ impl Row {
                                 .number_of_lines(1),
                         )
                         // A chevron only where the row leads somewhere.
-                        .child(pressable.then(|| icon(Icon::ChevronRight, 16.0).mr(px(-4.0)).text_color(move || c::muted_fg())))
+                        .child(pressable.then(|| {
+                            icon(Icon::ChevronRight, 16.0)
+                                .mr(px(-4.0))
+                                .text_color(move || c::muted_fg())
+                        }))
                         .into_element(),
                 ),
                 Trailing::Element(el) => Some(el),
@@ -413,7 +453,10 @@ pub fn icon_tile(glyph: Icon) -> View {
             .items_center()
             .justify_center()
             .text_color(move || c::foreground())
-            .child(icon(glyph, if sp.skin == Skin::Fluent { 20.0 } else { 18.0 })),
+            .child(icon(
+                glyph,
+                if sp.skin == Skin::Fluent { 20.0 } else { 18.0 },
+            )),
     }
 }
 
@@ -437,14 +480,32 @@ pub fn initials(name: &str) -> String {
 /// Decorative for screen readers: the row or header beside it names them.
 pub fn avatar(name: impl Into<SharedString>, seed: u64, size: f32) -> View {
     let name: SharedString = name.into();
-    avatar_of(name, seed, size, if super::portrait::has_photo(seed) { Photo::Person } else { Photo::None })
+    avatar_of(
+        name,
+        seed,
+        size,
+        if super::portrait::has_photo(seed) {
+            Photo::Person
+        } else {
+            Photo::None
+        },
+    )
 }
 
 /// A group's, community's or channel's avatar: its photo (a mock scene),
 /// or initials.
 pub fn group_avatar(name: impl Into<SharedString>, seed: u64, size: f32) -> View {
     let name: SharedString = name.into();
-    avatar_of(name, seed, size, if super::portrait::has_photo(seed + 1000) { Photo::Group } else { Photo::None })
+    avatar_of(
+        name,
+        seed,
+        size,
+        if super::portrait::has_photo(seed + 1000) {
+            Photo::Group
+        } else {
+            Photo::None
+        },
+    )
 }
 
 /// Which picture an avatar shows.
@@ -519,20 +580,86 @@ pub fn avatar_presence_on(
     let online = online.into_reactive();
     // Whole points so the dot and its ring land on the pixel grid.
     let dot = (size * 0.28).max(10.0).round();
+    view().size(px(size)).child(avatar(name, seed, size)).child(
+        view()
+            .absolute()
+            .right(px(0.0))
+            .bottom(px(0.0))
+            .size(px(dot))
+            .rounded_full()
+            .bg(move || c::online())
+            .border_2()
+            .border_color(move || surface())
+            .opacity(move || if online.get() { 1.0_f32 } else { 0.0 }),
+    )
+}
+
+/// What a presence mark says. Never colour alone: each has its own shape,
+/// and the row or control around it says the word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Availability {
+    Online,
+    Away,
+    Busy,
+}
+
+impl Availability {
+    pub fn label(self) -> &'static str {
+        match self {
+            Availability::Online => "online",
+            Availability::Away => "away",
+            Availability::Busy => "busy",
+        }
+    }
+}
+
+/// A presence mark for an avatar's corner (place it with `absolute()`):
+/// a filled dot (online), a ring (away), a dot crossed by a bar (busy),
+/// cut out of `surface` by a 2pt ring of its colour. Fades in and out
+/// (`BASE`, kept with reduced motion: a fade, not a move); hidden from
+/// screen readers, since the row says it in words.
+pub fn presence_badge(
+    kind: impl Fn() -> Option<Availability> + Copy + 'static,
+    dot: f32,
+    surface: fn() -> AdaptiveColor,
+) -> View {
+    let dot = dot.round();
+    let is = move |a: Availability| kind() == Some(a);
     view()
-        .size(px(size))
-        .child(avatar(name, seed, size))
+        .p(px(2.0))
+        .rounded_full()
+        .bg(move || surface())
+        .opacity(move || if kind().is_some() { 1.0_f32 } else { 0.0 })
+        .transition_opacity()
+        .duration(motion::BASE)
+        .accessibility_elements_hidden(true)
         .child(
             view()
-                .absolute()
-                .right(px(0.0))
-                .bottom(px(0.0))
                 .size(px(dot))
                 .rounded_full()
-                .bg(move || c::online())
+                .items_center()
+                .justify_center()
+                .bg(move || match kind() {
+                    Some(Availability::Online) => c::online(),
+                    Some(Availability::Busy) => c::destructive(),
+                    _ => AdaptiveColor::TRANSPARENT,
+                })
                 .border_2()
-                .border_color(move || surface())
-                .opacity(move || if online.get() { 1.0_f32 } else { 0.0 }),
+                .border_color(move || {
+                    if is(Availability::Away) {
+                        c::warning()
+                    } else {
+                        AdaptiveColor::TRANSPARENT
+                    }
+                })
+                .child(
+                    view()
+                        .w(px((dot * 0.55).round()))
+                        .h(px(2.0))
+                        .rounded_full()
+                        .bg(move || c::on_destructive())
+                        .style_when(move || !is(Availability::Busy), |st| st.hidden()),
+                ),
         )
 }
 
@@ -555,22 +682,29 @@ pub fn unread_badge(count: impl Fn() -> u32 + 'static, muted: impl Fn() -> bool 
         .child(
             text(move || {
                 let n = shown();
-                if n > 999 { "999+".to_string() } else { n.to_string() }
+                if n > 999 {
+                    "999+".to_string()
+                } else {
+                    n.to_string()
+                }
             })
             .text_size(px(font::CAPTION))
             .font_weight(FontWeight::BOLD)
             .tabular_nums()
-            .text_color(move || if m2() { c::background() } else { c::on_primary() }),
+            .text_color(move || {
+                if m2() {
+                    c::background()
+                } else {
+                    c::on_primary()
+                }
+            }),
         )
         .label(move || format!("{} unread", count()))
 }
 
 /// An [`unread_badge`] cut out of `surface` by a 2pt ring of its colour,
 /// for a badge that sits over an icon (the tab bar, the rail).
-pub fn unread_badge_on(
-    count: impl Fn() -> u32 + 'static,
-    surface: fn() -> AdaptiveColor,
-) -> View {
+pub fn unread_badge_on(count: impl Fn() -> u32 + 'static, surface: fn() -> AdaptiveColor) -> View {
     view()
         .p(px(2.0))
         .rounded_full()
@@ -628,10 +762,18 @@ pub fn ticks(status: impl Fn() -> Tick + Copy + 'static) -> View {
         match t {
             Tick::Sending => r#"<circle cx="12" cy="12" r="8"/><path d="M12 8v4l2.5 1.5"/>"#,
             Tick::Sent => r#"<path d="M5 12.5l4.5 4.5L19 7.5"/>"#,
-            Tick::Delivered => r#"<path d="M2 12.5l4.5 4.5L16 7.5"/><path d="M10 15.5l1.5 1.5L21 7.5"/>"#,
-            Tick::Read => r#"<circle cx="12" cy="12" r="11" fill="currentColor" stroke="none"/><path d="M4.5 12.5l3.5 3.5 7-7.5" stroke="white"/><path d="M10.5 15l1 1 7-7.5" stroke="white"/>"#,
-            Tick::Played => r#"<circle cx="9" cy="12" r="8.5" fill="currentColor" stroke="none"/><g transform="translate(9 12) scale(0.72) translate(-12 -12)" stroke="white" stroke-width="2.6"><path d="M4.5 12.5l3.5 3.5 7-7.5"/><path d="M10.5 15l1 1 7-7.5"/></g><path d="M19.2 9a4.5 4.5 0 0 1 0 6" stroke-width="1.8"/><path d="M21.9 6.6a8 8 0 0 1 0 10.8" stroke-width="1.8"/>"#,
-            Tick::Failed => r#"<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>"#,
+            Tick::Delivered => {
+                r#"<path d="M2 12.5l4.5 4.5L16 7.5"/><path d="M10 15.5l1.5 1.5L21 7.5"/>"#
+            }
+            Tick::Read => {
+                r#"<circle cx="12" cy="12" r="11" fill="currentColor" stroke="none"/><path d="M4.5 12.5l3.5 3.5 7-7.5" stroke="white"/><path d="M10.5 15l1 1 7-7.5" stroke="white"/>"#
+            }
+            Tick::Played => {
+                r#"<circle cx="9" cy="12" r="8.5" fill="currentColor" stroke="none"/><g transform="translate(9 12) scale(0.72) translate(-12 -12)" stroke="white" stroke-width="2.6"><path d="M4.5 12.5l3.5 3.5 7-7.5"/><path d="M10.5 15l1 1 7-7.5"/></g><path d="M19.2 9a4.5 4.5 0 0 1 0 6" stroke-width="1.8"/><path d="M21.9 6.6a8 8 0 0 1 0 10.8" stroke-width="1.8"/>"#
+            }
+            Tick::Failed => {
+                r#"<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>"#
+            }
         }
     };
     let src = move || {
@@ -643,15 +785,11 @@ pub fn ticks(status: impl Fn() -> Tick + Copy + 'static) -> View {
     view()
         .label(move || status().label())
         .role(AccessibilityRole::Image)
-        .child(
-            svg(src)
-                .size(px(16.0))
-                .text_color(move || match status() {
-                    Tick::Read | Tick::Played => c::tick_read(),
-                    Tick::Failed => c::destructive(),
-                    _ => c::bubble_meta(),
-                }),
-        )
+        .child(svg(src).size(px(16.0)).text_color(move || match status() {
+            Tick::Read | Tick::Played => c::tick_read(),
+            Tick::Failed => c::destructive(),
+            _ => c::bubble_meta(),
+        }))
 }
 
 // ---------------------------------------------------------------- chips
@@ -671,7 +809,13 @@ pub fn chip(
     let fluent = sp.skin == Skin::Fluent;
     let height = match (material, is_desktop()) {
         (true, _) => 32.0,
-        (false, true) => if fluent { 28.0 } else { 32.0 },
+        (false, true) => {
+            if fluent {
+                28.0
+            } else {
+                32.0
+            }
+        }
         (false, false) => 38.0,
     };
     button()
@@ -694,19 +838,29 @@ pub fn chip(
             _ => c::secondary(),
         })
         .when(material || fluent, |b| {
-            b.border_1().border_color(move || match (selected(), material) {
-                (true, _) => AdaptiveColor::TRANSPARENT,
-                (false, true) => c::input(),
-                (false, false) => c::border(),
-            })
+            b.border_1()
+                .border_color(move || match (selected(), material) {
+                    (true, _) => AdaptiveColor::TRANSPARENT,
+                    (false, true) => c::input(),
+                    (false, false) => c::border(),
+                })
         })
         .transition_colors()
         .duration(motion::INSTANT)
         .hover(|s| s.opacity(0.85))
         .active(|s| s.opacity(0.7))
-        .focus_visible(|s| s.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
+        .focus_visible(|s| {
+            s.outline(px(2.0))
+                .outline_offset(px(2.0))
+                .outline_color(move || c::ring())
+        })
         .child(material.then(|| {
-            icon(Icon::Check, 16.0).text_color(move || c::on_accent()).style_when(move || !selected(), |st| st.hidden().border_color(AdaptiveColor::TRANSPARENT))
+            icon(Icon::Check, 16.0)
+                .text_color(move || c::on_accent())
+                .style_when(
+                    move || !selected(),
+                    |st| st.hidden().border_color(AdaptiveColor::TRANSPARENT),
+                )
         }))
         .child(
             text(label)
@@ -725,28 +879,27 @@ pub fn chip(
 /// keeps the 16pt gutter at the start and leaves room for the fade at the
 /// end, and a fade of `surface`'s colour at the trailing edge says more
 /// chips are there instead of cutting the last one off at the pane's edge.
-pub fn chip_scroller(chips: impl IntoIterator<Item = AnyElement>, surface: fn() -> AdaptiveColor) -> View {
+pub fn chip_scroller(
+    chips: impl IntoIterator<Item = AnyElement>,
+    surface: fn() -> AdaptiveColor,
+) -> View {
     view()
         .flex_grow(0.0)
         .w_full()
         .min_w(px(0.0))
         .overflow_hidden()
         .child(
-            scroll()
-                .horizontal()
-                .scrollbar(false)
-                .w_full()
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .pl_4()
-                        .pr(px(EDGE_FADE + 8.0))
-                        .py_2()
-                        .role(AccessibilityRole::Tablist)
-                        .children(chips),
-                ),
+            scroll().horizontal().scrollbar(false).w_full().child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .pl_4()
+                    .pr(px(EDGE_FADE + 8.0))
+                    .py_2()
+                    .role(AccessibilityRole::Tablist)
+                    .children(chips),
+            ),
         )
         .child(edge_fade(surface))
 }
@@ -802,12 +955,16 @@ pub fn banner(tone: Tone, glyph: Icon, message: impl IntoReactive<SharedString>)
             Tone::Warning => c::warning_bg(),
             Tone::Danger => c::danger_bg(),
         })
-        .child(icon(glyph, 16.0).mt(px(1.0)).text_color(move || match tone {
-            Tone::Info => c::link(),
-            Tone::Secure => c::primary(),
-            Tone::Warning => c::warning(),
-            Tone::Danger => c::destructive(),
-        }))
+        .child(
+            icon(glyph, 16.0)
+                .mt(px(1.0))
+                .text_color(move || match tone {
+                    Tone::Info => c::link(),
+                    Tone::Secure => c::primary(),
+                    Tone::Warning => c::warning(),
+                    Tone::Danger => c::destructive(),
+                }),
+        )
         .child(
             text(message)
                 .flex_1()
@@ -826,7 +983,14 @@ pub fn card() -> View {
     view()
         .rounded(px(sp.radius.card))
         .bg(move || c::card())
-        .when(sp.card_stroke, |v| v.border(if sp.skin == Skin::Fluent { px(1.0) } else { hairline() }).border_color(move || c::border()))
+        .when(sp.card_stroke, |v| {
+            v.border(if sp.skin == Skin::Fluent {
+                px(1.0)
+            } else {
+                hairline()
+            })
+            .border_color(move || c::border())
+        })
         .when(sp.elevation == Elevation::Shadow, |v| v.shadow_2xs())
         .p_4()
 }
@@ -902,5 +1066,10 @@ pub fn skeleton_row() -> View {
         .px_4()
         .py_3()
         .child(view().size(px(48.0)).rounded_full().bg(move || c::muted()))
-        .child(view().gap_2().child(skeleton(140.0, 12.0)).child(skeleton(220.0, 10.0)))
+        .child(
+            view()
+                .gap_2()
+                .child(skeleton(140.0, 12.0))
+                .child(skeleton(220.0, 10.0)),
+        )
 }

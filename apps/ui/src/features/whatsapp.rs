@@ -67,7 +67,11 @@ pub fn unsupported_note(feature: &str) -> View {
         .gap_2()
         .px_3()
         .py_2()
-        .child(icon(Icon::Info, 14.0).mt(px(2.0)).text_color(move || c::muted_fg()))
+        .child(
+            icon(Icon::Info, 14.0)
+                .mt(px(2.0))
+                .text_color(move || c::muted_fg()),
+        )
         .child(
             text(format!("{feature} aren't available in WhatsApp chats."))
                 .flex_1()
@@ -79,7 +83,9 @@ pub fn unsupported_note(feature: &str) -> View {
 
 /// The opt-in screen, pushed: plain words, off by default, "Not now".
 pub fn opt_in() {
-    nav::push("whatsapp-opt-in", || page("WhatsApp chats", opt_in_screen(true)));
+    nav::push("whatsapp-opt-in", || {
+        page("WhatsApp chats", opt_in_screen(true))
+    });
 }
 
 /// The opt-in as a whole screen: the explanation scrolls, and Not now /
@@ -93,7 +99,10 @@ fn opt_in_screen(pushed: bool) -> View {
         .border_t(hairline())
         .border_color(move || c::border())
         .bg(move || c::background())
-        .style_when(move || linking.get(), |st| st.hidden().border_color(AdaptiveColor::TRANSPARENT))
+        .style_when(
+            move || linking.get(),
+            |st| st.hidden().border_color(AdaptiveColor::TRANSPARENT),
+        )
         .child(
             view()
                 .w_full()
@@ -104,17 +113,27 @@ fn opt_in_screen(pushed: bool) -> View {
                 .pb_safe_area_plus(px(12.0))
                 .flex_row()
                 .gap_3()
-                .child(view().flex_1().child(btn("Not now", Variant::Outline, BtnSize::Lg, move || {
-                    if pushed {
-                        nav::pop();
-                    }
-                })))
-                .child(view().flex_1().child(btn("Link WhatsApp…", Variant::Primary, BtnSize::Lg, move || {
-                    linking.set(true);
-                    s.begin_whatsapp_link(move || {
-                        toast("WhatsApp linked. Your chats will appear in a moment.");
-                    });
-                }))),
+                .child(view().flex_1().child(btn(
+                    "Not now",
+                    Variant::Outline,
+                    BtnSize::Lg,
+                    move || {
+                        if pushed {
+                            nav::pop();
+                        }
+                    },
+                )))
+                .child(view().flex_1().child(btn(
+                    "Link WhatsApp…",
+                    Variant::Primary,
+                    BtnSize::Lg,
+                    move || {
+                        linking.set(true);
+                        s.begin_whatsapp_link(move || {
+                            toast("WhatsApp linked. Your chats will appear in a moment.");
+                        });
+                    },
+                ))),
         );
     view()
         .flex_1()
@@ -396,7 +415,13 @@ mod tests {
     #[test]
     fn the_spec_lists_are_unsupported() {
         let missing: Vec<_> = unsupported().collect();
-        for f in ["Disappearing messages sync", "Polls", "Events", "Nudges", "View once"] {
+        for f in [
+            "Disappearing messages sync",
+            "Polls",
+            "Events",
+            "Nudges",
+            "View once",
+        ] {
             assert!(missing.contains(&f), "{f}");
         }
     }

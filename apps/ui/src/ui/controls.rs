@@ -31,7 +31,11 @@ pub fn field(placeholder: impl Into<SharedString>, value: Signal<String>) -> Inp
         .placeholder_color(|| color(c::muted_fg()))
         .caret_color(|| color(c::primary()))
         .selection_color(|| color(c::accent()))
-        .h(px(if is_desktop() { sp.field_h.0 } else { sp.field_h.1 }))
+        .h(px(if is_desktop() {
+            sp.field_h.0
+        } else {
+            sp.field_h.1
+        }))
         .px_3()
         .text_size(px(font::body()))
         .text_color(move || c::foreground())
@@ -43,7 +47,9 @@ pub fn field(placeholder: impl Into<SharedString>, value: Signal<String>) -> Inp
         // outlined field thickens all round; the others take the ring.
         .focus(move |s| {
             if fluent {
-                s.border_b(px(2.0)).border_color(move || c::input().opacity(0.5)).border_b_color(move || c::primary())
+                s.border_b(px(2.0))
+                    .border_color(move || c::input().opacity(0.5))
+                    .border_b_color(move || c::primary())
             } else if material {
                 s.border_2().border_color(move || c::primary())
             } else {
@@ -72,7 +78,13 @@ pub fn labelled_field(
             text(help)
                 .text_size(px(font::SMALL))
                 .line_height(px(18.0))
-                .text_color(move || if invalid() { c::destructive() } else { c::muted_fg() }),
+                .text_color(move || {
+                    if invalid() {
+                        c::destructive()
+                    } else {
+                        c::muted_fg()
+                    }
+                }),
         )
 }
 
@@ -94,10 +106,19 @@ pub fn search_field(placeholder: impl Into<SharedString>, query: Signal<String>)
         .items_center()
         .gap_2()
         .h(px(height))
-        .px(px(if sp.skin == Skin::Material { 16.0 } else { 12.0 }))
+        .px(px(if sp.skin == Skin::Material {
+            16.0
+        } else {
+            12.0
+        }))
         .rounded(px(sp.radius.search))
         .bg(move || c::secondary())
-        .when(sp.skin == Skin::Fluent, |v| v.border(hairline()).border_color(move || c::border()).border_b_1().border_b_color(move || c::input().opacity(0.6)))
+        .when(sp.skin == Skin::Fluent, |v| {
+            v.border(hairline())
+                .border_color(move || c::border())
+                .border_b_1()
+                .border_b_color(move || c::input().opacity(0.6))
+        })
         .child(icon(Icon::Search, 16.0).text_color(move || c::muted_fg()))
         .child(
             input()
@@ -160,22 +181,44 @@ pub fn toggle(
                 .border(px(w.border))
                 .border_color(c::input())
                 .checked(|s| s.bg(c::switch_on()).border_color(c::switch_on()));
-            if reduced { s } else { s.transition_colors().duration(motion::FAST) }
+            if reduced {
+                s
+            } else {
+                s.transition_colors().duration(motion::FAST)
+            }
         })
         .thumb_style(move |s| {
             let s = s
                 .size(px(w.thumb_off))
                 .rounded_full()
-                .bg(if w.ink_thumb_off { c::muted_fg() } else { c::switch_thumb() })
+                .bg(if w.ink_thumb_off {
+                    c::muted_fg()
+                } else {
+                    c::switch_thumb()
+                })
                 .translate_x(px(off_x));
-            let s = if apple { s.border_1().border_color(c::input()) } else { s };
+            let s = if apple {
+                s.border_1().border_color(c::input())
+            } else {
+                s
+            };
             let s = if soft_shadow { s.shadow_sm() } else { s };
-            let s = s
-                .checked(move |s| {
-                    let s = s.size(px(w.thumb_on)).translate_x(px(on_x)).bg(c::switch_thumb());
-                    if apple { s.border_color(c::switch_thumb()) } else { s }
-                });
-            if reduced { s } else { s.transition_all().duration(motion::FAST) }
+            let s = s.checked(move |s| {
+                let s = s
+                    .size(px(w.thumb_on))
+                    .translate_x(px(on_x))
+                    .bg(c::switch_thumb());
+                if apple {
+                    s.border_color(c::switch_thumb())
+                } else {
+                    s
+                }
+            });
+            if reduced {
+                s
+            } else {
+                s.transition_all().duration(motion::FAST)
+            }
         })
 }
 
@@ -221,14 +264,20 @@ pub fn toggle_row_with(
         .px_4()
         .min_h(px(super::parts::row_height()))
         .py_2()
-        .child(glyph.map(|g| super::parts::icon_tile(g).opacity(move || if disabled() { 0.45_f32 } else { 1.0 })))
+        .child(glyph.map(|g| {
+            super::parts::icon_tile(g).opacity(move || if disabled() { 0.45_f32 } else { 1.0 })
+        }))
         .child(
             view()
                 .flex_1()
                 .min_w(px(0.0))
                 .gap(px(2.0))
                 .opacity(move || if disabled() { 0.45_f32 } else { 1.0 })
-                .child(text(title.clone()).text_size(px(font::body())).number_of_lines(2))
+                .child(
+                    text(title.clone())
+                        .text_size(px(font::body()))
+                        .number_of_lines(2),
+                )
                 .child(subtitle.map(|s| {
                     text(s)
                         .text_size(px(font::SMALL))
@@ -270,7 +319,13 @@ pub fn segmented<T: Copy + PartialEq + 'static>(
         .gap(px(if material { 0.0 } else { 2.0 }))
         .rounded(px(track))
         .overflow_hidden()
-        .bg(move || if material { AdaptiveColor::TRANSPARENT } else { c::secondary() })
+        .bg(move || {
+            if material {
+                AdaptiveColor::TRANSPARENT
+            } else {
+                c::secondary()
+            }
+        })
         .when(material, |v| v.border_1().border_color(move || c::input()))
         .role(AccessibilityRole::Tablist)
         .children(options.into_iter().enumerate().map(move |(i, (v, label))| {
@@ -291,18 +346,43 @@ pub fn segmented<T: Copy + PartialEq + 'static>(
                 .items_center()
                 .justify_center()
                 .rounded(px(segment))
-                .when(material && i + 1 < count, |b| b.border_r_1().border_color(move || c::input()))
-                .when(!material, |b| {
-                    b.bg(move || if selected() { c::raised() } else { AdaptiveColor::TRANSPARENT })
-                        .border(hairline())
-                        .border_color(move || if selected() { c::border() } else { AdaptiveColor::TRANSPARENT })
-                        .style_when(selected, |st| st.shadow_sm())
+                .when(material && i + 1 < count, |b| {
+                    b.border_r_1().border_color(move || c::input())
                 })
-                .when(material, |b| b.bg(move || if selected() { c::accent() } else { AdaptiveColor::TRANSPARENT }))
+                .when(!material, |b| {
+                    b.bg(move || {
+                        if selected() {
+                            c::raised()
+                        } else {
+                            AdaptiveColor::TRANSPARENT
+                        }
+                    })
+                    .border(hairline())
+                    .border_color(move || {
+                        if selected() {
+                            c::border()
+                        } else {
+                            AdaptiveColor::TRANSPARENT
+                        }
+                    })
+                    .style_when(selected, |st| st.shadow_sm())
+                })
+                .when(material, |b| {
+                    b.bg(move || {
+                        if selected() {
+                            c::accent()
+                        } else {
+                            AdaptiveColor::TRANSPARENT
+                        }
+                    })
+                })
                 .child(material.then(|| {
                     icon(Icon::Check, 16.0)
                         .text_color(move || c::on_accent())
-                        .style_when(move || !selected(), |st| st.hidden().border_color(AdaptiveColor::TRANSPARENT))
+                        .style_when(
+                            move || !selected(),
+                            |st| st.hidden().border_color(AdaptiveColor::TRANSPARENT),
+                        )
                 }))
                 .cursor_pointer()
                 .transition_colors()
@@ -384,8 +464,16 @@ pub(crate) fn glass_capsule(content: impl IntoElement) -> View {
 /// the destination's title at 20pt): semibold on every skin, so the pane
 /// keeps to two weights. Apple tightens it as its 20pt titles are.
 fn pane_title_type() -> TitleType {
-    let tracking = if spec().skin == Skin::Apple { -0.2 } else { 0.0 };
-    TitleType { size: font::HEADING, weight: FontWeight::SEMIBOLD, tracking }
+    let tracking = if spec().skin == Skin::Apple {
+        -0.2
+    } else {
+        0.0
+    };
+    TitleType {
+        size: font::HEADING,
+        weight: FontWeight::SEMIBOLD,
+        tracking,
+    }
 }
 
 /// The header the app draws: back, title, actions, in the skin's shape.
@@ -413,7 +501,11 @@ pub fn app_header(title: impl Into<SharedString>, back: bool, right: Option<AnyE
     let centred = !large && sp.centred_now(is_wide);
     let apple = sp.skin == Skin::Apple;
     let adwaita = sp.skin == Skin::Adwaita;
-    let back_glyph = if sp.back_arrow { Icon::ArrowLeft } else { Icon::Back };
+    let back_glyph = if sp.back_arrow {
+        Icon::ArrowLeft
+    } else {
+        Icon::Back
+    };
     let back_btn = back.then(|| {
         let b = if in_info {
             icon_btn(Icon::Close, "Close info", crate::nav::close_info)
@@ -421,7 +513,11 @@ pub fn app_header(title: impl Into<SharedString>, back: bool, right: Option<AnyE
             icon_btn(back_glyph, "Back", crate::nav::pop)
         };
         // Apple groups header controls on glass (iOS 26 / macOS 26 toolbars).
-        if apple { glass_capsule(b).into_element() } else { b.into_element() }
+        if apple {
+            glass_capsule(b).into_element()
+        } else {
+            b.into_element()
+        }
     });
 
     if !back && is_wide {
@@ -478,10 +574,9 @@ pub fn app_header(title: impl Into<SharedString>, back: bool, right: Option<AnyE
             c::background()
         }
     };
-    let base = view()
-        .bg(bar_bg)
-        .z_index(1)
-        .when(adwaita, |v| v.border_b(hairline()).border_color(move || c::border()));
+    let base = view().bg(bar_bg).z_index(1).when(adwaita, |v| {
+        v.border_b(hairline()).border_color(move || c::border())
+    });
     if large {
         // Fluent: one row, the 28pt title beside the actions.
         if sp.skin == Skin::Fluent {
@@ -510,7 +605,11 @@ pub fn app_header(title: impl Into<SharedString>, back: bool, right: Option<AnyE
                     .px(px(if apple { 16.0 } else { 8.0 }))
                     .child(right),
             )
-            .child(title_text(title, type_).px_4().pb(px(if apple { 6.0 } else { 12.0 })));
+            .child(
+                title_text(title, type_)
+                    .px_4()
+                    .pb(px(if apple { 6.0 } else { 12.0 })),
+            );
     }
     if centred {
         // The title centred on the bar, whatever the two sides hold.
@@ -549,7 +648,9 @@ pub fn app_header(title: impl Into<SharedString>, back: bool, right: Option<AnyE
         // little stronger than row separators), drawn over the content.
         // Material's and Apple's bars have none (they tint or blur on
         // scroll); Fluent's page header has none either.
-        .when(sp.elevation == Elevation::Shadow && back, |v| v.border_b(hairline()).border_color(move || c::border()))
+        .when(sp.elevation == Elevation::Shadow && back, |v| {
+            v.border_b(hairline()).border_color(move || c::border())
+        })
         .child(back_btn)
         .child(title_text(title, type_).flex_1().when(!back, |t| t.pl_2()))
         .child(right)
@@ -559,7 +660,11 @@ pub fn app_header(title: impl Into<SharedString>, back: bool, right: Option<AnyE
 
 /// A bottom sheet on phones, a centred panel on desktops. Always in the
 /// tree; `open` drives it.
-pub fn app_sheet(open: Signal<bool>, title: impl Into<SharedString>, content: impl IntoElement + 'static) -> nsh_base::SheetElement {
+pub fn app_sheet(
+    open: Signal<bool>,
+    title: impl Into<SharedString>,
+    content: impl IntoElement + 'static,
+) -> nsh_base::SheetElement {
     let title: SharedString = title.into();
     let content = std::cell::RefCell::new(Some(content.into_element()));
     let sp = spec();
@@ -569,7 +674,11 @@ pub fn app_sheet(open: Signal<bool>, title: impl Into<SharedString>, content: im
     let r = sp.radius;
     let centred_title = matches!(sp.skin, Skin::Apple | Skin::Adwaita);
     let title_type = match sp.skin {
-        Skin::Material => TitleType { size: 22.0, weight: FontWeight::NORMAL, tracking: 0.0 },
+        Skin::Material => TitleType {
+            size: 22.0,
+            weight: FontWeight::NORMAL,
+            tracking: 0.0,
+        },
         _ => sp.page_title,
     };
     let material = sp.skin == Skin::Material;
@@ -583,7 +692,11 @@ pub fn app_sheet(open: Signal<bool>, title: impl Into<SharedString>, content: im
         // presses through to the backdrop.
         .when(panel, |sh| {
             sh.popup_style(|s| {
-                s.top_0().items_center().justify_center().p_6().pointer_events(PointerEvents::BoxNone)
+                s.top_0()
+                    .items_center()
+                    .justify_center()
+                    .p_6()
+                    .pointer_events(PointerEvents::BoxNone)
             })
         })
         .on_open_change(move |e: &SheetEvent| {
@@ -602,7 +715,9 @@ pub fn app_sheet(open: Signal<bool>, title: impl Into<SharedString>, content: im
                         .max_w(px(440.0))
                         .pt_2()
                         // Adwaita's dialogs carry no outline, only their shadow.
-                        .when(sp.skin != Skin::Adwaita, |v| v.border(hairline()).border_color(move || c::border()))
+                        .when(sp.skin != Skin::Adwaita, |v| {
+                            v.border(hairline()).border_color(move || c::border())
+                        })
                         .when(sp.elevation == Elevation::Shadow, |v| v.shadow_xl())
                 })
                 .when(panel, |v| v.pb_4())
@@ -611,13 +726,23 @@ pub fn app_sheet(open: Signal<bool>, title: impl Into<SharedString>, content: im
                 // desktop panel closes with Escape, the backdrop or Close.
                 // Material's drag handle is 32×4.
                 .child((!panel).then(|| {
-                    view().items_center().pt(px(if material { 16.0 } else { 6.0 })).pb(px(if material { 8.0 } else { 0.0 })).child(
-                        view()
-                            .w(px(if material { 32.0 } else { 36.0 }))
-                            .h(px(if material { 4.0 } else { 5.0 }))
-                            .rounded_full()
-                            .bg(move || if material { c::muted_fg().opacity(0.4) } else { c::muted_fg().opacity(0.35) }),
-                    )
+                    view()
+                        .items_center()
+                        .pt(px(if material { 16.0 } else { 6.0 }))
+                        .pb(px(if material { 8.0 } else { 0.0 }))
+                        .child(
+                            view()
+                                .w(px(if material { 32.0 } else { 36.0 }))
+                                .h(px(if material { 4.0 } else { 5.0 }))
+                                .rounded_full()
+                                .bg(move || {
+                                    if material {
+                                        c::muted_fg().opacity(0.4)
+                                    } else {
+                                        c::muted_fg().opacity(0.35)
+                                    }
+                                }),
+                        )
                 }))
                 // Header: 16pt leading (the content's gutter), the close
                 // button's frame 8pt from the trailing edge so its glyph
@@ -673,6 +798,31 @@ pub fn confirm(
     });
 }
 
+/// A native question with a plain (not destructive) action: "never by
+/// surprise" confirmations. `on_yes` runs when the action is chosen.
+pub fn ask_first(
+    title: impl Into<String>,
+    message: impl Into<String>,
+    action: impl Into<String>,
+    on_yes: impl FnOnce() + 'static,
+) {
+    let title = title.into();
+    let message = message.into();
+    let action = action.into();
+    spawn(async move {
+        let answer = alert_dialog()
+            .title(title)
+            .description(message)
+            .cancel("cancel", "Cancel")
+            .action("yes", action)
+            .show()
+            .await;
+        if matches!(answer, Ok(r) if r.action.as_deref() == Some("yes")) {
+            on_yes();
+        }
+    });
+}
+
 // ---------------------------------------------------------------- toasts
 
 /// The one toast showing (a short message that leaves by itself).
@@ -688,7 +838,10 @@ pub fn toast(message: impl Into<SharedString>) {
     announce_for_accessibility(message.to_string());
     let state = global::<ToastState>();
     let serial = state.with_untracked(|s| s.serial) + 1;
-    state.set(ToastState { message: Some(message), serial });
+    state.set(ToastState {
+        message: Some(message),
+        serial,
+    });
     set_timeout(Duration::from_millis(2600), move || {
         state.update(|s| {
             if s.serial == serial {
@@ -726,11 +879,12 @@ pub fn set_toast_inset(px: f32) {
 /// window now: the desktop detail pane's open chat with nothing pushed
 /// over it, or a chat page on top of the phone stack.
 fn conversation_showing() -> bool {
-    let top_is_chat = crate::nav::routes()
-        .with(|r| r.0.last().map(|route| route.key.starts_with("chat:")));
+    let top_is_chat =
+        crate::nav::routes().with(|r| r.0.last().map(|route| route.key.starts_with("chat:")));
     if wide() {
         top_is_chat.unwrap_or_else(|| {
-            crate::nav::tab().get() == crate::nav::Tab::Chats && crate::nav::open_chat().get().0.is_some()
+            crate::nav::tab().get() == crate::nav::Tab::Chats
+                && crate::nav::open_chat().get().0.is_some()
         })
     } else {
         top_is_chat.unwrap_or(false)
@@ -749,7 +903,11 @@ fn toast_lift() -> f32 {
         toast_lift_phone()
     };
     let asked = global::<ToastInset>().get().0;
-    if asked > 0.0 { base.max(asked + 12.0) } else { base }
+    if asked > 0.0 {
+        base.max(asked + 12.0)
+    } else {
+        base
+    }
 }
 
 /// The toast layer, mounted once at the root.
@@ -782,7 +940,13 @@ pub fn toast_layer() -> View {
                 .bg(move || c::foreground())
                 .shadow_md()
                 .opacity(move || if shown() { 1.0_f32 } else { 0.0 })
-                .translate_y(move || if shown() || motion::reduced() { px(0.0) } else { px(8.0) })
+                .translate_y(move || {
+                    if shown() || motion::reduced() {
+                        px(0.0)
+                    } else {
+                        px(8.0)
+                    }
+                })
                 .transition_all()
                 .duration(motion::BASE)
                 .ease_out()

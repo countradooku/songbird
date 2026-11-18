@@ -10,9 +10,9 @@ use crate::{
     store::{
         Store,
         ext_onboarding::{
-            INVITE_GROUP, INVITE_LEN, InviteCheck, UsernameCheck, check_invite, invite_complete, key_groups,
-            key_tail_matches, normalize_invite, normalize_username, username_format, username_key,
-            username_suggestions,
+            INVITE_GROUP, INVITE_LEN, InviteCheck, UsernameCheck, check_invite, invite_complete,
+            key_groups, key_tail_matches, normalize_invite, normalize_username, username_format,
+            username_key, username_suggestions,
         },
     },
     ui::*,
@@ -56,13 +56,21 @@ fn quiet(label: &'static str, on_press: impl Fn() + 'static) -> nsh_base::Button
 // ---------------------------------------------------------------- 1 welcome
 
 const PROMISES: [(Icon, &str, &str); 3] = [
-    (Icon::Chats, "Talk freely.", "Messages, voice and video calls with the people who matter to you."),
+    (
+        Icon::Chats,
+        "Talk freely.",
+        "Messages, voice and video calls with the people who matter to you.",
+    ),
     (
         Icon::Lock,
         "Only you and the people you talk to can read your messages.",
         "Not Songbird, not anyone else.",
     ),
-    (Icon::Heart, "Free. No ads. No tracking.", "Made in Europe, and paid for by people who choose Plus, never by your data."),
+    (
+        Icon::Heart,
+        "Free. No ads. No tracking.",
+        "Made in Europe, and paid for by people who choose Plus, never by your data.",
+    ),
 ];
 
 pub(super) fn welcome(f: Flow) -> View {
@@ -88,30 +96,41 @@ pub(super) fn welcome(f: Flow) -> View {
             .child(
                 // A fixed band, its text from the top, so neither the
                 // headline nor the dots below move between pages.
-                view().h(px(196.0)).w_full().justify_start().child(dynamic(move || {
-                    let i = page.get();
-                    untracked(move || {
-                        let (_, title, line) = PROMISES[i];
-                        let rise = motion().entering(
-                            MotionSpec::new(KeyframeTiming::new(motion::BASE).easing(Easing::EaseOut))
+                view()
+                    .h(px(196.0))
+                    .w_full()
+                    .justify_start()
+                    .child(dynamic(move || {
+                        let i = page.get();
+                        untracked(move || {
+                            let (_, title, line) = PROMISES[i];
+                            let rise = motion().entering(
+                                MotionSpec::new(
+                                    KeyframeTiming::new(motion::BASE).easing(Easing::EaseOut),
+                                )
                                 .values(MotionChannel::Opacity, [0.0, 1.0])
-                                .values(MotionChannel::TranslateY, [if motion::reduced() { 0.0 } else { 8.0 }, 0.0]),
-                        );
-                        view()
-                            .items_center()
-                            .gap_3()
-                            .bind_motion(&rise)
-                            .child(flow_title(title).text_center().max_w(px(360.0)))
-                            .child(flow_lead(line).text_center().max_w(px(340.0)))
-                            .into_element()
-                    })
-                })),
+                                .values(
+                                    MotionChannel::TranslateY,
+                                    [if motion::reduced() { 0.0 } else { 8.0 }, 0.0],
+                                ),
+                            );
+                            view()
+                                .items_center()
+                                .gap_3()
+                                .bind_motion(&rise)
+                                .child(flow_title(title).text_center().max_w(px(360.0)))
+                                .child(flow_lead(line).text_center().max_w(px(340.0)))
+                                .into_element()
+                        })
+                    })),
             )
             .child(page_dots(3, move || page.get(), move |i| page.set(i))),
         view()
             .gap_2()
             .child(primary("Get started", move || f.go(Step::Invite)))
-            .child(quiet("I already have an account", move || f.go(Step::Returning))),
+            .child(quiet("I already have an account", move || {
+                f.go(Step::Returning)
+            })),
     )
 }
 
@@ -121,7 +140,10 @@ pub(super) fn invite(f: Flow) -> View {
     let help = signal(false);
     let code = f.invite;
     // The code registration refused: editing it clears the message.
-    let refused = move || f.invite_refused.with(|r| r.as_ref().is_some_and(|r| code.with(|c| c == r)));
+    let refused = move || {
+        f.invite_refused
+            .with(|r| r.as_ref().is_some_and(|r| code.with(|c| c == r)))
+    };
     let complete = move || code.with(|c| invite_complete(c));
     // Only the format is checked here: there is no endpoint to ask about a
     // code before registering, which is where a bad one is refused.
@@ -201,7 +223,11 @@ fn username_line(name: impl Fn() -> String + Copy + 'static) -> View {
     )
 }
 
-fn username_field(value: Signal<String>, invalid: impl Fn() -> bool + Copy + 'static, next: impl Fn() + 'static) -> View {
+fn username_field(
+    value: Signal<String>,
+    invalid: impl Fn() -> bool + Copy + 'static,
+    next: impl Fn() + 'static,
+) -> View {
     view()
         .gap(px(6.0))
         .child(
@@ -214,8 +240,22 @@ fn username_field(value: Signal<String>, invalid: impl Fn() -> bool + Copy + 'st
             field("e.g. ana.popescu", value)
                 // An invalid name shows the destructive border, focused or
                 // not, as the invite code's blocks do.
-                .border_color(move || if invalid() { c::destructive() } else { c::input() })
-                .focus(move |st| st.border_color(move || if invalid() { c::destructive() } else { c::ring() }))
+                .border_color(move || {
+                    if invalid() {
+                        c::destructive()
+                    } else {
+                        c::input()
+                    }
+                })
+                .focus(move |st| {
+                    st.border_color(move || {
+                        if invalid() {
+                            c::destructive()
+                        } else {
+                            c::ring()
+                        }
+                    })
+                })
                 .on_submit(move |_: &str| next())
                 .auto_capitalize(AutoCapitalize::None)
                 .auto_correct(false)
@@ -261,7 +301,12 @@ pub(super) fn claim_username(s: Store, f: Flow) -> View {
     let saving = signal(false);
     let lost = f.taken.get_untracked().unwrap_or_default();
     let name = move || normalize_username(&value.get());
-    let still_taken = move || f.taken.with(|t| t.as_deref().is_some_and(|t| username_key(t) == username_key(&name())));
+    let still_taken = move || {
+        f.taken.with(|t| {
+            t.as_deref()
+                .is_some_and(|t| username_key(t) == username_key(&name()))
+        })
+    };
     let ok = move || username_format(&name()).is_none() && !still_taken();
     let next = move || {
         if !ok() || saving.get_untracked() {
@@ -298,27 +343,52 @@ pub(super) fn claim_username(s: Store, f: Flow) -> View {
         view()
             .gap_4()
             .child(flow_title("Pick another username"))
-            .child(flow_lead("Your account is ready. Choose a username to finish."))
+            .child(flow_lead(
+                "Your account is ready. Choose a username to finish.",
+            ))
             .child(username_field(
                 value,
-                move || still_taken() || matches!(username_format(&name()), Some(c) if c != UsernameCheck::Empty),
+                move || {
+                    still_taken()
+                        || matches!(username_format(&name()), Some(c) if c != UsernameCheck::Empty)
+                },
                 next,
             ))
-            .child(when(still_taken, move || {
-                status_line(
-                    || StatusTone::Problem,
-                    || Icon::Alert,
-                    move || UsernameCheck::Taken.message(&name()),
-                )
-            }).otherwise(move || username_line(name)))
-            .child(view().flex_row().flex_wrap().gap_2().children(options.into_iter().map(move |o| {
-                let pick = o.clone();
-                chip(format!("@{o}"), || false, move || value.set(pick.clone()))
-            }))),
+            .child(
+                when(still_taken, move || {
+                    status_line(
+                        || StatusTone::Problem,
+                        || Icon::Alert,
+                        move || UsernameCheck::Taken.message(&name()),
+                    )
+                })
+                .otherwise(move || username_line(name)),
+            )
+            .child(
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap_2()
+                    .children(options.into_iter().map(move |o| {
+                        let pick = o.clone();
+                        chip(format!("@{o}"), || false, move || value.set(pick.clone()))
+                    })),
+            ),
         view().child(
-            btn(move || if saving.get() { "Saving…" } else { "Continue" }, Variant::Primary, BtnSize::Lg, next)
-                .w_full()
-                .disabled(move || !ok() || saving.get()),
+            btn(
+                move || {
+                    if saving.get() {
+                        "Saving…"
+                    } else {
+                        "Continue"
+                    }
+                },
+                Variant::Primary,
+                BtnSize::Lg,
+                next,
+            )
+            .w_full()
+            .disabled(move || !ok() || saving.get()),
         ),
     )
 }
@@ -328,7 +398,11 @@ pub(super) fn claim_username(s: Store, f: Flow) -> View {
 pub(super) fn creating(s: Store, f: Flow) -> View {
     let name = normalize_username(&f.username.get_untracked());
     let code = f.invite.get_untracked();
-    let here = move || f.history.try_get().is_some_and(|h| h.last() == Some(&Step::Creating));
+    let here = move || {
+        f.history
+            .try_get()
+            .is_some_and(|h| h.last() == Some(&Step::Creating))
+    };
     // The real server (You → Server connection): challenge, Argon2id proof
     // of work on this device, both keys, the invite; then the username.
     if crate::backend::is_live() {
@@ -360,24 +434,28 @@ pub(super) fn creating(s: Store, f: Flow) -> View {
             }
         });
     } else {
-    // mock: registration with an invisible Argon2id proof of work (D-0048),
-    // about 1.5 s, then claiming the username.
-    set_timeout(Duration::from_millis(1500), move || {
-        if !f.history.try_get().is_some_and(|h| h.last() == Some(&Step::Creating)) {
-            return;
-        }
-        if check_invite(&code) == InviteCheck::Refused {
-            // One calm answer for every bad code; nothing was made.
-            f.invite_refused.set(Some(code.clone()));
-            f.rewind_to(Step::Invite);
-        } else if s.username_available(&name) {
-            s.create_account(name.clone());
-            f.replace(Step::Profile);
-        } else {
-            f.taken.set(Some(name.clone()));
-            f.replace(Step::ClaimUsername);
-        }
-    });
+        // mock: registration with an invisible Argon2id proof of work (D-0048),
+        // about 1.5 s, then claiming the username.
+        set_timeout(Duration::from_millis(1500), move || {
+            if !f
+                .history
+                .try_get()
+                .is_some_and(|h| h.last() == Some(&Step::Creating))
+            {
+                return;
+            }
+            if check_invite(&code) == InviteCheck::Refused {
+                // One calm answer for every bad code; nothing was made.
+                f.invite_refused.set(Some(code.clone()));
+                f.rewind_to(Step::Invite);
+            } else if s.username_available(&name) {
+                s.create_account(name.clone());
+                f.replace(Step::Profile);
+            } else {
+                f.taken.set(Some(name.clone()));
+                f.replace(Step::ClaimUsername);
+            }
+        });
     }
     let live_busy = move || crate::backend::live().with(|l| l.busy.clone());
     centred(
@@ -390,8 +468,10 @@ pub(super) fn creating(s: Store, f: Flow) -> View {
             .child(flow_title("Creating your account…").text_center())
             .child(busy_bar("Creating your account"))
             .child(
-                muted(move || SharedString::from(live_busy().unwrap_or_else(|| "This takes a moment.".into())))
-                    .text_center(),
+                muted(move || {
+                    SharedString::from(live_busy().unwrap_or_else(|| "This takes a moment.".into()))
+                })
+                .text_center(),
             ),
         view(),
     )
@@ -430,7 +510,11 @@ pub(super) fn profile(s: Store, f: Flow) -> View {
                                 .child(
                                     text(move || {
                                         let n = name.get();
-                                        if n.trim().is_empty() { String::new() } else { initials(&n) }
+                                        if n.trim().is_empty() {
+                                            String::new()
+                                        } else {
+                                            initials(&n)
+                                        }
                                     })
                                     .text_size(px(font::DISPLAY + 8.0))
                                     .font_weight(FontWeight::SEMIBOLD)
@@ -469,7 +553,11 @@ pub(super) fn profile(s: Store, f: Flow) -> View {
                 "",
                 || false,
             ))
-            .child(banner(Tone::Secure, Icon::Lock, "Only people you talk to can see your name and photo.")),
+            .child(banner(
+                Tone::Secure,
+                Icon::Lock,
+                "Only people you talk to can see your name and photo.",
+            )),
         view().child(primary("Continue", next).disabled(move || !ready())),
     )
 }
@@ -574,7 +662,11 @@ pub(super) fn backup_offer(f: Flow) -> View {
 }
 
 pub(super) fn backup_setup(f: Flow) -> View {
-    view().flex_1().child(backups::wizard_body(true, Rc::new(move || f.go(Step::Notifications)), Some(f.host)))
+    view().flex_1().child(backups::wizard_body(
+        true,
+        Rc::new(move || f.go(Step::Notifications)),
+        Some(f.host),
+    ))
 }
 
 // ---------------------------------------------------------------- 6 notifications
@@ -601,7 +693,8 @@ pub(super) fn notifications(f: Flow) -> View {
                     ));
                 }
                 NotificationPermission::Unavailable => {
-                    let _ = note.try_set(Some("This device can't show notifications from Songbird."));
+                    let _ =
+                        note.try_set(Some("This device can't show notifications from Songbird."));
                 }
                 NotificationPermission::Default => {
                     let _ = note.try_set(Some("You can turn notifications on later in Settings."));
@@ -661,10 +754,18 @@ pub(super) fn connect(s: Store, f: Flow) -> View {
     };
     let welcome = move || {
         let n = first();
-        if n.is_empty() { "Welcome to Songbird".to_string() } else { format!("Welcome to Songbird, {n}") }
+        if n.is_empty() {
+            "Welcome to Songbird".to_string()
+        } else {
+            format!("Welcome to Songbird, {n}")
+        }
     };
     let pick = move |w: Way| {
-        way.set(if way.get_untracked() == Some(w) { None } else { Some(w) });
+        way.set(if way.get_untracked() == Some(w) {
+            None
+        } else {
+            Some(w)
+        });
         found.set(false);
         if w == Way::Scan {
             // mock: the camera finds a friend's code (app-core resolves the username link).
@@ -686,7 +787,10 @@ pub(super) fn connect(s: Store, f: Flow) -> View {
                 view()
                     .size(px(18.0))
                     .text_color(move || c::muted_fg())
-                    .child(when(open, || icon(Icon::ChevronDown, 18.0)).otherwise(|| icon(Icon::ChevronRight, 18.0))),
+                    .child(
+                        when(open, || icon(Icon::ChevronDown, 18.0))
+                            .otherwise(|| icon(Icon::ChevronRight, 18.0)),
+                    ),
             )
             .on_press(move || pick(w))
             .build()
@@ -700,7 +804,13 @@ pub(super) fn connect(s: Store, f: Flow) -> View {
         if let Some(chat) = s.chat(id) {
             set_clipboard(chat.invite_link);
         }
-        finish(s, id, format!("\"{title}\" is ready. Its invite link is copied, so you can share it with your group."));
+        finish(
+            s,
+            id,
+            format!(
+                "\"{title}\" is ready. Its invite link is copied, so you can share it with your group."
+            ),
+        );
     };
     let link2 = link.clone();
     flow_layout(

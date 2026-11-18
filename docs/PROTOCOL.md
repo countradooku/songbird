@@ -24,10 +24,12 @@ Implemented in `crates/proto` (shared by server and clients); decisions D-0019, 
 | `0x01` | C→S | `Send` | `req_id u32`, `idempotency_key [16]`, `flags u8`, [if flag `0x01`: `group [16]`, `epoch u64`], [if `0x04`: `access_key [16]`], [if `0x10`: `commitment [32]`], [if `0x20`: `expire_after_s u32`], [if `0x40`: `group [16]`], `count u16` (≥ 1; 0 with `0x40`), then per device (no flag `0x02`) `count ×` (`device_id [16]`, `len u32` (≥ 1), `envelope [len]`), or shared (flag `0x02`) `count × device_id [16]`, `len u32` (≥ 1), `body [len]` |
 | `0x02` | C→S | `Ack` | `up_to_seq u64` |
 | `0x03` | C→S | `Ephemeral` | `to [16]`, `payload` (≥ 1 byte) |
+| `0x04` | C→S | `Attention` | `to [16]`, `payload` (≥ 1 byte): a nudge, routed within budgets per pair of accounts and blocks (§10.5); the recipient gets `0x84` |
 | `0x10` | C→S | `Auth` | protobuf `Auth` (§2) |
 | `0x81` | S→C | `Deliver` | `seq u64`, `envelope` (≥ 1 byte) |
 | `0x82` | S→C | `SendResult` | `req_id u32`, `status u8`; status 0 accepted; 1 rejected: `reason u16`, `retry_after_ms u32`; 2 device mismatch: protobuf `DeviceMismatch` |
 | `0x83` | S→C | `Ephemeral` | `payload` |
+| `0x84` | S→C | `Attention` | `payload`: an event that came through the attention class (§10.5, D-0108); apps honour a nudge only from this frame |
 | `0x90` | S→C | `Hello` | protobuf `Hello` (§2) |
 | `0x91` | S→C | `AuthOk` | protobuf `AuthOk` |
 | `0x92` | S→C | `Error` | protobuf `Error` (`code u32`, `retry_after_ms u32`), sent before a close when needed |
@@ -417,7 +419,7 @@ Decision D-0049 (unique handles, the owner's choice). Every request is signed by
 | --- | --- | --- |
 | `PUT /v1/username` | `hash [32] \|\| proof [64]` | 204; 409 `{"error":"taken"}` (another account's, held, or reserved); 400 `{"error":"proof"}`; 429 |
 | `DELETE /v1/username` | none | 204 |
-| `POST /v1/username/lookup` | `{"hash": hex, "key"?: digits}` | 200 `{"account": hex}`; 404; 400 for a malformed hash or key; 429 |
+| `POST /v1/username/lookup` | `{"hash": hex, "key"?: digits, "link"?: handle hex}` (the link: §10.3) | 200 `{"account": hex}`; 404; 400 for a malformed hash or key; 429 |
 | `PUT /v1/username/key` | `{"key": "4 to 10 digits"}` | 204 |
 | `DELETE /v1/username/key` | none | 204 |
 | `PUT /v1/username/link` | the link's ciphertext, 1 to 256 bytes | 200 `{"handle": 32 hex}`; 409 `{"error":"no username"}` |
@@ -555,6 +557,8 @@ Prompt 11's plans). Integers are big-endian.
    channel holds one message, written once and read once, and lives ten minutes. The server sees
    only the envelope. Plaintext:
    `version u8 (1) | account [16] | account_identity [32] | token [32] | device [16] | confirm_key [32] | u8 len | server_name`.
+   Version 2 (Prompt 9, D-0102) appends `storage_key [32]`, the account's storage key for the
+   record store (§10.1).
 4. The new device reads it (`GET /v1/provisioning/<channel>`, unsigned; waits up to 25 s, 204
    when nothing came, 404 once it has been read or the channel is gone) and opens it.
 5. The new device links (`POST /v1/devices/link`, unsigned, throttled per IP range):
@@ -817,7 +821,8 @@ Decision D-0056 (M7).
   - username (held 30 days, unlinked) and links;
   - link tokens;
   - the profile, device list, PIN and transparency salt on the account row;
-  - pending requests to join groups (Prompt 5). Group messages are no longer stored for the
+  - pending requests to join groups (Prompt 5);
+  - the record store's records and objects (Prompt 9). Group messages are no longer stored for the
     devices. Their leaves, and the account ID if it held a role, stay in each group's MLS state
     until a member commits the removal (D-0073).
   Encrypted backups keep the data until they expire (at most 93 days); a restore deletes it
@@ -1010,6 +1015,7 @@ Sent only to the sender's own other devices (a send that addresses only the send
 | `blocked` | The whole block list (accounts and groups), replacing the previous one. The server keeps only what it must to drop blocked senders (§5.11). |
 | `call_history` | Call log entries (Prompt 7's calls), so every device shows the same history. |
 | `request_response` | What the user did with a message request (§5.10). |
+| `storage` | The account record store (§10.1): a new storage key after a rotation, or "the store changed, fetch now". Settings live in the store; the `settings` kind is superseded. |
 
 ### 5.9 Restricted chat
 
@@ -2051,6 +2057,243 @@ The bandwidth each mode uses is measured in M5 (`P07-gate.md`).
 ## 9. Push (Prompt 8)
 
 ## 10. Settings sync and presence (Prompt 9)
+
+### 10.1 The account record store (M1, D-0102)
+
+An account's settings, per-chat preferences, contacts and lists are **records**: encrypted by
+the account's devices under a storage key the server never holds, stored opaque under random
+IDs. The client library is `crates/sync`; the wire types are `songbird_proto::storage`.
+
+**Records are never changed in place.** A new value is a new record under a fresh random 16-byte
+ID, and the record it replaces is deleted in the same write, so the set of IDs names the whole
+state. Every write is a compare-and-swap of the store's version:
+
+| Method and path | Body | Answer |
+| --- | --- | --- |
+| `GET /v1/storage` | — | `version u64 \| mlen u16 \| manifest` |
+| `GET /v1/storage/ids` | — | `version u64 \| n u32 \| id [16] * n` |
+| `POST /v1/storage/read` | `n u16 (1..=1024) \| id [16] * n` | `n u16 \| (id [16] \| len u16 \| record) * n`, IDs that no longer exist left out |
+| `PUT /v1/storage` | `version u8 (1) \| expected u64 \| mlen u16 \| manifest \| ndel u32 \| id [16] * ndel \| nins u32 \| (id [16] \| len u16 \| record) * nins` | 200 `{"version"}`; 409 `{"error": "version", "version"}` when another write won; 409 `full`; 409 `exists` for an ID already used; 400 `storage` |
+| `PUT /v1/storage/object` | an encrypted object, at most 2 MiB | `{"object": hex}` (a server-drawn 32-byte ID); 409 `full` |
+| `GET` and `DELETE /v1/storage/object/<id>` | — | the account's own objects only; 404 for any other |
+
+- Every endpoint needs a listed device of the account; a pending device gets 403 `pending`.
+- A record's length must be a Padmé value of 256 to 4,096 bytes plus a 16-byte tag
+  (`valid_record_len`), so most settings records share one size. A manifest is 16 to 256 bytes.
+- Caps per account (`[api.storage]`): 10,000 records, 16 MiB of records, 16 objects. A write may
+  delete and insert up to 20,000 records each, so a key rotation fits in one write.
+- Throttles per account, in `valkey-hot` under keyed names (`st:<kind>:<hmac>`): writes and reads
+  per hour, and records written (one unit per record a write deletes or inserts; 60,000 an hour,
+  burst 40,000, at least one key rotation of a full store; D-0108).
+- No write time is stored; the server keeps the version counter only.
+
+**Keys.** The storage key is 32 random bytes made by the primary at registration, given to a
+linked device in the provisioning message (version 2, §4.6), and rotated when a device is
+removed. A device that adopts the key starts from an empty replica and reads the store from
+scratch, so its own first-run defaults never overwrite the account's settings. Until app-core
+sends the new key to the other devices end to end (A2), the primary rotates only when it is left
+as the account's only device (D-0106):
+
+- `key_id = HMAC-SHA256(storage key, "songbird.v1/storage-key-id")[..8]`;
+- a record's key: `HKDF-SHA256(salt = "songbird.v1/storage", ikm = storage key,
+  info = "record\0" ‖ id)`; AES-256-GCM-SIV, zero nonce (one key per record, never rewritten),
+  AAD `"songbird.v1/storage-record\0" ‖ id`;
+- the manifest's key: the same HKDF with `info = "manifest"`; AES-256-GCM-SIV, random nonce,
+  AAD `"songbird.v1/storage-manifest\0" ‖ key_id`.
+
+**Record plaintext:** `be32(len) ‖ RecordPlain ‖ zeros` to the padded length. `RecordPlain`
+(protobuf): `key` (the logical key, §10.2, at most 256 bytes), the stamp (`wall_ms`, `counter`,
+`node` of 16 bytes), `deleted` (a tombstone, empty value) and `value`.
+
+**Manifest:** `key_id [8] ‖ nonce [12] ‖ AES-256-GCM-SIV(version u64 ‖ digest [32]) ‖ tag`
+(76 bytes); `digest = SHA-256("songbird.v1/storage-ids\0" ‖ sorted IDs)`; `version` is the store
+version the manifest was written at.
+
+**A device accepts a store only if:** the manifest opens under its storage key (another `key_id`:
+the key was rotated, wait for the new one); the manifest names the head's version; its digest
+matches the IDs; every record opens under its ID; and the version is not below one the device
+already saw. A store that fails is refused whole: a server that withholds, swaps, replays or
+rolls back records is caught. A new device trusts the first manifest it sees.
+
+**Merge.** Per logical key, the record with the greatest stamp wins, local edits included. A
+stamp is a hybrid logical clock `(wall ms, counter, node)`: a device's clock never goes
+backwards, follows remote stamps at most 24 hours ahead of its own time, and a write always gets
+a stamp above the key's current one, so a bad clock can never pin a key. Deletions are tombstones,
+collected 90 days later; a device away longer drops its own unwritten edits older than that.
+Convergence is proved by `crates/sync/tests/convergence.rs`.
+
+### 10.2 Logical keys
+
+Inside the ciphertext only:
+
+| Prefix | Holds |
+| --- | --- |
+| `s/<name>` | An account-wide setting |
+| `c/<chat>/<name>` | A per-chat preference; `<chat>` is the hex of the peer's account ID or the group ID |
+| `k/<id>` | A saved contact (name, notes, buddy-list groups) |
+| `l/<id>` | A custom chat list |
+| `b/<id>` | A broadcast list |
+| `x/<id>` | A starred message |
+| `p/<id>` | An installed pack |
+
+The values of each setting are defined with the app's settings (M5).
+
+### 10.3 Server-enforced settings (M2, D-0103)
+
+The few settings the server must see to enforce (THREAT_MODEL §4). Tightening is any listed
+device's; loosening is the primary's, checked in the write's transaction (D-0058), so a stolen
+linked device cannot open the account up. A pending device changes nothing (403 `pending`).
+
+| Request | Body | Answers |
+| --- | --- | --- |
+| `GET /v1/account/settings` | — | `{"discoverable": bool, "groups": "everyone" \| "contacts", "requests": "everyone" \| "nobody", "inactivity_months": 6 \| 12 \| 24}` |
+| `PUT /v1/account/discoverable` | `{"on": bool}` | 204; 403 `primary` for turning it on from a linked device |
+| `PUT /v1/account/groups` | `{"from": "everyone" \| "contacts"}` | 204; 403 `primary` for "everyone" from a linked device |
+| `PUT /v1/account/requests` | `{"from": "everyone" \| "nobody"}` (§5.10) | as before |
+| `PUT /v1/account/inactivity` | `{"months"}` (§4.10) | as before |
+
+- **Not discoverable:** `POST /v1/username/lookup` answers 404, exactly as for an unknown
+  username (same budgets, one statement of the same work), unless the request carries
+  `"link": <handle hex>` naming one of the account's own username links: a link or QR code the
+  user handed out keeps working. Existing contacts need no lookup.
+- **Group adds from contacts only:** a `POST /v1/groups/commit` that adds devices of such an
+  account must carry the header `Group-Add-Access-Key: hex(16)`, the XOR of the access keys of
+  every such account it adds (as broadcasts do, §5.10), compared in constant time; otherwise 403
+  `access`, the same whichever account was missing. Exempt: the committer's own account, and an
+  account with a pending request to join that group (it asked). Apps offer "Nobody" by
+  answering adds with an invitation the user accepts (a client rule). The app sets "contacts" at
+  registration (D-0101 question 9); the server's default for older accounts is "everyone".
+
+### 10.4 The profile's contents (M2, D-0103)
+
+The blob of `PUT /v1/profile` (§4.8) is, for every app (`songbird_content::profile`):
+
+```text
+blob = nonce [12] ‖ AES-256-GCM-SIV(key, nonce, aad = "songbird.v1/profile\0" ‖ be64(version),
+                                    be32(len) ‖ ProfilePlain ‖ zeros to a multiple of 256)
+key  = HKDF-SHA256(salt = "songbird.v1/profile", ikm = profile key, info = "profile")
+```
+
+`ProfilePlain`: name (≤ 128 bytes), about (≤ 280), status (text ≤ 140, emoji ≤ 32, `expires_ms`,
+0 for until changed), avatar (object ID and key, 32 bytes each), up to 5 links. The version is
+bound in, so an old profile cannot be served under a newer version.
+
+- **Visibility** of photo, about and status is "My contacts" or "Nobody": only contacts hold the
+  profile key, so a field shared with nobody is left out of the blob. Narrowing one rotates the
+  profile key (sent to remaining contacts with their next message, §5.10).
+- **A status** stops showing at its expiry on every reader, with no further message.
+- **After any change** the app sends its contacts `Content.profile_changed {version}`: sealed,
+  stored, `SILENT` (no wake-up). They fetch the profile again if the version is newer.
+
+### 10.5 Presence, last seen and nudges (M3, D-0104)
+
+The server never reveals connection state: no answer, header or timing tells a sender whether a
+recipient is online. Apps tell their allowed contacts themselves (`songbird_content::presence`).
+
+**Presence** (`Content.presence`: online, away, busy, or offline with `last_seen_ms` to the
+minute; `wants_reply` when just come online) goes **sealed**, in one batch to every allowed
+contact's devices:
+
+```text
+PUT /v1/ephemeral/sealed   (no device signature)
+Unidentified-Access-Key: hex(16)   the XOR of the access keys of every addressed account that is not open
+body: version u8 (1) | n u16 (1..=1024) | (device [16] | len u16 (1..=4096) | payload) * n   (at most 512 KiB)
+```
+
+- The server maps devices to accounts from its directory snapshot, recomputes the combined key
+  and compares it in constant time: "contacts only" is enforced cryptographically, and a stranger
+  cannot probe anyone. A wrong key refuses the whole batch, with the same 204 (D-0108); devices
+  that are not listed are left out.
+- Throttle: per IP range, counted per device addressed (1,000,000 an hour, burst 20,000).
+- Never stored; routed to connected devices only; the answer is always 204 with no body.
+- The server learns who receives presence and when, never who sent it, beyond correlating the
+  request's address and time with the sender's own connection (sealed sender's known limit).
+
+**The sender's rules** (`Presencer`): at most one batch per 5 s, the latest state wins and is
+always sent after the debounce; the same state is not sent twice; going background sends
+"offline" with last seen (if shared); contacts that asked get one reply each, at most once a
+minute; **invisible sends nothing at all**, and neither does "Nobody" for both online and last
+seen. A contact who was offline all along keeps the last value it saw, or shows "last seen
+recently": the server keeps no presence state. Reciprocity: a user who shares last seen with
+nobody sees nobody's.
+
+**Nudges** (`Content.attention {NUDGE}`) go identified on the WebSocket in the attention frame
+(`0x04`): the connection's ephemeral bucket, then budgets in `valkey-hot` per (sender,
+recipient) account pair (30 an hour, burst 3) and per sender (300 an hour, burst 20), under keyed
+names `q:n:` and `q:m:`, then the recipient's blocks. Over a budget, blocked, offline or the store
+down: dropped silently, like any ephemeral event (fail closed). The recipient gets it in the
+attention frame (`0x84`): the server marks each event it routes with its class, so one a client
+sent as an ordinary ephemeral event (`0x03`, outside these budgets) arrives as `0x83` and is
+never taken for a nudge (D-0108). The server learns that a nudge
+happened between two accounts, never its content. A nudge to an offline contact is lost. The
+receiving app shakes the window (desktop) or vibrates, unless nudges are off, globally or for
+that contact. The stored `DataMessage.nudge` kind is superseded and never sent.
+
+### 10.6 Parental supervision (M4, D-0105)
+
+**Linking, in person** (D-0107, D-0108). Three QR codes, read only by the live camera; nothing
+passes through the server between the two accounts, so it never learns who parents whom.
+
+1. The parent's device makes a fresh Ed25519 **policy key** for this child (never linked to the
+   parent's account) and a 32-byte link secret, and shows only a commitment to them:
+   `SONGBIRD:SUPERVISE:<hex(SHA-256("songbird.v1/link-commit\0" ‖ policy key ‖ link secret))>`.
+2. The child's phone scans it. The child enters their age; the phone computes the unlink date
+   from it and the country's age of digital consent (THREAT_MODEL §5); the birth date never
+   leaves the phone. It shows `SONGBIRD:CHILD:<account hex>:<unlink_at_s decimal>`.
+3. The parent's device scans it, signs the first policy (version 1, for that child, with that
+   date) and shows it with the secret: `SONGBIRD:POLICY:<link secret hex>:<policy hex>` (the
+   policy names the key; at most 644 bytes, about 200 with the app's client rules). It shows the
+   six-digit code (`SHA-256("songbird.v1/link-code\0" ‖ policy key ‖ link secret ‖ child)`,
+   first 4 bytes mod 10⁶).
+4. The child's phone scans it and checks that the key and secret match the commitment, the
+   signature, that the policy is version 1, for this account, with the date it computed, and not
+   unlinking. It shows the six digits.
+5. Parent and child compare the digits. Only then does the child's phone install the policy
+   (`PUT /v1/supervision`, as the primary), and the parent's device keep the link. The parent
+   committed before seeing the child's account, and the child's account was fixed before the key
+   and secret were revealed, so nobody relaying the codes can choose values that make two
+   different links show the same digits.
+
+**The policy** (`songbird_proto::supervision::Policy`):
+
+```text
+version u8 (1) | child [16] | policy_key [32] | policy_version u64 | flags u8
+  | unlink_at_s u64 | clen u16 | client_rules (0..=512) | signature [64]
+signature = Ed25519(policy key, "songbird.v1/supervision\0" ‖ every byte before it)
+```
+
+| Flag | The server enforces |
+| --- | --- |
+| `0x01` no message requests | `requests_off` set and locked |
+| `0x02` group adds need approval | `grp_contacts` set and locked; every commit adding the child's devices (its own joins included) carries an approval |
+| `0x04` not discoverable | `hidden` set and locked |
+| `0x80` unlink | supervision ends; the locks lift, the settings stay for the child to change |
+
+`client_rules` is AES-256-GCM-SIV ciphertext under a key from the link secret (HKDF, salt
+`"songbird.v1/supervision"`, info `"client-rules"`; AAD `"songbird.v1/client-rules\0" ‖ child ‖
+be64(version)`): approving each new contact, declining calls from non-contacts, nudges off, quiet
+hours. Only the two devices read it; the child's app enforces it and shows it.
+
+| Request | Who | Answers |
+| --- | --- | --- |
+| `PUT /v1/supervision` (the policy), signed | The child's own devices: the first from the child's primary (the child consents; the parent's signature proves the parent does), or a later one a child's device carries | 204; 403 `account` (a policy for another account, whatever its state), 403 `primary` (a first from another of the child's devices), 403 `signature`; 409 `exists`, `version` (not newer, or another key), `date` |
+| `PUT /v1/supervision/update` (a later policy), **unsigned** (D-0108) | Anyone: the parent's device. Authorized by the parent's signature against the key in force alone, so the server never learns which account the parent is (only the request's address, as for sealed sends); throttled per IP range | 204; 403 `signature` (a bad signature, or no policy in force: one answer after the same work); 409 `version`, `date` |
+| `GET /v1/supervision` | The child's devices | the policy as signed; 404 when none |
+
+- A locked setting answers 403 `supervised` to every device of the child, the primary included.
+- **Group approvals:** `Group-Add-Approval: hex(expires_s u64 | signature [64])` (several
+  comma-separated, at most 8), the signature by the policy key over
+  `"songbird.v1/group-approval\0" ‖ group [16] ‖ child [16] ‖ expires_s`; valid only if not
+  expired and at most a week ahead. Without one: 403 `approval`.
+- **The date:** the worker removes a policy past `unlink_at_s` and lifts its locks. A later
+  policy may move the date earlier, never later (409 `date`): supervision never outlives the date
+  set at linking (D-0108).
+- **No message requests** also closes the account to "anyone may send": the policy sets
+  `uak_open` off, and a profile upload opening it answers 403 `supervised` (D-0108).
+- **Group adds** check the contacts-only rule before the approval, so a stranger is refused
+  (403 `access`) as for any such account and never learns of the supervision.
+- **The child may delete their own account** (the owner's decision): the policy goes with it.
+- `GET /v1/account/settings` reports `"supervised"`.
 
 ## 11. Backup format and vault access (Prompt 10)
 

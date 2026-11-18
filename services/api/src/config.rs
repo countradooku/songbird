@@ -160,6 +160,10 @@ pub struct ApiSettings {
     /// those endpoints answer 503.
     #[serde(default)]
     pub profiles: Option<ProfileSettings>,
+    /// `[api.storage]`: the account record store (Prompt 9, M1, D-0102). Absent: those
+    /// endpoints answer 503.
+    #[serde(default)]
+    pub storage: Option<StorageSettings>,
     /// `[api.kt]`: key transparency (Prompt 3, M6, D-0055). Absent: those endpoints answer 503.
     #[serde(default)]
     pub kt: Option<KtSettings>,
@@ -280,6 +284,119 @@ impl Validate for KtSettings {
     }
 }
 
+/// `[api.storage]` (Prompt 9, M1, D-0102): the account record store.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageSettings {
+    /// 32 bytes (64 hex characters), the same on every `api` node: keys the throttle records.
+    pub secret: SecretRef,
+    /// Most records per account.
+    #[serde(default = "default_storage_records")]
+    pub max_records: u32,
+    /// Most record bytes per account (ciphertext).
+    #[serde(default = "default_storage_bytes")]
+    pub max_bytes: u32,
+    /// Most storage objects (custom wallpapers) per account.
+    #[serde(default = "default_storage_objects")]
+    pub max_objects: u32,
+    /// Writes per hour per account.
+    #[serde(default = "default_storage_writes")]
+    pub writes_per_hour: u32,
+    /// Their burst.
+    #[serde(default = "default_storage_write_burst")]
+    pub write_burst: u32,
+    /// Records written (deleted plus inserted) per hour per account, besides the writes'
+    /// count: a write costs one unit per record it touches (D-0108).
+    #[serde(default = "default_storage_record_units")]
+    pub record_units_per_hour: u32,
+    /// Their burst: one key rotation of a full store (deletes and inserts).
+    #[serde(default = "default_storage_record_burst")]
+    pub record_units_burst: u32,
+    /// Reads (head, IDs, records, objects) per hour per account.
+    #[serde(default = "default_storage_reads")]
+    pub reads_per_hour: u32,
+    /// Their burst.
+    #[serde(default = "default_storage_read_burst")]
+    pub read_burst: u32,
+}
+
+const fn default_storage_records() -> u32 {
+    10_000
+}
+const fn default_storage_bytes() -> u32 {
+    16 * 1024 * 1024
+}
+const fn default_storage_objects() -> u32 {
+    16
+}
+const fn default_storage_writes() -> u32 {
+    3_600
+}
+const fn default_storage_write_burst() -> u32 {
+    120
+}
+const fn default_storage_record_units() -> u32 {
+    60_000
+}
+const fn default_storage_record_burst() -> u32 {
+    40_000
+}
+const fn default_storage_reads() -> u32 {
+    7_200
+}
+const fn default_storage_read_burst() -> u32 {
+    240
+}
+
+impl StorageSettings {
+    /// The largest write body the caps allow: a key rotation rewrites every record at once.
+    #[must_use]
+    pub fn max_write_body(&self) -> usize {
+        let n = usize::try_from(self.max_records).unwrap_or(usize::MAX);
+        let b = usize::try_from(self.max_bytes).unwrap_or(usize::MAX);
+        (1 + 8 + 2 + songbird_proto::storage::MAX_MANIFEST + 4 + 4)
+            .saturating_add(n.saturating_mul(songbird_proto::storage::ID_LEN))
+            .saturating_add(n.saturating_mul(songbird_proto::storage::ID_LEN + 2))
+            .saturating_add(b)
+    }
+}
+
+impl Validate for StorageSettings {
+    fn validate(&self, v: &mut Validator) {
+        let most = u32::try_from(songbird_proto::storage::MAX_CHANGES / 2).unwrap_or(u32::MAX);
+        v.check(
+            (1..=most).contains(&self.max_records),
+            "max_records",
+            "must be in 1..=10000",
+        );
+        v.check(
+            (64 * 1024..=64 * 1024 * 1024).contains(&self.max_bytes),
+            "max_bytes",
+            "must be in 65536..=67108864",
+        );
+        v.check(
+            (1..=256).contains(&self.max_objects),
+            "max_objects",
+            "must be in 1..=256",
+        );
+        for (name, n) in [
+            ("writes_per_hour", self.writes_per_hour),
+            ("write_burst", self.write_burst),
+            ("record_units_per_hour", self.record_units_per_hour),
+            ("record_units_burst", self.record_units_burst),
+            ("reads_per_hour", self.reads_per_hour),
+            ("read_burst", self.read_burst),
+        ] {
+            v.check((1..=3_600_000).contains(&n), name, "must be in 1..=3600000");
+        }
+        v.check(
+            self.record_units_burst >= self.max_records.saturating_mul(2),
+            "record_units_burst",
+            "must allow one key rotation (twice max_records)",
+        );
+    }
+}
+
 /// `[api.profiles]` (Prompt 3, M5, D-0054).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -310,6 +427,20 @@ pub struct ProfileSettings {
     /// Burst of both.
     #[serde(default = "default_sealed_burst")]
     pub sealed_burst: u32,
+    /// Sealed presence batches per hour per IP range (Prompt 9, D-0104), counted per device
+    /// addressed: a range of many people behind one address shares it.
+    #[serde(default = "default_presence")]
+    pub presence_per_hour: u32,
+    /// Its burst (devices).
+    #[serde(default = "default_presence_burst")]
+    pub presence_burst: u32,
+    /// Unsigned parental policy updates per hour per IP range (`PUT /v1/supervision/update`,
+    /// D-0108).
+    #[serde(default = "default_policy_updates")]
+    pub policy_updates_per_hour: u32,
+    /// Their burst.
+    #[serde(default = "default_policy_update_burst")]
+    pub policy_update_burst: u32,
     /// IPv4 prefix length of a range.
     #[serde(default = "default_v4")]
     pub ipv4_prefix: u8,
@@ -318,6 +449,18 @@ pub struct ProfileSettings {
     pub ipv6_prefix: u8,
 }
 
+const fn default_policy_updates() -> u32 {
+    120
+}
+const fn default_policy_update_burst() -> u32 {
+    20
+}
+const fn default_presence() -> u32 {
+    1_000_000
+}
+const fn default_presence_burst() -> u32 {
+    20_000
+}
 const fn default_certificate_hours() -> u64 {
     24
 }
@@ -358,6 +501,10 @@ impl Validate for ProfileSettings {
             ("sealed_per_hour", self.sealed_per_hour),
             ("sealed_per_account_hour", self.sealed_per_account_hour),
             ("sealed_burst", self.sealed_burst),
+            ("presence_per_hour", self.presence_per_hour),
+            ("policy_updates_per_hour", self.policy_updates_per_hour),
+            ("policy_update_burst", self.policy_update_burst),
+            ("presence_burst", self.presence_burst),
         ] {
             v.check((1..=3_600_000).contains(&n), name, "must be in 1..=3600000");
         }
@@ -433,6 +580,9 @@ impl Validate for ApiSettings {
         }
         if let Some(p) = &self.profiles {
             v.section("profiles", p);
+        }
+        if let Some(st) = &self.storage {
+            v.section("storage", st);
         }
         if let Some(k) = &self.kt {
             v.section("kt", k);

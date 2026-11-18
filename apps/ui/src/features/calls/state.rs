@@ -184,7 +184,11 @@ impl ActiveCall {
         if self.phase != Phase::Connected {
             return Vec::new();
         }
-        self.participants.iter().filter(|p| p.joins_at <= self.connected).cloned().collect()
+        self.participants
+            .iter()
+            .filter(|p| p.joins_at <= self.connected)
+            .cloned()
+            .collect()
     }
 
     fn go(&mut self, phase: Phase) {
@@ -202,7 +206,10 @@ impl ActiveCall {
             EndReason::LeftLobby => None,
             EndReason::Declined => Some((CallDirection::Incoming, 0)),
             EndReason::Hangup if self.incoming => Some((CallDirection::Incoming, self.secs())),
-            EndReason::Hangup => Some((CallDirection::Outgoing, if reached { self.secs() } else { 0 })),
+            EndReason::Hangup => Some((
+                CallDirection::Outgoing,
+                if reached { self.secs() } else { 0 },
+            )),
         }
     }
 
@@ -323,7 +330,11 @@ pub fn clock(secs: u32) -> String {
 /// A short duration: "2:31", "1:02:03".
 pub fn short(secs: u32) -> String {
     let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
-    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
 }
 
 /// A duration in words, for history: "45 sec", "12 min", "1 hr 3 min".
@@ -370,24 +381,77 @@ pub fn ended_line(reason: EndReason, secs: u32) -> String {
 /// The 64 symbols of the verification code: easy to tell apart, easy to
 /// say aloud, with names for screen readers.
 pub const SYMBOLS: [(&str, &str); 64] = [
-    ("🐶", "Dog"), ("🐱", "Cat"), ("🦁", "Lion"), ("🐴", "Horse"), ("🦄", "Unicorn"), ("🐷", "Pig"),
-    ("🐘", "Elephant"), ("🐰", "Rabbit"), ("🐼", "Panda"), ("🐓", "Rooster"), ("🐧", "Penguin"),
-    ("🐢", "Turtle"), ("🐟", "Fish"), ("🐙", "Octopus"), ("🦋", "Butterfly"), ("🌷", "Tulip"),
-    ("🌳", "Tree"), ("🌵", "Cactus"), ("🍄", "Mushroom"), ("🌏", "Globe"), ("🌙", "Moon"),
-    ("☁️", "Cloud"), ("🔥", "Fire"), ("🍌", "Banana"), ("🍎", "Apple"), ("🍓", "Strawberry"),
-    ("🌽", "Corn"), ("🍕", "Pizza"), ("🎂", "Cake"), ("❤️", "Heart"), ("😀", "Smiley"),
-    ("🤖", "Robot"), ("🎩", "Hat"), ("👓", "Glasses"), ("🔧", "Spanner"), ("🎅", "Santa"),
-    ("👍", "Thumbs up"), ("☂️", "Umbrella"), ("⌛", "Hourglass"), ("⏰", "Clock"), ("🎁", "Gift"),
-    ("💡", "Light bulb"), ("📕", "Book"), ("✏️", "Pencil"), ("📎", "Paperclip"), ("✂️", "Scissors"),
-    ("🔒", "Lock"), ("🔑", "Key"), ("🔨", "Hammer"), ("☎️", "Telephone"), ("🏁", "Flag"),
-    ("🚂", "Train"), ("🚲", "Bicycle"), ("✈️", "Aeroplane"), ("🚀", "Rocket"), ("🏆", "Trophy"),
-    ("⚽", "Football"), ("🎸", "Guitar"), ("🎺", "Trumpet"), ("🔔", "Bell"), ("⚓", "Anchor"),
-    ("🎧", "Headphones"), ("📁", "Folder"), ("📌", "Pin"),
+    ("🐶", "Dog"),
+    ("🐱", "Cat"),
+    ("🦁", "Lion"),
+    ("🐴", "Horse"),
+    ("🦄", "Unicorn"),
+    ("🐷", "Pig"),
+    ("🐘", "Elephant"),
+    ("🐰", "Rabbit"),
+    ("🐼", "Panda"),
+    ("🐓", "Rooster"),
+    ("🐧", "Penguin"),
+    ("🐢", "Turtle"),
+    ("🐟", "Fish"),
+    ("🐙", "Octopus"),
+    ("🦋", "Butterfly"),
+    ("🌷", "Tulip"),
+    ("🌳", "Tree"),
+    ("🌵", "Cactus"),
+    ("🍄", "Mushroom"),
+    ("🌏", "Globe"),
+    ("🌙", "Moon"),
+    ("☁️", "Cloud"),
+    ("🔥", "Fire"),
+    ("🍌", "Banana"),
+    ("🍎", "Apple"),
+    ("🍓", "Strawberry"),
+    ("🌽", "Corn"),
+    ("🍕", "Pizza"),
+    ("🎂", "Cake"),
+    ("❤️", "Heart"),
+    ("😀", "Smiley"),
+    ("🤖", "Robot"),
+    ("🎩", "Hat"),
+    ("👓", "Glasses"),
+    ("🔧", "Spanner"),
+    ("🎅", "Santa"),
+    ("👍", "Thumbs up"),
+    ("☂️", "Umbrella"),
+    ("⌛", "Hourglass"),
+    ("⏰", "Clock"),
+    ("🎁", "Gift"),
+    ("💡", "Light bulb"),
+    ("📕", "Book"),
+    ("✏️", "Pencil"),
+    ("📎", "Paperclip"),
+    ("✂️", "Scissors"),
+    ("🔒", "Lock"),
+    ("🔑", "Key"),
+    ("🔨", "Hammer"),
+    ("☎️", "Telephone"),
+    ("🏁", "Flag"),
+    ("🚂", "Train"),
+    ("🚲", "Bicycle"),
+    ("✈️", "Aeroplane"),
+    ("🚀", "Rocket"),
+    ("🏆", "Trophy"),
+    ("⚽", "Football"),
+    ("🎸", "Guitar"),
+    ("🎺", "Trumpet"),
+    ("🔔", "Bell"),
+    ("⚓", "Anchor"),
+    ("🎧", "Headphones"),
+    ("📁", "Folder"),
+    ("📌", "Pin"),
 ];
 
 /// FNV-1a, 64 bit.
 fn fnv(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3))
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// The four symbols both sides compare: 24 bits of a hash, 6 per symbol.
@@ -404,7 +468,11 @@ pub fn verification_code(call_id: u64, chat: Option<ChatId>) -> [(&'static str, 
 // ------------------------------------------------------------------ devices
 
 /// mock: the device lists app-core reads from the platform.
-pub const MICS: [&str; 3] = ["Built-in microphone", "Headset microphone", "USB microphone"];
+pub const MICS: [&str; 3] = [
+    "Built-in microphone",
+    "Headset microphone",
+    "USB microphone",
+];
 pub const CAMERAS: [&str; 2] = ["Built-in camera", "USB camera"];
 pub const OUTPUTS: [&str; 2] = ["Built-in speakers", "Headphones"];
 
@@ -436,8 +504,14 @@ mod tests {
     #[test]
     fn hanging_up_logs_once_and_clears_after_the_ended_state() {
         let mut c = outgoing();
-        run(&mut c, CALLING_TICKS + RINGING_TICKS + CONNECTING_TICKS + 151 * PER_SEC);
-        assert_eq!(c.end(EndReason::Hangup), Some((CallDirection::Outgoing, 151)));
+        run(
+            &mut c,
+            CALLING_TICKS + RINGING_TICKS + CONNECTING_TICKS + 151 * PER_SEC,
+        );
+        assert_eq!(
+            c.end(EndReason::Hangup),
+            Some((CallDirection::Outgoing, 151))
+        );
         assert_eq!(status(&c), "Call ended · 2:31");
         assert_eq!(c.end(EndReason::Hangup), None, "ending twice logs once");
         let steps = run(&mut c, ENDED_TICKS);
@@ -447,7 +521,10 @@ mod tests {
     #[test]
     fn an_unanswered_incoming_call_is_missed() {
         let mut c = ActiveCall::new(2, "Mihai".into(), 2, Phase::Incoming);
-        let logs: Vec<_> = run(&mut c, INCOMING_TICKS).into_iter().filter_map(|s| s.log).collect();
+        let logs: Vec<_> = run(&mut c, INCOMING_TICKS)
+            .into_iter()
+            .filter_map(|s| s.log)
+            .collect();
         assert_eq!(logs, vec![(CallDirection::Missed, 0)]);
         assert_eq!(c.phase, Phase::Ended(EndReason::Missed));
     }
@@ -458,14 +535,20 @@ mod tests {
         c.accept(true);
         assert!(c.video);
         run(&mut c, CONNECTING_TICKS + 10 * PER_SEC);
-        assert_eq!(c.end(EndReason::Hangup), Some((CallDirection::Incoming, 10)));
+        assert_eq!(
+            c.end(EndReason::Hangup),
+            Some((CallDirection::Incoming, 10))
+        );
     }
 
     #[test]
     fn answered_elsewhere_logs_nothing_here() {
         let mut c = ActiveCall::new(2, "Mihai".into(), 2, Phase::Incoming);
         c.answered_elsewhere = true;
-        let logs: Vec<_> = run(&mut c, ELSEWHERE_TICKS).into_iter().filter_map(|s| s.log).collect();
+        let logs: Vec<_> = run(&mut c, ELSEWHERE_TICKS)
+            .into_iter()
+            .filter_map(|s| s.log)
+            .collect();
         assert!(logs.is_empty());
         assert_eq!(status(&c), "Answered on your phone");
     }
@@ -489,8 +572,16 @@ mod tests {
         run(&mut c, LOBBY_TICKS + CONNECTING_TICKS);
         assert_eq!(c.phase, Phase::Connected);
         c.waiting = vec![
-            Waiting { id: 1, name: "A".into(), seed: 1 },
-            Waiting { id: 2, name: "B".into(), seed: 2 },
+            Waiting {
+                id: 1,
+                name: "A".into(),
+                seed: 1,
+            },
+            Waiting {
+                id: 2,
+                name: "B".into(),
+                seed: 2,
+            },
         ];
         c.admit(1, true);
         c.admit(2, false);
@@ -503,7 +594,15 @@ mod tests {
         let mut c = outgoing();
         c.group = true;
         c.participants = (0..3)
-            .map(|i| Participant { id: i, name: format!("P{i}"), seed: i, muted: false, hand: false, video: false, joins_at: i as u32 * 4 })
+            .map(|i| Participant {
+                id: i,
+                name: format!("P{i}"),
+                seed: i,
+                muted: false,
+                hand: false,
+                video: false,
+                joins_at: i as u32 * 4,
+            })
             .collect();
         c.phase = Phase::Connected;
         assert_eq!(c.joined().len(), 1);

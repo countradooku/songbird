@@ -53,7 +53,13 @@ impl BtnSize {
     fn text(self) -> f32 {
         match self {
             BtnSize::Sm => 13.0,
-            BtnSize::Md => if is_desktop() { 14.0 } else { 16.0 },
+            BtnSize::Md => {
+                if is_desktop() {
+                    14.0
+                } else {
+                    16.0
+                }
+            }
             BtnSize::Lg => 17.0,
         }
     }
@@ -104,7 +110,11 @@ pub fn btn_with_icon(
 ) -> nsh_base::ButtonElement {
     let reduced = motion::reduced();
     let sp = spec();
-    let corner = if sp.pill_primary && variant == Variant::Primary { super::skin::FULL } else { sp.radius.button };
+    let corner = if sp.pill_primary && variant == Variant::Primary {
+        super::skin::FULL
+    } else {
+        sp.radius.button
+    };
     let press = sp.press;
     button()
         .on_press(on_press)
@@ -129,13 +139,20 @@ pub fn btn_with_icon(
             Variant::Secondary if sp.skin != super::skin::Skin::Adwaita => c::input().opacity(0.4),
             _ => AdaptiveColor::TRANSPARENT,
         })
-        .when(sp.elevation == Elevation::Shadow && matches!(variant, Variant::Secondary | Variant::Outline), |b| {
-            b.shadow_2xs()
-        })
+        .when(
+            sp.elevation == Elevation::Shadow
+                && matches!(variant, Variant::Secondary | Variant::Outline),
+            |b| b.shadow_2xs(),
+        )
         .cursor_pointer()
         .transition()
         .duration(motion::FAST)
-        .ease_bezier(motion::SETTLE.0, motion::SETTLE.1, motion::SETTLE.2, motion::SETTLE.3)
+        .ease_bezier(
+            motion::SETTLE.0,
+            motion::SETTLE.1,
+            motion::SETTLE.2,
+            motion::SETTLE.3,
+        )
         .hover(move |s| match variant {
             Variant::Ghost | Variant::Outline => s.bg(move || c::accent()),
             _ if press == PressStyle::Fill => s.opacity(0.9),
@@ -145,7 +162,11 @@ pub fn btn_with_icon(
             // Apple: the highlight dims; a capsule settles a little.
             PressStyle::Highlight => {
                 let s = s.opacity(0.7);
-                if reduced { s } else { s.scale(motion::PRESS_SCALE) }
+                if reduced {
+                    s
+                } else {
+                    s.scale(motion::PRESS_SCALE)
+                }
             }
             // Material: the state layer deepens; nothing moves.
             PressStyle::Ripple => match variant {
@@ -158,7 +179,11 @@ pub fn btn_with_icon(
                 _ => s.opacity(0.8),
             },
         })
-        .focus_visible(|s| s.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
+        .focus_visible(|s| {
+            s.outline(px(2.0))
+                .outline_offset(px(2.0))
+                .outline_color(move || c::ring())
+        })
         // One disabled look for every variant: a muted surface with a
         // hairline edge and a muted label that still reads (4.5:1).
         .disabled_style(|s| {
@@ -200,16 +225,30 @@ pub fn icon_btn(
         .cursor_pointer()
         .transition()
         .duration(motion::FAST)
-        .hover(move |s| if press == PressStyle::Fill { s.bg(move || c::muted()) } else { s.bg(move || c::accent()) })
+        .hover(move |s| {
+            if press == PressStyle::Fill {
+                s.bg(move || c::muted())
+            } else {
+                s.bg(move || c::accent())
+            }
+        })
         .active(move |s| match press {
             PressStyle::Highlight => {
                 let s = s.opacity(0.6);
-                if reduced { s } else { s.scale(motion::ICON_PRESS_SCALE) }
+                if reduced {
+                    s
+                } else {
+                    s.scale(motion::ICON_PRESS_SCALE)
+                }
             }
             PressStyle::Ripple => s.bg(move || c::foreground().opacity(0.12)),
             PressStyle::Fill => s.bg(move || c::secondary()).opacity(0.85),
         })
-        .focus_visible(|s| s.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
+        .focus_visible(|s| {
+            s.outline(px(2.0))
+                .outline_offset(px(2.0))
+                .outline_color(move || c::ring())
+        })
         .disabled_style(|s| s.opacity(0.4))
         .child(icon(glyph, glyph_size))
 }
@@ -240,10 +279,25 @@ pub fn fab(
         .cursor_pointer()
         .transition()
         .duration(motion::FAST)
-        .ease_bezier(motion::SETTLE.0, motion::SETTLE.1, motion::SETTLE.2, motion::SETTLE.3)
+        .ease_bezier(
+            motion::SETTLE.0,
+            motion::SETTLE.1,
+            motion::SETTLE.2,
+            motion::SETTLE.3,
+        )
         .hover(|s| s.opacity(0.92))
-        .active(move |s| if reduced || material { s.opacity(0.85) } else { s.scale(motion::ICON_PRESS_SCALE) })
-        .focus_visible(|s| s.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
+        .active(move |s| {
+            if reduced || material {
+                s.opacity(0.85)
+            } else {
+                s.scale(motion::ICON_PRESS_SCALE)
+            }
+        })
+        .focus_visible(|s| {
+            s.outline(px(2.0))
+                .outline_offset(px(2.0))
+                .outline_color(move || c::ring())
+        })
         .child(
             view()
                 .size(px(56.0))
@@ -251,9 +305,21 @@ pub fn fab(
                 .justify_center()
                 .rounded(corner)
                 .bg(move || if material { c::accent() } else { c::primary() })
-                .text_color(move || if material { c::on_accent() } else { c::on_primary() })
-                .when(material, |v| v.elevation(px(6.0)).shadow_md().shadow_color(c::foreground().opacity(0.25)))
-                .when(!material, |v| v.shadow_lg().shadow_color(c::primary().opacity(0.35)))
+                .text_color(move || {
+                    if material {
+                        c::on_accent()
+                    } else {
+                        c::on_primary()
+                    }
+                })
+                .when(material, |v| {
+                    v.elevation(px(6.0))
+                        .shadow_md()
+                        .shadow_color(c::foreground().opacity(0.25))
+                })
+                .when(!material, |v| {
+                    v.shadow_lg().shadow_color(c::primary().opacity(0.35))
+                })
                 .child(icon(glyph, 24.0)),
         )
 }

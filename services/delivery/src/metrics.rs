@@ -54,6 +54,10 @@ pub struct DeliveryMetrics {
     pub ephemeral_routed: Counter,
     /// Ephemeral events dropped (offline, lane full, or rate limited).
     pub ephemeral_dropped: Counter,
+    /// Attention events (nudges) routed (Prompt 9).
+    pub attention_routed: Counter,
+    /// Attention events dropped: over a budget, blocked, unknown, offline, or the gate down.
+    pub attention_dropped: Counter,
     /// Closed for falling behind (4100).
     pub slow_consumers: Counter,
     /// Closed for a protocol violation (4003).
@@ -123,7 +127,7 @@ impl DeliveryMetrics {
             "WebSocket connections open",
             self.connections_open.clone(),
         )?;
-        let counters: [(&str, &str, &Counter); 32] = [
+        let counters: [(&str, &str, &Counter); 34] = [
             (
                 "delivery_connections",
                 "WebSocket connections accepted",
@@ -224,6 +228,16 @@ impl DeliveryMetrics {
                 "delivery_ephemeral_dropped",
                 "Ephemeral events dropped",
                 &self.ephemeral_dropped,
+            ),
+            (
+                "delivery_attention_routed",
+                "Attention events (nudges) routed",
+                &self.attention_routed,
+            ),
+            (
+                "delivery_attention_dropped",
+                "Attention events (nudges) dropped",
+                &self.attention_dropped,
             ),
             (
                 "delivery_slow_consumers",

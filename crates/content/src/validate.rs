@@ -89,6 +89,22 @@ pub fn content(c: &Content) -> R {
         Some(Body::Sync(s)) => sync(s),
         Some(Body::RequestResponse(r)) => request_response(r),
         Some(Body::Call(c)) => crate::call::validate(c),
+        Some(Body::ProfileChanged(p)) => check(p.version > 0, "profile_changed.version"),
+        Some(Body::Presence(p)) => {
+            let state = crate::presence::State::try_from(p.state).ok();
+            check(
+                state.is_some_and(|s| s != crate::presence::State::Unspecified),
+                "presence.state",
+            )?;
+            check(
+                p.last_seen_ms == 0 || state == Some(crate::presence::State::Offline),
+                "presence.last_seen_ms",
+            )
+        }
+        Some(Body::Attention(a)) => check(
+            a.kind == i32::from(crate::presence::AttentionKind::Nudge),
+            "attention.kind",
+        ),
     }
 }
 
@@ -424,6 +440,7 @@ fn sync(s: &SyncMessage) -> R {
             h.calls.iter().try_for_each(call)
         }
         SyncKind::RequestResponse(r) => request_response(r),
+        SyncKind::Storage(st) => check(st.key.is_empty() || st.key.len() == KEY_LEN, "storage.key"),
     }
 }
 

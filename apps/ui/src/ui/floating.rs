@@ -98,14 +98,19 @@ pub fn header_band() -> f32 {
 /// soft shadow (its windows' surfaces float on the desktop the same way).
 /// Material separates by tone alone.
 pub fn pane_style(st: StyleRefinement) -> StyleRefinement {
-    let st = st.bg(move || c::pane()).rounded(px(pane_radius())).overflow_hidden();
+    let st = st
+        .bg(move || c::pane())
+        .rounded(px(pane_radius()))
+        .overflow_hidden();
     match skin() {
         Skin::Apple => st
             .border(hairline())
             .border_color(move || c::pane_border())
             .shadow_sm()
             .shadow_color(c::foreground().opacity(0.05)),
-        Skin::Fluent | Skin::Adwaita => st.border(hairline()).border_color(move || c::pane_border()),
+        Skin::Fluent | Skin::Adwaita => {
+            st.border(hairline()).border_color(move || c::pane_border())
+        }
         Skin::Material => st,
     }
 }
@@ -140,9 +145,10 @@ pub fn capsule_style(st: StyleRefinement) -> StyleRefinement {
             .shadow_sm()
             .shadow_color(c::foreground().opacity(0.06)),
         Skin::Material => st.bg(move || c::capsule()),
-        Skin::Fluent | Skin::Adwaita => {
-            st.bg(move || c::capsule()).border(hairline()).border_color(move || c::capsule_border())
-        }
+        Skin::Fluent | Skin::Adwaita => st
+            .bg(move || c::capsule())
+            .border(hairline())
+            .border_color(move || c::capsule_border()),
     }
 }
 
@@ -150,7 +156,8 @@ pub fn capsule_style(st: StyleRefinement) -> StyleRefinement {
 pub fn capsule(child: impl IntoElement) -> View {
     let v = view().style_when(|| true, capsule_style).child(child);
     if skin() == Skin::Apple {
-        v.glass_effect(nsh_core::GlassEffect::Regular).glass_tint_color(Some(c::capsule().opacity(0.35)))
+        v.glass_effect(nsh_core::GlassEffect::Regular)
+            .glass_tint_color(Some(c::capsule().opacity(0.35)))
     } else {
         v
     }

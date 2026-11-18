@@ -12,12 +12,18 @@ use crate::{store::store, ui::*};
 pub const WALLPAPERS: u8 = 9;
 
 pub fn wallpaper_name(i: u8) -> &'static str {
-    ["Default", "Coral", "Amber", "Meadow", "Lagoon", "Sky", "Iris", "Orchid", "Rose"][(i as usize).min(8)]
+    [
+        "Default", "Coral", "Amber", "Meadow", "Lagoon", "Sky", "Iris", "Orchid", "Rose",
+    ][(i as usize).min(8)]
 }
 
 /// The tint of wallpaper `i` over the chat background.
 pub fn wallpaper_tint(i: u8) -> AdaptiveColor {
-    if i == 0 { AdaptiveColor::TRANSPARENT } else { c::avatar((i - 1) as u64).opacity(0.22) }
+    if i == 0 {
+        AdaptiveColor::TRANSPARENT
+    } else {
+        c::avatar((i - 1) as u64).opacity(0.22)
+    }
 }
 
 const EMOJI_CHOICES: [&str; 32] = [
@@ -162,19 +168,17 @@ fn wallpaper_picker() -> View {
         .border_color(move || c::border())
         .bg(move || c::card())
         .child(
-            view()
-                .bg(move || c::chat_bg())
-                .child(
-                    view()
-                        .p_4()
-                        .gap_2()
-                        .bg(move || wallpaper_tint(chosen()))
-                        .transition_colors()
-                        .duration(motion::BASE)
-                        .label(move || format!("Preview, {} wallpaper", wallpaper_name(chosen())))
-                        .child(bubble("Are we still on for Saturday? 🌻", false))
-                        .child(bubble("Yes! I'll bring the cake 🎂", true)),
-                ),
+            view().bg(move || c::chat_bg()).child(
+                view()
+                    .p_4()
+                    .gap_2()
+                    .bg(move || wallpaper_tint(chosen()))
+                    .transition_colors()
+                    .duration(motion::BASE)
+                    .label(move || format!("Preview, {} wallpaper", wallpaper_name(chosen())))
+                    .child(bubble("Are we still on for Saturday? 🌻", false))
+                    .child(bubble("Yes! I'll bring the cake 🎂", true)),
+            ),
         )
         .child(
             view()
@@ -188,7 +192,13 @@ fn wallpaper_picker() -> View {
                 .children((0..WALLPAPERS).map(move |i| {
                     swatch(
                         wallpaper_name(i),
-                        move || if i == 0 { c::chat_bg() } else { c::avatar((i - 1) as u64) },
+                        move || {
+                            if i == 0 {
+                                c::chat_bg()
+                            } else {
+                                c::avatar((i - 1) as u64)
+                            }
+                        },
                         move || chosen() == i,
                         move || s.settings_update(|x| x.chat_wallpaper = i),
                     )
@@ -197,22 +207,27 @@ fn wallpaper_picker() -> View {
 }
 
 fn bubble(line: &'static str, mine: bool) -> View {
-    view()
-        .flex_row()
-        .when(mine, |v| v.justify_end())
-        .child(
-            view()
-                .max_w(px(260.0))
-                .px_3()
-                .py_2()
-                .rounded(move || radius::bubble())
-                .bg(move || if mine { c::bubble_out() } else { c::bubble_in() })
-                .child(
-                    text(line)
-                        .text_size(px(font::body()))
-                        .text_color(move || if mine { c::on_bubble_out() } else { c::on_bubble_in() }),
-                ),
-        )
+    view().flex_row().when(mine, |v| v.justify_end()).child(
+        view()
+            .max_w(px(260.0))
+            .px_3()
+            .py_2()
+            .rounded(move || radius::bubble())
+            .bg(move || {
+                if mine {
+                    c::bubble_out()
+                } else {
+                    c::bubble_in()
+                }
+            })
+            .child(text(line).text_size(px(font::body())).text_color(move || {
+                if mine {
+                    c::on_bubble_out()
+                } else {
+                    c::on_bubble_in()
+                }
+            })),
+    )
 }
 
 /// Replace one default reaction.
@@ -237,7 +252,10 @@ fn reaction_sheet(picking: Signal<Option<usize>>) -> nsh_base::SheetElement {
             tile(
                 format!("Use {e}"),
                 if is_desktop() { 40.0 } else { 48.0 },
-                move || s.settings.with(|x| x.default_reactions.iter().any(|r| r == e)),
+                move || {
+                    s.settings
+                        .with(|x| x.default_reactions.iter().any(|r| r == e))
+                },
                 move || {
                     if let Some(i) = picking.get_untracked() {
                         s.settings_update(|x| {

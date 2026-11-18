@@ -119,6 +119,7 @@ async fn stack(u: Option<UsernameSettings>) -> Option<Stack> {
         registration: None,
         usernames,
         keys: None,
+        storage: None,
         kt: None,
         profiles: None,
         devices: None,
@@ -596,4 +597,134 @@ async fn a_pending_device_changes_nothing_account_wide_and_only_the_primary_dele
             .unwrap()
             .disabled
     );
+}
+
+/// Prompt 9, M2 (D-0103): an account that is not discoverable answers lookups as an unknown
+/// username does, except through one of its own links; only the primary makes it discoverable
+/// again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::many_single_char_names, reason = "tests")]
+async fn a_hidden_account_is_found_only_through_its_own_link() {
+    let Some(s) = stack(Some(settings(CHEAP, UsernameThrottle::default()))).await else {
+        return;
+    };
+    // Alice has a primary and a linked device.
+    let keys: Vec<(Ed25519KeyPair, DeviceId)> = (0..2)
+        .map(|_| {
+            (
+                Ed25519KeyPair::generate().unwrap(),
+                DeviceId::random().unwrap(),
+            )
+        })
+        .collect();
+    let a = AccountId::random().unwrap();
+    let rows: Vec<(DeviceId, [u8; 32])> = keys
+        .iter()
+        .map(|(k, d)| (*d, k.public_key().as_ref().try_into().unwrap()))
+        .collect();
+    s.app.registry.create_account(&a, &rows).await.unwrap();
+    let mut it = keys.into_iter();
+    let (k, d) = it.next().unwrap();
+    let primary = ApiClient::new(s.addr, SERVER, d, k);
+    let (k, d) = it.next().unwrap();
+    let linked = ApiClient::new(s.addr, SERVER, d, k);
+    let (_, bob) = person(&s).await;
+    primary
+        .send("PUT", "/v1/username", Some(&claim_body("quiet.ana")))
+        .await
+        .unwrap();
+    let (st, b) = primary
+        .send("PUT", "/v1/username/link", Some(b"link-ciphertext"))
+        .await
+        .unwrap();
+    assert_eq!(st, 200);
+    let handle = serde_json::from_slice::<serde_json::Value>(&b).unwrap()["handle"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(lookup(&bob, "quiet.ana", None).await.0, 200);
+
+    // The linked device hides the account (tightening is any device's).
+    let off = br#"{"on":false}"#;
+    assert_eq!(
+        linked
+            .send("PUT", "/v1/account/discoverable", Some(off))
+            .await
+            .unwrap()
+            .0,
+        204
+    );
+    let (st, b) = linked
+        .send("GET", "/v1/account/settings", None)
+        .await
+        .unwrap();
+    assert_eq!(st, 200);
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(v["discoverable"], false);
+    assert_eq!(v["groups"], "everyone");
+    // Bob gets the answer of an unknown username, with or without a wrong link.
+    assert_eq!(lookup(&bob, "quiet.ana", None).await, (404, None));
+    assert_eq!(lookup(&bob, "no.such.name", None).await, (404, None));
+    let via = |link: &str| {
+        let h = hex::encode(Username::parse("quiet.ana").unwrap().hash());
+        format!(r#"{{"hash":"{h}","link":"{link}"}}"#).into_bytes()
+    };
+    let (st, _) = bob
+        .send("POST", "/v1/username/lookup", Some(&via(&"00".repeat(16))))
+        .await
+        .unwrap();
+    assert_eq!(st, 404);
+    // Through Alice's own link, Bob finds her.
+    let (st, b) = bob
+        .send("POST", "/v1/username/lookup", Some(&via(&handle)))
+        .await
+        .unwrap();
+    assert_eq!(st, 200);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&b).unwrap()["account"],
+        a.to_hex_unredacted()
+    );
+    // Only the primary makes the account discoverable again.
+    let on = br#"{"on":true}"#;
+    let (st, b) = linked
+        .send("PUT", "/v1/account/discoverable", Some(on))
+        .await
+        .unwrap();
+    assert_eq!((st, &b[..]), (403, &br#"{"error":"primary"}"#[..]));
+    // ...but may re-send the current value, and tighten group adds.
+    assert_eq!(
+        linked
+            .send("PUT", "/v1/account/discoverable", Some(off))
+            .await
+            .unwrap()
+            .0,
+        204
+    );
+    let contacts = br#"{"from":"contacts"}"#;
+    assert_eq!(
+        linked
+            .send("PUT", "/v1/account/groups", Some(contacts))
+            .await
+            .unwrap()
+            .0,
+        204
+    );
+    let everyone = br#"{"from":"everyone"}"#;
+    assert_eq!(
+        linked
+            .send("PUT", "/v1/account/groups", Some(everyone))
+            .await
+            .unwrap()
+            .0,
+        403
+    );
+    assert_eq!(
+        primary
+            .send("PUT", "/v1/account/discoverable", Some(on))
+            .await
+            .unwrap()
+            .0,
+        204
+    );
+    assert_eq!(lookup(&bob, "quiet.ana", None).await.0, 200);
 }

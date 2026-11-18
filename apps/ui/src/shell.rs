@@ -86,22 +86,24 @@ fn tab_content(tab: Tab) -> AnyElement {
 /// hidden at once, so two lists never show through each other.
 fn tab_panels(fade: bool) -> View {
     let current = nav::tab();
-    view().flex_1().children(Tab::ALL.into_iter().map(move |tab| {
-        let shown = move || current.get() == tab;
-        let panel = view().absolute().inset_0();
-        let panel = if fade {
-            panel
-                .opacity(move || if shown() { 1.0_f32 } else { 0.0 })
-                .style_when(move || !shown(), |st| st.invisible())
-                .accessibility_elements_hidden(move || !shown())
-                .transition_opacity()
-                .duration(motion::FAST)
-                .ease_out()
-        } else {
-            panel.style_when(move || !shown(), |st| st.hidden())
-        };
-        panel.child(tab_content(tab))
-    }))
+    view()
+        .flex_1()
+        .children(Tab::ALL.into_iter().map(move |tab| {
+            let shown = move || current.get() == tab;
+            let panel = view().absolute().inset_0();
+            let panel = if fade {
+                panel
+                    .opacity(move || if shown() { 1.0_f32 } else { 0.0 })
+                    .style_when(move || !shown(), |st| st.invisible())
+                    .accessibility_elements_hidden(move || !shown())
+                    .transition_opacity()
+                    .duration(motion::FAST)
+                    .ease_out()
+            } else {
+                panel.style_when(move || !shown(), |st| st.hidden())
+            };
+            panel.child(tab_content(tab))
+        }))
 }
 
 /// Presses a tab: the current one pops to its root.
@@ -162,16 +164,27 @@ fn native_tab_bar() -> View {
             })
             .collect::<Vec<TabBarItem>>()
     };
-    view().absolute().left_0().right_0().bottom_0().z_index(2).child(
-        tab_bar()
-            .items(items)
-            .selected_index(move || Tab::ALL.iter().position(|t| *t == current.get()).unwrap_or(0) as u32)
-            .on_change(move |i: &u32| {
-                if let Some(tab) = Tab::ALL.get(*i as usize) {
-                    choose(*tab);
-                }
-            }),
-    )
+    view()
+        .absolute()
+        .left_0()
+        .right_0()
+        .bottom_0()
+        .z_index(2)
+        .child(
+            tab_bar()
+                .items(items)
+                .selected_index(move || {
+                    Tab::ALL
+                        .iter()
+                        .position(|t| *t == current.get())
+                        .unwrap_or(0) as u32
+                })
+                .on_change(move |i: &u32| {
+                    if let Some(tab) = Tab::ALL.get(*i as usize) {
+                        choose(*tab);
+                    }
+                }),
+        )
 }
 
 /// One tab button with its accessibility and press; the look is the
@@ -186,11 +199,21 @@ fn tab_button(tab: Tab) -> nsh_base::ButtonElement {
         .cursor_pointer()
         .items_center()
         .justify_center()
-        .focus_visible(|st| st.outline(px(2.0)).outline_offset(px(-2.0)).outline_color(move || c::ring()))
+        .focus_visible(|st| {
+            st.outline(px(2.0))
+                .outline_offset(px(-2.0))
+                .outline_color(move || c::ring())
+        })
 }
 
 /// The tab's label.
-fn tab_label(tab: Tab, size: f32, selected: impl Fn() -> bool + Copy + 'static, on: fn() -> AdaptiveColor, off: fn() -> AdaptiveColor) -> Text {
+fn tab_label(
+    tab: Tab,
+    size: f32,
+    selected: impl Fn() -> bool + Copy + 'static,
+    on: fn() -> AdaptiveColor,
+    off: fn() -> AdaptiveColor,
+) -> Text {
     text(tab.label())
         .number_of_lines(1)
         .text_size(px(size))
@@ -233,7 +256,13 @@ fn glass_tab_bar() -> View {
                         .h_full()
                         .rounded_full()
                         .gap(px(1.0))
-                        .bg(move || if selected() { c::foreground().opacity(0.07) } else { AdaptiveColor::TRANSPARENT })
+                        .bg(move || {
+                            if selected() {
+                                c::foreground().opacity(0.07)
+                            } else {
+                                AdaptiveColor::TRANSPARENT
+                            }
+                        })
                         .transition_colors()
                         .duration(motion::BASE)
                         .active(|st| st.opacity(0.6))
@@ -243,9 +272,18 @@ fn glass_tab_bar() -> View {
                                 .h(px(26.0))
                                 .items_center()
                                 .justify_center()
-                                .text_color(move || if selected() { c::primary() } else { c::foreground() })
+                                .text_color(move || {
+                                    if selected() {
+                                        c::primary()
+                                    } else {
+                                        c::foreground()
+                                    }
+                                })
                                 .child(icon(glyph(tab), 23.0))
-                                .child((tab == Tab::Chats).then(|| tab_badge((32.0, 26.0), 23.0, c::card))),
+                                .child(
+                                    (tab == Tab::Chats)
+                                        .then(|| tab_badge((32.0, 26.0), 23.0, c::card)),
+                                ),
                         )
                         .child(tab_label(tab, 10.0, selected, c::primary, c::foreground))
                 })),
@@ -276,14 +314,28 @@ fn material_bar() -> View {
                         .rounded_full()
                         .items_center()
                         .justify_center()
-                        .bg(move || if selected() { c::sidebar_accent() } else { AdaptiveColor::TRANSPARENT })
+                        .bg(move || {
+                            if selected() {
+                                c::sidebar_accent()
+                            } else {
+                                AdaptiveColor::TRANSPARENT
+                            }
+                        })
                         .transition_colors()
                         .duration(motion::BASE)
                         // The state layer (Android adds its ripple on views).
                         .active(|st| st.bg(move || c::foreground().opacity(0.12)))
-                        .text_color(move || if selected() { c::on_accent() } else { c::muted_fg() })
+                        .text_color(move || {
+                            if selected() {
+                                c::on_accent()
+                            } else {
+                                c::muted_fg()
+                            }
+                        })
                         .child(icon(glyph(tab), 24.0))
-                        .child((tab == Tab::Chats).then(|| tab_badge((64.0, 32.0), 24.0, c::sidebar))),
+                        .child(
+                            (tab == Tab::Chats).then(|| tab_badge((64.0, 32.0), 24.0, c::sidebar)),
+                        ),
                 )
                 .child(tab_label(tab, 12.0, selected, c::foreground, c::muted_fg))
         }))
@@ -316,18 +368,24 @@ fn fluent_bar() -> View {
                         .h(px(24.0))
                         .items_center()
                         .justify_center()
-                        .text_color(move || if selected() { c::primary() } else { c::muted_fg() })
+                        .text_color(move || {
+                            if selected() {
+                                c::primary()
+                            } else {
+                                c::muted_fg()
+                            }
+                        })
                         .child(icon(glyph(tab), 20.0))
                         .child((tab == Tab::Chats).then(|| tab_badge((28.0, 24.0), 20.0, c::card))),
                 )
                 .child(tab_label(tab, 12.0, selected, c::foreground, c::muted_fg))
-                .child(
-                    view()
-                        .w(px(16.0))
-                        .h(px(3.0))
-                        .rounded_full()
-                        .bg(move || if selected() { c::primary() } else { AdaptiveColor::TRANSPARENT }),
-                )
+                .child(view().w(px(16.0)).h(px(3.0)).rounded_full().bg(move || {
+                    if selected() {
+                        c::primary()
+                    } else {
+                        AdaptiveColor::TRANSPARENT
+                    }
+                }))
         }))
 }
 
@@ -350,7 +408,13 @@ fn adwaita_bar() -> View {
                 .h(px(50.0))
                 .gap(px(2.0))
                 .rounded(px(6.0))
-                .bg(move || if selected() { c::foreground().opacity(0.08) } else { AdaptiveColor::TRANSPARENT })
+                .bg(move || {
+                    if selected() {
+                        c::foreground().opacity(0.08)
+                    } else {
+                        AdaptiveColor::TRANSPARENT
+                    }
+                })
                 .hover(|st| st.bg(move || c::foreground().opacity(0.05)))
                 .active(|st| st.bg(move || c::foreground().opacity(0.12)))
                 .child(
@@ -359,7 +423,13 @@ fn adwaita_bar() -> View {
                         .h(px(20.0))
                         .items_center()
                         .justify_center()
-                        .text_color(move || if selected() { c::primary() } else { c::foreground() })
+                        .text_color(move || {
+                            if selected() {
+                                c::primary()
+                            } else {
+                                c::foreground()
+                            }
+                        })
                         .child(icon(glyph(tab), 18.0))
                         .child((tab == Tab::Chats).then(|| tab_badge((26.0, 20.0), 18.0, c::card))),
                 )
@@ -380,17 +450,14 @@ fn phone_layout() -> AnyElement {
     nav_stack()
         .flex_1()
         .child(
-            nav_page()
-                .key("root")
-                .header_visible(false)
-                .child(
-                    view()
-                        .flex_1()
-                        .bg(move || c::background())
-                        .pt_safe_area()
-                        .child(tab_panels(false))
-                        .child(tab_bar()),
-                ),
+            nav_page().key("root").header_visible(false).child(
+                view()
+                    .flex_1()
+                    .bg(move || c::background())
+                    .pt_safe_area()
+                    .child(tab_panels(false))
+                    .child(tab_bar()),
+            ),
         )
         .child(pushed())
         .into_element()
@@ -432,7 +499,12 @@ fn destination_indicator() -> View {
     // drift from the items' flex layout. Right to left mirrors the row,
     // so it moves the other way.
     let step = if layout_rtl() { -1.0 } else { 1.0 };
-    let at = move || Tab::ALL.iter().position(|t| *t == current.get()).unwrap_or(0) as f32;
+    let at = move || {
+        Tab::ALL
+            .iter()
+            .position(|t| *t == current.get())
+            .unwrap_or(0) as f32
+    };
     let mark = match sk {
         Skin::Material => view()
             .w(px(56.0))
@@ -446,7 +518,14 @@ fn destination_indicator() -> View {
             .bg(move || c::foreground().opacity(0.06))
             .items_center()
             .justify_end()
-            .child(view().w(px(16.0)).h(px(3.0)).mb(px(2.0)).rounded_full().bg(move || c::primary())),
+            .child(
+                view()
+                    .w(px(16.0))
+                    .h(px(3.0))
+                    .mb(px(2.0))
+                    .rounded_full()
+                    .bg(move || c::primary()),
+            ),
         Skin::Apple | Skin::Adwaita => view()
             .absolute()
             .inset_0()
@@ -464,7 +543,11 @@ fn destination_indicator() -> View {
         .pointer_events(PointerEvents::None)
         .accessibility_elements_hidden(true)
         .translate_x(move || relative(at() * step))
-        .when(!reduced, |v| v.transition_transform().duration(motion::BASE).ease_in_out())
+        .when(!reduced, |v| {
+            v.transition_transform()
+                .duration(motion::BASE)
+                .ease_in_out()
+        })
         .child(mark)
 }
 
@@ -515,7 +598,11 @@ fn destination_item(tab: Tab) -> View {
             Skin::Apple => st.opacity(0.6),
             _ => st.bg(move || c::foreground().opacity(0.08)),
         })
-        .focus_visible(|st| st.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
+        .focus_visible(|st| {
+            st.outline(px(2.0))
+                .outline_offset(px(2.0))
+                .outline_color(move || c::ring())
+        })
         .child(
             view()
                 .w(px(slot_w))
@@ -526,9 +613,15 @@ fn destination_item(tab: Tab) -> View {
                 .transition_colors()
                 .duration(motion::BASE)
                 .child(glyph)
-                .child((tab == Tab::Chats).then(|| tab_badge((slot_w, slot_h), glyph_size, c::pane))),
+                .child(
+                    (tab == Tab::Chats).then(|| tab_badge((slot_w, slot_h), glyph_size, c::pane)),
+                ),
         );
-    view().flex_1().h_full().tooltip(hint(tab.label())).child(item)
+    view()
+        .flex_1()
+        .h_full()
+        .tooltip(hint(tab.label()))
+        .child(item)
 }
 
 /// The destination bar at the bottom of the list pane (it replaces the
@@ -540,7 +633,9 @@ fn destination_bar() -> View {
     view()
         .flex_none()
         .p_2()
-        .when(sk != Skin::Material, |v| v.border_t(hairline()).border_color(move || c::border()))
+        .when(sk != Skin::Material, |v| {
+            v.border_t(hairline()).border_color(move || c::border())
+        })
         .child(
             view()
                 .flex_row()
@@ -568,11 +663,18 @@ fn welcome_pane() -> AnyElement {
 /// something in its list is chosen: what to do there, with its own mark.
 fn section_pane(tab: Tab) -> AnyElement {
     let (glyph, title, message) = match tab {
-        Tab::Calls => (Icon::Calls, "Calls", "Choose a call to see its details, or start one."),
+        Tab::Calls => (
+            Icon::Calls,
+            "Calls",
+            "Choose a call to see its details, or start one.",
+        ),
         Tab::Spaces => (Icon::Spaces, "Spaces", "Choose a space or a channel."),
         Tab::You | Tab::Chats => (Icon::Settings, "Settings", "Choose a setting."),
     };
-    view().flex_1().child(empty_state(glyph, title, message, None)).into_element()
+    view()
+        .flex_1()
+        .child(empty_state(glyph, title, message, None))
+        .into_element()
 }
 
 /// The conversation pane's root: the open chat (or the welcome) on Chats,
@@ -598,13 +700,17 @@ fn detail_root() -> View {
                     })
                 })),
         )
-        .children([Tab::Calls, Tab::Spaces, Tab::You].into_iter().map(move |tab| {
-            view()
-                .absolute()
-                .inset_0()
-                .style_when(move || current.get() != tab, |st| st.hidden())
-                .child(section_pane(tab))
-        }))
+        .children(
+            [Tab::Calls, Tab::Spaces, Tab::You]
+                .into_iter()
+                .map(move |tab| {
+                    view()
+                        .absolute()
+                        .inset_0()
+                        .style_when(move || current.get() != tab, |st| st.hidden())
+                        .child(section_pane(tab))
+                }),
+        )
 }
 
 /// The info pane: a third floating card beside the conversation while a
@@ -646,7 +752,10 @@ fn adopt_title_bar() {
         let mut bar = TitleBarOptions::default();
         bar.style = style;
         if style == TitleBarStyle::Hidden {
-            bar.controls_offset = Some(Point { x: px(MARGIN), y: px(MARGIN) });
+            bar.controls_offset = Some(Point {
+                x: px(MARGIN),
+                y: px(MARGIN),
+            });
         }
         let mut attributes = WindowAttributes::default();
         attributes.title_bar = Some(bar);
@@ -715,7 +824,12 @@ fn desktop_layout() -> AnyElement {
     let conversation = floating::pane().flex_1().min_w_0().child(
         nav_stack()
             .flex_1()
-            .child(nav_page().key("detail").header_visible(false).child(detail_root()))
+            .child(
+                nav_page()
+                    .key("detail")
+                    .header_visible(false)
+                    .child(detail_root()),
+            )
             .child(pushed()),
     );
     view()

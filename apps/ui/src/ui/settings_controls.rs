@@ -66,7 +66,13 @@ pub fn radio_row(
                         .justify_center()
                         .border_2()
                         .border_color(move || if selected() { c::primary() } else { c::input() })
-                        .bg(move || if selected() { c::primary() } else { AdaptiveColor::TRANSPARENT })
+                        .bg(move || {
+                            if selected() {
+                                c::primary()
+                            } else {
+                                AdaptiveColor::TRANSPARENT
+                            }
+                        })
                         .text_color(move || c::on_primary())
                         .when(!reduced, |v| v.transition_colors().duration(motion::FAST))
                         .child(
@@ -98,12 +104,28 @@ pub fn swatch(
         .justify_center()
         .rounded_full()
         .border_2()
-        .border_color(move || if selected() { c::primary() } else { AdaptiveColor::TRANSPARENT })
+        .border_color(move || {
+            if selected() {
+                c::primary()
+            } else {
+                AdaptiveColor::TRANSPARENT
+            }
+        })
         .cursor_pointer()
         .transition()
         .duration(motion::FAST)
-        .active(move |s| if reduced { s.opacity(0.85) } else { s.scale(motion::ICON_PRESS_SCALE) })
-        .focus_visible(|s| s.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
+        .active(move |s| {
+            if reduced {
+                s.opacity(0.85)
+            } else {
+                s.scale(motion::ICON_PRESS_SCALE)
+            }
+        })
+        .focus_visible(|s| {
+            s.outline(px(2.0))
+                .outline_offset(px(2.0))
+                .outline_color(move || c::ring())
+        })
         .child(
             view()
                 .size(px(side))
@@ -149,16 +171,30 @@ pub fn tile(
         .rounded(move || radius::control())
         .bg(move || c::secondary())
         .border_2()
-        .border_color(move || if selected() { c::primary() } else { AdaptiveColor::TRANSPARENT })
+        .border_color(move || {
+            if selected() {
+                c::primary()
+            } else {
+                AdaptiveColor::TRANSPARENT
+            }
+        })
         .cursor_pointer()
         .transition()
         .duration(motion::FAST)
         .hover(|s| s.bg(move || c::accent()))
         .active(move |s| {
             let s = s.bg(move || c::accent());
-            if reduced { s } else { s.scale(motion::PRESS_SCALE) }
+            if reduced {
+                s
+            } else {
+                s.scale(motion::PRESS_SCALE)
+            }
         })
-        .focus_visible(|s| s.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
+        .focus_visible(|s| {
+            s.outline(px(2.0))
+                .outline_offset(px(2.0))
+                .outline_color(move || c::ring())
+        })
         .child(content)
 }
 
@@ -182,21 +218,53 @@ pub fn option_pill(
         .h(px(if is_desktop() { 28.0 } else { 36.0 }))
         .px(px(10.0))
         .rounded_full()
-        .bg(move || if selected() { c::accent() } else { c::secondary() })
+        .bg(move || {
+            if selected() {
+                c::accent()
+            } else {
+                c::secondary()
+            }
+        })
         .border_1()
-        .border_color(move || if selected() { c::primary() } else { AdaptiveColor::TRANSPARENT })
+        .border_color(move || {
+            if selected() {
+                c::primary()
+            } else {
+                AdaptiveColor::TRANSPARENT
+            }
+        })
         .cursor_pointer()
         .transition()
         .duration(motion::INSTANT)
         .hover(|s| s.opacity(0.85))
-        .active(move |s| if reduced { s.opacity(0.8) } else { s.scale(motion::PRESS_SCALE) })
-        .focus_visible(|s| s.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
+        .active(move |s| {
+            if reduced {
+                s.opacity(0.8)
+            } else {
+                s.scale(motion::PRESS_SCALE)
+            }
+        })
+        .focus_visible(|s| {
+            s.outline(px(2.0))
+                .outline_offset(px(2.0))
+                .outline_color(move || c::ring())
+        })
         .child(leading)
         .child(
             text(label)
-                .text_size(px(if is_desktop() { font::SMALL } else { font::SMALL + 1.0 }))
+                .text_size(px(if is_desktop() {
+                    font::SMALL
+                } else {
+                    font::SMALL + 1.0
+                }))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(move || if selected() { c::on_accent() } else { c::foreground() }),
+                .text_color(move || {
+                    if selected() {
+                        c::on_accent()
+                    } else {
+                        c::foreground()
+                    }
+                }),
         )
 }
 
@@ -223,7 +291,10 @@ pub fn expander(trigger: impl Into<SharedString>, body: impl Into<SharedString>)
                 .role(AccessibilityRole::Button)
                 .focusable(true)
                 .label(trigger.clone())
-                .accessibility_state(move || AccessibilityState { expanded: Some(open.get()), ..Default::default() })
+                .accessibility_state(move || AccessibilityState {
+                    expanded: Some(open.get()),
+                    ..Default::default()
+                })
                 .self_start()
                 .flex_row()
                 .items_center()
@@ -233,11 +304,17 @@ pub fn expander(trigger: impl Into<SharedString>, body: impl Into<SharedString>)
                 .hover(|s| s.opacity(0.8))
                 .focus_visible(|s| s.outline(px(2.0)).outline_color(move || c::ring()))
                 .text_color(move || c::link())
-                .child(text(trigger).text_size(px(font::SMALL)).font_weight(FontWeight::MEDIUM))
+                .child(
+                    text(trigger)
+                        .text_size(px(font::SMALL))
+                        .font_weight(FontWeight::MEDIUM),
+                )
                 .child(
                     icon(Icon::ChevronDown, 14.0)
                         .rotate(move || if open.get() { deg(180.0) } else { deg(0.0) })
-                        .when(!reduced, |v| v.transition_transform().duration(motion::BASE)),
+                        .when(!reduced, |v| {
+                            v.transition_transform().duration(motion::BASE)
+                        }),
                 ),
         )
         .into_element()
@@ -245,7 +322,12 @@ pub fn expander(trigger: impl Into<SharedString>, body: impl Into<SharedString>)
 
 /// A highlighted call-out card (the "What Songbird can see" entry): an
 /// icon tile, a title, one sentence, and pressable as a whole.
-pub fn callout(glyph: Icon, title: &'static str, message: &'static str, on_press: impl Fn() + 'static) -> nsh_base::ButtonElement {
+pub fn callout(
+    glyph: Icon,
+    title: &'static str,
+    message: &'static str,
+    on_press: impl Fn() + 'static,
+) -> nsh_base::ButtonElement {
     let reduced = motion::reduced();
     button()
         .on_press(on_press)
@@ -265,15 +347,29 @@ pub fn callout(glyph: Icon, title: &'static str, message: &'static str, on_press
         .transition()
         .duration(motion::FAST)
         .hover(|s| s.opacity(0.92))
-        .active(move |s| if reduced { s.opacity(0.85) } else { s.scale(0.99) })
-        .focus_visible(|s| s.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
+        .active(move |s| {
+            if reduced {
+                s.opacity(0.85)
+            } else {
+                s.scale(0.99)
+            }
+        })
+        .focus_visible(|s| {
+            s.outline(px(2.0))
+                .outline_offset(px(2.0))
+                .outline_color(move || c::ring())
+        })
         .child(icon_tile(glyph).bg(move || c::card()))
         .child(
             view()
                 .flex_1()
                 .min_w(px(0.0))
                 .gap(px(2.0))
-                .child(text(title).text_size(px(font::body())).font_weight(FontWeight::SEMIBOLD))
+                .child(
+                    text(title)
+                        .text_size(px(font::body()))
+                        .font_weight(FontWeight::SEMIBOLD),
+                )
                 .child(
                     text(message)
                         .text_size(px(font::SMALL))

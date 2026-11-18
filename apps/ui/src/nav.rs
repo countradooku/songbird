@@ -43,7 +43,10 @@ pub fn push(key: impl Into<SharedString>, screen: impl Fn() -> Screen + 'static)
         show_info(key, screen);
         return;
     }
-    push_route(Route { key, screen: Rc::new(screen) });
+    push_route(Route {
+        key,
+        screen: Rc::new(screen),
+    });
 }
 
 fn push_route(route: Route) {
@@ -94,7 +97,10 @@ fn is_info_key(key: &str) -> bool {
 /// that opened it toggles it), pushed elsewhere (over the conversation in
 /// its pane, or on the phone's stack).
 pub fn show_info(key: impl Into<SharedString>, screen: impl Fn() -> Screen + 'static) {
-    let route = Route { key: key.into(), screen: Rc::new(screen) };
+    let route = Route {
+        key: key.into(),
+        screen: Rc::new(screen),
+    };
     if !crate::ui::floating::fits_info_pane() {
         push_route(route);
         return;

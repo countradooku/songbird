@@ -273,8 +273,26 @@ impl Registry {
             "devices".into(),
             self.export_devices(account, push).await?.into(),
         );
+        out.insert("settings_store".into(), self.export_storage(account).await?);
         out.insert("not_attributable".into(), not_attributable());
         Ok(serde_json::Value::Object(out))
+    }
+
+    /// The record store (Prompt 9, D-0102): its size and version. The records themselves are
+    /// ciphertext only the account's devices open; they read them through the store's API.
+    async fn export_storage(
+        &self,
+        account: &AccountId,
+    ) -> Result<serde_json::Value, RegistryError> {
+        let (version, _) = self.storage_head(account).await?;
+        let (records, record_bytes) = self.storage_size(account).await?;
+        let objects = self.storage_objects_of(account).await?;
+        Ok(serde_json::json!({
+            "version": version,
+            "records": records,
+            "record_bytes": record_bytes,
+            "objects": objects.iter().map(hex::encode).collect::<Vec<_>>(),
+        }))
     }
 
     async fn export_devices(

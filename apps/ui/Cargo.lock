@@ -2445,9 +2445,11 @@ dependencies = [
  "serde_json",
  "songbird-camera",
  "songbird-client",
+ "songbird-content",
  "songbird-keys",
  "songbird-pow",
  "songbird-proto",
+ "songbird-sync",
  "songbird-types",
 ]
 
@@ -4204,6 +4206,19 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
+ "webpki-roots 1.0.12",
+]
+
+[[package]]
+name = "songbird-content"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "prost",
+ "songbird-proto",
+ "songbird-types",
+ "thiserror 2.0.21",
+ "zeroize",
 ]
 
 [[package]]
@@ -4234,6 +4249,18 @@ dependencies = [
  "prost",
  "songbird-types",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "songbird-sync"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "getrandom 0.4.3",
+ "prost",
+ "songbird-proto",
+ "thiserror 2.0.21",
+ "zeroize",
 ]
 
 [[package]]

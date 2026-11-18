@@ -165,6 +165,8 @@ async fn stack(people: usize) -> Option<Stack> {
                     key: (i == 1).then_some(BOB_KEY),
                     open: i == 3,
                     requests_off: false,
+                    groups_contacts: false,
+                    approval_key: None,
                 },
             )
         })
@@ -284,6 +286,7 @@ async fn stack(people: usize) -> Option<Stack> {
         keys: None,
         devices: None,
         profiles: None,
+        storage: None,
         kt: None,
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

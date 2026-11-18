@@ -71,7 +71,11 @@ pub fn place(prev: Option<&Message>, cur: &Message, next: Option<&Message>) -> P
 /// A time label's words: the clock ("09:24"), with the day at a day
 /// break ("Today 09:24", "Yesterday 18:02", "7 Nov 09:24").
 pub fn time_label(at: i64, day_break: bool) -> String {
-    if day_break { format!("{} {}", day_label(at), clock(at)) } else { clock(at) }
+    if day_break {
+        format!("{} {}", day_label(at), clock(at))
+    } else {
+        clock(at)
+    }
 }
 
 /// When a message was sent, in full (the desktop tooltip, message info):
@@ -122,7 +126,9 @@ pub fn waveform(seed: u64, bars: usize) -> Vec<f32> {
             x ^= x << 17;
             let noise = (x % 1000) as f32 / 1000.0;
             // A speech-like envelope: louder in the middle of phrases.
-            let phrase = ((i as f32 / bars as f32) * std::f32::consts::PI * 3.0).sin().abs();
+            let phrase = ((i as f32 / bars as f32) * std::f32::consts::PI * 3.0)
+                .sin()
+                .abs();
             (0.2 + 0.5 * noise + 0.3 * phrase).min(1.0)
         })
         .collect()
@@ -141,7 +147,13 @@ pub struct Span {
 
 impl Span {
     fn plain(text: &str) -> Self {
-        Span { text: text.into(), bold: false, italic: false, link: false, mention: false }
+        Span {
+            text: text.into(),
+            bold: false,
+            italic: false,
+            link: false,
+            mention: false,
+        }
     }
 }
 
@@ -157,7 +169,9 @@ fn push_mentions(out: &mut Vec<Span>, text: &str, bold: bool, italic: bool) {
         let named = bytes.get(i + 1).is_some_and(|(_, n)| n.is_alphabetic());
         if c == '@' && word_start && named {
             let mut j = i + 1;
-            while j < bytes.len() && (bytes[j].1.is_alphanumeric() || bytes[j].1 == '.' || bytes[j].1 == '_') {
+            while j < bytes.len()
+                && (bytes[j].1.is_alphanumeric() || bytes[j].1 == '.' || bytes[j].1 == '_')
+            {
                 j += 1;
             }
             // A trailing full stop ends the sentence, not the name.
@@ -166,9 +180,18 @@ fn push_mentions(out: &mut Vec<Span>, text: &str, bold: bool, italic: bool) {
             }
             let end = bytes.get(j).map_or(text.len(), |b| b.0);
             if at > plain_from {
-                out.push(Span { bold, italic, ..Span::plain(&text[plain_from..at]) });
+                out.push(Span {
+                    bold,
+                    italic,
+                    ..Span::plain(&text[plain_from..at])
+                });
             }
-            out.push(Span { bold, italic, mention: true, ..Span::plain(&text[at..end]) });
+            out.push(Span {
+                bold,
+                italic,
+                mention: true,
+                ..Span::plain(&text[at..end])
+            });
             plain_from = end;
             i = j;
             continue;
@@ -176,7 +199,11 @@ fn push_mentions(out: &mut Vec<Span>, text: &str, bold: bool, italic: bool) {
         i += 1;
     }
     if plain_from < text.len() {
-        out.push(Span { bold, italic, ..Span::plain(&text[plain_from..]) });
+        out.push(Span {
+            bold,
+            italic,
+            ..Span::plain(&text[plain_from..])
+        });
     }
 }
 
@@ -199,7 +226,10 @@ fn closing(chars: &[char], open: usize, marker: char) -> Option<usize> {
 fn push_links(out: &mut Vec<Span>, text: &str, bold: bool, italic: bool) {
     let mut rest = text;
     while !rest.is_empty() {
-        let at = ["https://", "http://"].iter().filter_map(|p| rest.find(p)).min();
+        let at = ["https://", "http://"]
+            .iter()
+            .filter_map(|p| rest.find(p))
+            .min();
         let Some(at) = at else {
             push_mentions(out, rest, bold, italic);
             return;
@@ -207,13 +237,21 @@ fn push_links(out: &mut Vec<Span>, text: &str, bold: bool, italic: bool) {
         if at > 0 {
             push_mentions(out, &rest[..at], bold, italic);
         }
-        let end = rest[at..].find(char::is_whitespace).map_or(rest.len(), |e| at + e);
+        let end = rest[at..]
+            .find(char::is_whitespace)
+            .map_or(rest.len(), |e| at + e);
         // A sentence's full stop or comma is not part of the link.
         let mut link_end = end;
         while link_end > at && rest[..link_end].ends_with(['.', ',', ')', '!', '?']) {
             link_end -= 1;
         }
-        out.push(Span { text: rest[at..link_end].into(), bold, italic, link: true, mention: false });
+        out.push(Span {
+            text: rest[at..link_end].into(),
+            bold,
+            italic,
+            link: true,
+            mention: false,
+        });
         rest = &rest[link_end..];
     }
 }
@@ -226,7 +264,9 @@ pub fn spans(text: &str) -> Vec<Span> {
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
-        if (c == '*' || c == '_') && let Some(j) = closing(&chars, i, c) {
+        if (c == '*' || c == '_')
+            && let Some(j) = closing(&chars, i, c)
+        {
             push_links(&mut out, &std::mem::take(&mut plain), false, false);
             let inner: String = chars[i + 1..j].iter().collect();
             push_links(&mut out, &inner, c == '*', c == '_');
@@ -334,9 +374,33 @@ mod tests {
         let a = text(1, Some(2), -30);
         let b = text(2, Some(2), -28);
         let c = text(3, None, -27);
-        assert_eq!(place(None, &a, Some(&b)), Place { day_break: true, time: true, first: true, last: false });
-        assert_eq!(place(Some(&a), &b, Some(&c)), Place { day_break: false, time: false, first: false, last: true });
-        assert_eq!(place(Some(&b), &c, None), Place { day_break: false, time: false, first: true, last: true });
+        assert_eq!(
+            place(None, &a, Some(&b)),
+            Place {
+                day_break: true,
+                time: true,
+                first: true,
+                last: false
+            }
+        );
+        assert_eq!(
+            place(Some(&a), &b, Some(&c)),
+            Place {
+                day_break: false,
+                time: false,
+                first: false,
+                last: true
+            }
+        );
+        assert_eq!(
+            place(Some(&b), &c, None),
+            Place {
+                day_break: false,
+                time: false,
+                first: true,
+                last: true
+            }
+        );
         // A long gap starts a new run.
         let late = text(4, Some(2), -5);
         assert!(place(Some(&b), &late, None).first);
@@ -384,24 +448,53 @@ mod tests {
     fn spans_find_bold_italic_and_links() {
         let s = spans("Hey *you*, see https://songbird.chat/blog. _soon_");
         assert_eq!(s[0], Span::plain("Hey "));
-        assert_eq!(s[1], Span { bold: true, ..Span::plain("you") });
+        assert_eq!(
+            s[1],
+            Span {
+                bold: true,
+                ..Span::plain("you")
+            }
+        );
         assert_eq!(s[2], Span::plain(", see "));
-        assert_eq!(s[3], Span { link: true, ..Span::plain("https://songbird.chat/blog") });
+        assert_eq!(
+            s[3],
+            Span {
+                link: true,
+                ..Span::plain("https://songbird.chat/blog")
+            }
+        );
         assert_eq!(s[4], Span::plain(". "));
-        assert_eq!(s[5], Span { italic: true, ..Span::plain("soon") });
+        assert_eq!(
+            s[5],
+            Span {
+                italic: true,
+                ..Span::plain("soon")
+            }
+        );
     }
 
     #[test]
     fn mentions_are_their_own_spans() {
         let s = spans("@Radu can you bring the wine? mail me@x.y");
-        assert_eq!(s[0], Span { mention: true, ..Span::plain("@Radu") });
+        assert_eq!(
+            s[0],
+            Span {
+                mention: true,
+                ..Span::plain("@Radu")
+            }
+        );
         assert_eq!(s[1], Span::plain(" can you bring the wine? mail me@x.y"));
         assert!(!is_plain("@Radu hi"));
     }
 
     #[test]
     fn the_encryption_notice_heads_the_chat() {
-        let notice = msg(1, None, -60 * 24 * 3, Body::System("Messages are end-to-end encrypted.".into()));
+        let notice = msg(
+            1,
+            None,
+            -60 * 24 * 3,
+            Body::System("Messages are end-to-end encrypted.".into()),
+        );
         let first = text(2, Some(2), -60 * 24 * 2);
         assert!(!place(None, &notice, Some(&first)).day_break);
         assert!(place(Some(&notice), &first, None).day_break);
@@ -412,7 +505,10 @@ mod tests {
 
     #[test]
     fn markers_inside_words_stay_text() {
-        assert_eq!(spans("snake_case_name"), vec![Span::plain("snake_case_name")]);
+        assert_eq!(
+            spans("snake_case_name"),
+            vec![Span::plain("snake_case_name")]
+        );
         assert_eq!(spans("2 * 3 * 4"), vec![Span::plain("2 * 3 * 4")]);
         assert_eq!(spans("*unclosed"), vec![Span::plain("*unclosed")]);
         assert!(is_plain("Ce mai faci?"));
@@ -453,12 +549,30 @@ mod tests {
     fn only_own_text_is_editable() {
         assert!(editable(&text(1, None, 0)));
         assert!(!editable(&text(1, Some(3), 0)));
-        assert!(!editable(&msg(1, None, 0, Body::Voice { secs: 3, played: false })));
+        assert!(!editable(&msg(
+            1,
+            None,
+            0,
+            Body::Voice {
+                secs: 3,
+                played: false
+            }
+        )));
     }
 
     #[test]
     fn voice_notes_play_on() {
-        let v = |id| msg(id, Some(2), 0, Body::Voice { secs: 3, played: false });
+        let v = |id| {
+            msg(
+                id,
+                Some(2),
+                0,
+                Body::Voice {
+                    secs: 3,
+                    played: false,
+                },
+            )
+        };
         let list = vec![v(1), v(2), text(3, Some(2), 0)];
         assert_eq!(next_voice(&list, 0), Some(1));
         assert_eq!(next_voice(&list, 1), None);

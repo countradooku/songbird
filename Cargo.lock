@@ -4843,6 +4843,7 @@ dependencies = [
  "serde",
  "serde_json",
  "songbird-jobs",
+ "songbird-proto",
  "songbird-surreal",
  "songbird-types",
  "thiserror 2.0.21",
@@ -4945,6 +4946,7 @@ dependencies = [
  "songbird-send",
  "songbird-service",
  "songbird-surreal",
+ "songbird-sync",
  "songbird-types",
  "songbird-valkey",
  "tokio",
@@ -5000,6 +5002,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
+ "webpki-roots 1.0.12",
 ]
 
 [[package]]
@@ -5011,7 +5014,9 @@ dependencies = [
  "proptest",
  "prost",
  "serde_json",
+ "songbird-keys",
  "songbird-proto",
+ "songbird-types",
  "thiserror 2.0.21",
  "zeroize",
 ]
@@ -5089,6 +5094,7 @@ dependencies = [
  "songbird-link",
  "songbird-mailbox",
  "songbird-proto",
+ "songbird-proxy",
  "songbird-push",
  "songbird-push-providers",
  "songbird-router",
@@ -5424,6 +5430,19 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
+]
+
+[[package]]
+name = "songbird-sync"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "getrandom 0.4.3",
+ "proptest",
+ "prost",
+ "songbird-proto",
+ "thiserror 2.0.21",
+ "zeroize",
 ]
 
 [[package]]

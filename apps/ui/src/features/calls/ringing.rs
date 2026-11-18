@@ -5,9 +5,10 @@
 use nsh_core::prelude::*;
 
 use super::{
-    accept, calls, field, hang_up, with_call,
+    accept, calls, field, hang_up,
     state::{self, MicAccess, Phase},
     surface::{arrive, ringing_avatar},
+    with_call,
 };
 use crate::{store::Store, ui::*};
 
@@ -18,7 +19,12 @@ pub fn incoming(s: Store, roomy: bool) -> AnyElement {
 
 /// The caller, the kind of call, and whether it still rings.
 fn who() -> (String, u64, bool) {
-    calls().with_untracked(|x| x.call.as_ref().map(|c| (c.title.clone(), c.seed, c.group)).unwrap_or_default())
+    calls().with_untracked(|x| {
+        x.call
+            .as_ref()
+            .map(|c| (c.title.clone(), c.seed, c.group))
+            .unwrap_or_default()
+    })
 }
 
 /// Phones: the whole screen rings.
@@ -43,7 +49,11 @@ fn full(s: Store) -> AnyElement {
                 .pt_4()
                 .text_color(move || c::on_call().opacity(0.75))
                 .child(icon(Icon::Lock, 13.0))
-                .child(text("End-to-end encrypted").text_size(px(font::CAPTION)).font_weight(FontWeight::MEDIUM)),
+                .child(
+                    text("End-to-end encrypted")
+                        .text_size(px(font::CAPTION))
+                        .font_weight(FontWeight::MEDIUM),
+                ),
         )
         .child(
             view()
@@ -52,7 +62,13 @@ fn full(s: Store) -> AnyElement {
                 .justify_center()
                 .gap_3()
                 .px_6()
-                .child(ringing_avatar(name.clone(), seed, group, 128.0, move || ringing.get()))
+                .child(ringing_avatar(
+                    name.clone(),
+                    seed,
+                    group,
+                    128.0,
+                    move || ringing.get(),
+                ))
                 .child(
                     text(name.clone())
                         .text_size(px(font::DISPLAY))
@@ -61,7 +77,11 @@ fn full(s: Store) -> AnyElement {
                         .number_of_lines(2)
                         .role(AccessibilityRole::Header),
                 )
-                .child(group.then(|| text("Group call").text_size(px(font::SMALL + 1.0)).text_color(move || c::on_call().opacity(0.7))))
+                .child(group.then(|| {
+                    text("Group call")
+                        .text_size(px(font::SMALL + 1.0))
+                        .text_color(move || c::on_call().opacity(0.7))
+                }))
                 .child(
                     text(move || status.get())
                         .text_size(px(font::TITLE))
@@ -69,22 +89,39 @@ fn full(s: Store) -> AnyElement {
                         .text_color(move || c::on_call().opacity(0.85)),
                 ),
         )
-        .child(when(move || ringing.get(), move || {
-            view()
-                .flex_row()
-                .justify_around()
-                .px_8()
-                .child(call_btn(|| Icon::PhoneOff, || "Decline".into(), CallTone::Decline, || false, 72.0, true, move || hang_up(s)))
-                .child(call_btn(
-                    move || if video.get() { Icon::Video } else { Icon::Phone },
-                    || "Accept".into(),
-                    CallTone::Accept,
-                    || false,
-                    72.0,
-                    true,
-                    move || accept(video.get_untracked()),
-                ))
-        }))
+        .child(when(
+            move || ringing.get(),
+            move || {
+                view()
+                    .flex_row()
+                    .justify_around()
+                    .px_8()
+                    .child(call_btn(
+                        || Icon::PhoneOff,
+                        || "Decline".into(),
+                        CallTone::Decline,
+                        || false,
+                        72.0,
+                        true,
+                        move || hang_up(s),
+                    ))
+                    .child(call_btn(
+                        move || {
+                            if video.get() {
+                                Icon::Video
+                            } else {
+                                Icon::Phone
+                            }
+                        },
+                        || "Accept".into(),
+                        CallTone::Accept,
+                        || false,
+                        72.0,
+                        true,
+                        move || accept(video.get_untracked()),
+                    ))
+            },
+        ))
         .into_element()
 }
 
@@ -115,7 +152,9 @@ fn card(s: Store) -> AnyElement {
                 .flex_row()
                 .items_center()
                 .gap_3()
-                .child(ringing_avatar(name.clone(), seed, group, 48.0, move || ringing.get()))
+                .child(ringing_avatar(name.clone(), seed, group, 48.0, move || {
+                    ringing.get()
+                }))
                 .child(
                     view()
                         .flex_1()
@@ -141,22 +180,53 @@ fn card(s: Store) -> AnyElement {
                                 .text_color(move || c::on_call().opacity(0.65))
                                 .child(icon(Icon::Lock, 12.0))
                                 .child(
-                                    text(if group { "Group call · End-to-end encrypted" } else { "End-to-end encrypted" })
-                                        .text_size(px(font::CAPTION)),
+                                    text(if group {
+                                        "Group call · End-to-end encrypted"
+                                    } else {
+                                        "End-to-end encrypted"
+                                    })
+                                    .text_size(px(font::CAPTION)),
                                 ),
                         ),
                 ),
         )
-        .child(when(move || ringing.get(), move || {
-            view()
-                // Three equal columns: the circles sit evenly whatever
-                // their captions' lengths.
-                .flex_row()
-                .items_start()
-                .child(view().flex_1().items_center().child(call_btn(|| Icon::PhoneOff, || "Decline".into(), CallTone::Decline, || false, 48.0, true, move || hang_up(s))))
-                .child(view().flex_1().items_center().child(call_btn(|| Icon::Video, || "Answer with video".into(), CallTone::Neutral, || false, 48.0, true, || accept(true))))
-                .child(view().flex_1().items_center().child(call_btn(|| Icon::Phone, || "Answer".into(), CallTone::Accept, || false, 48.0, true, move || accept(video.get_untracked()))))
-        }))
+        .child(when(
+            move || ringing.get(),
+            move || {
+                view()
+                    // Three equal columns: the circles sit evenly whatever
+                    // their captions' lengths.
+                    .flex_row()
+                    .items_start()
+                    .child(view().flex_1().items_center().child(call_btn(
+                        || Icon::PhoneOff,
+                        || "Decline".into(),
+                        CallTone::Decline,
+                        || false,
+                        48.0,
+                        true,
+                        move || hang_up(s),
+                    )))
+                    .child(view().flex_1().items_center().child(call_btn(
+                        || Icon::Video,
+                        || "Answer with video".into(),
+                        CallTone::Neutral,
+                        || false,
+                        48.0,
+                        true,
+                        || accept(true),
+                    )))
+                    .child(view().flex_1().items_center().child(call_btn(
+                        || Icon::Phone,
+                        || "Answer".into(),
+                        CallTone::Accept,
+                        || false,
+                        48.0,
+                        true,
+                        move || accept(video.get_untracked()),
+                    )))
+            },
+        ))
         .into_element()
 }
 

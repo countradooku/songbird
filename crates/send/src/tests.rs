@@ -454,6 +454,8 @@ fn gated(limits: RequestLimits) -> (Fixture, Arc<MemoryGate>) {
         key: Some([b; 16]),
         open: false,
         requests_off: false,
+        groups_contacts: false,
+        approval_key: None,
     };
     let gate = Arc::new(MemoryGate::new(limits));
     let mut f = Fixture::new();
@@ -1199,6 +1201,10 @@ impl Gate for DownGate {
     }
 
     fn blocked<'a>(&'a self, _: &'a AccountId, _: &'a AccountId) -> gate::GateFuture<'a> {
+        Box::pin(std::future::ready(Admit::Unavailable))
+    }
+
+    fn attention<'a>(&'a self, _: &'a AccountId, _: &'a AccountId) -> gate::GateFuture<'a> {
         Box::pin(std::future::ready(Admit::Unavailable))
     }
 

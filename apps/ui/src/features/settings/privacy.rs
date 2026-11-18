@@ -11,7 +11,11 @@ use crate::{
     ui::*,
 };
 
-const AUDIENCES: [Audience; 3] = [Audience::Everyone, Audience::Contacts, Audience::Nobody];
+/// Who may see the profile and presence: only contacts hold the key that
+/// opens them, so "Everyone" would mean the same as "My contacts" (D-0101).
+const AUDIENCES: [Audience; 2] = [Audience::Contacts, Audience::Nobody];
+/// Who may add me to groups.
+const GROUP_AUDIENCES: [Audience; 3] = [Audience::Everyone, Audience::Contacts, Audience::Nobody];
 
 pub fn privacy() {
     super::push("Privacy", content);
@@ -21,7 +25,10 @@ fn content() -> AnyElement {
     let s = store();
     let settings = s.settings;
     let ext = s.ext();
-    let count_blocked = move || s.contacts.with(|cs| cs.iter().filter(|c| c.blocked).count());
+    let count_blocked = move || {
+        s.contacts
+            .with(|cs| cs.iter().filter(|c| c.blocked).count())
+    };
     view()
         .child(view().pt_4().child(callout(
             Icon::ShieldCheck,
@@ -47,18 +54,37 @@ fn content() -> AnyElement {
         .child(foot(
             "Your profile is end\u{2011}to\u{2011}end encrypted. These choices decide who gets the key to read it.",
         ))
-        .child(view().pt_4().child(group(vec![toggle_row(
-            "Read receipts",
-            Some("When it's off, you don't send or see read receipts, except in groups."),
-            move || settings.with(|x| x.read_receipts),
-            move |on| s.settings_update(|x| x.read_receipts = on),
-        )])))
+        .child(view().pt_4().child(group(vec![
+            toggle_row(
+                "Read receipts",
+                Some("When it's off, you don't send or see read receipts, except in groups."),
+                move || settings.with(|x| x.read_receipts),
+                move |on| s.settings_update(|x| x.read_receipts = on),
+            ),
+            toggle_row(
+                "Typing indicators",
+                Some("When it's off, people don't see when you're typing, and you don't see when they are."),
+                move || settings.with(|x| x.typing_indicators),
+                move |on| s.settings_update(|x| x.typing_indicators = on),
+            ),
+        ])))
         .child(section(
             "Messages and groups",
             vec![
-                value_row("Groups", Some(Icon::Users), move || settings.with(|x| x.groups_add.label().into()), || {
-                    audience_page("Groups", "Who can add me to groups", |x| x.groups_add, |x, a| x.groups_add = a)
-                }),
+                value_row("Groups", Some(Icon::Users), move || settings.with(|x| x.groups_add.label().into()), groups),
+                value_row(
+                    "Message requests",
+                    Some(Icon::Chats),
+                    move || if settings.with(|x| x.message_requests) { "Everyone".into() } else { "Nobody".into() },
+                    requests,
+                ),
+                toggle_row_icon(
+                    Icon::AtSign,
+                    "Find me by username",
+                    Some("When it's off, people can still reach you with your username link or QR code."),
+                    move || settings.with(|x| x.discoverable),
+                    move |on| s.set_discoverable(on),
+                ),
                 value_row(
                     "Default message timer",
                     Some(Icon::Timer),
@@ -131,6 +157,57 @@ fn content() -> AnyElement {
         .into_element()
 }
 
+/// Who can add me to groups (the server checks it, Prompt 9).
+fn groups() {
+    super::push("Groups", || {
+        let s = store();
+        let labels = |a: Audience| match a {
+            Audience::Everyone => ("Everyone", None),
+            Audience::Contacts => ("My contacts", None),
+            Audience::Nobody => (
+                "Nobody",
+                Some("Contacts send you an invitation you can accept."),
+            ),
+        };
+        view()
+            .child(section_plain(
+                "Who can add me to groups",
+                GROUP_AUDIENCES
+                    .into_iter()
+                    .map(|a| {
+                        let (label, hint) = labels(a);
+                        radio_row(label, hint, move || s.settings.with(|x| x.groups_add == a), move || {
+                            s.set_groups_add(a)
+                        })
+                    })
+                    .collect(),
+            ))
+            .child(foot("Songbird's servers refuse adds from people who aren't your contacts, so this holds even if someone's app ignores it."))
+            .into_element()
+    });
+}
+
+/// Who can send me message requests (the server checks it).
+fn requests() {
+    super::push("Message requests", || {
+        let s = store();
+        view()
+            .child(section_plain(
+                "Who can send me message requests",
+                vec![
+                    radio_row("Everyone", None, move || s.settings.with(|x| x.message_requests), move || {
+                        s.set_message_requests(true)
+                    }),
+                    radio_row("Nobody", Some("Only your contacts can reach you."), move || {
+                        s.settings.with(|x| !x.message_requests)
+                    }, move || s.set_message_requests(false)),
+                ],
+            ))
+            .child(foot("A request shows you who it's from before you open it. Blocked people never reach you either way."))
+            .into_element()
+    });
+}
+
 /// A page of radio rows choosing who sees one thing.
 fn audience_page(
     title: &'static str,
@@ -146,9 +223,12 @@ fn audience_page(
                 AUDIENCES
                     .into_iter()
                     .map(|a| {
-                        radio_row(a.label(), None, move || s.settings.with(|x| get(x) == a), move || {
-                            s.settings_update(|x| set(x, a))
-                        })
+                        radio_row(
+                            a.label(),
+                            None,
+                            move || s.settings.with(|x| get(x) == a),
+                            move || s.settings_update(|x| set(x, a)),
+                        )
                     })
                     .collect(),
             ))
@@ -182,9 +262,9 @@ pub fn last_seen() {
             .child(section_plain(
                 "Who can see when I'm online",
                 vec![
-                    radio_row("Everyone", None, move || !ext.with(|x| x.online_same_as_last_seen), move || {
+                    radio_row("My contacts", None, move || !ext.with(|x| x.online_same_as_last_seen), move || {
                         s.ext_update(|x| x.online_same_as_last_seen = false);
-                        s.settings_update(|x| x.online = Audience::Everyone);
+                        s.settings_update(|x| x.online = Audience::Contacts);
                     }),
                     radio_row("Same as last seen", None, move || ext.with(|x| x.online_same_as_last_seen), move || {
                         s.ext_update(|x| x.online_same_as_last_seen = true);
@@ -243,7 +323,12 @@ pub fn blocked() {
         let s = store();
         let picking = signal(false);
         let blocked = computed(move || {
-            s.contacts.with(|cs| cs.iter().filter(|c| c.blocked).map(|c| (c.id, c.name.clone(), c.id)).collect::<Vec<_>>())
+            s.contacts.with(|cs| {
+                cs.iter()
+                    .filter(|c| c.blocked)
+                    .map(|c| (c.id, c.name.clone(), c.id))
+                    .collect::<Vec<_>>()
+            })
         });
         view()
             .child(when(
@@ -292,27 +377,37 @@ pub fn blocked() {
 fn block_sheet(open: Signal<bool>) -> nsh_base::SheetElement {
     let s = store();
     let people = computed(move || {
-        s.contacts.with(|cs| cs.iter().filter(|c| !c.blocked).map(|c| (c.id, c.name.clone())).collect::<Vec<_>>())
+        s.contacts.with(|cs| {
+            cs.iter()
+                .filter(|c| !c.blocked)
+                .map(|c| (c.id, c.name.clone()))
+                .collect::<Vec<_>>()
+        })
     });
     app_sheet(
         open,
         "Block someone",
-        scroll().max_h(px(420.0)).child(view().pb_2().child(dynamic(move || {
-            let list = people.get();
-            untracked(move || {
-                group_with_inset(list.into_iter().map(|(id, name)| {
-                    let n = name.clone();
-                    Row::new(name.clone())
-                        .leading(avatar(name, id, 36.0))
-                        .on_press(move || {
-                            s.block(id, true);
-                            open.set(false);
-                            toast(format!("{n} is blocked"));
-                        })
-                        .build()
-                }), INSET_AVATAR)
-            })
-        }))),
+        scroll()
+            .max_h(px(420.0))
+            .child(view().pb_2().child(dynamic(move || {
+                let list = people.get();
+                untracked(move || {
+                    group_with_inset(
+                        list.into_iter().map(|(id, name)| {
+                            let n = name.clone();
+                            Row::new(name.clone())
+                                .leading(avatar(name, id, 36.0))
+                                .on_press(move || {
+                                    s.block(id, true);
+                                    open.set(false);
+                                    toast(format!("{n} is blocked"));
+                                })
+                                .build()
+                        }),
+                        INSET_AVATAR,
+                    )
+                })
+            }))),
     )
 }
 
@@ -324,12 +419,15 @@ pub fn app_lock() {
         let on = move || settings.with(|x| x.app_lock);
         view()
             .child(view().pt_4().child(group(vec![toggle_row(
-                "Unlock with Face ID or PIN",
-                Some("Songbird asks for your device's Face ID, fingerprint or passcode when you open it."),
+                "Lock with a passcode",
+                Some("Songbird asks for six digits when you open it. They stay on this device. Face ID and fingerprints are coming."),
                 on,
                 move |v| {
-                    // mock: the platform's biometric prompt confirms first.
-                    s.settings_update(|x| x.app_lock = v);
+                    if v {
+                        crate::features::lock::set_passcode_page();
+                    } else {
+                        crate::features::lock::turn_off_page();
+                    }
                 },
             )])))
             .child(when(on, move || {

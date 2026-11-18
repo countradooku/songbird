@@ -18,6 +18,7 @@
 //! - [`profile`]: encrypted profiles and sender certificates (Prompt 3).
 //! - [`keys`]: the key directory's upload and fetch formats (PQXDH prekeys, Prompt 3).
 //! - [`report`]: a report with message franking (Prompt 4).
+//! - [`storage`]: the account record store (Prompt 9).
 //! - [`registration`]: the registration request, the transcripts its keys sign, and invite codes
 //!   (`POST /v1/registration`, Prompt 3).
 //!
@@ -30,6 +31,7 @@ pub mod close;
 pub mod control;
 pub mod devices;
 pub mod envelope;
+pub mod ephemeral;
 pub mod frame;
 pub mod keys;
 pub mod media;
@@ -37,6 +39,8 @@ pub mod mls;
 pub mod profile;
 pub mod registration;
 pub mod report;
+pub mod storage;
+pub mod supervision;
 pub mod system;
 
 pub use close::CloseCode;

@@ -20,6 +20,15 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 9 gate (`P09-gate.md`, D-0102 to D-0108; PR #67): **approved by the owner on
+  2026-11-18** ("Approve the gate"): M1–M6 and the security review's fixes, with the threat-model
+  rows (§1, §3.26, §4, §5). Still open: the GDPR Article 8 ages to confirm with counsel before
+  release (§5); device and parental linking between two real phones; presence and nudges from the
+  app once app-core (A2) exists.
+- Prompt 9 plan (`P09-plan.md`, D-0101): **approved by the owner on 2026-11-18** ("Approve
+  all"), every recommendation, the scope inventory included (every Settings row made real except
+  Prompts 10, 11 and 14's; host-only rows after the whole app is built). A supervised child may
+  delete their own account. M1 (the record store) is next.
 - Native camera module (`CAM-plan.md`, D-0110): **approved by the owner on 2026-11-18**
   ("approve all on the camera plan", relayed by the Prompt 9 session), every recommendation:
   the minimal Android host now (its push parts stay deferred), "connect a camera" for a
@@ -370,6 +379,372 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   host stays deferred. iOS checks need a physical iPhone. Nothing changes on the server or in
   THREAT_MODEL §1. Calls get the local preview now and send frames once app-core (A2) and
   LiveKit are in the app.
+
+## D-0109 — The Prompt 9 gate approved
+
+- Date: 2026-11-18
+- Status: accepted by the owner
+- Decided by: owner ("Approve the gate")
+- Context: `P09-gate.md`: the four gate items pass. Fast CI is green. The live suites are green,
+  except two api tests that need a 127.0.0.2 source address, which this Mac lacks. The security
+  review's findings are fixed (D-0108).
+- Decision:
+  - M1–M6 and the review's fixes are approved.
+  - So are the threat-model rows: §1 (the record store, storage objects and their throttles,
+    discoverability, group adds from contacts, sealed presence, nudges, supervision), §3.26, the
+    completed §4 and the §5 table.
+- Consequences:
+  - PR #67 may leave draft. Merging stays the owner's call.
+  - Still open: the Article 8 ages to confirm with counsel before release; linking between two
+    real phones; presence and nudges from the app once app-core (A2) exists.
+
+## D-0108 — Prompt 9: the security review's fixes
+
+- Date: 2026-11-18
+- Status: accepted; part of the Prompt 9 gate (`P09-gate.md`, "Security review")
+- Decided by: agent, on an independent read-only review of the whole Prompt 9 diff (a separate
+  agent given the code and the specifications, not the reports' conclusions)
+- Context: one high finding, four medium, seven low and four informational. Each was checked in
+  the code before fixing.
+- Decision (finding → fix):
+  - **H1** A supervised child could turn "anyone may send" on and be reached without a request.
+    Fix: a profile upload opening the account answers 403 `supervised` when message requests are
+    locked off, and installing such a policy closes the account.
+  - **M1** A later policy could push the unlink date out without limit. Fix: the date may only
+    move earlier (409 `date`).
+  - **M2** `PUT /v1/supervision` answered differently for supervised accounts. Fix: a signed
+    policy for another account is refused with one answer (403 `account`) whatever its state.
+  - **M3** A nudge sent as an ordinary ephemeral event got around the attention budgets and blocks.
+    Fix: the server marks each event in the ephemeral lane with its class, and delivery hands
+    attention events over in their own frame (`0x84`, `Event::Attention`). Apps honour a nudge only
+    from it.
+  - **M4** Linking a second child replaced the key for the first. Fix: a link in force is never
+    replaced; the screen says to unlink first.
+  - **L1** A parent's later policies named the parent's account to the server. Fix:
+    `PUT /v1/supervision/update`, unsigned, authorized by the policy key alone and throttled per
+    IP range; one answer for a bad signature and for no policy in force.
+  - **L2** The group-add checks revealed supervision to strangers. Fix: the contacts-only check
+    runs before the approval check.
+  - **L3** The six digits could be ground by someone relaying the codes. Fix: commit then reveal
+    (the parent's first code carries only a commitment; key and secret come after the child's
+    code), and the child's phone installs only after the digits are compared.
+  - **L4** The app lock's wait could be skipped by moving the clock. Fix: the wait is saved as time
+    left and counted down on the monotonic clock. "Lock after" locks if either clock says the time
+    is up, or the wall clock went backwards.
+  - **L5** Storage write budgets counted requests, not records. Fix: a second, cost-weighted
+    budget per record written (60,000 an hour, burst 40,000).
+  - **L6** Client rules showed how many were on by their length. Fix: padded to 64 bytes.
+  - **L7** Linking a device failed on accounts with a PIN. Fix: the new device asks for the PIN
+    and sends it with the same request; the token is spent only after the factor checks out.
+  - **I1** A device that never scanned the parent's code showed the server's rules unchecked.
+    Fix: it says it can't check them.
+  - **I2** An age giving no unlink date started supervision ending at once. Fix: linking stops.
+  - **I4** Presence batches answered 401 or 204 depending on which devices exist. Fix: always 204;
+    a refused batch reaches nobody.
+  - **I3** (secrets in plain app storage) is the known A0 mock: the platform keystore comes with
+    the host projects. Recorded, not changed.
+- Evidence:
+  - the parental gate (H1, M1, M2, L1);
+  - the nudge gate (M3: a nudge sent as ephemeral never arrives as attention);
+  - the presence gate (I4);
+  - `a_child_accepts_only_the_first_policy_meant_for_it` and
+    `the_link_code_matches_on_both_sides` (L3);
+  - `client_rules_open_only_for_their_child_and_version` and
+    `the_commitment_binds_the_key_and_the_secret` (L6);
+  - `closing_the_app_does_not_reset_the_wait` (L4);
+  - the frame proptests (`0x84`).
+- Consequences:
+  - The parental linking flow has five steps, and the parent's later policies go unsigned.
+  - Not exercised between two real phones yet: device and parental linking, and the PIN step
+    (P09-M6 "Not verified").
+
+## D-0107 — Prompt 9, milestone 6: the app's presence, profiles, nudges, contacts, device and parental linking
+
+- Date: 2026-11-18
+- Status: accepted for the milestone (agent, under the approved plan D-0101); its threat-model rows
+  were approved by the owner on 2026-11-18 with the gate (D-0109)
+- Decided by: agent (with owner approval of the plan, and of the camera plan D-0110: link codes
+  only from the live camera)
+- Context: the app's side of M2–M4, and linking (devices and parent with child) now that the
+  camera exists (PR #68, merged into this branch at the owner's word).
+- Options considered:
+  - Device linking: a pasted or typed code (rejected by the owner) or the live camera (chosen).
+  - The first parental policy: relayed sealed through a provisioning channel, or shown as a
+    third QR code. The relay was built first and replaced: the parent's signed write followed by
+    the child's install would let the server tie the two accounts by timing, against D-0105.
+    Chosen: the policy as a code; it is about 200 bytes.
+  - A newly linked device: re-keying its replica, or an empty replica under the account's key.
+    Re-keying was rejected: its first-run defaults are stamped later than the phone's choices and
+    would overwrite them on the first sync. Chosen: an empty replica.
+- Evidence:
+  - `a_linked_device_reads_the_account_settings_and_a_rotation_shuts_out_the_old_key`;
+  - `a_waiting_device_shows_a_link_code_the_main_phone_reads`;
+  - `a_link_request_proves_its_keys_and_the_confirmation_key`;
+  - `a_child_accepts_only_the_first_policy_meant_for_it` (another account, date or key, a later
+    version or an unlinking: refused);
+  - `parental_codes_round_trip_and_stay_apart` (no parental code is ever read as a link code);
+  - the presence lane's tests (`invisible_sends_nothing_ever`, one send per debounce, a batch
+    only for sealed devices with their combined key);
+  - `nothing_is_sent_without_known_devices` (nudges);
+  - the contacts, profile and supervision unit tests; the app's 199 tests.
+- Decision:
+  - `backend::presence`: the `Presencer` from the privacy settings and the lifecycle, sending
+    sealed batches.
+  - `backend::profile`: profiles sealed for contacts, a key rotation when a field narrows to
+    Nobody.
+  - `backend::nudge`: confirmed once, ever.
+  - `features::contacts` and `store::ext_contacts`: saved contacts are `k/` records.
+  - `backend::link`:
+    - the new device shows `SONGBIRD:LINK`;
+    - the main phone links what its camera read, after the confirmation;
+    - the storage key goes in provisioning v2;
+    - logging a device out signs a list without it;
+    - the key is rotated when the main phone is left alone.
+  - Parental linking: three codes (`SONGBIRD:SUPERVISE`, `SONGBIRD:CHILD`, `SONGBIRD:POLICY`,
+    PROTOCOL §10.6).
+- Consequences:
+  - Presence and nudges send nothing until app-core (A2) can seal for contacts' devices, which
+    the mock's contacts lack. No plaintext is ever sent.
+  - With other devices still linked, a logged-out device keeps the storage key until A2 delivers a
+    new one end to end (D-0106).
+  - The live linking flows (devices, parent and child) are built and unit tested. They have not
+    yet run between two real phones.
+
+## D-0106 — Prompt 9, milestone 5: the app's settings saved, synced and enforced; app lock; proxy dialing
+
+- Date: 2026-11-18
+- Status: accepted for the milestone (agent, under the approved plan D-0101); its threat-model rows
+  were approved by the owner on 2026-11-18 with the gate (D-0109)
+- Decided by: agent (with owner approval of the plan: every Settings row made real except
+  Prompts 10, 11 and 14's)
+- Context: every setting saved, synced across devices or kept on one, and the server-enforced ones
+  written to the server. Also the app lock, the two-step PIN, the account report, deletion, and
+  dialing through a Songbird proxy.
+- Options considered:
+  - Settings: one JSON blob, or a record per setting on `songbird-sync` (chosen: per-key merge,
+    PROTOCOL §10.2).
+  - The app lock's passcode: kept, or only a salted slow hash (chosen: PBKDF2-HMAC-SHA256,
+    600,000 rounds).
+  - Wrong guesses: counted in memory, or saved on the device (chosen, after a first build that
+    reset on restart).
+  - Proxy dialing: a plain TCP relay or TLS-in-TLS with the inner session's channel binding
+    (chosen).
+  - The storage key when a device is removed:
+    - rotate always, which strands the other devices until A2 can tell them;
+    - rotate only when the main phone is left alone (chosen until A2).
+- Evidence:
+  - `every_synced_and_device_setting_round_trips`, `device_only_settings_are_never_records`,
+    `two_devices_converge_through_the_store`, `settings_survive_a_restart` (headless, real
+    engine);
+  - `the_app_opens_locked_and_only_the_passcode_opens_it`, `closing_the_app_does_not_reset_the_wait`,
+    `a_passcode_is_kept_only_as_a_salted_slow_hash`, `wrong_guesses_wait_longer_and_longer`;
+  - `a_client_reaches_delivery_through_a_proxy_link` (e2e through the real relay to a TLS
+    delivery node);
+  - the storage live suite (4 of 4) and the P04/P05/P09 gates.
+- Decision:
+  - `backend::records`:
+    - the codec tables `SYNCED` and `DEVICE`;
+    - `restore`, `changed`, `schedule`, `periodic`, `under`, `put`;
+    - the HTTP `Remote`;
+    - `storage_key`, `adopt_key`, `rotate_key`.
+  - `backend::account`: the server settings, the PIN, the export and its summary.
+  - `backend::lock` and `features::lock`.
+  - `crates/client`: `ProxyRoute`, with the proxy-link parser moved to `songbird-types`.
+- Consequences:
+  - The app lock is a gate in the app, not storage encryption: the device's own protection
+    guards the app's storage (THREAT_MODEL §3.26).
+  - Face ID and fingerprints come with the native host projects.
+
+## D-0105 — Prompt 9, milestone 4: parental supervision with a per-child policy key
+
+- Date: 2026-11-18
+- Status: accepted for the milestone (agent, under the approved plan D-0101); its threat-model rows
+  and the compliance table were approved by the owner on 2026-11-18 with the gate (D-0109)
+- Decided by: agent (with owner approval of the plan, question 8: no parent identity or birth date
+  on the server; a supervised child may delete their own account)
+- Context: parental controls with in-person linking, a policy signed by the parent, server
+  enforcement of what it can see (requests, discoverability, group adds), clients enforcing the
+  rest, unlinking by the parent or at an age set at linking, GDPR Article 8.
+- Options considered: storing the parent's account and checking that its devices sign (the server
+  would learn who parents whom) or a fresh policy key per child (chosen); client rules in the clear
+  (the server would learn quiet hours and the like) or encrypted under a secret shared in person
+  (chosen); updates only through the child's devices (a child could withhold them) or from any
+  device, authorized by the signature (chosen).
+- Evidence: `a_parents_policy_locks_rules_and_only_the_parent_or_the_date_ends_it` (gate P09: the
+  first policy only from the child's primary, forged 403, locks 403 `supervised` for every device,
+  replay 409, the parent's update applies, the `superv` row's fields, unlinking, the date);
+  `a_supervised_child_joins_a_group_only_with_the_parents_approval` (groups gate: no approval,
+  another group, expired, too far ahead, another key: 403; the parent's: 200); unit tests of the
+  policy encoding, client rules, unlink dates and the consent table.
+- Decision:
+  - `songbird_proto::supervision` (policy and approval formats); `songbird_accounts::supervision`
+    (`superv`, locks `sv_*` and `grp_approval` on the account row, `put_supervision`,
+    `supervisions_due`, `end_supervision`); locks checked in `set_flag` and `set_requests_off`.
+  - `PUT` and `GET /v1/supervision`; `Group-Add-Approval` on commits and joins; the worker's sweep.
+  - `songbird_content::supervision`: `PolicyKey` (sign, approve), `ClientRules` (sealed under the
+    link secret), `link_code`, `unlink_at`, `CONSENT_AGES`.
+- Consequences: the app (M6) runs the parent's and child's flows on these. The consent table must
+  be confirmed by counsel before release (THREAT_MODEL §5).
+
+## D-0104 — Prompt 9, milestone 3: sealed presence batches, nudges in an attention class
+
+- Date: 2026-11-18
+- Status: accepted for the milestone (agent, under the approved plan D-0101); its threat-model rows
+  were approved by the owner on 2026-11-18 with the gate (D-0109)
+- Decided by: agent (with owner approval of the plan)
+- Context: encrypted presence and last seen to allowed contacts through the ephemeral lane, a
+  batched fan-out reusing the send path, debouncing and rate limits, invisible sending nothing; a
+  nudge in an attention class rate-limited per pair (D-0101 questions 3 and 4).
+- Options considered: identified presence on the WebSocket (the server would see each user's
+  contact list at every change) or sealed batches over HTTP (chosen, owner's answer to question
+  3); presence budgets per recipient account (one Valkey call per account, 500 per batch) or per IP
+  range counted per device (chosen; the access key already limits who can address whom); last seen
+  stored on the server or carried only in ephemeral presence (chosen, question 4).
+- Evidence: `presence_reaches_only_contacts_and_invisible_sends_nothing` and
+  `nudges_are_held_to_their_budgets_and_blocks_drop_them` (`tests/e2e/tests/gate_p09.rs`, a
+  delivery node, `api`, the registry and `valkey-hot`); proptests `invisible_never_sends_anything`
+  and `sends_are_debounced_and_the_last_state_is_always_sent`; `presence_batch_latency`: a
+  1,024-device batch (205 KiB, 16 devices online) p50 3.2 ms, max 10 ms over 19 runs on an Apple
+  M5 Pro, compose stack, in-process router.
+- Decision:
+  - `PUT /v1/ephemeral/sealed` (`songbird_proto::ephemeral::SealedBatch`) in `api`'s profiles,
+    behind the sealed-sender flag; the directory snapshot for keys; `Submit::ephemeral` routes
+    through the router `api` already has (publish-only Valkey in production).
+  - Client frame `0x04 Attention`; `Gate::attention` (budgets `q:n:` per pair, `q:m:` per
+    sender; blocks); `Client::attention`; metrics `delivery_attention_routed`/`_dropped`.
+  - `Content.presence` (17) and `Content.attention` (18); `songbird_content::presence::Presencer`
+    with a 5 s debounce, reply once per contact per minute, last seen to the minute, invisible
+    silent; the stored `Nudge` kind superseded.
+- Consequences: the app (M6) runs `Presencer` and sends sealed batches with its contacts' keys,
+  and nudges over its connection. Revisit the per-range budget with real NAT sizes.
+
+## D-0103 — Prompt 9, milestone 2: discoverability, group adds from contacts, the profile's contents
+
+- Date: 2026-11-18
+- Status: accepted for the milestone (agent, under the approved plan D-0101); its threat-model rows
+  were approved by the owner on 2026-11-18 with the gate (D-0109)
+- Decided by: agent (with owner approval of the plan)
+- Context: the prompt's server-enforced settings (username discoverability, who may reach you,
+  inactivity, plan), "who can add me to groups" (D-0101 question 6), and statuses and the about
+  line in the encrypted profile with a "profile changed" signal.
+- Options considered: discoverability off hiding the username from links too (breaks the links
+  and QR codes the user handed out) or only from lookups by name (chosen: a lookup through one of
+  the account's own link handles still resolves); group adds gated per added account with a key
+  each, or one XOR of all gated accounts' keys as broadcasts do (chosen: one answer whichever
+  account was missing); a server default of "contacts" for group adds (would refuse adds for every
+  existing account and test) or "everyone" with the app setting "contacts" at registration
+  (chosen).
+- Evidence: `a_hidden_account_is_found_only_through_its_own_link` (usernames live: 404 as for an
+  unknown name, a wrong link 404, the own link 200, a linked device 403 when loosening);
+  `group_adds_from_contacts_only_need_the_access_key` (groups gate, 13 of 13 pass: no key and a
+  wrong key 403 with nothing stored, the right key 200, a join request exempt, "everyone"
+  unchanged); `profiles_round_trip_bound_to_their_version`, `a_status_disappears_at_its_expiry`,
+  `fields_are_bounded_and_a_full_profile_fits_the_server_limit`.
+- Decision:
+  - `account.hidden` and `account.grp_contacts`; `GET /v1/account/settings`,
+    `PUT /v1/account/discoverable`, `PUT /v1/account/groups`; loosening by the primary only, in
+    the transaction; the directory snapshot carries `groups_contacts`.
+  - Lookups take an optional `link` handle; one SurrealQL statement of the same work in every case.
+  - Commits take `Group-Add-Access-Key`; exempt: the committer's account and accounts with a
+    pending join request.
+  - `songbird_content::profile`: `ProfilePlain` (name, about, status with emoji and expiry,
+    avatar, links), sealed with AES-256-GCM-SIV under a key from the profile key, the version in
+    the AAD, padded to 256 bytes; `Content.profile_changed` (tag 16).
+  - THREAT_MODEL §4 lists every server-enforced setting; plan is reserved for Prompt 11, parental
+    supervision for M4.
+- Consequences: the app (M5) sets "contacts" at registration, sends `profile_changed` after
+  edits, and adds the header when it adds contacts to groups. M4 makes a supervised account's
+  rules unloosenable.
+
+## D-0102 — Prompt 9, milestone 1: the account record store, with a manifest and a hybrid logical clock
+
+- Date: 2026-11-18
+- Status: accepted for the milestone (agent, under the approved plan D-0101); its threat-model rows
+  were approved by the owner on 2026-11-18 with the gate (D-0109)
+- Decided by: agent (with owner approval of the plan)
+- Context: settings, chat preferences and contacts must sync across devices without the server
+  seeing them, converge whatever order devices sync in, and survive a server that misbehaves
+  (D-0101 questions 2 and 10).
+- Options considered: per-record last writer wins alone (simpler; the server can withhold or roll
+  back records unseen); Signal's storage service (fresh IDs, an encrypted manifest that only moves
+  forward); a manifest listing every ID (rewritten whole at each write: 160 KiB at 10,000
+  records). Chosen: fresh IDs per write and a **small** manifest holding the version and a digest
+  of the ID set (76 bytes), written in the same compare-and-swap; the ID list is read separately
+  only when the version moved.
+- Evidence:
+  - `crates/sync/tests/convergence.rs`: proptest of 2 to 4 devices, ±1 h clock skews, offline
+    edits, deletions and random sync orders (512 cases): every device ends with the newest edit
+    of each key by stamp; a clock days ahead never pins a key; a delete and an offline edit
+    converge; tombstones go after 90 days and stale edits do not come back; withheld, swapped
+    and rolled-back records are refused; a key rotation rewrites everything.
+  - `services/api/tests/storage_live.rs` (SurrealDB, `valkey-hot`, `valkey-jobs`, `RustFS`):
+    replicas over HTTP converge; eight concurrent writers lose no edit; caps, lengths, versions,
+    other accounts and pending devices are refused; objects are the account's own; deletion
+    leaves nothing; latency below.
+  - Latency on an Apple M5 Pro (48 GB, macOS 27.2.1), compose stack, one `api` in the test
+    process: first write of 500 records 93 ms; a one-record sync p50 24 ms, p99 113 ms; a sync with
+    nothing new p50 5.6 ms, p99 36 ms; a fresh device reading 501 records p50 30 ms, p99 36 ms.
+    Development numbers, not the production host class.
+  - Fuzz target `storage` (every server decoder; the client's record and manifest openers).
+- Decision:
+  - `songbird_proto::storage` (wire), `songbird_accounts::storage` (rows `srec`, `sobj`; the
+    store's version and manifest on the account row), `services/api/src/storage.rs`
+    (`[api.storage]`), the new client crate `crates/sync` (sans-IO: HLC, records, manifest,
+    merge, sync loop, key rotation, an in-memory reference server).
+  - Records padded with Padmé from **256 bytes** (the plan said 64: at 64 two small settings
+    differed in size; at 256 most settings share one size); the server refuses other lengths.
+  - AES-256-GCM-SIV; a record key per ID from HKDF; zero nonce for records (one key each, never
+    rewritten), random nonce for the manifest.
+  - HLC with a 24 h follow bound; a write always beats the key's current stamp; tombstones
+    and stale local edits expire after 90 days.
+  - Caps per account: 10,000 records, 16 MiB, 16 objects of 2 MiB; a write may carry 20,000
+    deletions and 20,000 insertions, so a key rotation is one atomic write.
+  - The storage key travels in the provisioning message version 2; rotated keys and "fetch now"
+    travel in a new `storage` sync message; `settings` sync is superseded.
+  - No write time is stored.
+- Consequences: M2 to M6 keep everything they sync in the store; the app's settings (M5) define
+  each value's encoding (PROTOCOL §10.2). Rotation on device removal is the app's step (M5).
+  Revisit the caps with real usage; revisit the 24 h bound if clocks on real devices drift more.
+
+## D-0101 — Prompt 9: the plan, and the owner's decisions it needs
+
+- Date: 2026-11-18
+- Status: accepted (owner, 2026-11-18, "Approve all": every recommendation; a supervised child
+  may delete their own account)
+- Decided by: owner, on the agent's plan `docs/reports/P09-plan.md`
+- Context: Prompt 9 asks for encrypted settings sync, server-enforced settings, presence and
+  last seen, statuses, nudges, scenes and sound stickers, contacts sync and parental controls.
+  The owner widened the scope on 2026-11-18: every setting on the app's Settings screens made
+  real, except those later prompts own (backups, Prompt 10; plans, Prompt 11; WhatsApp, Prompt
+  14). What exists: message requests and the inactivity period (server-enforced), profiles
+  (one encrypted blob), the ephemeral lane (one device per frame, identified, ungated), a
+  stored `Nudge` kind, pack kinds for scenes, sounds and emoticons, and a mocked app whose
+  settings are neither saved nor synced. Missing: an account record store, an HLC, username
+  discoverability, a profile-changed signal, batched presence, an attention class, contacts,
+  parental controls, app-core.
+- Options considered and evidence: in the plan ("What Prompt 9 starts from", "Findings", "Every
+  setting, and where it lands").
+- Decisions asked of the owner (recommendations first):
+  1. the scope inventory as written; host-only rows (biometrics, screenshot blocking, app
+     switcher, passkeys) after the whole app is built;
+  2. fresh record IDs per write and an encrypted manifest in the same compare-and-swap;
+  3. presence sealed, batched and gated by the recipients' access keys;
+  4. last seen through the ephemeral lane only, no new server state;
+  5. app lock by an in-app passcode now;
+  6. a server-enforced "contacts only" bit for group adds, proved by the access key;
+  7. "My contacts" and "Nobody" for photo, about and status;
+  8. parental controls with a per-child policy key unlinked to the parent's account, rule bits,
+     a version and an unlink date, never the parent's identity or the birth date; and whether a
+     supervised child may delete their own account (recommended yes);
+  9. WhatsApp's defaults (contacts see last seen and online; receipts and typing on).
+- Agent decisions, unless the owner objects: `crates/sync` shared with app-core; HLC with a
+  24-hour clamp and 90-day tombstones; Padmé padding and write counters; AES-256-GCM-SIV under
+  per-record keys; the storage key in provisioning v2 and rotated on device removal; caps
+  measured in M1; custom wallpapers as storage objects; nudges identified in an attention class
+  with pair and sender budgets, the stored `Nudge` kind removed; discoverability off keeps links
+  and QR codes working; `SettingsSync` and `starred` sync replaced by records; the pack item
+  limit lowered to 16 MiB; proxy dialing in `crates/client`; one branch and one PR.
+- Consequences: M1 (the record store) starts first.
 
 ## D-0100 — Prompt 8: the security review's fixes
 

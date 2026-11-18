@@ -24,7 +24,9 @@ thread_local! {
 /// has no account.
 pub fn connect() {
     disconnect();
-    let Some((device, seed)) = device_key() else { return };
+    let Some((device, seed)) = device_key() else {
+        return;
+    };
     let endpoint = live().with_untracked(|l| l.endpoint.clone());
     let Ok(key) = DeviceKey::from_seed(DeviceId::from_bytes(device), &seed) else {
         live().update(|l| l.problem = Some("This device's key is damaged.".into()));
@@ -35,6 +37,27 @@ pub fn connect() {
         l.waiting = 0;
     });
     let mut cfg = ClientConfig::new(endpoint.ws_addr, endpoint.ws_name);
+    // The proxy setting (Prompt 9): TLS to the proxy, the server's own TLS
+    // inside it. A proxy only carries TLS, so the endpoint is reached over TLS.
+    let proxy =
+        crate::store::try_store().and_then(|s| s.settings.with_untracked(|x| x.proxy.clone()));
+    if let Some(host) = proxy {
+        let route =
+            songbird_types::proxy_link::ProxyLink::parse(&format!("songbird://proxy#{host}"), &[])
+                .ok();
+        match (route, songbird_client::web_tls()) {
+            (Some(link), Some(tls)) => {
+                cfg.proxy = Some(songbird_client::ProxyRoute::from_link(&link, tls.clone()));
+                cfg.tls = Some(tls);
+            }
+            _ => {
+                live().update(|l| {
+                    l.problem = Some("The proxy address isn't valid. Check it in Proxy.".into())
+                });
+                return;
+            }
+        }
+    }
     // Right after registration delivery's device directory may lag a poll.
     cfg.new_device_grace = std::time::Duration::from_secs(10);
     let task = spawn(async move {

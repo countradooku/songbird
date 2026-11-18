@@ -109,7 +109,11 @@ fn note(glyph: Icon, title: &'static str, line: &'static str) -> View {
             view()
                 .flex_1()
                 .gap(px(2.0))
-                .child(text(title).text_size(px(font::body())).font_weight(FontWeight::MEDIUM))
+                .child(
+                    text(title)
+                        .text_size(px(font::body()))
+                        .font_weight(FontWeight::MEDIUM),
+                )
                 .child(muted(line)),
         )
 }
@@ -185,7 +189,12 @@ fn message_tone() {
     tone_page("Message tone", "Message tones", &MESSAGE_TONES, false);
 }
 
-fn tone_page(title: &'static str, heading: &'static str, tones: &'static [&'static str], ring: bool) {
+fn tone_page(
+    title: &'static str,
+    heading: &'static str,
+    tones: &'static [&'static str],
+    ring: bool,
+) {
     super::push(title, move || {
         let s = store();
         let ext = s.ext();
@@ -196,17 +205,38 @@ fn tone_page(title: &'static str, heading: &'static str, tones: &'static [&'stat
                     .iter()
                     .map(|t| {
                         let t: &'static str = t;
-                        radio_row(t, None, move || ext.with(|x| if ring { x.ringtone == t } else { x.message_tone == t }), move || {
-                            s.ext_update(|x| if ring { x.ringtone = t } else { x.message_tone = t });
-                            // mock: the sound plays through the platform's audio session.
-                            if t != "None" {
-                                announce_for_accessibility(format!("Playing {t}"));
-                            }
-                        })
+                        radio_row(
+                            t,
+                            None,
+                            move || {
+                                ext.with(|x| {
+                                    if ring {
+                                        x.ringtone == t
+                                    } else {
+                                        x.message_tone == t
+                                    }
+                                })
+                            },
+                            move || {
+                                s.ext_update(|x| {
+                                    if ring {
+                                        x.ringtone = t
+                                    } else {
+                                        x.message_tone = t
+                                    }
+                                });
+                                // mock: the sound plays through the platform's audio session.
+                                if t != "None" {
+                                    announce_for_accessibility(format!("Playing {t}"));
+                                }
+                            },
+                        )
                     })
                     .collect(),
             ))
-            .child(foot("Songbird's own sounds. A chat can have its own, set in its info."))
+            .child(foot(
+                "Songbird's own sounds. A chat can have its own, set in its info.",
+            ))
             .into_element()
     });
 }

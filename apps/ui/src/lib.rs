@@ -26,7 +26,8 @@ use crate::store::Store;
 /// screenshots and notification checks on emulators and devices). Preview builds skip the first
 /// run on request, show the Calls tab's test rows and honour `SONGBIRD_DEMO_ARRIVALS`; a release
 /// build does none of it, whatever else the variable holds (D-0100).
-pub const PREVIEW_BUILD: bool = cfg!(debug_assertions) || is_one(option_env!("SONGBIRD_PREVIEW_BUILD"));
+pub const PREVIEW_BUILD: bool =
+    cfg!(debug_assertions) || is_one(option_env!("SONGBIRD_PREVIEW_BUILD"));
 
 const fn is_one(v: Option<&str>) -> bool {
     match v {
@@ -40,7 +41,14 @@ mod preview_tests {
     #[test]
     fn only_exactly_one_marks_a_preview_build() {
         assert!(super::is_one(Some("1")));
-        for v in [None, Some(""), Some("0"), Some("true"), Some("11"), Some(" 1")] {
+        for v in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("true"),
+            Some("11"),
+            Some(" 1"),
+        ] {
             assert!(!super::is_one(v), "{v:?}");
         }
     }
@@ -82,8 +90,19 @@ fn camera_components_linux(components: &nsh_platform_linux::Components) {
 pub fn App() -> impl IntoElement {
     let s = Store::new();
     store::install(s);
+    // Settings saved on this device, and the encrypted records synced from
+    // the account's other devices (Prompt 9); before the connection, which
+    // reads the proxy setting.
+    backend::records::restore(s);
     camera::install_for_app();
     backend::restore();
+    backend::records::periodic(s);
+    // Prompt 9, M6: the encrypted profile follows the user's edits, and
+    // presence follows the app's lifecycle and the privacy settings.
+    backend::profile::install(s);
+    backend::presence::install(s);
+    s.refresh_server_settings();
+    features::lock::install(s);
     theming::follow_settings(s);
     features::desktop::install_shortcuts();
     features::notify::install(features::desktop::current_chat);
@@ -94,10 +113,19 @@ pub fn App() -> impl IntoElement {
         .bg(move || ui::c::background())
         .text_color(move || ui::c::foreground())
         .child(
-            when(onboarded, || when(ui::wide, shell::desktop).otherwise(shell::phone))
-                .otherwise(features::onboarding::flow),
+            view()
+                .flex_1()
+                // Screen readers skip the app while it's locked (Prompt 9).
+                .accessibility_elements_hidden(move || features::lock::locked().get().0)
+                .child(
+                    when(onboarded, || {
+                        when(ui::wide, shell::desktop).otherwise(shell::phone)
+                    })
+                    .otherwise(features::onboarding::flow),
+                ),
         )
         .child(features::desktop::jump::layer())
+        .child(features::lock::layer())
         .child(features::calls::call_layer())
         .child(ui::toast_layer())
 }

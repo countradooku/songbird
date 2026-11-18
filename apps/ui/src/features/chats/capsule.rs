@@ -29,7 +29,11 @@ fn track_height() -> f32 {
 /// The capsule's label size: the row preview's size, so the list keeps to
 /// three text sizes.
 fn label_size() -> f32 {
-    if is_desktop() { font::SMALL } else { font::BODY_DESKTOP }
+    if is_desktop() {
+        font::SMALL
+    } else {
+        font::BODY_DESKTOP
+    }
 }
 
 /// Apple and Material draw segmented controls as capsules; Fluent and
@@ -118,14 +122,25 @@ pub fn lists_capsule(s: Store) -> View {
         // container, flat).
         .indicator_style(move |st| {
             let st = st.top_1().bottom_1();
-            let st = if round() { st.rounded_full() } else { st.rounded(radius::sm()) };
+            let st = if round() {
+                st.rounded_full()
+            } else {
+                st.rounded(radius::sm())
+            };
             if material {
                 st.bg(c::accent())
             } else {
-                st.bg(c::raised()).border_1().border_color(c::border()).shadow_sm()
+                st.bg(c::raised())
+                    .border_1()
+                    .border_color(c::border())
+                    .shadow_sm()
             }
         })
-        .child(each(move || segments(s), |w: &Filter| w.clone(), |w, _| segment(w.get_untracked())));
+        .child(each(
+            move || segments(s),
+            |w: &Filter| w.clone(),
+            |w, _| segment(w.get_untracked()),
+        ));
 
     let manage = button()
         .on_press(pages::open_lists)
@@ -142,7 +157,11 @@ pub fn lists_capsule(s: Store) -> View {
         .duration(motion::INSTANT)
         .hover(|st| st.text_color(move || c::foreground()))
         .active(|st| st.opacity(0.7))
-        .focus_visible(|st| st.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
+        .focus_visible(|st| {
+            st.outline(px(2.0))
+                .outline_offset(px(2.0))
+                .outline_color(move || c::ring())
+        })
         .child(icon(Icon::Plus, 16.0));
 
     view()
@@ -196,7 +215,11 @@ pub fn unread_toggle() -> nsh_base::ButtonElement {
         .duration(motion::FAST)
         .hover(|st| st.opacity(0.85))
         .active(|st| st.opacity(0.7))
-        .focus_visible(|st| st.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
+        .focus_visible(|st| {
+            st.outline(px(2.0))
+                .outline_offset(px(2.0))
+                .outline_color(move || c::ring())
+        })
         // The filter glyph, as Mail's Unread filter: an empty ring read as
         // a radio button. Muted off, the accent ink on the selection wash on.
         .child(

@@ -35,3 +35,11 @@ the phone long-press sheet (the macOS host's mouse never triggers a hold, by des
 | Unread toggle | Rows that leave fade, the rest glide | Instant |
 | Pin or unpin | The chat leaves the rows and appears in pinned people (glide and fade) | Instant |
 | Unread ring colour | Fades over `BASE` | Kept (a colour fade) |
+
+## Prompt 9, M6: presence marks
+
+| Change | Motion | Reduced motion |
+| --- | --- | --- |
+| A person's presence changes (online, away, busy, none) | The avatar's corner mark fades in or out, `BASE`; its shape swaps at once (filled dot, ring, dot with a bar); the row's label says the word | Same (a fade) |
+
+Not frame-captured in this milestone.

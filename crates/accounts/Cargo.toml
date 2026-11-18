@@ -11,6 +11,8 @@ license.workspace = true
 songbird-types.workspace = true
 songbird-surreal.workspace = true
 songbird-jobs.workspace = true
+# The record store's wire types (Prompt 9, D-0102).
+songbird-proto.workspace = true
 aws-lc-rs.workspace = true
 bytes.workspace = true
 getrandom.workspace = true

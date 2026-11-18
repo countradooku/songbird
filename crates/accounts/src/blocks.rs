@@ -33,6 +33,10 @@ pub struct AccessRow {
     pub open: bool,
     /// Message requests are refused (dropped silently).
     pub requests_off: bool,
+    /// Group adds need the account's access key (Prompt 9, D-0103).
+    pub groups_contacts: bool,
+    /// Group adds need a parent's approval signed by this key (Prompt 9, D-0105).
+    pub approval_key: Option<[u8; 32]>,
 }
 
 impl Registry {
@@ -158,9 +162,12 @@ impl Registry {
         account: &AccountId,
         off: bool,
     ) -> Result<(), RegistryError> {
-        self.db
+        // Accepting requests again is refused while a parent's policy refuses them (D-0105).
+        let r = self
+            .db
             .query(
                 "BEGIN TRANSACTION;
+                 IF !$off AND (account:[$a].sv_requests ?? false) { THROW 'songbird:supervised' };
                  UPDATE account:[$a] SET requests_off = $off WHERE deleting = false RETURN NONE;
                  UPDATE directory:v SET version += 1 RETURN NONE;
                  COMMIT TRANSACTION;",
@@ -169,8 +176,14 @@ impl Registry {
                     var("off", Value::Bool(off)),
                 ],
             )
-            .await?;
-        Ok(())
+            .await;
+        match r {
+            Ok(_) => Ok(()),
+            Err(DbError::Statement(k)) if k == "Thrown:supervised" => {
+                Err(RegistryError::Supervised)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Whether an account refuses message requests.
@@ -223,7 +236,8 @@ impl Registry {
         let v = self
             .db
             .query1(
-                "SELECT meta::id(id)[0] AS a, uak, uak_open, requests_off FROM account
+                "SELECT meta::id(id)[0] AS a, uak, uak_open, requests_off, grp_contacts, grp_approval
+                   FROM account
                    WHERE deleting = false;",
                 Vec::new(),
             )
@@ -241,6 +255,11 @@ impl Registry {
                     .and_then(|b| <[u8; 16]>::try_from(b.as_ref()).ok()),
                 open: matches!(r.get("uak_open"), Some(Value::Bool(true))),
                 requests_off: matches!(r.get("requests_off"), Some(Value::Bool(true))),
+                groups_contacts: matches!(r.get("grp_contacts"), Some(Value::Bool(true))),
+                approval_key: r
+                    .get("grp_approval")
+                    .and_then(|b| b.as_bytes())
+                    .and_then(|b| <[u8; 32]>::try_from(b.as_ref()).ok()),
             });
         }
         Ok(out)

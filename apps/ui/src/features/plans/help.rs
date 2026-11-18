@@ -25,8 +25,19 @@ fn help_page() -> Screen {
         .w_full()
         .max_w(px(760.0))
         .self_center()
-        .child(view().px_4().pt_4().child(search_field("Search help", query)))
-        .child(section_title(move || if searching() { "Results" } else { "Popular articles" }))
+        .child(
+            view()
+                .px_4()
+                .pt_4()
+                .child(search_field("Search help", query)),
+        )
+        .child(section_title(move || {
+            if searching() {
+                "Results"
+            } else {
+                "Popular articles"
+            }
+        }))
         .child(when(
             move || results.with(|r| r.is_empty()),
             move || {
@@ -34,7 +45,9 @@ fn help_page() -> Screen {
                     Icon::Search,
                     "No articles found",
                     "Try other words, or contact us and a person will help.",
-                    Some(btn("Contact us…", Variant::Secondary, BtnSize::Md, contact).into_element()),
+                    Some(
+                        btn("Contact us…", Variant::Secondary, BtnSize::Md, contact).into_element(),
+                    ),
                 )
             },
         ))
@@ -46,7 +59,10 @@ fn help_page() -> Screen {
                 .bg(move || c::card())
                 .border_1()
                 .border_color(move || c::border())
-                .style_when(move || results.with(|r| r.is_empty()), |st| st.hidden().border_color(AdaptiveColor::TRANSPARENT))
+                .style_when(
+                    move || results.with(|r| r.is_empty()),
+                    |st| st.hidden().border_color(AdaptiveColor::TRANSPARENT),
+                )
                 .child(each(
                     move || results.get(),
                     |i| *i,
@@ -54,7 +70,11 @@ fn help_page() -> Screen {
                         let a = &ARTICLES[i.get_untracked()];
                         let id = a.id;
                         view()
-                            .child(view().style_when(move || index.get() == 0, |st| st.hidden()).child(separator_inset(16.0)))
+                            .child(
+                                view()
+                                    .style_when(move || index.get() == 0, |st| st.hidden())
+                                    .child(separator_inset(16.0)),
+                            )
                             .child(
                                 Row::new(a.title)
                                     .subtitle(a.summary)
@@ -158,10 +178,14 @@ fn article_page(id: &'static str) -> Screen {
                         view()
                             .flex_row()
                             .gap_2()
-                            .child(chip("Yes", || false, move || {
-                                answered.set(Some(true));
-                                toast("Thanks for telling us");
-                            }))
+                            .child(chip(
+                                "Yes",
+                                || false,
+                                move || {
+                                    answered.set(Some(true));
+                                    toast("Thanks for telling us");
+                                },
+                            ))
                             .child(chip("No", || false, move || answered.set(Some(false))))
                     },
                 ))
@@ -175,7 +199,12 @@ fn article_page(id: &'static str) -> Screen {
                         view()
                             .gap_2()
                             .child(muted("Sorry about that. A person can help."))
-                            .child(view().flex_row().child(btn("Contact us…", Variant::Secondary, BtnSize::Md, contact)))
+                            .child(view().flex_row().child(btn(
+                                "Contact us…",
+                                Variant::Secondary,
+                                BtnSize::Md,
+                                contact,
+                            )))
                     },
                 )),
         );
@@ -362,8 +391,14 @@ pub fn licences() {
                     .child(muted("Version 0.1.0 (1) · Beta").select_text()),
             )
             .child(section_title("Open-source licences"))
-            .child(group(LICENCES.iter().map(|(name, licence)| super::info_row(name, *licence))))
-            .child(crate::features::settings::foot("The full texts of these licences ship with the app."));
+            .child(group(
+                LICENCES
+                    .iter()
+                    .map(|(name, licence)| super::info_row(name, *licence)),
+            ))
+            .child(crate::features::settings::foot(
+                "The full texts of these licences ship with the app.",
+            ));
         page("Version and licences", page_scroll(body))
     });
 }

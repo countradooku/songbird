@@ -16,8 +16,8 @@ use std::{
 
 use nsh_core::{platform::Lifecycle, prelude::*};
 use songbird_camera::{
-    Access, Backend, Capture, CaptureError, Config, Event, Frame, Lens, Purpose, Sink, Still, Unavailable,
-    mailbox,
+    Access, Backend, Capture, CaptureError, Config, Event, Frame, Lens, Purpose, Sink, Still,
+    Unavailable, mailbox,
 };
 
 use crate::ui::*;
@@ -62,7 +62,12 @@ pub fn install_for_app() {
 /// code after a moment, as the mocked flows did before the camera existed.
 fn demo() -> songbird_camera::fake::FakeCamera {
     let fake = songbird_camera::fake::FakeCamera::new();
-    fake.photo_gives(Ok(Still { bytes: Vec::new(), mime: "image/jpeg", width: 3, height: 4 }));
+    fake.photo_gives(Ok(Still {
+        bytes: Vec::new(),
+        mime: "image/jpeg",
+        width: 3,
+        height: 4,
+    }));
     DEMO.with(|d| *d.borrow_mut() = Some(fake.clone()));
     fake
 }
@@ -197,7 +202,8 @@ pub fn use_session(
         effect(move || {
             let shown_here = active();
             // A call keeps its camera on a desktop whose window is minimised.
-            let backgrounded = lifecycle() == Lifecycle::Background && !(purpose == Purpose::Call && is_desktop());
+            let backgrounded =
+                lifecycle() == Lifecycle::Background && !(purpose == Purpose::Call && is_desktop());
             let access = cam.access.get();
             let _ = s.retries.get();
             untracked(|| {
@@ -297,7 +303,11 @@ impl Session {
         self.shown.set(Shown::Asking);
         let tx = Mutex::new(Some(self.answers.clone()));
         backend.request_access(Box::new(move |answer| {
-            if let Some(tx) = tx.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+            if let Some(tx) = tx
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
                 tx.send(answer);
             }
         }));
@@ -314,7 +324,11 @@ impl Session {
         *self.photo_done.borrow_mut() = Some(Box::new(done));
         let tx = Mutex::new(Some(self.photos.clone()));
         c.capture_photo(Box::new(move |r| {
-            if let Some(tx) = tx.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+            if let Some(tx) = tx
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
                 tx.send(r);
             }
         }));
@@ -357,7 +371,10 @@ impl Session {
 
 /// Opens the system's camera settings, where there is a page for them.
 fn open_settings() {
-    if let Some(url) = current().and_then(|c| c.backend).and_then(|b| b.settings_url()) {
+    if let Some(url) = current()
+        .and_then(|c| c.backend)
+        .and_then(|b| b.settings_url())
+    {
         // Acts at once; whether it opened does not change what the screen shows.
         drop(open_url(url));
     }
@@ -475,15 +492,27 @@ pub fn preview_fill(session: &Session) -> View {
     let preview = session.preview;
     view().absolute().inset_0().child(
         native("songbird/camera")
-            .prop("session", move || preview.get().map_or(serde_json::Value::Null, serde_json::Value::from))
-            .prop("purpose", serde_json::Value::from(format!("{:?}", session.purpose)))
+            .prop("session", move || {
+                preview
+                    .get()
+                    .map_or(serde_json::Value::Null, serde_json::Value::from)
+            })
+            .prop(
+                "purpose",
+                serde_json::Value::from(format!("{:?}", session.purpose)),
+            )
             .flex_1()
             .role(AccessibilityRole::Image)
             .label("Your camera"),
     )
 }
 
-fn state(glyph: Icon, title: &'static str, message: String, action: Option<AnyElement>) -> AnyElement {
+fn state(
+    glyph: Icon,
+    title: &'static str,
+    message: String,
+    action: Option<AnyElement>,
+) -> AnyElement {
     empty_state(glyph, title, message, action).into_element()
 }
 

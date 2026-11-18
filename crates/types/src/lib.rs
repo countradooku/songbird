@@ -12,6 +12,7 @@ pub mod config;
 pub mod dns;
 pub mod error;
 pub mod id;
+pub mod proxy_link;
 pub mod secret;
 
 pub use error::{ConfigError, IdError};

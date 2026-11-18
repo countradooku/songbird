@@ -150,6 +150,7 @@ async fn stack() -> Option<Stack> {
         registration: None,
         usernames: None,
         keys: None,
+        storage: None,
         kt: None,
         profiles: None,
         devices: None,

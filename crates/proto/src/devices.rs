@@ -36,6 +36,13 @@
 //! version u8 (1) | account [16] | account_identity [32] | token [32] | device [16]
 //!   | confirm_key [32] | u8 len | server_name
 //! ```
+//!
+//! Version 2 (Prompt 9, D-0102) adds the account's storage key, so the new device can read and
+//! write the encrypted record store (settings, contacts):
+//!
+//! ```text
+//! version u8 (2) | ...version 1's fields... | storage_key [32]
+//! ```
 
 use songbird_types::id::ID_LEN;
 use songbird_types::{AccountId, DeviceId};
@@ -413,7 +420,12 @@ pub struct Provision {
     pub confirm_key: [u8; 32],
     /// The server the account lives on.
     pub server_name: String,
+    /// The account's storage key (version 2; Prompt 9).
+    pub storage_key: Option<[u8; 32]>,
 }
+
+/// The provisioning message's version with the storage key.
+pub const PROVISION_V2: u8 = 2;
 
 impl Provision {
     /// The plaintext.
@@ -425,8 +437,13 @@ impl Provision {
         if self.server_name.is_empty() {
             return Err(DevicesError::Malformed);
         }
-        let mut b = Vec::with_capacity(1 + 16 + 32 + 32 + 16 + 32 + 1 + self.server_name.len());
-        b.push(VERSION);
+        let mut b =
+            Vec::with_capacity(1 + 16 + 32 + 32 + 16 + 32 + 1 + self.server_name.len() + 32);
+        b.push(if self.storage_key.is_some() {
+            PROVISION_V2
+        } else {
+            VERSION
+        });
         b.extend_from_slice(self.account.as_bytes());
         b.extend_from_slice(&self.account_identity);
         b.extend_from_slice(&self.token);
@@ -434,6 +451,9 @@ impl Provision {
         b.extend_from_slice(&self.confirm_key);
         b.push(len);
         b.extend_from_slice(self.server_name.as_bytes());
+        if let Some(k) = &self.storage_key {
+            b.extend_from_slice(k);
+        }
         Ok(b)
     }
 
@@ -443,7 +463,8 @@ impl Provision {
     /// [`DevicesError::Malformed`].
     pub fn decode(input: &[u8]) -> Result<Self, DevicesError> {
         let mut r = Reader(input);
-        if r.u8()? != VERSION {
+        let version = r.u8()?;
+        if version != VERSION && version != PROVISION_V2 {
             return Err(DevicesError::Malformed);
         }
         let account = AccountId::from_bytes(r.id16()?);
@@ -453,6 +474,11 @@ impl Provision {
         let confirm_key = r.array()?;
         let n = usize::from(r.u8()?);
         let name = r.take(n)?;
+        let storage_key = if version == PROVISION_V2 {
+            Some(r.array()?)
+        } else {
+            None
+        };
         if n == 0 || !r.0.is_empty() {
             return Err(DevicesError::Malformed);
         }
@@ -466,6 +492,7 @@ impl Provision {
             device,
             confirm_key,
             server_name,
+            storage_key,
         })
     }
 }
@@ -626,9 +653,19 @@ mod tests {
             device: DeviceId::from_bytes([4; 16]),
             confirm_key: [5; 32],
             server_name: "chat.example".to_owned(),
+            storage_key: None,
         };
         let b = p.encode().unwrap();
         assert_eq!(Provision::decode(&b), Ok(p.clone()));
+        // Version 2 carries the storage key; cut short it does not decode.
+        let v2 = Provision {
+            storage_key: Some([6; 32]),
+            ..p.clone()
+        };
+        let b2 = v2.encode().unwrap();
+        assert_eq!(b2.first(), Some(&PROVISION_V2));
+        assert_eq!(Provision::decode(&b2), Ok(v2));
+        assert!(Provision::decode(&b2[..b2.len() - 1]).is_err());
         for cut in 0..b.len() {
             assert!(Provision::decode(&b[..cut]).is_err());
         }

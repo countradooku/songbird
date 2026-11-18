@@ -555,6 +555,8 @@ Prompt 11's plans). Integers are big-endian.
    channel holds one message, written once and read once, and lives ten minutes. The server sees
    only the envelope. Plaintext:
    `version u8 (1) | account [16] | account_identity [32] | token [32] | device [16] | confirm_key [32] | u8 len | server_name`.
+   Version 2 (Prompt 9, D-0102) appends `storage_key [32]`, the account's storage key for the
+   record store (§10.1).
 4. The new device reads it (`GET /v1/provisioning/<channel>`, unsigned; waits up to 25 s, 204
    when nothing came, 404 once it has been read or the channel is gone) and opens it.
 5. The new device links (`POST /v1/devices/link`, unsigned, throttled per IP range):
@@ -817,7 +819,8 @@ Decision D-0056 (M7).
   - username (held 30 days, unlinked) and links;
   - link tokens;
   - the profile, device list, PIN and transparency salt on the account row;
-  - pending requests to join groups (Prompt 5). Group messages are no longer stored for the
+  - pending requests to join groups (Prompt 5);
+  - the record store's records and objects (Prompt 9). Group messages are no longer stored for the
     devices. Their leaves, and the account ID if it held a role, stay in each group's MLS state
     until a member commits the removal (D-0073).
   Encrypted backups keep the data until they expire (at most 93 days); a restore deletes it
@@ -1010,6 +1013,7 @@ Sent only to the sender's own other devices (a send that addresses only the send
 | `blocked` | The whole block list (accounts and groups), replacing the previous one. The server keeps only what it must to drop blocked senders (§5.11). |
 | `call_history` | Call log entries (Prompt 7's calls), so every device shows the same history. |
 | `request_response` | What the user did with a message request (§5.10). |
+| `storage` | The account record store (§10.1): a new storage key after a rotation, or "the store changed, fetch now". Settings live in the store; the `settings` kind is superseded. |
 
 ### 5.9 Restricted chat
 
@@ -2051,6 +2055,82 @@ The bandwidth each mode uses is measured in M5 (`P07-gate.md`).
 ## 9. Push (Prompt 8)
 
 ## 10. Settings sync and presence (Prompt 9)
+
+### 10.1 The account record store (M1, D-0102)
+
+An account's settings, per-chat preferences, contacts and lists are **records**: encrypted by
+the account's devices under a storage key the server never holds, stored opaque under random
+IDs. The client library is `crates/sync`; the wire types are `songbird_proto::storage`.
+
+**Records are never changed in place.** A new value is a new record under a fresh random 16-byte
+ID, and the record it replaces is deleted in the same write, so the set of IDs names the whole
+state. Every write is a compare-and-swap of the store's version:
+
+| Method and path | Body | Answer |
+| --- | --- | --- |
+| `GET /v1/storage` | — | `version u64 \| mlen u16 \| manifest` |
+| `GET /v1/storage/ids` | — | `version u64 \| n u32 \| id [16] * n` |
+| `POST /v1/storage/read` | `n u16 (1..=1024) \| id [16] * n` | `n u16 \| (id [16] \| len u16 \| record) * n`, IDs that no longer exist left out |
+| `PUT /v1/storage` | `version u8 (1) \| expected u64 \| mlen u16 \| manifest \| ndel u32 \| id [16] * ndel \| nins u32 \| (id [16] \| len u16 \| record) * nins` | 200 `{"version"}`; 409 `{"error": "version", "version"}` when another write won; 409 `full`; 409 `exists` for an ID already used; 400 `storage` |
+| `PUT /v1/storage/object` | an encrypted object, at most 2 MiB | `{"object": hex}` (a server-drawn 32-byte ID); 409 `full` |
+| `GET` and `DELETE /v1/storage/object/<id>` | — | the account's own objects only; 404 for any other |
+
+- Every endpoint needs a listed device of the account; a pending device gets 403 `pending`.
+- A record's length must be a Padmé value of 256 to 4,096 bytes plus a 16-byte tag
+  (`valid_record_len`), so most settings records share one size. A manifest is 16 to 256 bytes.
+- Caps per account (`[api.storage]`): 10,000 records, 16 MiB of records, 16 objects. A write may
+  delete and insert up to 20,000 records each, so a key rotation fits in one write.
+- Throttles per account, in `valkey-hot` under keyed names (`st:<kind>:<hmac>`): writes and reads
+  per hour.
+- No write time is stored; the server keeps the version counter only.
+
+**Keys.** The storage key is 32 random bytes made by the primary at registration, given to a
+linked device in the provisioning message (version 2, §4.6), and rotated when a device is
+removed:
+
+- `key_id = HMAC-SHA256(storage key, "songbird.v1/storage-key-id")[..8]`;
+- a record's key: `HKDF-SHA256(salt = "songbird.v1/storage", ikm = storage key,
+  info = "record\0" ‖ id)`; AES-256-GCM-SIV, zero nonce (one key per record, never rewritten),
+  AAD `"songbird.v1/storage-record\0" ‖ id`;
+- the manifest's key: the same HKDF with `info = "manifest"`; AES-256-GCM-SIV, random nonce,
+  AAD `"songbird.v1/storage-manifest\0" ‖ key_id`.
+
+**Record plaintext:** `be32(len) ‖ RecordPlain ‖ zeros` to the padded length. `RecordPlain`
+(protobuf): `key` (the logical key, §10.2, at most 256 bytes), the stamp (`wall_ms`, `counter`,
+`node` of 16 bytes), `deleted` (a tombstone, empty value) and `value`.
+
+**Manifest:** `key_id [8] ‖ nonce [12] ‖ AES-256-GCM-SIV(version u64 ‖ digest [32]) ‖ tag`
+(76 bytes); `digest = SHA-256("songbird.v1/storage-ids\0" ‖ sorted IDs)`; `version` is the store
+version the manifest was written at.
+
+**A device accepts a store only if:** the manifest opens under its storage key (another `key_id`:
+the key was rotated, wait for the new one); the manifest names the head's version; its digest
+matches the IDs; every record opens under its ID; and the version is not below one the device
+already saw. A store that fails is refused whole: a server that withholds, swaps, replays or
+rolls back records is caught. A new device trusts the first manifest it sees.
+
+**Merge.** Per logical key, the record with the greatest stamp wins, local edits included. A
+stamp is a hybrid logical clock `(wall ms, counter, node)`: a device's clock never goes
+backwards, follows remote stamps at most 24 hours ahead of its own time, and a write always gets
+a stamp above the key's current one, so a bad clock can never pin a key. Deletions are tombstones,
+collected 90 days later; a device away longer drops its own unwritten edits older than that.
+Convergence is proved by `crates/sync/tests/convergence.rs`.
+
+### 10.2 Logical keys
+
+Inside the ciphertext only:
+
+| Prefix | Holds |
+| --- | --- |
+| `s/<name>` | An account-wide setting |
+| `c/<chat>/<name>` | A per-chat preference; `<chat>` is the hex of the peer's account ID or the group ID |
+| `k/<id>` | A saved contact (name, notes, buddy-list groups) |
+| `l/<id>` | A custom chat list |
+| `b/<id>` | A broadcast list |
+| `x/<id>` | A starred message |
+| `p/<id>` | An installed pack |
+
+The values of each setting are defined with the app's settings (M5).
 
 ## 11. Backup format and vault access (Prompt 10)
 

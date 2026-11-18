@@ -371,7 +371,14 @@ message SyncMessage {
     BlockListSync blocked = 7;
     CallHistorySync call_history = 8;
     RequestResponse request_response = 9;
+    StorageSync storage = 10;
   }
+}
+
+// The account record store (Prompt 9, PROTOCOL §10.1).
+message StorageSync {
+  bytes key = 1;     // empty, or a new 32-byte storage key after a rotation
+  bool changed = 2;  // the store changed: fetch it now
 }
 
 // What this device sent, so the others show it too.
@@ -409,8 +416,8 @@ message ChatState {
   bool marked_unread = 5;
 }
 
-// Settings that follow the user across devices (Prompt 9 adds the rest). Unset fields are
-// unchanged.
+// Superseded by the account record store (Prompt 9, PROTOCOL §10): apps keep settings there.
+// Unset fields are unchanged.
 message SettingsSync {
   optional bool read_receipts = 1;
   optional bool typing_indicators = 2;

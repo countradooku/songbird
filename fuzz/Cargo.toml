@@ -24,6 +24,7 @@ songbird-groups = { path = "../crates/groups" }
 songbird-calls = { path = "../services/calls" }
 songbird-groups-harness = { path = "../tests/groups" }
 songbird-send = { path = "../crates/send" }
+songbird-sync = { path = "../crates/sync" }
 akd = { version = "=0.13.0", default-features = false, features = ["whatsapp_v1", "serde_serialization", "public_auditing"] }
 bytes = "1"
 prost = "0.14"
@@ -238,6 +239,13 @@ bench = false
 [[bin]]
 name = "call_records"
 path = "fuzz_targets/call_records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "storage"
+path = "fuzz_targets/storage.rs"
 test = false
 doc = false
 bench = false

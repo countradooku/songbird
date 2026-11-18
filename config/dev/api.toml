@@ -79,6 +79,18 @@ filter = "info"
 # certificate_key = { file = "/path/to/certificate-seed.hex" }   # with sealed_sender
 # sealed_sender = false                                           # the flag; Prompt 12 verifies it
 #
+# The account record store: synced settings, contacts, lists (Prompt 9, M1, D-0102). Absent:
+# those endpoints answer 503.
+# [api.storage]
+# secret = { file = "/path/to/storage-secret.hex" }              # 64 hex; same on every api node
+# max_records = 10000                                             # per account
+# max_bytes = 16777216                                            # per account, ciphertext
+# max_objects = 16                                                # custom wallpapers, 2 MiB each
+# writes_per_hour = 3600
+# write_burst = 120
+# reads_per_hour = 7200
+# read_burst = 240
+#
 # Key transparency on akd (Prompt 3, D-0057). Absent: those endpoints answer 503.
 # [api.kt]
 # secret = { file = "/path/to/kt-secret.hex" }                    # 64 hex; same on every api node

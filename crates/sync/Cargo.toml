@@ -1,0 +1,23 @@
+[package]
+name = "songbird-sync"
+description = "Songbird's account record store, client side (Prompt 9, D-0102): encrypted settings, chat preferences and contacts as records under random IDs, merged per logical key by last writer wins on a hybrid logical clock, with an encrypted manifest that catches records withheld, replayed or rolled back. Sans-IO; used by the app now and by app-core later."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+# The store's wire types, Padmé and the server's length rules.
+songbird-proto.workspace = true
+aws-lc-rs.workspace = true
+getrandom.workspace = true
+prost.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

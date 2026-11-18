@@ -4660,6 +4660,7 @@ dependencies = [
  "serde",
  "serde_json",
  "songbird-jobs",
+ "songbird-proto",
  "songbird-surreal",
  "songbird-types",
  "thiserror 2.0.21",
@@ -4791,6 +4792,7 @@ dependencies = [
  "songbird-s3",
  "songbird-send",
  "songbird-surreal",
+ "songbird-sync",
  "songbird-types",
 ]
 
@@ -5006,6 +5008,18 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
+]
+
+[[package]]
+name = "songbird-sync"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "getrandom 0.4.3",
+ "prost",
+ "songbird-proto",
+ "thiserror 2.0.21",
+ "zeroize",
 ]
 
 [[package]]

@@ -593,7 +593,7 @@ pub mod request_response {
 #[derive(Clone, PartialEq, ::prost::Message)]
 #[prost(skip_debug)]
 pub struct SyncMessage {
-    #[prost(oneof = "sync_message::Kind", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9")]
+    #[prost(oneof = "sync_message::Kind", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10")]
     pub kind: Option<sync_message::Kind>,
 }
 
@@ -619,7 +619,19 @@ pub mod sync_message {
         CallHistory(super::CallHistorySync),
         #[prost(message, tag = "9")]
         RequestResponse(super::RequestResponse),
+        #[prost(message, tag = "10")]
+        Storage(super::StorageSync),
     }
+}
+
+/// The account record store (Prompt 9): a new storage key after a rotation, or "fetch now".
+#[derive(Clone, PartialEq, ::prost::Message)]
+#[prost(skip_debug)]
+pub struct StorageSync {
+    #[prost(bytes = "vec", tag = "1")]
+    pub key: Vec<u8>,
+    #[prost(bool, tag = "2")]
+    pub changed: bool,
 }
 
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -855,6 +867,7 @@ redacted_debug!(
     ChatStateSync,
     ChatState,
     SettingsSync,
+    StorageSync,
     BlockListSync,
     CallHistorySync,
     CallMessage,

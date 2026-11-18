@@ -284,6 +284,7 @@ async fn stack(people: usize) -> Option<Stack> {
         keys: None,
         devices: None,
         profiles: None,
+        storage: None,
         kt: None,
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

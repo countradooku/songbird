@@ -23,6 +23,7 @@ members = [
     "crates/akd",
     "crates/content",
     "crates/groups",
+    "crates/sync",
     "services/delivery",
     "services/api",
     "services/push",
@@ -71,6 +72,7 @@ songbird-akd = { path = "crates/akd" }
 songbird-keys = { path = "crates/keys" }
 songbird-content = { path = "crates/content" }
 songbird-groups = { path = "crates/groups" }
+songbird-sync = { path = "crates/sync" }
 songbird-calls = { path = "services/calls" }
 
 anyhow = "1.0.104"

@@ -165,6 +165,56 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0102 — Prompt 9, milestone 1: the account record store, with a manifest and a hybrid logical clock
+
+- Date: 2026-11-18
+- Status: accepted for the milestone (agent, under the approved plan D-0101); its threat-model rows
+  await the owner
+- Decided by: agent (with owner approval of the plan)
+- Context: settings, chat preferences and contacts must sync across devices without the server
+  seeing them, converge whatever order devices sync in, and survive a server that misbehaves
+  (D-0101 questions 2 and 10).
+- Options considered: per-record last writer wins alone (simpler; the server can withhold or roll
+  back records unseen); Signal's storage service (fresh IDs, an encrypted manifest that only moves
+  forward); a manifest listing every ID (rewritten whole at each write: 160 KiB at 10,000
+  records). Chosen: fresh IDs per write and a **small** manifest holding the version and a digest
+  of the ID set (76 bytes), written in the same compare-and-swap; the ID list is read separately
+  only when the version moved.
+- Evidence:
+  - `crates/sync/tests/convergence.rs`: proptest of 2 to 4 devices, ±1 h clock skews, offline
+    edits, deletions and random sync orders (512 cases): every device ends with the newest edit
+    of each key by stamp; a clock days ahead never pins a key; a delete and an offline edit
+    converge; tombstones go after 90 days and stale edits do not come back; withheld, swapped
+    and rolled-back records are refused; a key rotation rewrites everything.
+  - `services/api/tests/storage_live.rs` (SurrealDB, `valkey-hot`, `valkey-jobs`, `RustFS`):
+    replicas over HTTP converge; eight concurrent writers lose no edit; caps, lengths, versions,
+    other accounts and pending devices are refused; objects are the account's own; deletion
+    leaves nothing; latency below.
+  - Latency on an Apple M5 Pro (48 GB, macOS 27.2.1), compose stack, one `api` in the test
+    process: first write of 500 records 93 ms; a one-record sync p50 24 ms, p99 113 ms; a sync with
+    nothing new p50 5.6 ms, p99 36 ms; a fresh device reading 501 records p50 30 ms, p99 36 ms.
+    Development numbers, not the production host class.
+  - Fuzz target `storage` (every server decoder; the client's record and manifest openers).
+- Decision:
+  - `songbird_proto::storage` (wire), `songbird_accounts::storage` (rows `srec`, `sobj`; the
+    store's version and manifest on the account row), `services/api/src/storage.rs`
+    (`[api.storage]`), the new client crate `crates/sync` (sans-IO: HLC, records, manifest,
+    merge, sync loop, key rotation, an in-memory reference server).
+  - Records padded with Padmé from **256 bytes** (the plan said 64: at 64 two small settings
+    differed in size; at 256 most settings share one size); the server refuses other lengths.
+  - AES-256-GCM-SIV; a record key per ID from HKDF; zero nonce for records (one key each, never
+    rewritten), random nonce for the manifest.
+  - HLC with a 24 h follow bound; a write always beats the key's current stamp; tombstones
+    and stale local edits expire after 90 days.
+  - Caps per account: 10,000 records, 16 MiB, 16 objects of 2 MiB; a write may carry 20,000
+    deletions and 20,000 insertions, so a key rotation is one atomic write.
+  - The storage key travels in the provisioning message version 2; rotated keys and "fetch now"
+    travel in a new `storage` sync message; `settings` sync is superseded.
+  - No write time is stored.
+- Consequences: M2 to M6 keep everything they sync in the store; the app's settings (M5) define
+  each value's encoding (PROTOCOL §10.2). Rotation on device removal is the app's step (M5).
+  Revisit the caps with real usage; revisit the 24 h bound if clocks on real devices drift more.
+
 ## D-0101 — Prompt 9: the plan, and the owner's decisions it needs
 
 - Date: 2026-11-18

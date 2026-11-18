@@ -58,6 +58,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 songbird-surreal.workspace = true
+# The client side of the record store, run against the real server (Prompt 9, M1).
+songbird-sync.workspace = true
 
 [lints]
 workspace = true

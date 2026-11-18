@@ -110,6 +110,8 @@ pub enum Outcome {
     NotFound,
     /// 409 with a reason.
     Conflict(&'static str),
+    /// 409 with a JSON body (the record store's current version).
+    ConflictJson(serde_json::Value),
     /// 403 with a reason.
     Forbidden(&'static str),
     /// 429 (microseconds).

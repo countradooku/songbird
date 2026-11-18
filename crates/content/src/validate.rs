@@ -424,6 +424,7 @@ fn sync(s: &SyncMessage) -> R {
             h.calls.iter().try_for_each(call)
         }
         SyncKind::RequestResponse(r) => request_response(r),
+        SyncKind::Storage(st) => check(st.key.is_empty() || st.key.len() == KEY_LEN, "storage.key"),
     }
 }
 

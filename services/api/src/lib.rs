@@ -50,6 +50,7 @@ pub mod registration;
 pub mod reports;
 pub mod requests;
 pub mod server;
+pub mod storage;
 pub mod usernames;
 
 use std::sync::Arc;
@@ -107,6 +108,8 @@ pub struct ApiMetrics {
     pub devices: devices::DeviceMetrics,
     /// Profiles and sealed sender.
     pub profiles: profiles::ProfileMetrics,
+    /// The account record store (Prompt 9).
+    pub storage: storage::StorageMetrics,
     /// Blocks and the request policy.
     pub blocks: requests::RequestsMetrics,
     /// Reports.
@@ -172,6 +175,7 @@ impl ApiMetrics {
         self.keys.register(m)?;
         self.devices.register(m)?;
         self.profiles.register(m)?;
+        self.storage.register(m)?;
         self.blocks.register(m)?;
         self.reports.register(m)?;
         self.media.register(m)?;
@@ -216,6 +220,8 @@ pub struct App {
     pub devices: Option<devices::Devices>,
     /// Encrypted profiles and sealed sender (absent: those endpoints answer 503).
     pub profiles: Option<profiles::Profiles>,
+    /// The account record store (absent: those endpoints answer 503).
+    pub storage: Option<storage::Storage>,
     /// Key transparency (absent: those endpoints answer 503).
     pub kt: Option<kt::Transparency>,
     /// Blocks and the message-request policy (absent: those endpoints answer 503).
@@ -325,6 +331,10 @@ impl App {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the dispatch table: one arm per endpoint family"
+    )]
     async fn route(self: &Arc<Self>, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
         let path = req.uri().path().to_owned();
         let method = req.method().clone();
@@ -358,6 +368,9 @@ impl App {
                 self.delete_account(device).await
             }
             (&Method::PUT, "/v1/messages") => self.put_message(req).await,
+            (_, p) if p == "/v1/storage" || p.starts_with("/v1/storage/") => {
+                self.storage(req).await
+            }
             (_, p)
                 if p == "/v1/messages/sealed"
                     || p == "/v1/certificate"
@@ -532,6 +545,80 @@ impl App {
         Ok(profile_outcome(out))
     }
 
+    /// `/v1/storage…` ([`storage`]): a listed (not pending) device of the account only.
+    async fn storage(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let st = self.storage.as_ref().ok_or_else(unavailable)?;
+        let method = req.method().clone();
+        let path = req.uri().path().to_owned();
+        let object = |p: &str| {
+            let mut id = [0u8; 32];
+            hex::decode_to_slice(p.trim_start_matches("/v1/storage/object/"), &mut id)
+                .map(|()| id)
+                .map_err(|_| Refusal::Status(StatusCode::NOT_FOUND))
+        };
+        let (device, body) = match (&method, path.as_str()) {
+            (&Method::PUT, "/v1/storage") => {
+                self.authenticate_body(req, st.settings.max_write_body())
+                    .await?
+            }
+            (&Method::PUT, "/v1/storage/object") => {
+                self.authenticate_body(req, songbird_proto::storage::MAX_OBJECT)
+                    .await?
+            }
+            (&Method::POST, "/v1/storage/read") => {
+                self.authenticate_body(
+                    req,
+                    2 + songbird_proto::storage::MAX_READ * songbird_proto::storage::ID_LEN,
+                )
+                .await?
+            }
+            (&Method::GET, "/v1/storage" | "/v1/storage/ids") => {
+                self.authenticate_json(req).await?
+            }
+            (&Method::GET | &Method::DELETE, p) if p.starts_with("/v1/storage/object/") => {
+                self.authenticate_json(req).await?
+            }
+            _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
+        };
+        let row = self
+            .registry
+            .device(&device)
+            .await
+            .map_err(|_| unavailable())?
+            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+        if row.pending {
+            return Ok(pending_refusal());
+        }
+        let a = row.account;
+        let out = match (&method, path.as_str()) {
+            (&Method::GET, "/v1/storage") => st.head(&self.registry, &self.hot, &a).await,
+            (&Method::GET, "/v1/storage/ids") => st.ids(&self.registry, &self.hot, &a).await,
+            (&Method::POST, "/v1/storage/read") => {
+                st.read(&self.registry, &self.hot, &a, &body).await
+            }
+            (&Method::PUT, "/v1/storage") => st.write(&self.registry, &self.hot, &a, &body).await,
+            (&Method::PUT, "/v1/storage/object") => {
+                st.put_object(&self.registry, &self.hot, &self.s3, &a, body)
+                    .await
+            }
+            (&Method::GET, p) => {
+                let id = object(p)?;
+                if let Err(o) = st.object_allowed(&self.registry, &self.hot, &a, &id).await {
+                    return Ok(profile_outcome(o));
+                }
+                return self.serve_object(&storage::object_name(&id)).await;
+            }
+            (&Method::DELETE, p) => {
+                let id = object(p)?;
+                st.delete_object(&self.registry, &self.hot, &self.s3, &a, &id)
+                    .await
+            }
+            _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
+        };
+        Ok(profile_outcome(out))
+    }
+
     /// `/v1/kt/…` ([`kt`]): signed like every device request.
     async fn kt(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
         let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
@@ -570,7 +657,12 @@ impl App {
 
     /// An avatar object, streamed.
     async fn serve_avatar(&self, id: &[u8; 32]) -> Result<Response<Body>, Refusal> {
-        let got = match self.s3.get_object(&profiles::avatar_name(id), None).await {
+        self.serve_object(&profiles::avatar_name(id)).await
+    }
+
+    /// An object from `RustFS`, streamed.
+    async fn serve_object(&self, name: &str) -> Result<Response<Body>, Refusal> {
+        let got = match self.s3.get_object(name, None).await {
             Ok(g) => g,
             Err(songbird_s3::Error::NotFound) => {
                 return Err(Refusal::Status(StatusCode::NOT_FOUND));
@@ -1442,6 +1534,7 @@ fn profile_outcome(o: profiles::Outcome) -> Response<Body> {
         Outcome::Conflict(what) => {
             json(StatusCode::CONFLICT, &serde_json::json!({ "error": what }))
         }
+        Outcome::ConflictJson(v) => json(StatusCode::CONFLICT, &v),
         Outcome::Forbidden(what) => {
             json(StatusCode::FORBIDDEN, &serde_json::json!({ "error": what }))
         }

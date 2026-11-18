@@ -58,8 +58,10 @@ pub mod kt;
 pub mod packs;
 pub mod profile;
 pub mod reports;
+pub mod storage;
 pub use db::{Db, DbError, SurrealSettings};
 pub use push_store::PushStore;
+pub use storage::{StorageCaps, StorageWriteError};
 
 /// Ed25519 public key length.
 pub const AUTH_KEY_LEN: usize = 32;
@@ -278,6 +280,16 @@ UPSERT directory:v SET version = version ?? 1 RETURN NONE;
 DEFINE TABLE IF NOT EXISTS store SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS generation ON store TYPE int;
 UPSERT store:g SET generation = generation ?? 1 RETURN NONE;
+DEFINE FIELD IF NOT EXISTS st_v ON account TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS st_m ON account TYPE option<bytes>;
+DEFINE TABLE IF NOT EXISTS srec SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS account ON srec TYPE bytes;
+DEFINE FIELD IF NOT EXISTS blob ON srec TYPE bytes;
+DEFINE FIELD IF NOT EXISTS size ON srec TYPE int;
+DEFINE INDEX IF NOT EXISTS srec_account ON srec FIELDS account;
+DEFINE TABLE IF NOT EXISTS sobj SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS account ON sobj TYPE bytes;
+DEFINE INDEX IF NOT EXISTS sobj_account ON sobj FIELDS account;
 ";
 
 /// Registry failures. They carry no identifiers.
@@ -631,6 +643,8 @@ pub struct Remnants {
     pub group_requests: u64,
     /// Group prune marks still naming the devices (D-0075).
     pub group_marks: u64,
+    /// Storage records and storage object records of the account (Prompt 9, D-0102).
+    pub storage: u64,
 }
 
 impl Remnants {
@@ -1950,6 +1964,8 @@ impl Registry {
                  DELETE passkey WHERE account = $a RETURN NONE;
                  DELETE avatar WHERE account = $a RETURN NONE;
                  DELETE grp_req WHERE acct = $a RETURN NONE;
+                 DELETE srec WHERE account = $a RETURN NONE;
+                 DELETE sobj WHERE account = $a RETURN NONE;
                  UPDATE grp_prune SET gone = array::complement(gone, $devs)
                    WHERE gone CONTAINSANY $devs RETURN NONE;
                  DELETE account:[$a] RETURN NONE;
@@ -1991,7 +2007,9 @@ impl Registry {
                    + count(SELECT id FROM mlskp WHERE device IN $ds)
                    + count(SELECT id FROM mlskp_used WHERE device IN $ds);
                  RETURN count(SELECT id FROM grp_req WHERE acct = $a);
-                 RETURN count(SELECT id FROM grp_prune WHERE gone CONTAINSANY $ds);",
+                 RETURN count(SELECT id FROM grp_prune WHERE gone CONTAINSANY $ds);
+                 RETURN count(SELECT id FROM srec WHERE account = $a)
+                   + count(SELECT id FROM sobj WHERE account = $a);",
                 vec![
                     var("a", bytes(account.as_bytes())),
                     var("ds", Value::Array(ds)),
@@ -2013,6 +2031,7 @@ impl Registry {
             prekeys: n(5)?,
             group_requests: n(6)?,
             group_marks: n(7)?,
+            storage: n(8)?,
         })
     }
 

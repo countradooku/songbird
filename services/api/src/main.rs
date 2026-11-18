@@ -277,6 +277,21 @@ fn profiles(
     )?))
 }
 
+/// `[api.storage]` (Prompt 9, M1), if configured.
+fn storage(
+    s: &ApiSettings,
+    metrics: &ApiMetrics,
+) -> Result<Option<songbird_api::storage::Storage>, BoxError> {
+    let Some(st) = &s.storage else {
+        return Ok(None);
+    };
+    Ok(Some(songbird_api::storage::Storage::new(
+        st.clone(),
+        &*st.secret.resolve_key32()?,
+        metrics.storage.clone(),
+    )?))
+}
+
 /// `[api.requests]` (Prompt 4, D-0062), if configured: the blocks and request-policy endpoints,
 /// and the gate of requests and broadcasts on `PUT /v1/messages`.
 #[allow(
@@ -362,6 +377,10 @@ fn reports(
     )))
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one construction step per configured section"
+)]
 async fn build(
     s: &ApiSettings,
     metrics: ApiMetrics,
@@ -437,6 +456,7 @@ async fn build(
         None => (None, None),
     };
     let profiles = profiles(s, &metrics)?;
+    let storage = storage(s, &metrics)?;
     let kt = transparency(s).await?;
     let reports = reports(s, &metrics)?;
     let calls = calls(s, &metrics)?;
@@ -460,6 +480,7 @@ async fn build(
         keys,
         devices,
         profiles,
+        storage,
         kt,
         calls,
     });

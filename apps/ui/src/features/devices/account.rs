@@ -99,7 +99,18 @@ fn body() -> AnyElement {
                         "Turn off your PIN?",
                         "Anyone who gets your recovery key or a linked device could then link a new device without it.",
                         "Turn off",
-                        move || s.settings_update(|x| x.two_step_pin = false),
+                        move || {
+                            if crate::backend::is_live() && crate::backend::registered() {
+                                spawn(async move {
+                                    match crate::backend::account::clear_pin().await {
+                                        Ok(()) => s.settings_update(|x| x.two_step_pin = false),
+                                        Err(p) => toast(p.0),
+                                    }
+                                });
+                            } else {
+                                s.settings_update(|x| x.two_step_pin = false);
+                            }
+                        },
                     );
                 }
             },
@@ -304,21 +315,34 @@ pub fn account_switcher(open: Signal<bool>) -> AnyElement {
     .into_element()
 }
 
-/// Setting or changing the PIN: twice, at least 4 digits.
+/// Setting or changing the PIN: twice, 6 to 12 digits (the server's rule).
 fn pin_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
     let pin = signal(String::new());
     let again = signal(String::new());
     let digits = |p: &str| p.chars().filter(char::is_ascii_digit).collect::<String>();
-    let long_enough = move || pin.with(|p| p.len() >= 4);
+    let long_enough = move || pin.with(|p| (6..=12).contains(&p.len()));
     let same = move || pin.get() == again.get();
     let save = move || {
         if long_enough() && same() {
-            // mock: app-core `set_pin` (Argon2id verifier on the server).
-            s.settings_update(|x| x.two_step_pin = true);
-            pin.set(String::new());
-            again.set(String::new());
-            open.set(false);
-            toast("PIN saved");
+            let chosen = pin.get_untracked();
+            let done = move || {
+                s.settings_update(|x| x.two_step_pin = true);
+                pin.set(String::new());
+                again.set(String::new());
+                open.set(false);
+                toast("PIN saved");
+            };
+            // The server keeps only a salted Argon2id verifier (Prompt 3).
+            if crate::backend::is_live() && crate::backend::registered() {
+                spawn(async move {
+                    match crate::backend::account::set_pin(chosen).await {
+                        Ok(()) => done(),
+                        Err(p) => toast(p.0),
+                    }
+                });
+            } else {
+                done();
+            }
         }
     };
     app_sheet(
@@ -331,13 +355,13 @@ fn pin_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
             .child(muted("Choose a PIN you'll remember. Songbird asks for it now and then, so you don't forget it."))
             .child(labelled_field(
                 "New PIN",
-                field("At least 4 digits", pin)
+                field("6 to 12 digits", pin)
                     .on_change(move |t: &str| pin.set(digits(t)))
                     .masked(true)
                     .keyboard_type(KeyboardType::Number)
                     .max_length(12),
-                move || if pin.with(|p| !p.is_empty() && p.len() < 4) { "Use at least 4 digits." } else { "" },
-                move || pin.with(|p| !p.is_empty() && p.len() < 4),
+                move || if pin.with(|p| !p.is_empty() && !(6..=12).contains(&p.len())) { "Use 6 to 12 digits." } else { "" },
+                move || pin.with(|p| !p.is_empty() && !(6..=12).contains(&p.len())),
             ))
             .child(labelled_field(
                 "Confirm PIN",

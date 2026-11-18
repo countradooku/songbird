@@ -137,10 +137,23 @@ fn request_info() {
             .child(when(
                 move || ext.with(|x| x.account_report.is_none()),
                 move || {
-                    // mock: app-core asks the server's GDPR export (Prompt 3, M7).
+                    // The server's GDPR export (Prompt 3, M7), summed up here.
                     btn("Request report", Variant::Primary, BtnSize::Lg, move || {
-                        s.ext_update(|x| x.account_report = Some("Ready".into()));
-                        toast("Report ready");
+                        if crate::backend::is_live() && crate::backend::registered() {
+                            spawn(async move {
+                                match crate::backend::account::export().await {
+                                    Ok(v) => {
+                                        let summary = crate::backend::account::summarize(&v);
+                                        s.ext_update(|x| x.account_report = Some(summary));
+                                        toast("Report ready");
+                                    }
+                                    Err(p) => toast(p.0),
+                                }
+                            });
+                        } else {
+                            s.ext_update(|x| x.account_report = Some("This device isn't connected to a Songbird server yet, so there's nothing on a server to report.".into()));
+                            toast("Report ready");
+                        }
                     })
                 },
             ))
@@ -150,6 +163,7 @@ fn request_info() {
                     view()
                         .gap_2()
                         .child(banner(Tone::Secure, Icon::Check, "Your report is ready. It stays on this device until you export it."))
+                        .child(card().child(body(move || ext.with(|x| x.account_report.clone().unwrap_or_default()))))
                         .child(btn_with_icon("Export report", Some(Icon::Download), Variant::Outline, BtnSize::Md, || {
                             toast("Saved to Files")
                         }))
@@ -164,7 +178,17 @@ fn delete_account() {
         "Delete your account?",
         "Your account, username and devices are removed from Songbird's servers. Messages on your devices are erased. This can't be undone.",
         "Delete account",
-        // mock: app-core signs the deletion request; the server journals and deletes (Prompt 3, M7).
-        || toast("Account deletion requested"),
+        // The server journals and deletes every store, then verifies it (Prompt 3, M7).
+        || {
+            if crate::backend::is_live() && crate::backend::registered() {
+                crate::backend::run(async {
+                    crate::backend::delete_account().await?;
+                    toast("Account deletion requested");
+                    Ok(())
+                });
+            } else {
+                toast("Account deletion requested");
+            }
+        },
     );
 }

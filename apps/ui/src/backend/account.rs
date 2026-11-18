@@ -72,3 +72,53 @@ pub async fn set_inactivity(months: u8) -> Result<(), Problem> {
     )
     .await
 }
+
+/// `PUT /v1/account/pin` (the main phone): 6 to 12 digits; the server keeps
+/// only a salted Argon2id verifier under its pepper.
+pub async fn set_pin(pin: String) -> Result<(), Problem> {
+    put("/v1/account/pin", serde_json::json!({ "pin": pin })).await
+}
+
+/// `DELETE /v1/account/pin`.
+pub async fn clear_pin() -> Result<(), Problem> {
+    let (status, answer) = signed("DELETE", "/v1/account/pin", None, false).await?;
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        Err(explain(status, &answer))
+    }
+}
+
+/// `GET /v1/account/export` (the main phone): what the server holds about
+/// the account, as it answers it.
+pub async fn export() -> Result<Value, Problem> {
+    let (status, body) = signed("GET", "/v1/account/export", None, false).await?;
+    ok_json(status, &body)
+}
+
+/// The account report in a few plain lines: what the server holds, and
+/// that it can't read the encrypted parts.
+#[must_use]
+pub fn summarize(v: &Value) -> String {
+    let a = &v["account"];
+    let devices = v["devices"].as_array().map_or(0, Vec::len);
+    let store = &v["settings_store"];
+    format!(
+        "Account created {}.\n{} device(s).\nUsername: {}.\nTwo-step PIN: {}.\nEncrypted settings: {} record(s), {} bytes, unreadable to the server.\nDeleted after {} months unused.",
+        a["created"].as_str().unwrap_or("?"),
+        devices,
+        if a["username_hash"].is_null() {
+            "none"
+        } else {
+            "set (only its hash)"
+        },
+        if a["pin_set"].as_bool() == Some(true) {
+            "on"
+        } else {
+            "off"
+        },
+        store["records"].as_u64().unwrap_or(0),
+        store["record_bytes"].as_u64().unwrap_or(0),
+        a["inactivity_months"].as_u64().unwrap_or(12),
+    )
+}

@@ -2,7 +2,8 @@
 //!
 //! Every change to an account's set of devices writes its account row (`dgen`) in the same
 //! transaction, so two concurrent changes to one account conflict in SurrealDB and one retries:
-//! the device limit holds under races (the live tests race it).
+//! the device limit holds under races (the live tests race it). Retries back off with jitter,
+//! within a time budget ([`crate::Backoff`], D-0093).
 //!
 //! A linked device is **pending** until the account identity key vouches for it in a signed
 //! list: it can authenticate (to finish setting up and upload its keys) but no one is asked to
@@ -16,7 +17,7 @@ use songbird_surreal::Value;
 use songbird_types::{AccountId, DeviceId};
 
 use crate::db::{self, DbError};
-use crate::{CONFLICT_RETRIES, Registry, RegistryError, bytes, id16, id32, int, rows, var};
+use crate::{Backoff, Registry, RegistryError, bytes, id16, id32, int, rows, var};
 
 /// One device of an account, as its own devices see it (`GET /v1/devices`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,7 +67,7 @@ impl Registry {
         classify: impl Fn(&str) -> Option<RegistryError>,
         done: impl Fn(Vec<Value>) -> Result<T, RegistryError>,
     ) -> Result<T, RegistryError> {
-        let mut attempt = 0;
+        let mut backoff = Backoff::new();
         loop {
             match self.db.query(sql, vars()).await {
                 Ok(v) => return done(v),
@@ -74,17 +75,12 @@ impl Registry {
                     if let Some(e) = classify(&kind) {
                         return Err(e);
                     }
-                    if kind == db::TRANSACTION_CONFLICT && attempt < CONFLICT_RETRIES {
-                        attempt += 1;
-                        tokio::time::sleep(Duration::from_millis(2u64 << attempt.min(6))).await;
-                        continue;
+                    if kind != db::TRANSACTION_CONFLICT {
+                        return Err(DbError::Statement(kind).into());
                     }
-                    return Err(DbError::Statement(kind).into());
+                    backoff.conflicted().await?;
                 }
-                Err(e) if crate::is_conflict(&e) && attempt < CONFLICT_RETRIES => {
-                    attempt += 1;
-                    tokio::time::sleep(Duration::from_millis(2u64 << attempt.min(6))).await;
-                }
+                Err(e) if crate::is_conflict(&e) => backoff.conflicted().await?,
                 Err(e) => return Err(e.into()),
             }
         }

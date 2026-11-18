@@ -64,6 +64,18 @@ fn camera_components_ios(components: &nsh_platform_ios::Components) {
     songbird_camera::apple::register(components);
 }
 
+/// The camera's live preview on Windows (Media Foundation frames drawn with Direct2D).
+#[native_components(windows)]
+fn camera_components_windows(components: &nsh_platform_windows::Components) {
+    songbird_camera::windows::register(components);
+}
+
+/// The camera's live preview on Linux (V4L2 frames in a GTK picture).
+#[native_components(linux)]
+fn camera_components_linux(components: &nsh_platform_linux::Components) {
+    songbird_camera::linux::register(components);
+}
+
 /// Songbird's root: the store, the theme the user chose, the first run
 /// or the app, and the layers over everything (calls, toasts).
 #[component]

@@ -13,6 +13,26 @@ description = "Songbird's camera: one interface over AVFoundation, CameraX, Medi
 # the fallback on Apple (D-0110). No `img`: frames come as grey bytes.
 rqrr = { version = "0.11.0", default-features = false }
 
+# Desktop stills (Windows, Linux) are encoded from frames in pure Rust (D-0114).
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+jpeg-encoder = { version = "0.7.1", default-features = false, features = ["std"] }
+
+# Windows: Media Foundation, the consent store, Direct2D (D-0114); the version NSH links.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Registry", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_Dxgi_Common"] }
+nsh-platform-windows = { version = "0.6.0", default-features = false }
+serde_json = "1"
+
+# Linux: V4L2 and a GTK picture (D-0114); gtk4 at the version NSH links.
+[target.'cfg(target_os = "linux")'.dependencies]
+v4l = { version = "0.14.0", default-features = false, features = ["v4l2"] }
+gtk4 = "0.11"
+nsh-platform-linux = { version = "0.6.0", default-features = false }
+serde_json = "1"
+
+[dev-dependencies]
+jpeg-encoder = { version = "0.7.1", default-features = false, features = ["std"] }
+
 [lints.rust]
 unsafe_code = "deny"
 unsafe_op_in_unsafe_fn = "deny"

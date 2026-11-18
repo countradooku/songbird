@@ -167,6 +167,24 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0114 — Camera, milestone 4: Windows (Media Foundation) and Linux (V4L2)
+
+- Date: 2026-11-18
+- Status: accepted by the agent within the approved plan (D-0110); report `docs/reports/CAM-M4.md`
+- Decided by: agent
+- Decision:
+  1. One shared desktop core (`desktop.rs`, no `unsafe`): a reading thread per capture, a pump
+     routing frames, preview images with watchers, stills encoded in pure Rust
+     (`jpeg-encoder`) and filtered.
+  2. Windows: access from the camera consent store (no prompt exists for desktop apps),
+     Media Foundation's source reader in NV12, a Direct2D preview.
+  3. Linux: V4L2 through `v4l`'s safe API, a GTK picture preview.
+- Evidence: Linux on a `v4l2loopback` camera: 1280×720 at the feed's rate, a clean JPEG, the
+  link code read; tests and clippy clean on macOS, Ubuntu and Windows.
+- Open: **Linux's camera portal with PipeWire** is not built. A Flatpak build needs it; native
+  packages do not (the portal grants unsandboxed apps). Build it before a Flatpak exists. The
+  full app was not built on Windows ARM64 (`aws-lc-sys` needs `clang-cl` in the VM).
+
 ## D-0113 — Camera, milestone 3: Songbird's Android host with CameraX
 
 - Date: 2026-11-18

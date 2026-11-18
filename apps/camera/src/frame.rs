@@ -191,6 +191,39 @@ pub(crate) fn nv12_from_yuv(
     })
 }
 
+/// NV12 from packed YUYV (YUY2: `Y0 U Y1 V` per two pixels), as webcams give it over V4L2;
+/// chroma of every other row. Checked against the buffer's length.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // Linux's frames; tested everywhere
+pub(crate) fn nv12_from_yuyv(
+    data: &[u8],
+    stride: usize,
+    width: usize,
+    height: usize,
+) -> Option<Pixels> {
+    if width < 2 || height == 0 || !width.is_multiple_of(2) || stride < width.checked_mul(2)? {
+        return None;
+    }
+    let mut y = Vec::with_capacity(width * height);
+    let mut uv = Vec::with_capacity(width * height.div_ceil(2));
+    for row in 0..height {
+        let start = row.checked_mul(stride)?;
+        let line = data.get(start..start.checked_add(width * 2)?)?;
+        let (quads, _) = line.as_chunks::<4>();
+        for &[y0, u, y1, v] in quads {
+            y.extend_from_slice(&[y0, y1]);
+            if row % 2 == 0 {
+                uv.extend_from_slice(&[u, v]);
+            }
+        }
+    }
+    Some(Pixels::Nv12 {
+        y,
+        y_stride: width,
+        uv,
+        uv_stride: width,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,6 +298,19 @@ mod tests {
         assert!(nv12_from_yuv(&y, 1, &[10], &[11], 4, 2, 2, 2).is_none());
         assert!(nv12_from_yuv(&y, 4, &[], &[11], 4, 2, 2, 2).is_none());
         assert!(nv12_from_yuv(&y, usize::MAX, &[10], &[11], 4, 2, 2, 2).is_none());
+    }
+
+    #[test]
+    fn nv12_from_yuyv_takes_every_other_chroma_row() {
+        // 2×2: rows `Y0 U Y1 V`, 4 bytes, stride 6 (padding).
+        let data = [1, 10, 2, 11, 0, 0, 3, 20, 4, 21, 0, 0];
+        let Some(Pixels::Nv12 { y, uv, .. }) = nv12_from_yuyv(&data, 6, 2, 2) else {
+            panic!("converted")
+        };
+        assert_eq!((y, uv), (vec![1, 2, 3, 4], vec![10, 11]));
+        assert!(nv12_from_yuyv(&data[..9], 6, 2, 2).is_none());
+        assert!(nv12_from_yuyv(&data, 3, 2, 2).is_none());
+        assert!(nv12_from_yuyv(&data, 6, 3, 2).is_none());
     }
 
     #[test]

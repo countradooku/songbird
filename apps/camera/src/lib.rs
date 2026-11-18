@@ -18,11 +18,17 @@
 pub mod android;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub mod apple;
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
+pub mod desktop;
 pub mod fake;
 pub mod frame;
 pub mod jpeg;
+#[cfg(target_os = "linux")]
+pub mod linux;
 pub mod mailbox;
 pub mod qr;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 use std::sync::{Arc, Mutex};
 
@@ -335,6 +341,10 @@ pub fn platform() -> Option<Arc<dyn Backend>> {
     return Some(Arc::new(apple::AppleCamera));
     #[cfg(target_os = "android")]
     return Some(Arc::new(android::AndroidCamera));
+    #[cfg(target_os = "windows")]
+    return Some(Arc::new(windows::WindowsCamera));
+    #[cfg(target_os = "linux")]
+    return Some(Arc::new(linux::LinuxCamera));
     #[allow(unreachable_code)]
     None
 }

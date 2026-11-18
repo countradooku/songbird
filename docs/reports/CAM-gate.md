@@ -3,7 +3,9 @@
 - Date: 2026-11-18
 - Plan: [CAM-plan.md](CAM-plan.md), approved by the owner on 2026-11-18 ("approve all on the
   camera plan"); decisions D-0110 to D-0116; PR #68 (`claude/camera-plan`)
-- Status: **waiting for the owner**.
+- Status: **approved by the owner on 2026-11-18** ("Approve both"): the gate, and the IJG
+  licence for `jpeg-encoder` only (D-0117). The "Not done" items stay open; the iPhone check
+  waits for a device.
 
 ## What was built
 

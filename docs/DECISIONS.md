@@ -26,8 +26,10 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   primary without one, video clips on Windows and Linux later, portal then V4L2 on Linux,
   `unsafe` in `songbird-camera`'s platform modules only, link codes only from the live camera.
   Still the owner's: a physical iPhone and the personal team for the iOS checks (question 4).
-- Camera gate (`CAM-gate.md`, D-0111 to D-0116; PR #68): **waiting for the owner**: M1–M5 and the
-  security review's fixes; `jpeg-encoder`'s IJG licence; a physical iPhone.
+- Camera gate (`CAM-gate.md`, D-0111 to D-0117; PR #68): **approved by the owner on 2026-11-18**
+  ("Approve both"): M1–M5 and the security review's fixes, with the gate's open items left open;
+  the IJG licence for `jpeg-encoder` only (D-0117). Still the owner's: a physical iPhone and the
+  personal team for the iOS camera check.
 - Prompt 8, M4 and M5 rest (D-0099): **deferred by the owner on 2026-11-18 until the whole app
   is built** ("lets do this after we have the whole app built"): the Xcode and Gradle host
   projects (APNs token, PushKit with CallKit, FCM, UnifiedPush, ConnectionService), the Apple
@@ -169,10 +171,26 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0117 — The camera gate approved; the IJG licence for `jpeg-encoder` only
+
+- Date: 2026-11-18
+- Status: accepted (owner, 2026-11-18, "Approve both")
+- Decided by: owner, on `docs/reports/CAM-gate.md`
+- Decision:
+  1. The camera gate: M1–M5 (D-0111 to D-0115) and the security review's fixes (D-0116). The
+     gate's "Not done" items stay open: the iOS check on a physical iPhone, the Android scan on a
+     device, Linux's portal and PipeWire, the app build on Windows ARM64, video clips, CI for the
+     app workspaces and a pinned Gradle wrapper.
+  2. `deny.toml` allows IJG as a per-crate exception for `jpeg-encoder` (desktop stills, pure
+     Rust). IJG is permissive and asks for an acknowledgement in documentation; it is on the
+     app's licences page (You › Help › App version and licences), with the camera's other new
+     open-source parts.
+- Consequences: no other crate may bring IJG without its own entry.
+
 ## D-0116 — Camera: the security review's fixes
 
 - Date: 2026-11-18
-- Status: accepted; part of the camera gate (`docs/reports/CAM-gate.md`, "Security review")
+- Status: accepted (owner, with the camera gate, 2026-11-18); `docs/reports/CAM-gate.md`, "Security review"
 - Decided by: agent, on an independent read-only review of the whole camera diff
 - Context: no high findings; three medium, three low, informational notes.
 - Decision:

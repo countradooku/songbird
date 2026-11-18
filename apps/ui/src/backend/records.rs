@@ -311,8 +311,9 @@ pub fn apply<'a>(
 struct Engine {
     /// The replica; `None` while a sync holds it.
     replica: Option<Replica>,
-    /// Edits made while a sync held the replica, applied when it returns.
-    queued: Vec<(&'static str, String)>,
+    /// Edits made while a sync held the replica, applied when it returns
+    /// (`None`: a deletion).
+    queued: Vec<(String, Option<String>)>,
     /// What was last written to the replica, to find changes.
     last: Vec<(&'static str, String)>,
     syncing: bool,
@@ -398,6 +399,69 @@ pub fn restore(store: Store) {
             again: false,
         });
     });
+    store.reload_records();
+}
+
+// ---------------------------------------------------------------- other records
+
+/// Every live record under `prefix` (saved contacts `k/`, per-chat `c/`),
+/// as text; a record that isn't UTF-8 is skipped.
+#[must_use]
+pub fn under(prefix: &str) -> Vec<(String, String)> {
+    ENGINE.with(|e| {
+        let e = e.borrow();
+        let Some(engine) = e.as_ref() else {
+            return Vec::new();
+        };
+        let mut out: Vec<(String, String)> = engine
+            .replica
+            .as_ref()
+            .map(|r| {
+                r.with_prefix(prefix)
+                    .into_iter()
+                    .filter_map(|(k, v)| Some((k, String::from_utf8(v).ok()?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Edits queued behind a sync in flight are the newest.
+        for (k, v) in engine.queued.iter().filter(|(k, _)| k.starts_with(prefix)) {
+            out.retain(|(key, _)| key != k);
+            if let Some(v) = v {
+                out.push((k.clone(), v.clone()));
+            }
+        }
+        out.sort();
+        out
+    })
+}
+
+/// Sets (`Some`) or deletes (`None`) one record that is not a setting: a
+/// saved contact or a per-chat preference. Saved at once; a live account
+/// syncs soon after, as for settings.
+pub fn put(store: Store, key: &str, value: Option<String>) {
+    let edited = ENGINE.with(|e| {
+        let mut e = e.borrow_mut();
+        let Some(engine) = e.as_mut() else {
+            return false;
+        };
+        match engine.replica.as_mut() {
+            Some(r) => {
+                let done = match &value {
+                    Some(v) => r.set(key, v.clone().into_bytes(), now_ms()),
+                    None => r.delete(key, now_ms()),
+                };
+                if done.is_err() {
+                    return false;
+                }
+                save(r);
+            }
+            None => engine.queued.push((key.to_string(), value)),
+        }
+        true
+    });
+    if edited && super::is_live() && super::registered() {
+        schedule(store);
+    }
 }
 
 /// Records what changed after a settings intent: synced settings become
@@ -421,7 +485,7 @@ pub fn changed(store: Store) {
                     Some(r) => {
                         let _ = r.set(k, v.clone().into_bytes(), now_ms());
                     }
-                    None => engine.queued.push((k, v.clone())),
+                    None => engine.queued.push(((*k).to_string(), Some(v.clone()))),
                 }
                 edited = true;
             }
@@ -521,7 +585,10 @@ async fn run_sync() -> Result<Vec<String>, SyncError> {
     ENGINE.with(|e| {
         if let Some(engine) = e.borrow_mut().as_mut() {
             for (k, v) in std::mem::take(&mut engine.queued) {
-                let _ = replica.set(k, v.into_bytes(), now_ms());
+                let _ = match v {
+                    Some(v) => replica.set(&k, v.into_bytes(), now_ms()),
+                    None => replica.delete(&k, now_ms()),
+                };
                 engine.again = true;
             }
             save(&replica);
@@ -562,6 +629,10 @@ fn pull(store: Store, changed: &[String]) {
     });
     store.settings.set(s);
     ext.set(x);
+    // Saved contacts and per-chat records another device changed.
+    if changed.iter().any(|k| !k.starts_with("s/")) {
+        store.reload_records();
+    }
 }
 
 /// The record store over HTTP, signed by this device.
@@ -724,6 +795,48 @@ mod tests {
         assert_eq!((p.theme, p.read_receipts), (ThemeChoice::Light, false));
         Ok(())
     }
+
+    /// Saved contacts are records too: one saved on the phone reaches the
+    /// laptop, an edit there comes back, and a deletion converges.
+    #[test]
+    fn saved_contacts_converge_between_devices() -> Result<(), SyncError> {
+        use crate::store::SavedContact;
+        let server = MemoryServer::new();
+        let key = StorageKey::from_bytes([6; 32]);
+        let mut phone = Replica::new(key.clone(), [1; 16]);
+        let mut laptop = Replica::new(key, [2; 16]);
+        let mut ana = SavedContact {
+            id: "0123456789abcdef0123456789abcdef".into(),
+            name: "Ana Popescu".into(),
+            username: "ana".into(),
+            notes: "Climbing on Thursdays".into(),
+            groups: vec!["Friends".into()],
+        };
+        let bo = SavedContact {
+            id: "fedcba9876543210fedcba9876543210".into(),
+            name: "Bogdan".into(),
+            ..SavedContact::default()
+        };
+        phone.set(&ana.key(), ana.encode().into_bytes(), 1_000)?;
+        phone.set(&bo.key(), bo.encode().into_bytes(), 1_000)?;
+        block_on(songbird_sync::sync(&mut phone, &server, 1_000))?;
+        block_on(songbird_sync::sync(&mut laptop, &server, 1_000))?;
+        ana.groups.push("Work".into());
+        laptop.set(&ana.key(), ana.encode().into_bytes(), 2_000)?;
+        phone.delete(&bo.key(), 2_500)?;
+        block_on(songbird_sync::sync(&mut laptop, &server, 3_000))?;
+        block_on(songbird_sync::sync(&mut phone, &server, 3_000))?;
+        block_on(songbird_sync::sync(&mut laptop, &server, 3_000))?;
+        let book = |r: &Replica| -> Vec<SavedContact> {
+            r.with_prefix("k/")
+                .into_iter()
+                .filter_map(|(k, v)| SavedContact::decode(&k, std::str::from_utf8(&v).ok()?))
+                .collect()
+        };
+        assert_eq!(book(&phone), book(&laptop));
+        assert_eq!(book(&phone), vec![ana]);
+        Ok(())
+    }
 }
 
 /// The wiring on the real engine, headless: settings changed through the
@@ -771,6 +884,61 @@ mod headless {
         let mut config = nsh_engine::EngineConfig::new(nsh_engine::Root::of::<SettingsProbe>());
         config.storage = Some(storage.clone());
         nsh_testing::Headless::start(config).map_err(|e| e.to_string())
+    }
+
+    static SAVE: AtomicBool = AtomicBool::new(true);
+
+    /// Saves a contact and a chat scene through the store's intents, and
+    /// shows what the records hold.
+    #[component]
+    fn ContactsProbe() -> impl IntoElement {
+        let s = Store::new();
+        crate::store::install(s);
+        super::restore(s);
+        if SAVE.load(Ordering::SeqCst) {
+            set_timeout(std::time::Duration::from_millis(10), move || {
+                s.save_contact(crate::store::SavedContact {
+                    name: "Ana Popescu".into(),
+                    username: "@ana".into(),
+                    notes: "Climbing".into(),
+                    groups: vec!["Friends".into()],
+                    ..Default::default()
+                });
+                s.save_from("Bogdan", "bogdan");
+                s.set_chat_scene(4, Some(3));
+            });
+        }
+        let book = s.book();
+        let scenes = s.scenes();
+        text(move || {
+            let names = book.with(|b| {
+                b.0.iter()
+                    .map(|c| format!("{}/{}/{}", c.name, c.username, c.groups.join("+")))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            });
+            let scene = scenes.with(|m| m.0.get(&4).copied().unwrap_or(0));
+            format!("book {names} scene {scene}")
+        })
+    }
+
+    #[test]
+    fn saved_contacts_and_scenes_survive_a_restart() -> Result<(), String> {
+        let storage = nsh_testing::MemoryStorage::new([]);
+        let start = |storage: &std::sync::Arc<nsh_testing::MemoryStorage>| {
+            let mut config = nsh_engine::EngineConfig::new(nsh_engine::Root::of::<ContactsProbe>());
+            config.storage = Some(storage.clone());
+            nsh_testing::Headless::start(config).map_err(|e| e.to_string())
+        };
+        let want = "text:book Ana Popescu/ana/Friends,Bogdan/bogdan/ scene 3";
+        SAVE.store(true, Ordering::SeqCst);
+        let mut first = start(&storage)?;
+        first.wait_for(want)?;
+        drop(first);
+        SAVE.store(false, Ordering::SeqCst);
+        let mut second = start(&storage)?;
+        second.wait_for(want)?;
+        Ok(())
     }
 
     #[test]

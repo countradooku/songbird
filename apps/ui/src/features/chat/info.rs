@@ -155,6 +155,7 @@ fn contact_info(chat: ChatId) -> AnyElement {
     let seed = info.with_untracked(|c| c.as_ref().map_or(0, |c| c.seed));
     let timer_open = signal(false);
     let theme_open = signal(false);
+    let scene_open = signal(false);
     // The strip shows what the count counts: photos and videos first,
     // then documents and links.
     let media_count = s.media_of(chat).len() + s.docs_of(chat).len() + s.links_of(chat).len();
@@ -210,7 +211,7 @@ fn contact_info(chat: ChatId) -> AnyElement {
         .child(muted(move || {
             peer.with(|p| {
                 p.as_ref()
-                    .map(|p| presence_label(&p.presence))
+                    .map(|p| presence_label(&s.presence_of(p)))
                     .unwrap_or_default()
             })
         }))
@@ -324,6 +325,7 @@ fn contact_info(chat: ChatId) -> AnyElement {
             ))
             .build(),
         super::theme::theme_row(chat, theme_open),
+        super::scene::scene_row(chat, scene_open),
         Row::new("Disappearing messages")
             .icon(Icon::Timer)
             .trailing(
@@ -440,6 +442,39 @@ fn contact_info(chat: ChatId) -> AnyElement {
             .build(),
     ]);
 
+    // Save to contacts: an encrypted contact record, synced.
+    let saved = move || {
+        peer.with(|p| {
+            p.as_ref().is_some_and(|p| {
+                s.book()
+                    .with(|_| s.saved_by_username(&p.username).is_some())
+            })
+        })
+    };
+    let save_group = dynamic(move || {
+        let on = saved();
+        untracked(move || {
+            group([if on {
+                Row::new("In your contacts")
+                    .icon(Icon::Contact)
+                    .chevron()
+                    .on_press(crate::features::contacts::open)
+                    .build()
+            } else {
+                Row::new("Save to contacts")
+                    .icon(Icon::UserPlus)
+                    .subtitle("Add notes and groups. Encrypted, and synced to your devices.")
+                    .on_press(move || {
+                        if let Some(p) = peer.get_untracked() {
+                            s.save_from(&p.name, &p.username);
+                            toast(format!("{} saved to your contacts", p.name));
+                        }
+                    })
+                    .build()
+            }])
+        })
+    });
+
     view()
         .flex_1()
         .child(page_scroll(
@@ -451,6 +486,7 @@ fn contact_info(chat: ChatId) -> AnyElement {
                 .child(identity)
                 .child(about_group)
                 .child(media_group)
+                .child(save_group)
                 .child(settings_group)
                 .child(encryption)
                 .child(common_group)
@@ -458,6 +494,7 @@ fn contact_info(chat: ChatId) -> AnyElement {
         ))
         .child(sheets::timer_sheet(s, chat, timer_open))
         .child(super::theme::theme_sheet(chat, theme_open))
+        .child(super::scene::scene_sheet(chat, scene_open))
         .into_element()
 }
 

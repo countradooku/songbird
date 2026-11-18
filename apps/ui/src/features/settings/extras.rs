@@ -5,6 +5,7 @@ use nsh_core::prelude::*;
 
 use super::{PRESENCES, presence_name, presence_of, section, section_plain};
 use crate::{
+    backend::supervision as sup,
     features,
     store::{Body, ChildContact, ContactId, Message, proxy_host, store, when_label},
     ui::*,
@@ -442,38 +443,104 @@ pub fn parental() {
                 "See it from their side",
                 vec![Row::new("Preview what your child sees").icon(Icon::Eye).chevron().on_press(child_view).build()],
             ))
-            .child(super::foot("A child can't remove these rules alone. They end when you unlink, or on the birthday you both chose when linking (13 to 16, depending on your country)."))
+            .child(super::foot("A child can't remove these rules alone, but can always delete their own account. The rules end when you unlink, or by themselves when your child reaches the age of digital consent in your country (13 to 16 in the EU)."))
             .into_element()
     });
 }
 
-/// Linking in person: the QR on the child's phone, both confirm.
+/// Linking in person (PROTOCOL §10.6): this device makes a policy key and
+/// a link secret just for this child and shows them as a code to scan;
+/// both screens then show the same six digits, which parent and child
+/// compare. The child's age (entered on the child's phone) and the
+/// country's age of digital consent set the day supervision ends.
 fn link_child() {
     super::push("Link a child's account", || {
         let s = store();
+        // The country for the age of digital consent: the device's region.
+        let country = locale().region().unwrap_or("EU").to_ascii_uppercase();
+        let age_text = signal("12".to_string());
+        let age =
+            move || age_text.with(|t| t.trim().parse::<u8>().ok().filter(|a| (6..=17).contains(a)));
+        let link = signal(s.start_parental_link(12, &country));
+        let c2 = country.clone();
+        effect(move || {
+            if let Some(a) = age() {
+                let l = untracked(|| s.start_parental_link(a, &c2));
+                link.set(l);
+            }
+        });
+        let consent = songbird_content::supervision::consent_age(&country);
+        let code = move || {
+            let c = link.with(sup::code);
+            format!("{} {}", &c[..3.min(c.len())], &c[3.min(c.len())..])
+        };
+        let ends = move || {
+            link.with(|l| {
+                if l.unlink_at_s == 0 {
+                    String::new()
+                } else {
+                    sup::date_label(l.unlink_at_s)
+                }
+            })
+        };
         view()
             .items_center()
             .px_6()
             .pt_6()
             .gap_4()
-            .child(qr_code("child-link", 168.0))
+            .child(dynamic(move || {
+                let payload = link.with(sup::qr_payload);
+                untracked(move || {
+                    view()
+                        .role(AccessibilityRole::Image)
+                        .label("Linking code for your child's phone to scan")
+                        .child(qr_code(&payload, 168.0))
+                })
+            }))
             .child(
                 view()
                     .gap_3()
                     .max_w(px(420.0))
                     .child(step(1, "On your child's phone, open Songbird → You → Parental controls → I'm a child."))
-                    .child(step(2, "Scan the code on their screen with this phone, side by side."))
-                    .child(step(3, "Both of you confirm the same four words on each screen.")),
+                    .child(step(2, "Scan this code with their phone, side by side."))
+                    .child(step(3, "Check that both screens show the same six digits.")),
             )
             .child(
-                // mock: app-core runs the in-person link and signs the policy with the parent's key (Prompt 9).
-                btn("We both confirmed", Variant::Primary, BtnSize::Lg, move || {
-                    s.settings_update(|x| x.parental_controls = true);
+                view()
+                    .items_center()
+                    .gap_1()
+                    .child(muted("The code on both screens"))
+                    .child(numeric_code(code).label(move || format!("Code {}", link.with(sup::code)))),
+            )
+            .child(
+                view().w_full().max_w(px(420.0)).child(labelled_field(
+                    "Their age (they enter it on their phone)",
+                    field("Age", age_text),
+                    move || match age() {
+                        Some(_) if !ends().is_empty() => format!(
+                            "Supervision ends by itself on {}, the month after they turn {consent}. Their birth date stays on their phone.",
+                            ends()
+                        ),
+                        Some(_) => format!("Supervision ends when they turn {consent}."),
+                        None => "Enter an age from 6 to 17.".into(),
+                    },
+                    move || age().is_none(),
+                )),
+            )
+            .child(
+                btn("We both see the same code", Variant::Primary, BtnSize::Lg, move || {
+                    if age().is_none() {
+                        toast("Enter their age first");
+                        return;
+                    }
+                    s.confirm_parental_link();
                     crate::nav::pop();
                     rules();
-                }),
+                })
+                .disabled(move || age().is_none()),
             )
-            .child(muted("Linking only works in person, so nobody can take over a child's account remotely.").text_center().max_w(px(420.0)))
+            .child(muted("Linking only works in person, so nobody can take over a child's account remotely. Songbird's servers never learn who the parent is.").text_center().max_w(px(420.0)))
+            .child(view().h(px(24.0)))
             .into_element()
     });
 }
@@ -500,18 +567,20 @@ fn step(n: u32, line: &'static str) -> View {
         .child(body(line).flex_1())
 }
 
-/// The rules a parent sets.
+/// The rules a parent sets. Each change is a new policy, signed on this
+/// device and sent when the account is live; the child's app shows it.
 fn rules() {
-    super::push("Rules for Maria", || {
+    super::push("Rules", || {
         let s = store();
         let ext = s.ext();
         let p =
             move |f: fn(&crate::store::ParentalRules) -> bool| move || ext.with(|x| f(&x.parental));
+        let name = ext.with_untracked(|x| x.parental.child_name.clone());
         view()
             .child(view().px_4().pt_4().child(banner(
                 Tone::Secure,
                 Icon::Lock,
-                "You'll never see their messages. These rules are signed by you and shown to them.",
+                "You'll never see their messages, calls or contacts. These rules are signed on this phone and shown to them in full.",
             )))
             .child(section_plain(
                 "Who can message them",
@@ -525,7 +594,7 @@ fn rules() {
                         w.label(),
                         None,
                         move || ext.with(|x| x.parental.who_can_message == w),
-                        move || s.ext_update(|x| x.parental.who_can_message = w),
+                        move || s.set_parental_rules(|r| r.who_can_message = w),
                     )
                 })
                 .collect(),
@@ -537,22 +606,22 @@ fn rules() {
                         "Group invites need my approval",
                         None,
                         p(|r| r.groups_need_approval),
-                        move |v| s.ext_update(|x| x.parental.groups_need_approval = v),
+                        move |v| s.set_parental_rules(|r| r.groups_need_approval = v),
                     ),
                     toggle_row(
                         "Block calls from people not in contacts",
                         None,
                         p(|r| r.block_unknown_calls),
-                        move |v| s.ext_update(|x| x.parental.block_unknown_calls = v),
+                        move |v| s.set_parental_rules(|r| r.block_unknown_calls = v),
                     ),
                     toggle_row(
                         "Others can find them by username",
                         Some("Off: only people they add, or you approve, can start a chat."),
                         p(|r| r.discoverable),
-                        move |v| s.ext_update(|x| x.parental.discoverable = v),
+                        move |v| s.set_parental_rules(|r| r.discoverable = v),
                     ),
                     toggle_row("Allow nudges", None, p(|r| r.nudges), move |v| {
-                        s.ext_update(|x| x.parental.nudges = v)
+                        s.set_parental_rules(|r| r.nudges = v)
                     }),
                 ],
             ))
@@ -564,10 +633,13 @@ fn rules() {
                     (Some("22:00–07:00"), "22:00–07:00"),
                 ],
                 move || ext.with(|x| x.parental.quiet_hours),
-                move |q| s.ext_update(|x| x.parental.quiet_hours = q),
+                move |q| s.set_parental_rules(|r| r.quiet_hours = q),
             )))
             .child(super::foot(
                 "No notifications during quiet hours, except calls from you.",
+            ))
+            .child(super::foot(
+                "Songbird's servers keep the rules they enforce, the date supervision ends and a key that isn't linked to your account. The other rules are encrypted for your two phones.",
             ))
             .child(view().pt_4().child(group(vec![
                     Row::new("Unlink")
@@ -575,11 +647,11 @@ fn rules() {
                         .danger()
                         .on_press(move || {
                             confirm(
-                                "Unlink Maria's account?",
-                                "The rules stop at once. Maria is told.",
+                                format!("Unlink {name}'s account?"),
+                                format!("The rules stop at once. {name} is told, and keeps the settings to change."),
                                 "Unlink",
                                 move || {
-                                    s.settings_update(|x| x.parental_controls = false);
+                                    s.unlink_child();
                                     crate::nav::pop();
                                 },
                             )
@@ -590,45 +662,56 @@ fn rules() {
     });
 }
 
-/// The child's side (mock): which rules apply, set by whom.
+/// The child's side: every rule in force, read from the signed policy and
+/// checked against the key their phone scanned. When the account is live
+/// it is the server's copy (`GET /v1/supervision`); otherwise the policy
+/// this device signed last (the preview a parent sees).
 fn child_view() {
-    super::push("Rules from Mama", || {
+    super::push("Rules from your parent", || {
         let s = store();
         let ext = s.ext();
-        let rules = move || {
-            ext.with(|x| {
-                let r = &x.parental;
-                let mut out = vec![format!(
-                    "Who can message you: {}",
-                    r.who_can_message.label().to_lowercase()
-                )];
-                if r.groups_need_approval {
-                    out.push("Group invites wait for Mama to approve".into());
+        // (rules, a problem) from the server when live, else locally.
+        let fetched = resource(
+            move || Some(crate::backend::is_live() && crate::backend::registered()),
+            |live, _info| async move {
+                if live {
+                    sup::fetch().await.map_err(|p| p.0)
+                } else {
+                    Ok(None)
                 }
-                if r.block_unknown_calls {
-                    out.push("Calls only from your contacts".into());
-                }
-                if !r.discoverable {
-                    out.push("People can't find you by username".into());
-                }
-                if let Some(q) = r.quiet_hours {
-                    out.push(format!("Quiet hours {q}"));
-                }
-                out
-            })
+            },
+        );
+        let lines = move || -> Vec<String> {
+            let child = sup::child_link();
+            let key = child.as_ref().map(|c| c.policy_key);
+            let secret = child.as_ref().map(|c| c.secret);
+            let server = fetched.get().flatten();
+            let policy = server.or_else(|| {
+                let link = sup::parent_link()?;
+                let rules = ext.with(|x| x.parental.clone());
+                sup::sign_policy(&link, &rules, false, link.version.max(1))
+            });
+            if let Some(e) = fetched.error() {
+                return vec![format!("The rules couldn't be checked just now. {e}")];
+            }
+            match policy {
+                Some(p) if sup::verify(&p, key.as_ref()) => sup::rules_in_force(&p, secret.as_ref()),
+                Some(_) => vec!["These rules aren't signed by the parent you linked with, so none of them apply.".into()],
+                None => vec!["No parent supervises this account.".into()],
+            }
         };
         view()
             .child(view().px_4().pt_4().child(banner(
                 Tone::Secure,
                 Icon::ShieldCheck,
-                "These rules are set by Mama. They can't read your messages.",
+                "Your parent never sees your messages, calls, photos or contacts. They only set who can reach you.",
             )))
             .child(section_title("Rules that apply to you"))
             .child(dynamic(move || {
-                let list = rules();
+                let list = lines();
                 untracked(move || group(list.into_iter().map(|r| Row::new(r).icon(Icon::Check).build())))
             }))
-            .child(super::foot("Mama can't see your chats, calls, photos or contacts. The rules end on your 16th birthday, as you both agreed."))
+            .child(super::foot("Every rule your parent set is listed here; there are no hidden ones. Each was signed by the phone you linked with in person. You can still delete your own account."))
             .into_element()
     });
 }

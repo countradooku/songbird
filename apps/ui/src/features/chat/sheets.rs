@@ -458,16 +458,67 @@ const STICKERS: [&str; 12] = [
 
 fn sticker_sheet(cv: Conv) -> AnyElement {
     let open = cv.sticker_open;
+    // Installed sound-sticker packs follow the built-in stickers.
+    let sound_packs = computed(|| {
+        crate::store::ext_groups::groups_state().with(|g| {
+            g.packs
+                .iter()
+                .filter(|p| p.kind == crate::store::ext_groups::PackKind::SoundStickers)
+                .map(|p| (p.name.clone(), p.items.clone()))
+                .collect::<Vec<_>>()
+        })
+    });
+    let cell = if is_desktop() { 44.0 } else { 48.0 };
     app_sheet(
         open,
         "Stickers",
-        emoji_grid(&STICKERS, 40.0, move |e| {
-            open.set(false);
-            cv.send_body(Body::Sticker {
-                emoji: e.into(),
-                pack: "Songbird friends".into(),
-            });
-        }),
+        view()
+            .child(emoji_grid(&STICKERS, 40.0, move |e| {
+                open.set(false);
+                cv.send_body(Body::Sticker {
+                    emoji: e.into(),
+                    pack: "Songbird friends".into(),
+                });
+            }))
+            .child(dynamic(move || {
+                let packs = sound_packs.get();
+                untracked(move || {
+                    view().children(packs.into_iter().map(move |(name, items)| {
+                        view()
+                            .child(section_title(format!("{name} · sound stickers")))
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .flex_wrap()
+                                    .px_3()
+                                    .pb_2()
+                                    .justify_center()
+                                    .children(items.into_iter().map(move |e| {
+                                        let (label, pick, pack) = (
+                                            format!("{e}, plays a sound"),
+                                            e.clone(),
+                                            name.clone(),
+                                        );
+                                        pressable()
+                                            .on_press(move || {
+                                                open.set(false);
+                                                cv.send_body(Body::Sticker {
+                                                    emoji: pick.clone(),
+                                                    pack: pack.clone(),
+                                                });
+                                            })
+                                            .accessibility_label(label)
+                                            .size(px(cell))
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(move || radius::control())
+                                            .hover(|st| st.bg(move || c::accent()))
+                                            .child(text(e).text_size(px(40.0)))
+                                    })),
+                            )
+                    }))
+                })
+            })),
     )
     .into_element()
 }

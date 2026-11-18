@@ -142,6 +142,19 @@ pub fn live_avatar(row: Memo<ChatRow>, size: f32, surface: fn() -> AdaptiveColor
                         ),
                 ),
         )
+        // A direct chat's person: their presence at the corner (a shape
+        // for each, and the row's label says the word).
+        .child(
+            view()
+                .absolute()
+                .right(px(-2.0))
+                .bottom(px(-2.0))
+                .child(presence_badge(
+                    move || row.with(|r| r.availability),
+                    (size * 0.26).max(10.0),
+                    surface,
+                )),
+        )
         .child(
             view()
                 .absolute()

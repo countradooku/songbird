@@ -106,6 +106,11 @@ fn body() -> impl IntoElement {
                                 toast("Invite link copied. Share it with a friend.");
                             }))
                             .child(action(Icon::QrCode, "Scan QR code", open_scan))
+                            .child(action(
+                                Icon::Contact,
+                                "Saved contacts",
+                                features::contacts::open,
+                            ))
                     }))
                     .child(section_title("Contacts on Songbird")),
             )

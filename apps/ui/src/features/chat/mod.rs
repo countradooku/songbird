@@ -25,6 +25,7 @@ mod info;
 mod list;
 pub(crate) mod logic;
 mod message_info;
+mod scene;
 mod sheets;
 pub(crate) mod theme;
 mod voice;
@@ -518,7 +519,12 @@ fn watch(cv: Conv) {
         seen.replace((count, last_id));
         let Some(last) = last else { return };
         if last_id != was_last && matches!(last.body, Body::Nudge) {
-            let nudges = s.settings.with_untracked(|x| x.nudges);
+            // Off globally, or for this person: no shake (PROTOCOL §10.5).
+            let nudges = s.settings.with_untracked(|x| x.nudges)
+                && last
+                    .from
+                    .and_then(|from| s.contact(from))
+                    .is_none_or(|c| !c.nudges_off);
             if nudges || last.mine() {
                 shake(cv);
             }
@@ -531,6 +537,37 @@ fn watch(cv: Conv) {
             }
         }
     });
+}
+
+/// Sends a nudge. The first one this device ever sends is confirmed first,
+/// so a nudge never happens by surprise (D-0101 question 9); the answer is
+/// kept on this device.
+pub(crate) fn send_nudge(s: Store, chat: ChatId) {
+    if crate::backend::nudge::confirmed() {
+        s.nudge_with_echo(chat);
+        return;
+    }
+    let name = s
+        .peer(chat)
+        .map(|p| {
+            p.name
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .unwrap_or_else(|| "Their".into());
+    ask_first(
+        "Send a nudge?",
+        format!(
+            "{name}'s chat window shakes, or their phone vibrates, to get their attention. They can turn nudges off for you. Songbird only asks this once."
+        ),
+        "Send nudge",
+        move || {
+            crate::backend::nudge::set_confirmed();
+            s.nudge_with_echo(chat);
+        },
+    );
 }
 
 /// The nudge: the conversation shakes once (no motion when reduced).
@@ -642,6 +679,8 @@ pub fn conversation(chat: ChatId) -> AnyElement {
                 .flex_1()
                 .overflow_hidden()
                 .bind_motion(&cv.shake)
+                // The chat's scene, behind the messages (Prompt 9).
+                .child(scene::scene_layer(chat))
                 .child(list::message_list(cv))
                 // Scroll-edge fades: messages dissolve under the floating
                 // header and composer instead of being cut at the pane's

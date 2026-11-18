@@ -13,6 +13,7 @@ use std::time::Duration;
 use nsh_core::prelude::*;
 
 use super::{Audience, ChatId, ContactId, Minutes, NOW, Presence, Settings, Store};
+use crate::backend::supervision as sup;
 
 /// When a custom status clears itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +155,9 @@ pub struct Broadcast {
 pub struct SettingsExt {
     /// When the custom status clears; `None` keeps it.
     pub status_until: Option<Minutes>,
+    /// The same expiry on the real clock (ms since the epoch; 0: none), for
+    /// the encrypted profile, where every reader stops showing the status.
+    pub status_expires_ms: u64,
     pub status_emoji: String,
     /// The online audience follows last seen (WhatsApp's "Same as last seen").
     pub online_same_as_last_seen: bool,
@@ -180,6 +184,7 @@ impl Default for SettingsExt {
     fn default() -> Self {
         Self {
             status_until: None,
+            status_expires_ms: 0,
             status_emoji: "💬".into(),
             online_same_as_last_seen: false,
             app_lock_after: LockAfter::Immediately,
@@ -263,15 +268,21 @@ impl Store {
     }
 
     /// Sets the custom status ("In a meeting") with its expiry, and clears
-    /// it when that comes. mock: app-core writes the encrypted profile and
-    /// sends contacts a "profile changed" signal (Prompt 9).
+    /// it when that comes. The encrypted profile carries it with its real
+    /// expiry (`backend::profile` publishes on the change). mock: the
+    /// "profile changed" signal to contacts is app-core's (Prompt 9).
     pub fn set_status(&self, line: String, emoji: String, expiry: StatusExpiry) {
         let now = NOW;
         let until = expiry.until(now);
         let line = line.trim().to_string();
+        let expires_ms = until.map_or(0, |u| {
+            (nsh_core::time::unix_ms().max(0.0) as u64)
+                .saturating_add((u - now).max(0) as u64 * 60_000)
+        });
         self.profile_update(|p| p.status_line = (!line.is_empty()).then(|| line.clone()));
         self.ext_update(|x| {
             x.status_until = until;
+            x.status_expires_ms = expires_ms;
             x.status_emoji = emoji;
         });
         if let Some(until) = until {
@@ -289,7 +300,10 @@ impl Store {
 
     pub fn clear_status(&self) {
         self.profile_update(|p| p.status_line = None);
-        self.ext_update(|x| x.status_until = None);
+        self.ext_update(|x| {
+            x.status_until = None;
+            x.status_expires_ms = 0;
+        });
     }
 
     // ------------------------------------------------------------ server-enforced settings
@@ -393,7 +407,10 @@ impl Store {
         });
     }
 
+    /// The user's presence choice; the presence rules decide what (if
+    /// anything) contacts are told (`backend::presence`).
     pub fn set_presence(&self, presence: Presence) {
+        crate::backend::presence::set_choice(*self, &presence);
         self.profile_update(|p| p.presence = presence);
     }
 
@@ -405,6 +422,70 @@ impl Store {
                 c.nudges_off = off;
             }
         });
+    }
+
+    // ------------------------------------------------------------ parental controls
+
+    /// Starts (or resumes) linking a child on the parent's device: a fresh
+    /// policy key and link secret, kept on this device, and the date
+    /// supervision ends from the child's age and country. Returns the link.
+    ///
+    /// mock: the child's account ID comes from scanning the code on the
+    /// child's phone (a camera, with the host projects); a random stand-in
+    /// until then. The child's side (age, scanned key and secret) is kept
+    /// here too, as the child's device would, for the child's view.
+    pub fn start_parental_link(&self, age: u8, country: &str) -> sup::ParentLink {
+        let now = nsh_core::time::unix_ms().max(0.0) as u64;
+        let (year, month) = sup::born(age, now);
+        let ends = sup::ends(year, month, country).unwrap_or(0);
+        // An unfinished link (no policy signed yet) keeps its key and code.
+        let mut link = sup::parent_link()
+            .filter(|l| l.version == 0)
+            .unwrap_or_else(|| sup::start_link(crate::backend::wire::random(), ends));
+        link.unlink_at_s = ends;
+        sup::save_parent_link(&link);
+        sup::save_child(&sup::ChildLink {
+            policy_key: sup::public(&link).unwrap_or_default(),
+            secret: link.secret,
+            birth_year: year,
+            birth_month: month,
+            country: country.to_string(),
+        });
+        link
+    }
+
+    /// Both screens showed the same code: the first policy, signed by the
+    /// parent's key. The child's primary uploads it (`PUT /v1/supervision`)
+    /// when the account is live.
+    pub fn confirm_parental_link(&self) {
+        self.settings_update(|x| x.parental_controls = true);
+        self.push_policy(false);
+    }
+
+    /// Changes a rule; the parent's device signs and sends the new policy.
+    pub fn set_parental_rules(&self, f: impl FnOnce(&mut ParentalRules)) {
+        self.ext_update(|x| f(&mut x.parental));
+        self.push_policy(false);
+    }
+
+    /// Ends supervision now: a newer policy with the unlink flag.
+    pub fn unlink_child(&self) {
+        self.push_policy(true);
+        sup::forget_parent();
+        self.settings_update(|x| x.parental_controls = false);
+    }
+
+    fn push_policy(&self, unlink: bool) {
+        let rules = self.ext().with_untracked(|x| x.parental.clone());
+        let Some(mut link) = sup::parent_link() else {
+            return;
+        };
+        let Some(policy) = sup::next_policy(&mut link, &rules, unlink) else {
+            return;
+        };
+        if crate::backend::is_live() && crate::backend::registered() {
+            crate::backend::run(async move { sup::upload(&policy).await });
+        }
     }
 
     // ------------------------------------------------------------ chat lists

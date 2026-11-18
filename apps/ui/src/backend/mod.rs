@@ -15,11 +15,20 @@
 //! - account deletion (`DELETE /v1/account`);
 //! - the delivery connection (`crates/client`): authenticated, live status,
 //!   envelopes counted but left on the server (only app-core can decrypt
-//!   and acknowledge them).
+//!   and acknowledge them);
+//! - Prompt 9: settings and saved contacts as encrypted records
+//!   (`records`), the encrypted profile with the custom status (`profile`),
+//!   parental supervision policies (`supervision`). Presence (`presence`)
+//!   and nudges (`nudge`) are wired, and send once app-core knows contacts'
+//!   devices and seals for them.
 
 pub mod account;
 pub mod lock;
+pub mod nudge;
+pub mod presence;
+pub mod profile;
 pub mod records;
+pub mod supervision;
 pub mod wire;
 mod ws;
 

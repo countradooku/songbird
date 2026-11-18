@@ -5,6 +5,7 @@ pub mod backups;
 pub mod calls;
 pub mod chat;
 pub mod chats;
+pub mod contacts;
 pub mod desktop;
 pub mod devices;
 pub mod gallery;

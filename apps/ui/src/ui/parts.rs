@@ -594,6 +594,75 @@ pub fn avatar_presence_on(
     )
 }
 
+/// What a presence mark says. Never colour alone: each has its own shape,
+/// and the row or control around it says the word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Availability {
+    Online,
+    Away,
+    Busy,
+}
+
+impl Availability {
+    pub fn label(self) -> &'static str {
+        match self {
+            Availability::Online => "online",
+            Availability::Away => "away",
+            Availability::Busy => "busy",
+        }
+    }
+}
+
+/// A presence mark for an avatar's corner (place it with `absolute()`):
+/// a filled dot (online), a ring (away), a dot crossed by a bar (busy),
+/// cut out of `surface` by a 2pt ring of its colour. Fades in and out
+/// (`BASE`, kept with reduced motion: a fade, not a move); hidden from
+/// screen readers, since the row says it in words.
+pub fn presence_badge(
+    kind: impl Fn() -> Option<Availability> + Copy + 'static,
+    dot: f32,
+    surface: fn() -> AdaptiveColor,
+) -> View {
+    let dot = dot.round();
+    let is = move |a: Availability| kind() == Some(a);
+    view()
+        .p(px(2.0))
+        .rounded_full()
+        .bg(move || surface())
+        .opacity(move || if kind().is_some() { 1.0_f32 } else { 0.0 })
+        .transition_opacity()
+        .duration(motion::BASE)
+        .accessibility_elements_hidden(true)
+        .child(
+            view()
+                .size(px(dot))
+                .rounded_full()
+                .items_center()
+                .justify_center()
+                .bg(move || match kind() {
+                    Some(Availability::Online) => c::online(),
+                    Some(Availability::Busy) => c::destructive(),
+                    _ => AdaptiveColor::TRANSPARENT,
+                })
+                .border_2()
+                .border_color(move || {
+                    if is(Availability::Away) {
+                        c::warning()
+                    } else {
+                        AdaptiveColor::TRANSPARENT
+                    }
+                })
+                .child(
+                    view()
+                        .w(px((dot * 0.55).round()))
+                        .h(px(2.0))
+                        .rounded_full()
+                        .bg(move || c::on_destructive())
+                        .style_when(move || !is(Availability::Busy), |st| st.hidden()),
+                ),
+        )
+}
+
 // ---------------------------------------------------------------- badges
 
 /// An unread counter pill. `muted` greys it (a muted chat).

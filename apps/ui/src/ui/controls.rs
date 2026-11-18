@@ -798,6 +798,31 @@ pub fn confirm(
     });
 }
 
+/// A native question with a plain (not destructive) action: "never by
+/// surprise" confirmations. `on_yes` runs when the action is chosen.
+pub fn ask_first(
+    title: impl Into<String>,
+    message: impl Into<String>,
+    action: impl Into<String>,
+    on_yes: impl FnOnce() + 'static,
+) {
+    let title = title.into();
+    let message = message.into();
+    let action = action.into();
+    spawn(async move {
+        let answer = alert_dialog()
+            .title(title)
+            .description(message)
+            .cancel("cancel", "Cancel")
+            .action("yes", action)
+            .show()
+            .await;
+        if matches!(answer, Ok(r) if r.action.as_deref() == Some("yes")) {
+            on_yes();
+        }
+    });
+}
+
 // ---------------------------------------------------------------- toasts
 
 /// The one toast showing (a short message that leaves by itself).

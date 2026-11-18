@@ -5,8 +5,10 @@
 use std::collections::HashMap;
 
 use crate::{
-    store::{Body, Chat, ChatId, ChatKind, Contact, ContactId, Message, MsgId, when_label},
-    ui::Tick,
+    store::{
+        Body, Chat, ChatId, ChatKind, Contact, ContactId, Message, MsgId, Presence, when_label,
+    },
+    ui::{Availability, Tick},
 };
 
 /// Which chats the list shows: All, or one of the user's lists in the
@@ -207,6 +209,9 @@ pub struct ChatRow {
     pub favourite: bool,
     pub archived: bool,
     pub lists: Vec<String>,
+    /// The other person's presence, for a direct chat whose person shares
+    /// it (online, away, busy; never a group).
+    pub availability: Option<Availability>,
 }
 
 impl ChatRow {
@@ -274,6 +279,9 @@ impl ChatRow {
         }
         if self.mention {
             parts.push("you were mentioned".into());
+        }
+        if let Some(a) = self.availability {
+            parts.push(a.label().into());
         }
         let (prefix, text) = self.preview_text();
         if !text.is_empty() {
@@ -379,6 +387,21 @@ pub fn row(c: &Chat, messages: &HashMap<ChatId, Vec<Message>>, contacts: &[Conta
         favourite: c.favourite,
         archived: c.archived,
         lists: c.lists.clone(),
+        availability: if group {
+            None
+        } else {
+            peer.and_then(|p| availability(&p.presence))
+        },
+    }
+}
+
+/// The mark a person's presence shows (last seen and invisible show none).
+pub fn availability(p: &Presence) -> Option<Availability> {
+    match p {
+        Presence::Online => Some(Availability::Online),
+        Presence::Away => Some(Availability::Away),
+        Presence::Busy => Some(Availability::Busy),
+        Presence::Invisible | Presence::LastSeen(_) => None,
     }
 }
 

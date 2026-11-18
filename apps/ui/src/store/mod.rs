@@ -8,6 +8,7 @@
 
 mod ext_chat;
 mod ext_chats;
+mod ext_contacts;
 mod ext_extras;
 pub mod ext_groups;
 pub mod ext_onboarding;
@@ -19,6 +20,7 @@ use std::{collections::HashMap, time::Duration};
 
 use nsh_core::{prelude::*, storage::Storage};
 
+pub use ext_contacts::*;
 pub use ext_extras::*;
 pub use ext_settings::*;
 pub use model::*;
@@ -655,7 +657,17 @@ impl Store {
         }
     }
 
+    /// Nudges the other person of a direct chat. The real path: when the
+    /// account is live, `Content.attention {NUDGE}` to their devices
+    /// (`backend::nudge`), which sends nothing until app-core knows them.
+    /// The chat shows it either way. mock: the line in the chat is the
+    /// mock's; a real nudge is not a stored message (PROTOCOL §10.5).
     pub fn nudge(&self, chat: ChatId) {
+        if let Some(peer) = self.peer(chat) {
+            let _ = crate::backend::nudge::send(
+                crate::backend::presence::peer_of(*self, peer.id).as_ref(),
+            );
+        }
         self.send(chat, Body::Nudge, None);
     }
 

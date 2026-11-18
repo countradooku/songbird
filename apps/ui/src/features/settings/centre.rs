@@ -11,7 +11,7 @@ use crate::{store::store, ui::*};
 /// (icon, one sentence, the "Learn more" text).
 type Item = (Icon, &'static str, &'static str);
 
-const CAN_SEE: [Item; 6] = [
+const CAN_SEE: [Item; 10] = [
     (
         Icon::User,
         "Your account ID and username, so people can find you.",
@@ -42,9 +42,29 @@ const CAN_SEE: [Item; 6] = [
         "Who is in a call with whom, only while it rings or lasts.",
         "Removed when the call ends. What you say and show is end\u{2011}to\u{2011}end encrypted.",
     ),
+    (
+        Icon::Settings,
+        "How many settings records you have, and when they change.",
+        "Your settings and saved contacts are stored encrypted. We see how many records there are, their size and when they're written, never what they say.",
+    ),
+    (
+        Icon::Eye,
+        "Which devices a presence update goes to, and when.",
+        "Your app sends your presence sealed, only to the contacts you allow. We can't see who sent it or what it says, and we never tell anyone you're online.",
+    ),
+    (
+        Icon::Zap,
+        "That a nudge happened between two accounts.",
+        "Nudges are limited per pair of people, so we see that one was sent, never what it is. A nudge is never stored, and one to someone offline is lost.",
+    ),
+    (
+        Icon::Users,
+        "For a supervised child: a key, the rules we enforce and an end date.",
+        "Not who the parent is: the key isn't linked to any account. Rules only the apps enforce, like quiet hours, are encrypted for the two phones.",
+    ),
 ];
 
-const NEVER_SEES: [Item; 8] = [
+const NEVER_SEES: [Item; 10] = [
     (
         Icon::Chats,
         "Your messages.",
@@ -73,12 +93,22 @@ const NEVER_SEES: [Item; 8] = [
     (
         Icon::Contact,
         "Your contacts.",
-        "Your contact list is synced between your devices encrypted. We never upload your address book.",
+        "Saved contacts, their notes and groups sync between your devices encrypted. We never upload your address book.",
     ),
     (
         Icon::Settings,
         "Your settings.",
         "Theme, notifications, who sees your last seen: each is an encrypted record only your devices can read.",
+    ),
+    (
+        Icon::Eye,
+        "Whether you're online, and your last seen.",
+        "Your app tells only the contacts you allow, encrypted. Invisible sends nothing at all.",
+    ),
+    (
+        Icon::Smile,
+        "Your status and its emoji.",
+        "A status is inside your encrypted profile, with the time it clears. Fields you share with nobody are left out of it.",
     ),
     (
         Icon::Cloud,

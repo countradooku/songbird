@@ -262,6 +262,7 @@ pub struct JumpPage {
 /// Pages people go to rather than settings they change: their name alone
 /// says it, so they skip the "Settings:" prefix.
 const DESTINATIONS: &[&str] = &[
+    "Contacts",
     "Linked devices",
     "Broadcast lists",
     "Starred messages",
@@ -357,6 +358,12 @@ fn entries() -> Vec<Entry> {
             "media auto-download network usage proxy quality",
             Icon::Database,
             links::storage_and_data,
+        ),
+        e(
+            "Contacts",
+            "people address book save buddy groups notes friends work",
+            Icon::Contact,
+            crate::features::contacts::open,
         ),
         e(
             "Linked devices",
@@ -619,6 +626,7 @@ fn you_home(status_open: Signal<bool>) -> View {
             "Storage and data",
         ]))))
         .child(view().pt_4().child(group(pick(&[
+            "Contacts",
             "Linked devices",
             "Lists",
             "Broadcast lists",

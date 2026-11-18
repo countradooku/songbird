@@ -45,3 +45,15 @@ Tokens from `ui::motion`; every motion goes through `Motion::play` / transitions
 | Messages under the header and composer | Fade out at the scroll edges (static scrims) | Same |
 | ⌘K opens | Card scales 0.98→1 and fades over `FAST`; the dim fades in | Fade only |
 | ⌘K closes | Card and dim fade out over `INSTANT` | Same |
+
+## Prompt 9, M6: scenes, sound stickers, nudges
+
+| Change | Motion | Reduced motion |
+| --- | --- | --- |
+| Chat scene chosen / removed | The scene layer cross-fades in or out, `SLOW` (opacity 0 ↔ 0.16), then stays still: a background never competes with messages | Same (a fade) |
+| Chat scene sheet | The app's sheet (native slide up; panel on desktop); radio rows' check fills `FAST` | Native; colour only |
+| Sound sticker shows | Plays its sound once by itself if autoplay is on (sound, not motion); the speaker button presses like every icon button (scale 0.94, `FAST`) | Opacity press |
+| First nudge ever | Native question ("Send a nudge?"), then the shake as before | Native; no shake |
+| Nudge received with nudges off (globally or for that person) | No shake; the line in the chat still says it | Same |
+
+Not frame-captured in this milestone.

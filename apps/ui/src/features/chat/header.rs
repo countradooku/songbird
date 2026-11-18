@@ -58,7 +58,7 @@ fn subtitle(cv: Conv) -> impl Fn() -> (String, bool) + Copy + 'static {
             ChatKind::Direct(id) | ChatKind::WhatsApp(id) => match s.contact(id) {
                 Some(p) if p.blocked => "Blocked".into(),
                 Some(p) => {
-                    let presence = presence_label(&p.presence);
+                    let presence = presence_label(&s.presence_of(&p));
                     match (presence.is_empty(), p.status_line) {
                         (false, Some(st)) => format!("{presence} · {st}"),
                         (false, None) => presence,
@@ -389,7 +389,7 @@ fn more_menu(cv: Conv, nudge: bool) -> AnyElement {
     ]);
     if nudge {
         items.push(menu_entry(Icon::Zap, "Send a nudge", false, move || {
-            s.nudge_with_echo(chat)
+            super::send_nudge(s, chat)
         }));
     }
     items.push(menu_rule());

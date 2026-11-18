@@ -67,6 +67,10 @@ pub fn App() -> impl IntoElement {
     backend::records::restore(s);
     backend::restore();
     backend::records::periodic(s);
+    // Prompt 9, M6: the encrypted profile follows the user's edits, and
+    // presence follows the app's lifecycle and the privacy settings.
+    backend::profile::install(s);
+    backend::presence::install(s);
     s.refresh_server_settings();
     features::lock::install(s);
     theming::follow_settings(s);

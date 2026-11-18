@@ -858,7 +858,7 @@ fn body(cv: Conv, item: ItemMemo, kind: Kind) -> AnyElement {
         Kind::Event => event_body(cv, item),
         Kind::Contact => contact_body(cv, item),
         Kind::Location => location_body(cv, item),
-        Kind::Sticker => sticker_body(item),
+        Kind::Sticker => sticker_body(cv, item),
         Kind::ViewOnce => view_once_body(cv, item),
         Kind::Call => call_body(cv, item),
         Kind::Deleted => deleted_body(cv, item),
@@ -1694,15 +1694,25 @@ fn contact_body(cv: Conv, item: ItemMemo) -> AnyElement {
                 )))
                 .child(view().w(px(1.0)).bg(rule))
                 .child(view().flex_1().py_1().child(btn(
-                    "Add",
+                    move || {
+                        if info.with(|i| s.book().with(|_| s.saved_by_username(&i.1).is_some())) {
+                            "Saved"
+                        } else {
+                            "Save to contacts"
+                        }
+                    },
                     Variant::Ghost,
                     BtnSize::Sm,
                     move || {
-                        // mock: app-core adds them to the encrypted address book.
-                        toast(format!(
-                            "{} added to your contacts",
-                            info.with_untracked(|i| i.0.clone())
-                        ));
+                        // An encrypted contact record (`k/<id>`), synced to
+                        // the user's other devices.
+                        let (name, user) = info.get_untracked();
+                        if s.saved_by_username(&user).is_some() {
+                            crate::features::contacts::open();
+                            return;
+                        }
+                        s.save_from(&name, &user);
+                        toast(format!("{name} saved to your contacts"));
                     },
                 ))),
         )
@@ -1867,17 +1877,53 @@ fn location_body(cv: Conv, item: ItemMemo) -> AnyElement {
         .into_element()
 }
 
-fn sticker_body(item: ItemMemo) -> AnyElement {
+/// A sticker; one from a Sound stickers pack also has a speaker button
+/// that plays its sound, and plays it by itself when it first shows if
+/// the user lets sound stickers play automatically (Prompt 9).
+fn sticker_body(cv: Conv, item: ItemMemo) -> AnyElement {
+    let s = cv.s;
     let info = sel(item, |i| match &i.m.body {
         Body::Sticker { emoji, pack } => (emoji.clone(), pack.clone()),
         _ => Default::default(),
     });
-    text(move || info.with(|i| i.0.clone()))
-        .text_size(px(96.0))
-        .line_height(px(112.0))
-        .px_1()
-        .label(move || info.with(|i| format!("Sticker from {}", i.1)))
-        .role(AccessibilityRole::Image)
+    let id = sel(item, |i| i.m.id);
+    let sound = computed(move || info.with(|i| s.is_sound_sticker(&i.1)));
+    // The cell may be given another message: read it where it's used.
+    effect(move || {
+        let (sticker, id, sound) = (info.with(|i| i.0.clone()), id.get(), sound.get());
+        if sound && !sticker.is_empty() {
+            untracked(|| super::scene::autoplay(cv.chat, id, &sticker));
+        }
+    });
+    view()
+        .flex_row()
+        .items_end()
+        .gap_1()
+        .child(
+            text(move || info.with(|i| i.0.clone()))
+                .text_size(px(96.0))
+                .line_height(px(112.0))
+                .px_1()
+                .label(move || {
+                    info.with(|i| {
+                        if sound.get() {
+                            format!("Sound sticker from {}", i.1)
+                        } else {
+                            format!("Sticker from {}", i.1)
+                        }
+                    })
+                })
+                .role(AccessibilityRole::Image),
+        )
+        .child(when(
+            move || sound.get(),
+            move || {
+                icon_btn(Icon::Volume, "Play sound", move || {
+                    super::scene::play(&info.with_untracked(|i| i.0.clone()))
+                })
+                .mb_2()
+            },
+        ))
         .into_element()
 }
 

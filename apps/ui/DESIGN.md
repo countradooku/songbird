@@ -124,11 +124,11 @@ every scale and translate is dropped; colour and opacity fades stay.
 | Text | `heading`, `body`, `muted`, `section_title`, `footnote` |
 | Rows | `Row::new(title).icon(..).subtitle(..).chevron()/.value(..)/.trailing(..).danger().on_press(..).build()`, `group([...])` (icon rows), `group_plain` (no leading icon), `group_with_inset(rows, INSET_*)`, `Row::leading_kind().inset()`, `toggle_row`, `toggle_row_icon`, `toggle_row_with(icon, …, disabled)` |
 | Inputs | `field`, `labelled_field`, `search_field`, `toggle`, `segmented`, `chip`, `chip_scroller(chips, surface)`, `edge_fade(surface)` (last child of a `w_full().overflow_hidden()` view around the scroll; content ends with `EDGE_FADE + 8` padding) |
-| People | `avatar(name, seed, size)`, `avatar_presence`, `avatar_presence_on(…, surface)`, `initials` |
+| People | `avatar(name, seed, size)`, `avatar_presence`, `avatar_presence_on(…, surface)`, `presence_badge(|| Option<Availability>, dot, surface)` (online: filled dot, away: ring, busy: dot with a bar; never colour alone), `initials` |
 | Status | `ticks(|| Tick)`, `unread_badge`, `unread_badge_on(count, surface)`, `tag`, `banner(Tone, Icon, msg)` |
 | Surfaces | `card()`, `separator()`, `separator_inset(left)`, `hairline()` |
 | Pages | `page(title, content)`, `page_with(title, right, content)`, `app_header`, `page_scroll` |
-| Overlays | `app_sheet(open, title, content)`, `confirm(title, msg, action, f)`, `toast(msg)`; toasts float above the tab bar on phones and above the composer whenever a conversation shows; a screen with its own bottom bar calls `set_toast_inset(px)` (and 0 when it goes) |
+| Overlays | `app_sheet(open, title, content)`, `confirm(title, msg, action, f)`, `ask_first(title, msg, action, f)` (a plain, non-destructive question: "never by surprise"), `toast(msg)`; toasts float above the tab bar on phones and above the composer whenever a conversation shows; a screen with its own bottom bar calls `set_toast_inset(px)` (and 0 when it goes) |
 | States | `empty_state`, `skeleton`, `skeleton_row` |
 | Layout | `wide()` — the desktop layout (by window width) |
 

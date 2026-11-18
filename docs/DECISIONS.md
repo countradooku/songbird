@@ -20,6 +20,11 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 9 gate (`P09-gate.md`, D-0102 to D-0108; PR #67): **approved by the owner on
+  2026-11-18** ("Approve the gate"): M1–M6 and the security review's fixes, with the threat-model
+  rows (§1, §3.26, §4, §5). Still open: the GDPR Article 8 ages to confirm with counsel before
+  release (§5); device and parental linking between two real phones; presence and nudges from the
+  app once app-core (A2) exists.
 - Prompt 9 plan (`P09-plan.md`, D-0101): **approved by the owner on 2026-11-18** ("Approve
   all"), every recommendation, the scope inventory included (every Settings row made real except
   Prompts 10, 11 and 14's; host-only rows after the whole app is built). A supervised child may
@@ -375,6 +380,24 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   THREAT_MODEL §1. Calls get the local preview now and send frames once app-core (A2) and
   LiveKit are in the app.
 
+## D-0109 — The Prompt 9 gate approved
+
+- Date: 2026-11-18
+- Status: accepted by the owner
+- Decided by: owner ("Approve the gate")
+- Context: `P09-gate.md`: the four gate items pass. Fast CI is green. The live suites are green,
+  except two api tests that need a 127.0.0.2 source address, which this Mac lacks. The security
+  review's findings are fixed (D-0108).
+- Decision:
+  - M1–M6 and the review's fixes are approved.
+  - So are the threat-model rows: §1 (the record store, storage objects and their throttles,
+    discoverability, group adds from contacts, sealed presence, nudges, supervision), §3.26, the
+    completed §4 and the §5 table.
+- Consequences:
+  - PR #67 may leave draft. Merging stays the owner's call.
+  - Still open: the Article 8 ages to confirm with counsel before release; linking between two
+    real phones; presence and nudges from the app once app-core (A2) exists.
+
 ## D-0108 — Prompt 9: the security review's fixes
 
 - Date: 2026-11-18
@@ -439,7 +462,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 - Date: 2026-11-18
 - Status: accepted for the milestone (agent, under the approved plan D-0101); its threat-model rows
-  await the owner
+  were approved by the owner on 2026-11-18 with the gate (D-0109)
 - Decided by: agent (with owner approval of the plan, and of the camera plan D-0110: link codes
   only from the live camera)
 - Context: the app's side of M2–M4, and linking (devices and parent with child) now that the
@@ -491,7 +514,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 - Date: 2026-11-18
 - Status: accepted for the milestone (agent, under the approved plan D-0101); its threat-model rows
-  await the owner
+  were approved by the owner on 2026-11-18 with the gate (D-0109)
 - Decided by: agent (with owner approval of the plan: every Settings row made real except
   Prompts 10, 11 and 14's)
 - Context: every setting saved, synced across devices or kept on one, and the server-enforced ones
@@ -536,7 +559,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 - Date: 2026-11-18
 - Status: accepted for the milestone (agent, under the approved plan D-0101); its threat-model rows
-  and the compliance table await the owner
+  and the compliance table were approved by the owner on 2026-11-18 with the gate (D-0109)
 - Decided by: agent (with owner approval of the plan, question 8: no parent identity or birth date
   on the server; a supervised child may delete their own account)
 - Context: parental controls with in-person linking, a policy signed by the parent, server
@@ -567,7 +590,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 - Date: 2026-11-18
 - Status: accepted for the milestone (agent, under the approved plan D-0101); its threat-model rows
-  await the owner
+  were approved by the owner on 2026-11-18 with the gate (D-0109)
 - Decided by: agent (with owner approval of the plan)
 - Context: encrypted presence and last seen to allowed contacts through the ephemeral lane, a
   batched fan-out reusing the send path, debouncing and rate limits, invisible sending nothing; a
@@ -599,7 +622,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 - Date: 2026-11-18
 - Status: accepted for the milestone (agent, under the approved plan D-0101); its threat-model rows
-  await the owner
+  were approved by the owner on 2026-11-18 with the gate (D-0109)
 - Decided by: agent (with owner approval of the plan)
 - Context: the prompt's server-enforced settings (username discoverability, who may reach you,
   inactivity, plan), "who can add me to groups" (D-0101 question 6), and statuses and the about
@@ -637,7 +660,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 - Date: 2026-11-18
 - Status: accepted for the milestone (agent, under the approved plan D-0101); its threat-model rows
-  await the owner
+  were approved by the owner on 2026-11-18 with the gate (D-0109)
 - Decided by: agent (with owner approval of the plan)
 - Context: settings, chat preferences and contacts must sync across devices without the server
   seeing them, converge whatever order devices sync in, and survive a server that misbehaves

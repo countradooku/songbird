@@ -14,8 +14,8 @@
 - The camera module (PR #68, D-0110 to D-0118) is merged into this branch at the owner's word
   ("Merge #68 here, resume").
 - Branch `claude/p09-settings-presence-44c936`, draft PR songbirdchat/songbird#67.
-- Status: **awaiting the owner's approval.** The threat-model rows marked "awaiting the owner"
-  (THREAT_MODEL §1, §3.26, §4, §5) go with it.
+- Status: **approved by the owner on 2026-11-18** ("Approve the gate", D-0109), with the
+  threat-model rows (THREAT_MODEL §1, §3.26, §4, §5).
 
 ## The gate, item by item
 
@@ -105,7 +105,7 @@ Each was checked in the code and fixed, except I3, which is recorded (D-0108).
 
 ## Threat model
 
-Awaiting the owner:
+Approved by the owner with the gate:
 - THREAT_MODEL §1: the rows for the record store, settings, profiles, presence and supervision.
 - §3.26: every row, including the M5 and M6 rows and those D-0108 changed.
 - §4: the completed table of server-enforced settings.
@@ -114,7 +114,7 @@ Awaiting the owner:
 
 ## For the owner
 
-1. Approve the gate, with the threat-model rows above.
+1. ~~Approve the gate~~: approved on 2026-11-18.
 2. Device and parental linking need two real phones: one session with a physical iPhone and an
    Android phone, after the camera's own device checks.
 3. Nothing is merged. PR #67 carries the camera module from PR #68. Merging #68 first keeps #67's

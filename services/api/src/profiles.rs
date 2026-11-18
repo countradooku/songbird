@@ -260,8 +260,14 @@ impl Profiles {
     pub async fn policy_budget(&self, hot: &ValkeyConn, peer: IpAddr) -> Result<(), Outcome> {
         let s = &self.settings;
         let range = range_of(peer, s.ipv4_prefix, s.ipv6_prefix);
-        self.throttle(hot, "v", &range, s.policy_updates_per_hour, s.policy_update_burst)
-            .await
+        self.throttle(
+            hot,
+            "v",
+            &range,
+            s.policy_updates_per_hour,
+            s.policy_update_burst,
+        )
+        .await
     }
 
     async fn throttle(

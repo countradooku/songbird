@@ -147,10 +147,11 @@ mod tests {
 
     #[test]
     fn a_passcode_is_kept_only_as_a_salted_slow_hash() {
-        let salt = [7u8; 16];
+        let salt: [u8; 16] = wire::random();
+        let other: [u8; 16] = wire::random();
         let h = derive("123456", salt);
         assert_ne!(h, derive("123457", salt));
-        assert_ne!(h, derive("123456", [8; 16]));
+        assert_ne!(h, derive("123456", other));
         assert!(pbkdf2::verify(pbkdf2::PBKDF2_HMAC_SHA256, rounds(), &salt, b"123456", &h).is_ok());
     }
 

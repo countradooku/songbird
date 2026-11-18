@@ -355,7 +355,7 @@ mod headless {
         let storage = nsh_testing::MemoryStorage::new([
             (
                 "sb.app_lock".to_string(),
-                crate::backend::lock::stored_form("246810", [3; 16]),
+                crate::backend::lock::stored_form("246810", crate::backend::wire::random()),
             ),
             (
                 "sb.device_settings".to_string(),
@@ -383,7 +383,7 @@ mod headless {
         let storage = nsh_testing::MemoryStorage::new([
             (
                 "sb.app_lock".to_string(),
-                crate::backend::lock::stored_form("246810", [3; 16]),
+                crate::backend::lock::stored_form("246810", crate::backend::wire::random()),
             ),
             (
                 "sb.device_settings".to_string(),

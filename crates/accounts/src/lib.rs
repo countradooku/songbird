@@ -485,7 +485,7 @@ pub const METRICS: [CounterSpec; 2] = [
 /// by [`CONFLICT_RETRIES`] attempts and [`CONFLICT_BUDGET`] of time. Without the jitter, racing
 /// writers that lost to the same commit all wake at the same instant and collide again, round
 /// after round, until one of them runs out of attempts. How often a call loses is not bounded by
-/// the number of competing winners: SurrealKV counts commits still in flight or awaiting their
+/// the number of competing winners: `SurrealKV` counts commits still in flight or awaiting their
 /// fsync as conflicts, so the bound is a time budget (D-0093).
 pub(crate) struct Backoff {
     attempt: u32,

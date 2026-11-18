@@ -107,13 +107,10 @@ pub mod class {
 
     /// The class and the payload of what the lane carried (`None`: nothing after the class).
     #[must_use]
-    pub fn untag(mut b: Bytes) -> Option<(u8, Bytes)> {
-        if b.len() < 2 {
-            return None;
-        }
-        let c = b[0];
-        b = b.slice(1..);
-        Some((c, b))
+    pub fn untag(b: &Bytes) -> Option<(u8, Bytes)> {
+        let c = *b.first()?;
+        let payload = b.slice(1..);
+        (!payload.is_empty()).then_some((c, payload))
     }
 }
 

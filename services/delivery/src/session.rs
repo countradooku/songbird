@@ -359,7 +359,7 @@ impl<M: Mailbox, R: Router> Session<M, R> {
                 }
                 Some(tagged) = inbox.ephemeral.recv() => {
                     // The class the server wrote (D-0108); anything else is dropped.
-                    let frame = match class::untag(tagged) {
+                    let frame = match class::untag(&tagged) {
                         Some((class::EPHEMERAL, payload)) => ServerFrame::Ephemeral { payload },
                         Some((class::ATTENTION, payload)) => ServerFrame::Attention { payload },
                         _ => continue,

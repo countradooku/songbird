@@ -4,7 +4,7 @@
 - Asked for by: the owner, during Prompt 9 (PR #67): linking a device by pasting a text code
   was rejected; the app gets native camera code on every platform that needs it, because the
   camera also serves photos and videos in chat and video calls.
-- Status: **proposed, waiting for the owner** (D-0102). No code is written until the owner
+- Status: **proposed, waiting for the owner** (D-0110). No code is written until the owner
   approves.
 - Base: `main` at `8271b89` (Prompt 8 merged, PR #65). Prompt 9's linking logic
   (`apps/ui/src/backend/link.rs`) is on `claude/p09-settings-presence-44c936` (PR #67); this

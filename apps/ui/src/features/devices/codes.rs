@@ -1,6 +1,6 @@
 //! What the camera may read (D-0110): the link code a new device shows (PROTOCOL §4.6), a
-//! contact's safety-number code, and the two codes of parental linking (PROTOCOL §10.6, D-0107):
-//! the parent's and the child's. Each has its own scheme, so a code made to look like one is
+//! contact's safety-number code, and the three codes of parental linking (PROTOCOL §10.6,
+//! D-0107): the parent's, the child's, and the signed first policy. Each has its own scheme, so a code made to look like one is
 //! never taken for the other, and anything else the camera sees is ignored.
 //!
 //! Codes are upper case so QR codes hold them in alphanumeric mode (smaller codes; version 5
@@ -12,8 +12,12 @@ pub const LINK: &str = "SONGBIRD:LINK:";
 pub const SAFETY: &str = "SONGBIRD:SAFETY:";
 /// The parent's code: `SONGBIRD:SUPERVISE:<policy key hex>:<link secret hex>`.
 pub const SUPERVISE: &str = "SONGBIRD:SUPERVISE:";
-/// The child's code: `SONGBIRD:CHILD:<account hex>:<unlink date, seconds>:<channel hex>:<key hex>`.
+/// The child's code: `SONGBIRD:CHILD:<account hex>:<unlink date, seconds>`.
 pub const CHILD: &str = "SONGBIRD:CHILD:";
+/// The parent's signed first policy: `SONGBIRD:POLICY:<policy hex>`.
+pub const POLICY: &str = "SONGBIRD:POLICY:";
+/// The longest policy a code carries, in bytes (a policy with the most client rules).
+pub const MAX_POLICY: usize = 1 + 16 + 32 + 8 + 1 + 8 + 2 + 512 + 64;
 /// The longest channel ID a link code carries, in bytes (as the provisioning parser accepts).
 pub const MAX_CHANNEL: usize = 64;
 
@@ -36,18 +40,15 @@ pub enum Scanned {
         /// The link secret the client rules are sealed under.
         secret: [u8; 32],
     },
-    /// A child's code: their account, the date supervision ends (computed on their phone),
-    /// and the provisioning channel and key the first policy is sealed to.
+    /// A child's code: their account and the date supervision ends (computed on their phone).
     Child {
         /// The child's account ID.
         account: [u8; 16],
         /// When supervision ends by itself (seconds since 1970).
         unlink_at_s: u64,
-        /// The provisioning channel ID.
-        channel: Vec<u8>,
-        /// The child device's X25519 provisioning public key.
-        key: [u8; 32],
     },
+    /// The parent's signed first policy, as bytes (checked by the child's phone).
+    Policy(Vec<u8>),
 }
 
 /// The link code a new device shows.
@@ -71,13 +72,14 @@ pub fn supervise_code(key: &[u8; 32], secret: &[u8; 32]) -> String {
 
 /// The child's code (parental linking).
 #[must_use]
-pub fn child_code(account: &[u8; 16], unlink_at_s: u64, channel: &[u8], key: &[u8; 32]) -> String {
-    format!(
-        "{CHILD}{}:{unlink_at_s}:{}:{}",
-        hex_upper(account),
-        hex_upper(channel),
-        hex_upper(key)
-    )
+pub fn child_code(account: &[u8; 16], unlink_at_s: u64) -> String {
+    format!("{CHILD}{}:{unlink_at_s}", hex_upper(account))
+}
+
+/// The code of a signed policy (parental linking).
+#[must_use]
+pub fn policy_code(policy: &[u8]) -> String {
+    format!("{POLICY}{}", hex_upper(policy))
 }
 
 /// What `text` is, if it is a code the app understands.
@@ -97,24 +99,21 @@ pub fn parse(text: &str) -> Option<Scanned> {
         return Some(Scanned::Supervise { key, secret });
     }
     if let Some(rest) = strip_prefix_ignore_case(text, CHILD) {
-        let mut parts = rest.split(':');
-        let account: [u8; 16] = unhex(parts.next()?)?.try_into().ok()?;
-        let date = parts.next()?;
+        let (account, date) = rest.split_once(':')?;
+        let account: [u8; 16] = unhex(account)?.try_into().ok()?;
         if date.is_empty() || date.len() > 12 || !date.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        let unlink_at_s = date.parse().ok()?;
-        let channel = unhex(parts.next()?).filter(|c| !c.is_empty() && c.len() <= MAX_CHANNEL)?;
-        let key: [u8; 32] = unhex(parts.next()?)?.try_into().ok()?;
-        if parts.next().is_some() {
             return None;
         }
         return Some(Scanned::Child {
             account,
-            unlink_at_s,
-            channel,
-            key,
+            unlink_at_s: date.parse().ok()?,
         });
+    }
+    if let Some(rest) = strip_prefix_ignore_case(text, POLICY) {
+        if rest.is_empty() || rest.len() > 2 * MAX_POLICY {
+            return None;
+        }
+        return unhex_any(rest).map(Scanned::Policy);
     }
     if let Some(digits) = strip_prefix_ignore_case(text, SAFETY)
         && digits.len() == 60
@@ -149,7 +148,15 @@ fn hex_upper(bytes: &[u8]) -> String {
 }
 
 fn unhex(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) || text.len() > 2 * MAX_CHANNEL.max(32) {
+    if text.len() > 2 * MAX_CHANNEL.max(32) {
+        return None;
+    }
+    unhex_any(text)
+}
+
+/// Hex of any length (callers bound it).
+fn unhex_any(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
         return None;
     }
     let digit = |c: u8| (c as char).to_digit(16);
@@ -226,43 +233,32 @@ mod tests {
                 secret: [2; 32]
             })
         );
-        let child = child_code(&[3; 16], 1_900_000_000, &[4; 16], &[5; 32]);
+        let child = child_code(&[3; 16], 1_900_000_000);
         assert_eq!(
             parse(&child),
             Some(Scanned::Child {
                 account: [3; 16],
-                unlink_at_s: 1_900_000_000,
-                channel: vec![4; 16],
-                key: [5; 32]
+                unlink_at_s: 1_900_000_000
             })
         );
-        // Neither is ever read as a link code, nor the other way round.
-        assert!(!matches!(parse(&code), Some(Scanned::Link { .. })));
-        assert!(!matches!(parse(&child), Some(Scanned::Link { .. })));
+        let policy = policy_code(&[6; 200]);
+        assert_eq!(parse(&policy), Some(Scanned::Policy(vec![6; 200])));
+        // None is ever read as a link code, nor the other way round.
+        for code in [&code, &child, &policy] {
+            assert!(!matches!(parse(code), Some(Scanned::Link { .. })), "{code}");
+        }
         let link = link_code(&[4; 16], &[5; 32]);
         assert!(matches!(parse(&link), Some(Scanned::Link { .. })));
         for bad in [
             format!("{SUPERVISE}{}:{}", "01".repeat(32), "02".repeat(31)),
             format!("{SUPERVISE}{}", "01".repeat(32)),
-            format!(
-                "{CHILD}{}:-1:{}:{}",
-                "03".repeat(16),
-                "04".repeat(16),
-                "05".repeat(32)
-            ),
-            format!(
-                "{CHILD}{}:1:{}:{}:x",
-                "03".repeat(16),
-                "04".repeat(16),
-                "05".repeat(32)
-            ),
-            format!("{CHILD}{}:1:{}", "03".repeat(16), "04".repeat(16)),
-            format!(
-                "{CHILD}{}:1234567890123:{}:{}",
-                "03".repeat(16),
-                "04".repeat(16),
-                "05".repeat(32)
-            ),
+            format!("{CHILD}{}:-1", "03".repeat(16)),
+            format!("{CHILD}{}:1:x", "03".repeat(16)),
+            format!("{CHILD}{}:", "03".repeat(16)),
+            format!("{CHILD}{}:1234567890123", "03".repeat(16)),
+            format!("{POLICY}"),
+            format!("{POLICY}ABC"),
+            format!("{POLICY}{}", "00".repeat(MAX_POLICY + 1)),
         ] {
             assert_eq!(parse(&bad), None, "{bad}");
         }

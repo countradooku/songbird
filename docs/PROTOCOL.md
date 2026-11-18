@@ -2087,7 +2087,10 @@ state. Every write is a compare-and-swap of the store's version:
 
 **Keys.** The storage key is 32 random bytes made by the primary at registration, given to a
 linked device in the provisioning message (version 2, §4.6), and rotated when a device is
-removed:
+removed. A device that adopts the key starts from an empty replica and reads the store from
+scratch, so its own first-run defaults never overwrite the account's settings. Until app-core
+sends the new key to the other devices end to end (A2), the primary rotates only when it is left
+as the account's only device (D-0106):
 
 - `key_id = HMAC-SHA256(storage key, "songbird.v1/storage-key-id")[..8]`;
 - a record's key: `HKDF-SHA256(salt = "songbird.v1/storage", ikm = storage key,
@@ -2223,13 +2226,24 @@ that contact. The stored `DataMessage.nudge` kind is superseded and never sent.
 
 ### 10.6 Parental supervision (M4, D-0105)
 
-**Linking, in person.** The parent's device makes a fresh Ed25519 **policy key** for this child
-(never linked to the parent's account) and a 32-byte link secret, and shows both in a QR code; the
-child's device scans it and shows its own (the child's account). Both screens show the same
-six-digit code (`SHA-256("songbird.v1/link-code\0" ‖ policy key ‖ link secret ‖ child)`, first 4
-bytes mod 10⁶), which parent and child compare and confirm. The child enters their age; the
-child's device computes the unlink date from it and the country's age of digital consent
-(THREAT_MODEL §5); the birth date never leaves the device.
+**Linking, in person** (D-0107). Three QR codes, read only by the live camera; nothing passes
+through the server between the two accounts, so it never learns who parents whom.
+
+1. The parent's device makes a fresh Ed25519 **policy key** for this child (never linked to the
+   parent's account) and a 32-byte link secret, and shows
+   `SONGBIRD:SUPERVISE:<policy key hex>:<link secret hex>`.
+2. The child's phone scans it. The child enters their age; the phone computes the unlink date
+   from it and the country's age of digital consent (THREAT_MODEL §5); the birth date never
+   leaves the phone. It shows `SONGBIRD:CHILD:<account hex>:<unlink_at_s decimal>`.
+3. The parent's device scans it. Both screens show the same six-digit code
+   (`SHA-256("songbird.v1/link-code\0" ‖ policy key ‖ link secret ‖ child)`, first 4 bytes mod
+   10⁶), which parent and child compare.
+4. On the parent's confirmation, its device signs the first policy (version 1, for that child,
+   with that date) and shows it as `SONGBIRD:POLICY:<policy hex>` (at most 644 bytes; about 200
+   with the client rules the app writes).
+5. The child's phone scans it and installs it (`PUT /v1/supervision`, as the primary) only if it
+   is version 1, for this account, with the date it computed, not unlinking, and signed by the
+   key it scanned.
 
 **The policy** (`songbird_proto::supervision::Policy`):
 

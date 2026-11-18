@@ -556,15 +556,16 @@ fn link_child() {
 }
 
 /// The parent's side on the real backend (PROTOCOL §10.6, D-0107): show
-/// this device's code, scan the child's, compare six digits, send the
-/// first policy sealed to the child's phone.
+/// this device's code, scan the child's, compare six digits, then show the
+/// signed first policy for the child's phone to scan. Nothing passes
+/// through the server between the two accounts.
 fn link_child_live() {
-    #[derive(Clone, PartialEq)]
-    struct Child {
-        account: [u8; 16],
-        unlink_at_s: u64,
-        channel: Vec<u8>,
-        key: [u8; 32],
+    #[derive(Clone, Copy, PartialEq)]
+    enum Phase {
+        ShowCode,
+        Scan,
+        Compare([u8; 16], u64),
+        Policy,
     }
     super::push("Link a child's account", || {
         let s = store();
@@ -573,9 +574,8 @@ fn link_child_live() {
             .filter(|l| l.version == 0)
             .unwrap_or_else(|| sup::start_link([0; 16], 0));
         let payload = sup::qr_payload(&link);
-        let scanning = signal(false);
-        let child = signal(None::<Child>);
-        let sending = signal(false);
+        let phase = signal(Phase::ShowCode);
+        let policy = signal(String::new());
         let failed = signal(None::<String>);
         let show_code = move || {
             view()
@@ -595,27 +595,22 @@ fn link_child_live() {
                         .child(step(2, "Let their phone scan this code, then enter their age there."))
                         .child(step(3, "Their phone shows a code: scan it with this one.")),
                 )
-                .child(btn("Scan your child's code", Variant::Primary, BtnSize::Lg, move || scanning.set(true)))
+                .child(btn("Scan your child's code", Variant::Primary, BtnSize::Lg, move || {
+                    phase.set(Phase::Scan);
+                }))
                 .into_element()
         };
         let scan = move || {
             let session = crate::camera::use_session(
                 songbird_camera::Purpose::ScanCode,
-                move || child.get().is_none(),
+                move || phase.get() == Phase::Scan,
                 move |text| {
                     if let Some(features::devices::codes::Scanned::Child {
                         account,
                         unlink_at_s,
-                        channel,
-                        key,
                     }) = features::devices::codes::parse(&text)
                     {
-                        child.set(Some(Child {
-                            account,
-                            unlink_at_s,
-                            channel,
-                            key,
-                        }));
+                        phase.set(Phase::Compare(account, unlink_at_s));
                     }
                 },
             );
@@ -628,46 +623,23 @@ fn link_child_live() {
                     "Point at the code on your child's phone",
                 ))
                 .child(btn("Back", Variant::Ghost, BtnSize::Md, move || {
-                    scanning.set(false)
+                    phase.set(Phase::ShowCode)
                 }))
                 .into_element()
         };
-        let confirm = move |c: Child| {
+        let compare = move |account: [u8; 16], unlink_at_s: u64| {
             let digits = sup::parent_link()
-                .map(|l| sup::digits_for(&l, &c.account))
+                .map(|l| sup::digits_for(&l, &account))
                 .unwrap_or_default();
             let spaced = format!(
                 "{} {}",
                 &digits[..3.min(digits.len())],
                 &digits[3.min(digits.len())..]
             );
-            let ends = if c.unlink_at_s == 0 {
+            let ends = if unlink_at_s == 0 {
                 String::new()
             } else {
-                sup::date_label(c.unlink_at_s)
-            };
-            let send = move || {
-                let c = c.clone();
-                sending.set(true);
-                failed.set(None);
-                let policy_rules = s.ext().with_untracked(|x| x.parental.clone());
-                spawn(async move {
-                    let result =
-                        sup::send_first(&policy_rules, c.account, c.unlink_at_s, c.channel, c.key)
-                            .await;
-                    let _ = sending.try_set(false);
-                    match result {
-                        Ok(()) => {
-                            s.settings_update(|x| x.parental_controls = true);
-                            crate::nav::pop();
-                            rules();
-                            toast("Sent. Your child's phone applies the rules.");
-                        }
-                        Err(p) => {
-                            let _ = failed.try_set(Some(p.to_string()));
-                        }
-                    }
-                });
+                sup::date_label(unlink_at_s)
             };
             view()
                 .items_center()
@@ -686,14 +658,45 @@ fn link_child_live() {
                 .child(when(move || failed.get().is_some(), move || {
                     status_line(|| StatusTone::Problem, || Icon::Alert, move || failed.get().unwrap_or_default().into())
                 }))
-                .child(
-                    btn("We both see the same code", Variant::Primary, BtnSize::Lg, send)
-                        .disabled(move || sending.get()),
-                )
+                .child(btn("We both see the same code", Variant::Primary, BtnSize::Lg, move || {
+                    let rules = s.ext().with_untracked(|x| x.parental.clone());
+                    match sup::first_policy(&rules, account, unlink_at_s) {
+                        Ok(code) => {
+                            failed.set(None);
+                            policy.set(code);
+                            phase.set(Phase::Policy);
+                        }
+                        Err(p) => failed.set(Some(p.to_string())),
+                    }
+                }))
                 .child(btn("They don't match", Variant::Ghost, BtnSize::Md, move || {
-                    child.set(None);
-                    scanning.set(false);
+                    phase.set(Phase::ShowCode);
                     toast("Not linked. Start again side by side.");
+                }))
+                .into_element()
+        };
+        let show_policy = move || {
+            view()
+                .items_center()
+                .gap_4()
+                .child(
+                    view()
+                        .role(AccessibilityRole::Image)
+                        .label("Your rules, for your child's phone to scan")
+                        .child(dynamic(move || {
+                            let code = policy.get();
+                            untracked(move || qr_code(&code, 220.0))
+                        })),
+                )
+                .child(
+                    muted("Last step: let your child's phone scan these rules. They're signed by this phone, and only their phone takes them.")
+                        .text_center()
+                        .max_w(px(420.0)),
+                )
+                .child(btn("Done", Variant::Primary, BtnSize::Lg, move || {
+                    s.settings_update(|x| x.parental_controls = true);
+                    crate::nav::pop();
+                    rules();
                 }))
                 .into_element()
         };
@@ -703,12 +706,13 @@ fn link_child_live() {
             .pt_6()
             .gap_4()
             .child(dynamic(move || {
-                let (found, scan_now) = (child.get(), scanning.get());
+                let now = phase.get();
                 let show_code = show_code.clone();
-                untracked(move || match found {
-                    Some(c) => confirm(c),
-                    None if scan_now => scan(),
-                    None => show_code(),
+                untracked(move || match now {
+                    Phase::ShowCode => show_code(),
+                    Phase::Scan => scan(),
+                    Phase::Compare(account, at) => compare(account, at),
+                    Phase::Policy => show_policy(),
                 })
             }))
             .child(muted("Linking only works in person, so nobody can take over a child's account remotely. Songbird's servers never learn who the parent is.").text_center().max_w(px(420.0)))
@@ -718,14 +722,16 @@ fn link_child_live() {
 }
 
 /// The child's side (PROTOCOL §10.6, D-0107): scan the parent's code,
-/// enter an age, show this phone's code, and take the parent's first
-/// policy once both screens showed the same six digits.
+/// enter an age, show this phone's code, then scan the parent's signed
+/// rules and install them.
 fn child_link() {
     #[derive(Clone, Copy, PartialEq)]
     enum Phase {
         Scan,
         Age([u8; 32], [u8; 32]),
-        Waiting,
+        Show,
+        ScanRules,
+        Installing,
         Done,
     }
     super::push("Link with a parent", || {
@@ -743,37 +749,58 @@ fn child_link() {
         }
         let phase = signal(Phase::Scan);
         let age_text = signal(String::new());
-        let shown = signal(None::<(String, String)>); // (code, six digits)
+        let linking = signal(None::<sup::ChildLinking>);
         let failed = signal(None::<String>);
         let rules = signal(Vec::<String>::new());
         let country = locale().region().unwrap_or("EU").to_ascii_uppercase();
         let age =
             move || age_text.with(|t| t.trim().parse::<u8>().ok().filter(|a| (6..=17).contains(a)));
-        let start = move |key: [u8; 32], secret: [u8; 32], age: u8| {
-            let country = country.clone();
-            failed.set(None);
-            phase.set(Phase::Waiting);
+        let start = move |key: [u8; 32], secret: [u8; 32], age: u8| match sup::start_child(
+            key,
+            secret,
+            age,
+            country.clone(),
+        ) {
+            Ok(c) => {
+                failed.set(None);
+                linking.set(Some(c));
+                phase.set(Phase::Show);
+            }
+            Err(p) => failed.set(Some(p.to_string())),
+        };
+        let start = std::rc::Rc::new(start);
+        let install = move |bytes: Vec<u8>| {
+            let Some(c) = linking.get_untracked() else {
+                return;
+            };
+            phase.set(Phase::Installing);
             spawn(async move {
-                let result = match sup::start_child(key, secret, age, country).await {
-                    Ok(c) => {
-                        let _ = shown.try_set(Some((c.code(), c.digits())));
-                        sup::finish_child(c).await
-                    }
-                    Err(p) => Err(p),
-                };
-                match result {
+                match sup::finish_child(c, bytes).await {
                     Ok(p) => {
                         let secret = sup::child_link().map(|c| c.secret);
                         let _ = rules.try_set(sup::rules_in_force(&p, secret.as_ref()));
+                        let _ = failed.try_set(None);
                         let _ = phase.try_set(Phase::Done);
                     }
                     Err(p) => {
                         let _ = failed.try_set(Some(p.to_string()));
+                        let _ = phase.try_set(Phase::ScanRules);
                     }
                 }
             });
         };
-        let start = std::rc::Rc::new(start);
+        let problem = move || {
+            when(
+                move || failed.get().is_some(),
+                move || {
+                    status_line(
+                        || StatusTone::Problem,
+                        || Icon::Alert,
+                        move || failed.get().unwrap_or_default().into(),
+                    )
+                },
+            )
+        };
         view()
             .items_center()
             .px_6()
@@ -812,6 +839,7 @@ fn child_link() {
                             "It sets the day supervision ends by itself. It stays on this phone.",
                             move || age_text.with(|t| !t.trim().is_empty()) && age().is_none(),
                         ))
+                        .child(problem())
                         .child(
                             btn("Show my code", Variant::Primary, BtnSize::Lg, move || {
                                 if let Some(a) = age() {
@@ -821,49 +849,47 @@ fn child_link() {
                             .disabled(move || age().is_none()),
                         )
                         .into_element(),
-                    Phase::Waiting => view()
-                        .items_center()
-                        .gap_4()
-                        .child(dynamic(move || {
-                            let s = shown.get();
-                            untracked(move || match s {
-                                Some((code, digits)) => view()
-                                    .items_center()
-                                    .gap_3()
-                                    .child(
-                                        view()
-                                            .role(AccessibilityRole::Image)
-                                            .label("Your code for your parent's phone to scan")
-                                            .child(qr_code(&code, 168.0)),
-                                    )
-                                    .child(muted("The code on both screens"))
-                                    .child(numeric_code(format!("{} {}", &digits[..3], &digits[3..])).label(format!("Code {digits}")))
-                                    .child(muted("Let your parent scan this, and check both phones show the same six digits.").text_center().max_w(px(420.0)))
-                                    .into_element(),
-                                None => busy_bar("Making a code").into_element(),
-                            })
-                        }))
-                        .child(
-                            when(
-                                move || failed.get().is_none(),
-                                || busy_bar("Waiting for your parent's phone"),
-                            )
-                            .otherwise(move || {
+                    Phase::Show => {
+                        let Some(c) = linking.get_untracked() else {
+                            return view().into_element();
+                        };
+                        let digits = c.digits();
+                        view()
+                            .items_center()
+                            .gap_3()
+                            .child(
                                 view()
-                                    .gap_2()
-                                    .items_center()
-                                    .child(status_line(
-                                        || StatusTone::Problem,
-                                        || Icon::Alert,
-                                        move || failed.get().unwrap_or_default().into(),
-                                    ))
-                                    .child(btn("Start again", Variant::Primary, BtnSize::Md, move || {
-                                        shown.set(None);
-                                        phase.set(Phase::Scan);
-                                    }))
-                            }),
-                        )
-                        .into_element(),
+                                    .role(AccessibilityRole::Image)
+                                    .label("Your code for your parent's phone to scan")
+                                    .child(qr_code(&c.code(), 168.0)),
+                            )
+                            .child(muted("The code on both screens"))
+                            .child(numeric_code(format!("{} {}", &digits[..3], &digits[3..])).label(format!("Code {digits}")))
+                            .child(muted("Let your parent scan this, and check both phones show the same six digits. Then their phone shows your rules.").text_center().max_w(px(420.0)))
+                            .child(btn("Scan the rules", Variant::Primary, BtnSize::Lg, move || phase.set(Phase::ScanRules)))
+                            .into_element()
+                    }
+                    Phase::ScanRules => {
+                        let session = crate::camera::use_session(
+                            songbird_camera::Purpose::ScanCode,
+                            move || phase.get() == Phase::ScanRules,
+                            move |text| {
+                                if let Some(features::devices::codes::Scanned::Policy(bytes)) =
+                                    features::devices::codes::parse(&text)
+                                {
+                                    install(bytes);
+                                }
+                            },
+                        );
+                        view()
+                            .items_center()
+                            .gap_4()
+                            .child(problem())
+                            .child(crate::camera::camera_view(&session, 280.0, "Point at the rules on your parent's phone"))
+                            .child(btn("Back", Variant::Ghost, BtnSize::Md, move || phase.set(Phase::Show)))
+                            .into_element()
+                    }
+                    Phase::Installing => busy_bar("Applying the rules").into_element(),
                     Phase::Done => view()
                         .w_full()
                         .gap_3()

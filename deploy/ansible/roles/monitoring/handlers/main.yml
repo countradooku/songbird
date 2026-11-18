@@ -1,0 +1,10 @@
+---
+# Reload by SIGHUP (the lifecycle API is off: nothing on the bastion can stop alerting over HTTP).
+# The configuration was checked before this runs; a failed signal fails the run.
+- name: Reload Prometheus
+  ansible.builtin.command: docker kill --signal HUP songbird-prometheus
+  changed_when: true
+
+- name: Reload Alertmanager
+  ansible.builtin.command: docker kill --signal HUP songbird-alertmanager
+  changed_when: true

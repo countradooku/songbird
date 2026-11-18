@@ -3,9 +3,7 @@
 
 use nsh_core::prelude::*;
 
-#[cfg(debug_assertions)]
-use super::simulate_in;
-use super::{join_link, start_call_in, state};
+use super::{join_link, simulate_in, start_call_in, state};
 use crate::{
     nav,
     store::{CallDirection, CallLink, CallRecord, ChatKind, Contact, Store, clock, day_label, day_of, store, when_label},
@@ -93,9 +91,13 @@ pub fn calls_tab() -> AnyElement {
             .py_8()
         }))
         .child(footnote("Your call history is end-to-end encrypted and synced across your devices."));
-    // Developer builds only: rows that make the mock ring.
-    #[cfg(debug_assertions)]
-    let footer = footer.child(demo(s));
+    // Developer and preview builds only (never a release): rows that make
+    // the mock ring, to test calls and their notifications on a device.
+    let footer = if crate::PREVIEW_BUILD {
+        footer.child(demo(s))
+    } else {
+        footer
+    };
     view()
         .flex_1()
         .child(app_header("Calls", false, Some(icon_btn(Icon::Plus, "New call", move || new_call(s)).into_element())))
@@ -471,9 +473,8 @@ fn link_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
     )
 }
 
-/// Developer builds only: make the mock ring here (no calls arrive
-/// yet). Set apart and marked, never in a release build.
-#[cfg(debug_assertions)]
+/// Developer and preview builds only: make the mock ring here (no calls
+/// arrive yet). Set apart and marked, never in a release build.
 fn demo(s: Store) -> View {
     let ana = 1;
     let family = 2;

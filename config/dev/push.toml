@@ -17,7 +17,7 @@ filter = "info"
 # push_index_secret = { file = "/path/to/push-index-secret.hex" } # 64 hex chars, shared with api and worker
 # concurrency = 64
 # debounce_ms = 1000
-# [push.surrealdb]
+# [push.push_tokens]
 # addr = "127.0.0.1:47800"
 # host = "localhost"
 # user = "root"

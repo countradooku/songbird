@@ -7,7 +7,7 @@ pub mod jump;
 pub mod keys;
 
 use nsh_core::{
-    desktop::{MenuRole, TrayTitleRun},
+    desktop::{MenuRole, TrayTitleRun, WindowAttributes},
     element::{
         FileDragEvent, FileDropEvent,
         desktop::{MenuItem, WindowRef, main_window, open_window, set_application_menu, set_tray, tray, window as new_window},
@@ -34,7 +34,7 @@ pub struct SearchFocus(pub u64);
 
 /// The chat open now: the desktop detail pane's, or the top pushed chat
 /// page in the narrow layout.
-fn current_chat() -> Option<ChatId> {
+pub fn current_chat() -> Option<ChatId> {
     if wide() {
         return nav::open_chat().get_untracked().0;
     }
@@ -107,7 +107,42 @@ pub fn install_shortcuts() {
         on_key_with(sc.keys, KeyOptions { when, ..KeyOptions::default() }, move |_| run(s, command));
     }
     desktop_menus();
+    s.restore_tray_choice();
     desktop_tray();
+    close_to_tray();
+}
+
+/// While the tray / menu bar icon shows, closing the main window hides it
+/// and Songbird keeps running there, connected, so messages and calls still
+/// notify (D-0098; desktops have no push service). Quit from the tray's
+/// menu or the app menu. Without the icon, closing works as the system's
+/// does.
+fn close_to_tray() {
+    let window = main_window();
+    let w = window.clone();
+    effect(move || {
+        let keep = !extras().with(|e| e.tray_hidden);
+        untracked(|| {
+            let mut a = WindowAttributes::default();
+            a.close_on_press = Some(!keep);
+            w.set(a);
+        });
+    });
+    let w = window.clone();
+    window.on_close_press(move |_| {
+        if extras().with_untracked(|e| e.tray_hidden) {
+            w.close();
+        } else {
+            w.hide();
+        }
+    });
+}
+
+/// Brings the main window back (from the tray, a notification).
+pub fn show_main_window() {
+    let w = main_window();
+    w.show();
+    w.focus();
 }
 
 const SHEET_KEY: &str = "shortcuts";
@@ -302,9 +337,9 @@ fn desktop_tray() {
                     })
                     .title(title)
                     .menu([
-                        MenuItem::new("Open Songbird").on_select(|| main_window().focus()),
+                        MenuItem::new("Open Songbird").on_select(show_main_window),
                         MenuItem::new("New chat").on_select(move || {
-                            main_window().focus();
+                            show_main_window();
                             run(s, Command::NewChat);
                         }),
                         MenuItem::separator(),
@@ -429,6 +464,8 @@ pub fn desktop_settings() {
     nav::push("desktop-settings", || {
         let s = store();
         let ext = extras();
+        // The system's login item may have changed in its own settings.
+        s.refresh_launch_at_login();
         let tray_name = if os() == Os::MacOs { "Show in menu bar" } else { "Show in system tray" };
         let body = view()
             .w_full()
@@ -444,7 +481,7 @@ pub fn desktop_settings() {
             .child(section_title(if os() == Os::MacOs { "Menu bar" } else { "System tray" }))
             .child(group([toggle_row(
                 tray_name,
-                Some("The feather shows your unread count, and opens Songbird."),
+                Some("The feather shows your unread count. Closing the window keeps Songbird running there, so messages and calls still notify you."),
                 move || !ext.with(|e| e.tray_hidden),
                 move |v| s.set_tray_hidden(!v),
             )]))

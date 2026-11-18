@@ -245,6 +245,11 @@ async fn stack(people: usize) -> Option<Stack> {
             metrics: metrics.calls.clone(),
         }),
         server_name: API.into(),
+        push_store: Arc::new(
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
+        ),
         registry: Arc::clone(&registry),
         s3: songbird_s3::Client::new(songbird_s3::Config::new(
             "127.0.0.1:9".into(),

@@ -120,6 +120,11 @@ async fn stack() -> Option<Stack> {
         reports: None,
         calls: None,
         server_name: API.into(),
+        push_store: Arc::new(
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
+        ),
         registry: Arc::clone(&registry),
         s3: s3.clone(),
         queue: Arc::clone(&queue),
@@ -180,6 +185,11 @@ async fn stack() -> Option<Stack> {
     ));
     let worker = Worker {
         block_keys: None,
+        push_store: Arc::new(
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
+        ),
         registry: Arc::clone(&registry),
         s3: s3.clone(),
         queue,
@@ -218,7 +228,9 @@ async fn person(s: &Stack) -> (NewAccount, ApiClient) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_account_is_exported_then_deleted_from_every_prompt_3_store() {
-    let Some(s) = stack().await else { return };
+    let Some(s) = Box::pin(stack()).await else {
+        return;
+    };
     let (n, c) = person(&s).await;
     let r = &s.registry;
     let a = n.account;
@@ -371,8 +383,17 @@ async fn an_account_is_exported_then_deleted_from_every_prompt_3_store() {
     assert!(done, "deletion job ran");
     // Every store, inspected directly.
     let index = [push_index(&PUSH_INDEX, &n.device)];
-    let rem = r.remnants(&a, &[n.device], &index).await.unwrap();
+    let rem = r.remnants(&a, &[n.device]).await.unwrap();
     assert!(rem.is_empty(), "{rem:?}");
+    assert_eq!(
+        songbird_accounts::PushStore::beside(r)
+            .await
+            .unwrap()
+            .count(&index)
+            .await
+            .unwrap(),
+        0
+    );
     assert!(r.profile(&a).await.unwrap().is_none());
     assert!(r.passkey(&a, &[8; 32]).await.unwrap().is_none());
     assert!(r.avatars_of(&a).await.unwrap().is_empty());
@@ -397,7 +418,9 @@ async fn an_account_is_exported_then_deleted_from_every_prompt_3_store() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn inactivity_warns_a_month_and_a_week_before_then_deletes() {
-    let Some(s) = stack().await else { return };
+    let Some(s) = Box::pin(stack()).await else {
+        return;
+    };
     let r = &s.registry;
     let (n, c) = person(&s).await;
     let (busy, busy_c) = person(&s).await;

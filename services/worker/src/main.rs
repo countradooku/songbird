@@ -60,6 +60,15 @@ impl Validate for WorkerConfig {
                 "is required in staging and production (deleting blocks, D-0062)",
             );
             v.check(
+                w.push_tokens.as_ref().is_some_and(|p| {
+                    p.tls_ca.is_some()
+                        && p.user != w.surrealdb.user
+                        && p.database != w.surrealdb.database
+                }),
+                "worker.push_tokens",
+                "is required in staging and production, with TLS, its own user and its own database",
+            );
+            v.check(
                 w.s3.tls_ca.is_some() && w.surrealdb.tls_ca.is_some() && w.jobs.valkey.tls(),
                 "worker.s3.tls_ca",
                 "worker.surrealdb.tls_ca and worker.jobs.valkey.tls_ca are required in staging and production",
@@ -73,6 +82,10 @@ impl Validate for WorkerConfig {
 #[serde(deny_unknown_fields)]
 struct WorkerSettings {
     surrealdb: songbird_accounts::SurrealSettings,
+    /// Push registrations' own database and credential (D-0095); development may omit it (a
+    /// database beside the registry's).
+    #[serde(default)]
+    push_tokens: Option<songbird_accounts::SurrealSettings>,
     jobs: JobsSettings,
     s3: S3Settings,
     push_index_secret: SecretRef,
@@ -303,7 +316,10 @@ impl Service for WorkerService {
 
     fn new(config: WorkerConfig, metrics: &mut Metrics) -> Result<Self, BoxError> {
         // The registry's write-conflict retries and busy answers (D-0093).
-        for (name, help, read) in songbird_accounts::METRICS {
+        for (name, help, read) in songbird_accounts::METRICS
+            .into_iter()
+            .chain(songbird_jobs::queue::METRICS)
+        {
             metrics.register_counter_fn(name, help, read)?;
         }
         let m = WorkerMetrics::default();
@@ -364,6 +380,7 @@ impl Service for WorkerService {
         };
         let block_keys = block_keys(s.requests_secret.as_ref(), &registry).await?;
         let worker = Arc::new(Worker {
+            push_store: Arc::new(push_store(s.push_tokens.as_ref(), &registry).await?),
             registry,
             s3: songbird_s3::Client::new(s3_config(&s.s3)?)?,
             queue: Arc::clone(&queue),
@@ -418,4 +435,64 @@ impl Service for WorkerService {
 
 fn main() -> std::process::ExitCode {
     songbird_service::main::<WorkerService>()
+}
+
+/// The push registrations' own database (D-0095); development without one: a database beside
+/// the registry's.
+async fn push_store(
+    settings: Option<&songbird_accounts::SurrealSettings>,
+    registry: &songbird_accounts::Registry,
+) -> Result<songbird_accounts::PushStore, BoxError> {
+    Ok(match settings {
+        Some(p) => {
+            songbird_accounts::PushStore::connect(
+                songbird_accounts::Db::connect(p.config()?).await?,
+            )
+            .await?
+        }
+        None => songbird_accounts::PushStore::beside(registry).await?,
+    })
+}
+
+#[cfg(test)]
+mod credential_scope_tests {
+    use super::*;
+
+    /// Push credentials can be configured in the push service only (D-0097): this service's
+    /// configuration refuses them, at the top level and in its own section.
+    #[test]
+    fn push_credentials_are_refused() {
+        for (name, value) in [
+            (
+                "apns",
+                r#"{ key = { file = "/run/songbird/secrets/apns_key.p8" } }"#,
+            ),
+            (
+                "fcm",
+                r#"{ service_account = { file = "/run/songbird/secrets/fcm.json" } }"#,
+            ),
+            (
+                "webpush",
+                r#"{ vapid_key = { file = "/run/songbird/secrets/vapid_key.pem" } }"#,
+            ),
+            ("push_key", r#"{ file = "/run/songbird/secrets/push_key" }"#),
+        ] {
+            for text in [
+                format!(
+                    "{name} = {value}\n[common]\nenvironment = \"dev\"\nadmin_listen = \"127.0.0.1:9100\"\n"
+                ),
+                format!(
+                    "[common]\nenvironment = \"dev\"\nadmin_listen = \"127.0.0.1:9100\"\n[worker]\n{name} = {value}\n"
+                ),
+            ] {
+                let e = songbird_types::config::load_from_parts::<WorkerConfig, _>(
+                    &text,
+                    Vec::<(String, String)>::new(),
+                    "SONGBIRD",
+                )
+                .expect_err(name);
+                assert!(e.to_string().contains(name), "{name}: {e}");
+            }
+        }
+    }
 }

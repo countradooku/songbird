@@ -9,7 +9,6 @@
 )]
 
 use std::collections::VecDeque;
-use std::convert::Infallible;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -199,7 +198,24 @@ pub enum Behaviour {
     ExpiredAuth,
     /// Wait this long, then succeed.
     Slow(Duration),
+    /// Accept the request and never answer (a black-holed provider): only the client's own
+    /// timeout ends it (Prompt 8, D-0095).
+    Hang,
+    /// Reset the request mid-stream (HTTP/2 `RST_STREAM`; HTTP/1 closes the connection).
+    Reset,
 }
+
+/// Why the mock reset a request (only ever [`Behaviour::Reset`]).
+#[derive(Debug)]
+struct MockReset;
+
+impl std::fmt::Display for MockReset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("mock reset")
+    }
+}
+
+impl std::error::Error for MockReset {}
 
 /// A request the mock received.
 #[derive(Clone, Debug)]
@@ -214,6 +230,8 @@ pub struct RecordedRequest {
     pub headers: Vec<(String, String)>,
     /// Body.
     pub body: Vec<u8>,
+    /// When the mock had read the whole request (latency measurements).
+    pub at: std::time::Instant,
 }
 
 impl RecordedRequest {
@@ -239,6 +257,8 @@ struct State {
     requests: Mutex<Vec<RecordedRequest>>,
     token_requests: Mutex<Vec<RecordedRequest>>,
     script: Mutex<VecDeque<Behaviour>>,
+    /// What requests get once the script is empty (default: success).
+    fallback: Mutex<Behaviour>,
     token_script: Mutex<VecDeque<Behaviour>>,
     issued: Mutex<Vec<String>>,
     token_lifetime: AtomicU64,
@@ -314,6 +334,7 @@ impl MockServer {
             requests: Mutex::default(),
             token_requests: Mutex::default(),
             script: Mutex::default(),
+            fallback: Mutex::new(Behaviour::Ok),
             token_script: Mutex::default(),
             issued: Mutex::default(),
             token_lifetime: AtomicU64::new(3600),
@@ -352,9 +373,26 @@ impl MockServer {
         self.addr
     }
 
+    /// How many requests arrived (cheap: no copy, unlike [`MockServer::requests`]).
+    #[must_use]
+    pub fn request_count(&self) -> usize {
+        lock(&self.state.requests).len()
+    }
+
     /// Answers the next requests with `b` (in order); then success again.
     pub fn push(&self, b: Behaviour) {
         lock(&self.state.script).push_back(b);
+    }
+
+    /// Answers every request without a scripted behaviour with `b` from now on: an outage
+    /// (`Unavailable`, `Hang`, `Reset`, `RateLimited`) until [`MockServer::recover`].
+    pub fn outage(&self, b: Behaviour) {
+        *lock(&self.state.fallback) = b;
+    }
+
+    /// Ends an [`outage`](Self::outage): success again.
+    pub fn recover(&self) {
+        *lock(&self.state.fallback) = Behaviour::Ok;
     }
 
     /// Answers the next token requests with `b` (FCM).
@@ -465,7 +503,7 @@ async fn handle(
     state: Arc<State>,
     req: Request<Incoming>,
     http2: bool,
-) -> Result<Response<Full<Bytes>>, Infallible> {
+) -> Result<Response<Full<Bytes>>, MockReset> {
     let (parts, body) = req.into_parts();
     let body = Limited::new(body, 1 << 20)
         .collect()
@@ -491,6 +529,7 @@ async fn handle(
             })
             .collect(),
         body: body.to_vec(),
+        at: std::time::Instant::now(),
     };
 
     if state.flavor == Flavor::Fcm && rec.path == "/token" {
@@ -498,10 +537,16 @@ async fn handle(
     }
     let auth = rec.header("authorization").map(str::to_owned);
     lock(&state.requests).push(rec);
-    let mut b = lock(&state.script).pop_front().unwrap_or(Behaviour::Ok);
-    if let Behaviour::Slow(d) = b {
-        tokio::time::sleep(d).await;
-        b = Behaviour::Ok;
+    let scripted = lock(&state.script).pop_front();
+    let mut b = scripted.unwrap_or_else(|| lock(&state.fallback).clone());
+    match b {
+        Behaviour::Slow(d) => {
+            tokio::time::sleep(d).await;
+            b = Behaviour::Ok;
+        }
+        Behaviour::Hang => std::future::pending::<()>().await,
+        Behaviour::Reset => return Err(MockReset),
+        _ => {}
     }
     // FCM: only tokens this mock issued are accepted.
     if state.flavor == Flavor::Fcm && b == Behaviour::Ok {
@@ -581,7 +626,10 @@ fn respond(flavor: Flavor, b: &Behaviour) -> Response<Full<Bytes>> {
         (Flavor::WebPush, Behaviour::RateLimited { retry_after }) => {
             with_retry_after(json(StatusCode::TOO_MANY_REQUESTS, ""), *retry_after)
         }
-        (Flavor::WebPush, Behaviour::ServerError) => json(StatusCode::INTERNAL_SERVER_ERROR, ""),
+        // Hang and Reset are handled before answering; a 500 if one ever got here.
+        (Flavor::WebPush, Behaviour::ServerError) | (_, Behaviour::Hang | Behaviour::Reset) => {
+            json(StatusCode::INTERNAL_SERVER_ERROR, "")
+        }
         (Flavor::WebPush, Behaviour::Unavailable) => json(StatusCode::SERVICE_UNAVAILABLE, ""),
         (Flavor::WebPush, Behaviour::ExpiredAuth) => json(StatusCode::FORBIDDEN, ""),
     }
@@ -608,7 +656,7 @@ fn token(state: &State, rec: RecordedRequest) -> Response<Full<Bytes>> {
         Behaviour::RateLimited { retry_after } => {
             with_retry_after(json(StatusCode::TOO_MANY_REQUESTS, "{}"), retry_after)
         }
-        Behaviour::ServerError | Behaviour::Unavailable => {
+        Behaviour::ServerError | Behaviour::Unavailable | Behaviour::Hang | Behaviour::Reset => {
             json(StatusCode::INTERNAL_SERVER_ERROR, "{}")
         }
         Behaviour::ExpiredAuth | Behaviour::Unregistered => {

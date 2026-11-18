@@ -40,19 +40,68 @@ the same idempotency key (or sends over its WebSocket once it reconnects).
 
 ## Push provider outage or rate limiting
 
-- Detection: `push_results{provider=…,result="retried"}` rising; a provider breaker open (logs);
-  `songbird_jobs` delayed set (`ZCARD j:push:later`) growing.
+- Detection: alert `PushProviderDown` (retries and no sends for 10 minutes) or
+  `PushPermanentFailures` (`result="failed"`: credentials or a rejected request, which retrying
+  will not fix); `push_results{provider=…,result="retried"}` rising; `songbird_jobs_retried`
+  rising; the delayed sets (`ZCARD j:push:later`, `ZCARD j:ring:later`) growing.
 - Impact: wake-ups delayed for that platform only; messages safe in mailboxes.
 - Immediate actions: none needed; the breaker answers retries without network until the
   cool-down, and jobs back off with full jitter (up to 10 min).
 - Recovery: automatic when the provider answers. Jobs that exhaust 12 attempts are
-  dead-lettered (next runbook).
+  dead-lettered (next runbook). Tested (D-0096, `services/push/tests/outage_live.rs`): FCM down
+  for 3 s and APNs black-holed (accepting, never answering) end with every device woken without
+  an operator; `retry-after` is honoured; a crash mid-burst loses no wake-up.
+- `PushPermanentFailures` on APNs: an expired or revoked `.p8`, or the bundle ID not matching the
+  key's team; on FCM: the service account's key revoked or its role removed. Rotate the credential
+  (section "Push credentials" below); jobs that failed are dead-lettered and can be re-queued.
 - Verification: `retried` falls, `sent` rises; `XLEN j:push` near zero.
+
+## Call rings too late (`push_rings_expired` rising)
+
+Calls ring on their own stream (`j:ring`, D-0095) and a ring is worth sending for 30 s only (the
+offer expires after 60 s); the push service drops a ring it cannot send in time instead of ringing
+for a call already given up.
+
+- Detection: alert `PushRingsTooLate` (more than 5 in 15 minutes).
+- Impact: callees not rung while their app is closed; the caller sees no answer, the callee a
+  missed call when the app next connects. Messages are not affected.
+- Immediate actions: check the provider (APNs `VoIP` is the usual path) as in the outage runbook;
+  check `push` is running and `XLEN j:ring` is near zero (a stuck ring consumer).
+- Recovery: automatic; nothing to replay (a late ring is worthless by design).
+- Verification: `push_rings_expired` flat, `push_results{result="sent"}` rising.
+
+## Push credentials (rotation, a suspected leak)
+
+The APNs `.p8`, the FCM service account, the VAPID key and the push service's X25519 key exist only
+in SOPS and, on the push hosts, in `/etc/songbird/secrets/push` (mode 0400, uid 65532), mounted
+into `songbird-push` alone (D-0097). `cargo xtask secret-scope` fails CI if anything else in
+`deploy/` names them; every rollout checks the running containers
+(`roles/songbird/tasks/verify-push-credentials.yml`).
+
+- Rotation (APNs, FCM): create the new key in Apple's or Google's console straight into SOPS
+  (`sops edit deploy/secrets/<env>.sops.yaml`), `deploy/bin/rollout <env>`, then revoke the old
+  key. Pushes keep working across the switch (both keys are valid until the revocation).
+- VAPID: a new key changes the application server key that subscriptions were made with; apps
+  subscribe again at their next start (their old subscriptions are refused and deleted).
+- The push X25519 key: registrations are sealed to it, so a new key makes every stored
+  registration unopenable (`PushRegistrationsUnopenable`). Rotate only on a suspected leak, with
+  `api` given the new public key in the same rollout; apps register again at their next start.
+- A suspected leak of a provider key: revoke it in the provider's console first (pushes stop
+  until the new key is rolled out; messages are safe), then rotate as above.
+
+## Monitoring (Prometheus and Alertmanager on the bastion, D-0097)
+
+- Both listen on the bastion's loopback only: `ssh -L 9090:127.0.0.1:9090 -L 9093:127.0.0.1:9093
+  root@<bastion>`, then <http://127.0.0.1:9090/alerts> and <http://127.0.0.1:9093>.
+- Rules: `deploy/monitoring/rules/songbird.yml`, unit-tested in CI with `promtool`. Each alert
+  names its runbook.
+- Where alerts go is set in SOPS (`alert_email_to` with the SMTP relay, or `alert_webhook_url`).
+  Neither set: alerts show in Alertmanager's UI only.
 
 ## Dead letters (`j:dead` growing, any stream)
 
-- Detection: alert on the dead-letter stream length (`XLEN j:dead`) or worker/push logs "job
-  dead-lettered".
+- Detection: alert `JobsDeadLettered` (`songbird_jobs_dead_lettered_total` rising, exported by
+  `push` and `worker`); the stream length (`XLEN j:dead`); logs "job dead-lettered".
 - Impact by stream: `push` — a wake-up lost (message safe); `cleanup` — an object kept until the
   30-day sweep deletes it; `deletion` — **an account deletion not finished**: treat as urgent.
 - Immediate actions:

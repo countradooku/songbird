@@ -23,6 +23,12 @@ pub use ext_extras::*;
 pub use ext_settings::*;
 pub use model::*;
 
+/// The seeded data, for other modules' tests.
+#[cfg(test)]
+pub(crate) mod seed_for_tests {
+    pub use super::seed::seed;
+}
+
 use crate::ui::Tick;
 
 /// "Now" in mock minutes: Tuesday 17 Nov 2026, 10:24.
@@ -110,6 +116,13 @@ pub fn presence_label(p: &Presence) -> String {
     }
 }
 
+/// A message from someone else or an incoming call, for the notifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Arrival {
+    Message { chat: ChatId, sender: Option<String>, preview: String },
+    Call { chat: ChatId, video: bool },
+}
+
 /// The store. `Copy`: closures and rows capture it like a signal.
 #[derive(Clone, Copy)]
 pub struct Store {
@@ -123,6 +136,10 @@ pub struct Store {
     pub devices: Signal<Vec<Device>>,
     pub settings: Signal<Settings>,
     pub session: Signal<Session>,
+    /// Who hears of messages from others and incoming calls (the notifier,
+    /// D-0098): called at once, so it decides with the chat and settings as
+    /// they are when the message arrives.
+    on_arrival: Stored<Option<std::rc::Rc<dyn Fn(Store, Arrival)>>>,
     next_id: Stored<u64>,
 }
 
@@ -159,7 +176,7 @@ impl Store {
         // emulators and VMs, which don't pass the environment through).
         // Preview builds (`SONGBIRD_PREVIEW_BUILD=1` at compile time, for
         // screenshots on emulators and VMs) honour the marker as well.
-        let preview_build = cfg!(debug_assertions) || option_env!("SONGBIRD_PREVIEW_BUILD").is_some();
+        let preview_build = crate::PREVIEW_BUILD;
         let preview = preview_build
             && (std::env::var_os("SONGBIRD_ONBOARDED").is_some()
                 || data_dir().is_some_and(|d| d.join("songbird-onboarded").exists()));
@@ -175,6 +192,7 @@ impl Store {
             devices: signal(seed.devices),
             settings: signal(seed.settings),
             session: signal(Session { onboarded, ..seed.session }),
+            on_arrival: stored(None),
             next_id: stored(100_000),
         }
     }
@@ -245,7 +263,7 @@ impl Store {
 
     // ------------------------------------------------------------ chat intents
 
-    fn edit_chat(&self, id: ChatId, f: impl FnOnce(&mut Chat)) {
+    pub(crate) fn edit_chat(&self, id: ChatId, f: impl FnOnce(&mut Chat)) {
         self.chats.update(|cs| {
             if let Some(c) = cs.iter_mut().find(|c| c.id == id) {
                 f(c);
@@ -350,8 +368,25 @@ impl Store {
             forwarded: false,
             receipts: Vec::new(),
         };
+        let incoming = (from.is_some() && !system).then(|| (msg.body.preview(), from));
         self.messages.update(|m| m.entry(chat).or_default().push(msg));
+        if let Some((preview, Some(from))) = incoming {
+            let sender = self.contact(from).map(|c| c.name);
+            self.arrive(Arrival::Message { chat, sender, preview });
+        }
         id
+    }
+
+    /// Tells the notifier, if one listens.
+    pub fn arrive(&self, a: Arrival) {
+        if let Some(f) = self.on_arrival.with(|f| f.clone()) {
+            f(*self, a);
+        }
+    }
+
+    /// Sets who hears of arrivals (one listener: the notifier).
+    pub fn on_arrival(&self, f: impl Fn(Store, Arrival) + 'static) {
+        self.on_arrival.with(|slot| *slot = Some(std::rc::Rc::new(f)));
     }
 
     fn edit_message(&self, chat: ChatId, id: MsgId, f: impl FnOnce(&mut Message)) {

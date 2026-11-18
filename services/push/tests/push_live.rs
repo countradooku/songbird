@@ -10,6 +10,7 @@
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
+    clippy::many_single_char_names,
     reason = "tests"
 )]
 
@@ -17,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use songbird_accounts::push_token::{self, Registration};
-use songbird_accounts::{Db, Registry, push_index};
+use songbird_accounts::{Db, PushStore, push_index};
 use songbird_jobs::queue::DEAD_KEY;
 use songbird_jobs::{ConsumeConfig, Job, Queue, QueueConfig, Stream, Work};
 use songbird_push::{Handler, Kind, Providers, PushMetrics};
@@ -31,7 +32,7 @@ use songbird_types::DeviceId;
 
 struct Env {
     valkey: String,
-    registry: Arc<Registry>,
+    registry: Arc<PushStore>,
 }
 
 async fn env() -> Option<Env> {
@@ -57,8 +58,9 @@ async fn env() -> Option<Env> {
         timeout: Duration::from_secs(5),
         max_message_bytes: 16 << 20,
     };
+    // The push database alone (D-0095): this service never touches the registry.
     let registry = Arc::new(
-        Registry::connect(Db::connect(cfg).await.unwrap())
+        PushStore::connect(Db::connect(cfg).await.unwrap())
             .await
             .unwrap(),
     );
@@ -69,7 +71,13 @@ async fn wipe(url: &str) {
     let client = redis::Client::open(url).unwrap();
     let mut c = client.get_multiplexed_async_connection().await.unwrap();
     let _: () = redis::cmd("DEL")
-        .arg(&[Stream::Push.key(), Stream::Push.delayed_key(), DEAD_KEY])
+        .arg(&[
+            Stream::Push.key(),
+            Stream::Push.delayed_key(),
+            Stream::Ring.key(),
+            Stream::Ring.delayed_key(),
+            DEAD_KEY,
+        ])
         .query_async(&mut c)
         .await
         .unwrap();
@@ -89,7 +97,34 @@ struct Device {
 }
 
 fn job(d: &Device, call: bool) -> Job {
-    Job::new(Work::Push { device: d.id, call }).unwrap()
+    if call {
+        ring(d, 30_000)
+    } else {
+        Job::new(Work::Push { device: d.id }).unwrap()
+    }
+}
+
+/// A ring that may still ring for `life_ms` (negative: already too late).
+fn ring(d: &Device, life_ms: i64) -> Job {
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    Job::new(Work::Ring {
+        device: d.id,
+        until_ms: u64::try_from(now + life_ms).unwrap(),
+    })
+    .unwrap()
+}
+
+fn fast_consumer() -> ConsumeConfig {
+    ConsumeConfig {
+        housekeeping: Duration::from_millis(50),
+        ..ConsumeConfig::default()
+    }
 }
 
 fn for_token<'a>(reqs: &'a [RecordedRequest], token: &str) -> Vec<&'a RecordedRequest> {
@@ -117,7 +152,7 @@ async fn offline_devices_get_one_constant_wake_up() {
         let index = push_index(&index_secret, &id);
         if let Some(reg) = reg {
             let sealed = push_token::seal(&push_public, &index, &reg).unwrap();
-            env.registry.put_push_token(&index, &sealed).await.unwrap();
+            env.registry.put(&index, &sealed).await.unwrap();
         }
         Device { id, index }
     };
@@ -197,17 +232,21 @@ async fn offline_devices_get_one_constant_wake_up() {
     qcfg.backoff_max = Duration::from_millis(200);
     let client = redis::Client::open(env.valkey.as_str()).unwrap();
     let queue = Arc::new(Queue::connect(client, &[9; 32], qcfg).await.unwrap());
-    queue.ensure_groups(&[Stream::Push]).await.unwrap();
+    queue
+        .ensure_groups(&[Stream::Push, Stream::Ring])
+        .await
+        .unwrap();
+    let handler = Arc::new(handler);
     let running = songbird_push::spawn(
         Arc::clone(&queue),
-        Arc::new(handler),
-        ConsumeConfig {
-            housekeeping: Duration::from_millis(50),
-            ..ConsumeConfig::default()
-        },
+        Arc::clone(&handler),
+        fast_consumer(),
+        fast_consumer(),
     );
 
-    // 1. A burst per device becomes exactly one push each.
+    // 1. A burst per device becomes one push at once and one trailing push at the window's end
+    //    (D-0095): never more than two, and the last message of the burst is never left without
+    //    a wake-up after it.
     let mut burst = Vec::new();
     for _ in 0..5 {
         burst.extend([
@@ -217,21 +256,28 @@ async fn offline_devices_get_one_constant_wake_up() {
         ]);
     }
     queue.enqueue(&burst).await.unwrap();
-    eventually("one push per provider", async || {
-        apns_mock.requests().len() == 1
-            && fcm_mock.requests().len() == 1
-            && web_mock.requests().len() == 1
+    eventually("a leading and a trailing push per provider", async || {
+        apns_mock.requests().len() == 2
+            && fcm_mock.requests().len() == 2
+            && web_mock.requests().len() == 2
     })
     .await;
     eventually("the burst handled", async || {
         [Kind::Apns, Kind::Fcm, Kind::WebPush]
             .iter()
-            .all(|k| metrics.count(*k, "debounced") == 4)
+            .all(|k| metrics.count(*k, "debounced") == 3 && metrics.count(*k, "deferred") == 1)
     })
     .await;
-    assert_eq!(apns_mock.requests().len(), 1);
-    assert_eq!(fcm_mock.requests().len(), 1);
-    assert_eq!(web_mock.requests().len(), 1);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(apns_mock.requests().len(), 2);
+    assert_eq!(fcm_mock.requests().len(), 2);
+    assert_eq!(web_mock.requests().len(), 2);
+    // Every push of a provider is the same bytes, leading or trailing.
+    for m in [&apns_mock, &fcm_mock] {
+        let r = m.requests();
+        assert_eq!(r[0].body, r[1].body);
+        assert_eq!(r[0].path, r[1].path);
+    }
     // Constant content.
     let a = &apns_mock.requests()[0];
     assert_eq!(a.path, format!("/3/device/{}", hex::encode([0xa1; 32])));
@@ -252,34 +298,49 @@ async fn offline_devices_get_one_constant_wake_up() {
     assert_eq!(w.path, "/up/opaque");
     assert_eq!(sub.decrypt(&w.body).unwrap(), PLAINTEXT);
 
-    // 2. A call goes to the VoIP token (debounced apart from messages).
+    // 2. A ring goes to the VoIP token at once (never debounced, its own stream), with expiry 0.
     queue.enqueue(&[job(&apple, true)]).await.unwrap();
-    eventually("the VoIP push", async || apns_mock.requests().len() == 2).await;
-    let v = &apns_mock.requests()[1];
+    eventually("the VoIP push", async || apns_mock.requests().len() == 3).await;
+    let v = &apns_mock.requests()[2];
     assert_eq!(v.path, format!("/3/device/{}", hex::encode([0xb2; 32])));
     assert_eq!(v.header("apns-push-type"), Some("voip"));
+    assert_eq!(v.header("apns-expiration"), Some("0"));
     assert_eq!(v.body, b"{}");
+    // On FCM and Web Push a ring is the very same message as a wake-up.
+    queue
+        .enqueue(&[job(&android, true), job(&unified, true)])
+        .await
+        .unwrap();
+    eventually("rings on FCM and Web Push", async || {
+        fcm_mock.requests().len() == 3 && web_mock.requests().len() == 3
+    })
+    .await;
+    assert_eq!(fcm_mock.requests()[2].body, fcm_mock.requests()[0].body);
+    assert_eq!(
+        sub.decrypt(&web_mock.requests()[2].body).unwrap(),
+        PLAINTEXT
+    );
+    // A ring past its time is dropped unsent; an Apple device without a VoIP token is not rung.
+    queue
+        .enqueue(&[ring(&apple, -1), ring(&gone, 30_000)])
+        .await
+        .unwrap();
+    eventually("the late ring dropped", async || {
+        metrics.rings_expired.get() == 1 && metrics.calls_without_voip.get() == 1
+    })
+    .await;
+    assert_eq!(apns_mock.requests().len(), 3);
 
     // 3. An unregistered token is deleted.
     apns_mock.push(Behaviour::Unregistered);
     queue.enqueue(&[job(&gone, false)]).await.unwrap();
     eventually("the unregistered token deleted", async || {
-        env.registry
-            .push_token(&gone.index)
-            .await
-            .unwrap()
-            .is_none()
+        env.registry.get(&gone.index).await.unwrap().is_none()
     })
     .await;
     assert_eq!(metrics.count(Kind::Apns, "unregistered"), 1);
     // The other registrations stay.
-    assert!(
-        env.registry
-            .push_token(&apple.index)
-            .await
-            .unwrap()
-            .is_some()
-    );
+    assert!(env.registry.get(&apple.index).await.unwrap().is_some());
 
     // 4. A provider outage (503) is retried and the push arrives later.
     fcm_mock.push(Behaviour::Unavailable);
@@ -289,7 +350,7 @@ async fn offline_devices_get_one_constant_wake_up() {
     })
     .await;
     eventually("the retry delivered", async || {
-        metrics.count(Kind::Fcm, "sent") == 2
+        metrics.count(Kind::Fcm, "sent") == 4
     })
     .await;
     assert_eq!(metrics.count(Kind::Fcm, "retried"), 1);
@@ -334,5 +395,43 @@ async fn offline_devices_get_one_constant_wake_up() {
     }
 
     assert_eq!(queue.dead_letters().await.unwrap(), 0);
+    running.stop().await;
+
+    // 6. A ring is not delayed behind a backlog of 10,000 message wake-ups: the message consumer
+    //    runs one job at a time, the ring consumer on its own.
+    let running = songbird_push::spawn(
+        Arc::clone(&queue),
+        Arc::clone(&handler),
+        ConsumeConfig {
+            concurrency: 1,
+            batch: 16,
+            ..fast_consumer()
+        },
+        fast_consumer(),
+    );
+    let mut backlog = Vec::with_capacity(10_000);
+    for _ in 0..10_000 {
+        backlog.push(
+            Job::new(Work::Push {
+                device: DeviceId::random().unwrap(),
+            })
+            .unwrap(),
+        );
+    }
+    for chunk in backlog.chunks(512) {
+        queue.enqueue(chunk).await.unwrap();
+    }
+    let before = apns_mock.requests().len();
+    let t = tokio::time::Instant::now();
+    queue.enqueue(&[job(&apple, true)]).await.unwrap();
+    eventually("the ring behind the backlog", async || {
+        apns_mock.requests().len() == before + 1
+    })
+    .await;
+    let took = t.elapsed();
+    let left = queue.depth(Stream::Push).await.unwrap();
+    assert!(left > 5_000, "the backlog drained first ({left} left)");
+    assert!(took < Duration::from_secs(2), "the ring took {took:?}");
+    println!("ring behind 10,000 queued wake-ups: {took:?}, {left} still queued");
     running.stop().await;
 }

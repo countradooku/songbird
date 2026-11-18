@@ -155,6 +155,8 @@ pub struct SendMetrics {
     pub routes_lagged: Counter,
     /// Envelopes stored for devices with no session anywhere (a push wake-up follows).
     pub routes_offline: Counter,
+    /// Of those, envelopes of `SILENT` sends: no wake-up (D-0095).
+    pub routes_silent: Counter,
     /// Stores that failed (mailbox full or unavailable).
     pub mailbox_errors: Counter,
     /// Message requests stored.
@@ -198,6 +200,11 @@ impl SendMetrics {
                 "routes_offline",
                 "Envelopes for devices without a session",
                 &self.routes_offline,
+            ),
+            (
+                "routes_silent",
+                "Envelopes for devices without a session, sent silent (no wake-up)",
+                &self.routes_silent,
             ),
             (
                 "send_mailbox_errors",
@@ -727,8 +734,10 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
     }
 
     /// Routes a stored send to its recipients' sessions, wherever they are; a device with no
-    /// session gets a push wake-up (debounced, never blocking the caller).
-    pub async fn route(&self, payload: SendPayload, seqs: Vec<u64>) {
+    /// session gets a push wake-up (debounced, never blocking the caller), unless the send is
+    /// `silent` (`SILENT`, D-0095): then it waits in the mailbox for the device's next
+    /// connection and wakes nobody.
+    pub async fn route(&self, payload: SendPayload, seqs: Vec<u64>, silent: bool) {
         let m = self.metrics;
         // Route even a replayed send: if the original route was lost (crash between store and
         // route), this retry delivers it now instead of at the next safety sweep; a duplicate
@@ -751,7 +760,11 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
                 Routed::Lagged => m.routes_lagged.inc(),
                 Routed::Offline => {
                     m.routes_offline.inc();
-                    self.push.offline(device);
+                    if silent {
+                        m.routes_silent.inc();
+                    } else {
+                        self.push.offline(device);
+                    }
                 }
             }
         }
@@ -768,7 +781,7 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
     ) -> SendStatus {
         match self.store(sender, &mut s, received, scratch).await {
             Ok(outcome) => {
-                self.route(s.payload, outcome.seqs).await;
+                self.route(s.payload, outcome.seqs, s.hints.silent).await;
                 SendStatus::Accepted
             }
             Err(status) => status,

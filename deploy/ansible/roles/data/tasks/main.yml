@@ -42,6 +42,46 @@
     cap_drop: [ALL]
   no_log: true
 
+- name: Wait until SurrealDB answers
+  ansible.builtin.uri:
+    url: "https://{{ private_ip }}:8000/health"
+    ca_path: "{{ songbird_pki_dir }}/surrealdb/ca.crt"
+  register: surreal_health
+  until: surreal_health.status == 200
+  retries: 30
+  delay: 2
+
+# Push registrations live in a database of their own (D-0095): one user per service that touches
+# them, each scoped to that database alone, none able to read the registry (`songbird`), and the
+# backup user (a VIEWER of `songbird` only) never sees them. SurrealDB's system users have roles,
+# not per-table rights, so each of the three may read and write the push database; what they
+# cannot do is reach anything else.
+- name: Push database and its users (api, worker, push)
+  ansible.builtin.uri:
+    url: "https://{{ private_ip }}:8000/sql"
+    method: POST
+    ca_path: "{{ songbird_pki_dir }}/surrealdb/ca.crt"
+    url_username: "{{ secrets.surrealdb_user }}"
+    url_password: "{{ secrets.surrealdb_password }}"
+    force_basic_auth: true
+    headers:
+      Accept: application/json
+    body_format: raw
+    body: >-
+      DEFINE NAMESPACE IF NOT EXISTS songbird; USE NS songbird;
+      DEFINE DATABASE IF NOT EXISTS push; USE DB push;
+      DEFINE USER OVERWRITE push_api ON DATABASE
+      PASSWORD {{ secrets.push_db_password_api | to_json }} ROLES EDITOR;
+      DEFINE USER OVERWRITE push_worker ON DATABASE
+      PASSWORD {{ secrets.push_db_password_worker | to_json }} ROLES EDITOR;
+      DEFINE USER OVERWRITE push_service ON DATABASE
+      PASSWORD {{ secrets.push_db_password_push | to_json }} ROLES EDITOR;
+    return_content: true
+  register: push_db
+  changed_when: false
+  failed_when: push_db.status != 200 or (push_db.json | rejectattr('status', 'equalto', 'OK') | list | length) > 0
+  no_log: true
+
 # Mailbox log (D-0029). Topic durability `persisted` (set by the mailbox) makes Iggy fsync before
 # it confirms (invariant 1). Iggy 0.10 runs on io_uring: the seccomp profile is Docker's default
 # plus the three io_uring syscalls (deploy/compose/iggy-seccomp.json). HTTP, QUIC and WebSocket

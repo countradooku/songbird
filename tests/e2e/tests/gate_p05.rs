@@ -204,6 +204,11 @@ async fn stack(people: usize) -> Option<Stack> {
         reports: None,
         calls: None,
         server_name: API.into(),
+        push_store: Arc::new(
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
+        ),
         registry: Arc::clone(&registry),
         s3: songbird_s3::Client::new(songbird_s3::Config::new(
             "127.0.0.1:9".into(),
@@ -1261,7 +1266,7 @@ async fn groups_are_in_the_export_and_requests_go_with_the_account() {
     let export = |who: usize| {
         let account = s.people[who].mls.account;
         let r = Arc::clone(&s.registry);
-        async move { r.export(&account, &[9; 32]).await.unwrap() }
+        async move { r.export(&account, None).await.unwrap() }
     };
     let e = export(alice).await;
     assert_eq!(e["groups"][0]["group"], gid.as_str());
@@ -1281,7 +1286,7 @@ async fn groups_are_in_the_export_and_requests_go_with_the_account() {
     let account = s.people[carol].mls.account;
     let devices = s.registry.account_devices(&account).await.unwrap();
     s.registry.delete_account_rows(&account).await.unwrap();
-    let left = s.registry.remnants(&account, &devices, &[]).await.unwrap();
+    let left = s.registry.remnants(&account, &devices).await.unwrap();
     assert!(left.is_empty(), "{left:?}");
     let (_, l) = list(&s, alice).await;
     assert_eq!(&l[..], &[0u8, 0][..], "the request is gone");
@@ -1415,7 +1420,7 @@ async fn departed_devices_are_removed_through_server_proposals() {
     // Her account's rows go; nothing names her devices any more.
     let devices = s.registry.account_devices(&account).await.unwrap();
     s.registry.delete_account_rows(&account).await.unwrap();
-    let left = s.registry.remnants(&account, &devices, &[]).await.unwrap();
+    let left = s.registry.remnants(&account, &devices).await.unwrap();
     assert!(left.is_empty(), "{left:?}");
 }
 

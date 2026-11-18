@@ -12,6 +12,9 @@ use nsh_core::{prelude::*, storage::Storage};
 
 use super::{Plan, Store};
 
+/// Storage key: the user hid the tray / menu bar icon.
+const TRAY_HIDDEN_KEY: &str = "tray-hidden";
+
 /// Monthly or yearly billing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Billing {
@@ -241,13 +244,52 @@ impl Store {
 
     // ------------------------------------------------------------ desktop
 
+    /// The user's own "Open at login" switch: the system's login item
+    /// (NSH 0.6: `SMAppService` on macOS, the Run key on Windows, an XDG
+    /// autostart entry on Linux). Shown at once; put back, with a toast, if
+    /// the system refuses. On macOS the system may then wait for the user's
+    /// approval in Login Items.
     pub fn set_launch_at_login(&self, on: bool) {
-        // mock: the platform's login item (SMAppService, the Run key, an
-        // XDG autostart entry); NSH has no API for it yet (DESKTOP_GAPS.md).
         self.settings_update(|x| x.launch_at_login = on);
+        let s = *self;
+        spawn(async move {
+            if nsh_core::element::desktop::set_launch_at_login(on).await.is_err() {
+                s.settings_update(|x| x.launch_at_login = !on);
+                crate::ui::toast(if on {
+                    "Songbird could not be set to open at login"
+                } else {
+                    "Songbird could not be removed from login items"
+                });
+            }
+        });
     }
 
+    /// Reads the login item as the system has it now (the user may change
+    /// it in the system's settings): call when the switch shows.
+    pub fn refresh_launch_at_login(&self) {
+        let s = *self;
+        spawn(async move {
+            let on = nsh_core::element::desktop::launch_at_login().await;
+            s.settings_update(|x| x.launch_at_login = on);
+        });
+    }
+
+    /// Shows or hides the tray / menu bar icon. While it shows, closing the
+    /// window keeps Songbird running there (D-0098). Remembered.
     pub fn set_tray_hidden(&self, hidden: bool) {
+        extras().update(|e| e.tray_hidden = hidden);
+        if hidden {
+            if let Err(e) = Storage::set_item(TRAY_HIDDEN_KEY, "1") {
+                log::warn!("tray choice not saved: {e}");
+            }
+        } else {
+            Storage::remove_item(TRAY_HIDDEN_KEY);
+        }
+    }
+
+    /// The tray choice saved by an earlier run.
+    pub fn restore_tray_choice(&self) {
+        let hidden = Storage::get_item(TRAY_HIDDEN_KEY).is_some();
         extras().update(|e| e.tray_hidden = hidden);
     }
 }

@@ -114,6 +114,11 @@ async fn stack_full(
         reports: None,
         calls: None,
         server_name: SERVER.into(),
+        push_store: Arc::new(
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
+        ),
         registry,
         s3,
         queue: Arc::new(queue),

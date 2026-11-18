@@ -246,6 +246,50 @@ async fn a_slow_provider_times_out_as_retry() {
     assert_eq!(f.apns.send(&alert()).await, Outcome::Delivered);
 }
 
+/// A black-holed APNs (accepts, never answers) costs each push its timeout, opens the breaker,
+/// and after its cooldown a probe finds the recovered provider (Prompt 8, D-0095).
+#[tokio::test]
+async fn a_black_holed_provider_times_out_opens_the_breaker_and_recovers() {
+    let f = fixture(|c| {
+        c.http.request_timeout = Duration::from_millis(200);
+        c.breaker = BreakerConfig {
+            failures: 3,
+            window: Duration::from_secs(60),
+            cooldown: Duration::from_millis(300),
+        };
+    })
+    .await;
+    f.mock.outage(Behaviour::Hang);
+    for _ in 0..3 {
+        let t = tokio::time::Instant::now();
+        assert_eq!(f.apns.send(&alert()).await, Outcome::Retry { after: None });
+        assert!(
+            t.elapsed() < Duration::from_secs(1),
+            "bounded by the timeout"
+        );
+    }
+    assert_eq!(f.apns.breaker_state(), BreakerState::Open);
+    let sent = f.mock.requests().len();
+    assert!(matches!(
+        f.apns.send(&alert()).await,
+        Outcome::Retry { after: Some(_) }
+    ));
+    assert_eq!(f.mock.requests().len(), sent, "no request while open");
+    f.mock.recover();
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(f.apns.send(&alert()).await, Outcome::Delivered);
+    assert_eq!(f.apns.breaker_state(), BreakerState::Closed);
+}
+
+/// A stream reset mid-request is transient: retried, and the connection serves the next push.
+#[tokio::test]
+async fn a_reset_stream_is_retried() {
+    let f = fixture(|_| {}).await;
+    f.mock.push(Behaviour::Reset);
+    assert!(matches!(f.apns.send(&alert()).await, Outcome::Retry { .. }));
+    assert_eq!(f.apns.send(&alert()).await, Outcome::Delivered);
+}
+
 #[tokio::test]
 async fn breaker_opens_and_answers_without_the_network() {
     let f = fixture(|c| {

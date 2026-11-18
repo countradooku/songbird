@@ -81,6 +81,11 @@ pub const SEND_FLAG_EXPIRES: u8 = 0x20;
 /// the frame lists no devices. Needs [`SEND_FLAG_SHARED`]; not with [`SEND_FLAG_MLS`],
 /// [`SEND_FLAG_ACCESS`] or [`SEND_FLAG_REQUEST`] (membership is the authorization).
 pub const SEND_FLAG_GROUP: u8 = 0x40;
+/// `Send` flag: wake nobody (Prompt 8, D-0095). The envelopes are stored and delivered as usual,
+/// but a recipient that is offline gets no push for them: receipts, sync messages and other
+/// sends the recipient need not see at once. No block follows; any other flag may go with it.
+/// The server keeps the bit only while it routes the send: never stored, never logged.
+pub const SEND_FLAG_SILENT: u8 = 0x80;
 /// Every `Send` flag this version takes; other bits (and the retired [`SEND_FLAG_MLS`]) are
 /// refused.
 pub const SEND_FLAGS: u8 = SEND_FLAG_SHARED
@@ -88,7 +93,8 @@ pub const SEND_FLAGS: u8 = SEND_FLAG_SHARED
     | SEND_FLAG_REQUEST
     | SEND_FLAG_FRANKED
     | SEND_FLAG_EXPIRES
-    | SEND_FLAG_GROUP;
+    | SEND_FLAG_GROUP
+    | SEND_FLAG_SILENT;
 /// Longest disappearing hint: the 30 days an envelope is kept anyway.
 pub const MAX_EXPIRE_AFTER_S: u32 = 30 * 24 * 3600;
 /// Length of an access key.
@@ -263,6 +269,8 @@ pub struct SendHints {
     /// The group of a group application message (`GROUP`, Prompt 5): the server fans the shared
     /// body out to this group's roster.
     pub group: Option<[u8; 16]>,
+    /// Wake no offline recipient (`SILENT`, Prompt 8): stored and delivered as usual, no push.
+    pub silent: bool,
 }
 
 impl std::fmt::Debug for SendHints {
@@ -273,6 +281,7 @@ impl std::fmt::Debug for SendHints {
             .field("franked", &self.commitment.is_some())
             .field("expire_after_s", &self.expire_after_s)
             .field("group", &self.group.is_some())
+            .field("silent", &self.silent)
             .finish()
     }
 }
@@ -307,6 +316,7 @@ impl SendFrame {
                 commitment: None,
                 expire_after_s: None,
                 group: None,
+                silent: false,
             },
             payload: SendPayload::PerDevice(recipients),
         }
@@ -693,6 +703,7 @@ fn decode_send_blocks(c: &mut Cursor<'_>, flags: u8) -> Result<SendHints, FrameE
         commitment,
         expire_after_s,
         group,
+        silent: has(SEND_FLAG_SILENT),
     };
     Ok(hints)
 }
@@ -806,6 +817,9 @@ fn encode_send(s: &SendFrame, out: &mut BytesMut) {
     }
     if h.group.is_some() {
         flags |= SEND_FLAG_GROUP;
+    }
+    if h.silent {
+        flags |= SEND_FLAG_SILENT;
     }
     out.put_u8(flags);
     if let Some(k) = &h.access {
@@ -1014,6 +1028,7 @@ mod tests {
                             commitment,
                             expire_after_s: expire,
                             group: None,
+                            silent: req_id % 7 == 0,
                         };
                         ClientFrame::Send(s)
                     }
@@ -1030,6 +1045,7 @@ mod tests {
                             // A group's body may be franked and disappear too.
                             commitment: (req_id % 3 == 0).then_some([7; 32]),
                             expire_after_s: (req_id % 5 == 0).then_some(60),
+                            silent: req_id % 2 == 0,
                             ..SendHints::default()
                         },
                         req_id,
@@ -1184,7 +1200,20 @@ mod tests {
         assert_eq!(base(SEND_FLAG_REQUEST | SEND_FLAG_SHARED, &[]), refused);
         assert_eq!(base(SEND_FLAG_REQUEST | SEND_FLAG_MLS, &[0; 24]), refused);
         assert_eq!(base(0x40, &[]), refused);
-        assert_eq!(base(0x80, &[]), refused);
+        // `SILENT` (0x80, D-0095) carries no block and goes with any other flag.
+        let silent = base(SEND_FLAG_SILENT, &[]).unwrap();
+        let ClientFrame::Send(f) = silent else {
+            panic!("not a send")
+        };
+        assert!(f.hints.silent);
+        assert!(base(SEND_FLAG_SILENT | SEND_FLAG_ACCESS, &[0; 16]).is_ok());
+        assert!(!matches!(
+            base(0, &[]),
+            Ok(ClientFrame::Send(SendFrame {
+                hints: SendHints { silent: true, .. },
+                ..
+            }))
+        ));
         // The disappearing hint: 1 s to 30 days.
         let exp = |s: u32| base(SEND_FLAG_EXPIRES, &s.to_be_bytes());
         assert_eq!(exp(0), Err(FrameError::Control("send.expire_after_s")));
@@ -1265,12 +1294,13 @@ mod tests {
                 Err(FrameError::Truncated)
             );
         }
-        // Unknown flags are refused.
+        // Refused flags (every bit is assigned since `SILENT`, D-0095: the retired MLS bit is
+        // the one left to refuse).
         let mut b = BytesMut::new();
         b.put_u8(ty::SEND);
         b.put_u32(7);
         b.put_slice(&[0; 16]);
-        b.put_u8(0x80);
+        b.put_u8(SEND_FLAG_MLS);
         b.put_u16(1);
         assert_eq!(
             ClientFrame::decode(&b.freeze(), &Limits::DEFAULT),

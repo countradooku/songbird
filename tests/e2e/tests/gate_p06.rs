@@ -116,6 +116,11 @@ async fn stack() -> Option<Stack> {
         reports: None,
         calls: None,
         server_name: SERVER.into(),
+        push_store: Arc::new(
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
+        ),
         registry: Arc::clone(&registry),
         s3: s3.clone(),
         queue: queue("p06-api").await,
@@ -151,6 +156,11 @@ async fn stack() -> Option<Stack> {
     });
     let worker = Worker {
         block_keys: None,
+        push_store: Arc::new(
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
+        ),
         registry,
         s3,
         queue: queue("p06-worker").await,
@@ -994,7 +1004,7 @@ async fn the_export_lists_uploads_and_packs_in_progress_and_deletion_removes_the
     let export = s
         .app
         .registry
-        .export(&account, &[9; 32])
+        .export(&account, None)
         .await
         .unwrap()
         .to_string();
@@ -1009,17 +1019,16 @@ async fn the_export_lists_uploads_and_packs_in_progress_and_deletion_removes_the
     assert!(export.contains("GIF searches") && export.contains("Packs you made"));
 
     s.worker.delete_account(&account).await.unwrap();
-    let remnants = s
-        .app
-        .registry
-        .remnants(
-            &account,
-            &[dev],
-            &[songbird_accounts::push_index(&[9; 32], &dev)],
-        )
-        .await
-        .unwrap();
+    let remnants = s.app.registry.remnants(&account, &[dev]).await.unwrap();
     assert!(remnants.is_empty(), "{remnants:?}");
+    assert_eq!(
+        s.app
+            .push_store
+            .count(&[songbird_accounts::push_index(&[9; 32], &dev)])
+            .await
+            .unwrap(),
+        0
+    );
     assert!(s.app.registry.pack(&pack_id).await.unwrap().is_none());
     assert!(
         s.app

@@ -11,6 +11,22 @@ images:
   livekit: "livekit/livekit-server:v1.13.11@sha256:25cd902de7cacbd5f1f779f6a6ac1eae20ba8f56b0935934ce6b0ab80d1e3d20"
   iggy: "apache/iggy:0.10.0@sha256:176125a0580f526b0fee8b98ccf4ed5f77e243066183243d87282abce4851bf3"
   ghostunnel: "ghostunnel/ghostunnel:v1.11.5@sha256:65c4e34ec0ee0f30ea1f72b7411ec70a91c32fc50f067a8466ad2adb1e7420f2"
+  # Monitoring on the bastion (Prompt 8, D-0097).
+  prometheus: "prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996"
+  alertmanager: "prom/alertmanager:v0.28.1@sha256:27c475db5fb156cab31d5c18a4251ac7ed567746a2483ff264516437a39b15ba"
+
+# Push (Prompt 8, D-0097): which providers this environment uses, the app's bundle ID and the
+# VAPID contact. Their credentials are in SOPS and reach the push container only
+# (roles/songbird/tasks/push.yml; `cargo xtask secret-scope` checks it).
+push_providers:
+  apns: true
+  fcm: true
+  webpush: true
+push_bundle_id: chat.songbird.app
+# Push runs as a uid of its own (D-0100): the provider keys on the host are readable by push alone,
+# not by every Songbird container's uid.
+push_uid: 65533
+push_vapid_subject: "mailto:push@{{ songbird_public_domain | default('songbird.chat') }}"
 
 # Which Songbird services run on which role, and their private admin ports.
 songbird_services_by_role:
@@ -68,7 +84,7 @@ tls_owner_uid:
   valkey-livekit: 999
   delivery: 65532
   api: 65532
-  push: 65532
+  push: 65533
   worker: 65532
   calls: 65532
 tls_leaf_days: 30

@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
+mod secret_scope;
 mod workflows;
 
 type Result<T = ()> = std::result::Result<T, String>;
@@ -32,6 +33,8 @@ cargo xtask <command>
   workflows             CI policy for .github/workflows (D-0045): standard GitHub-hosted
                           runners only, release and deploy on tags or by hand only, secrets
                           only there, pinned actions, read-only token, concurrency
+  secret-scope          push provider credentials and the push key are named in deploy/ and
+                          config/ only by the push task and secrets-init (D-0097)
   smoke                 start every service, check /readyz and /metrics, SIGTERM, expect exit 0
   sanitize              workspace tests under ASan and TSan (nightly, -Zbuild-std)
   miri                  Miri on the pure crates (nightly)
@@ -78,6 +81,7 @@ fn main() -> ExitCode {
     let r = match cmd {
         "ci" => ci(rest.first().map_or("fast", String::as_str)),
         "workflows" => workflows::check(Path::new(".github/workflows")),
+        "secret-scope" => secret_scope::check(Path::new(".")),
         "smoke" => smoke(),
         "sanitize" => sanitizers(),
         "miri" => miri(),
@@ -177,6 +181,8 @@ fn ci(level: &str) -> Result {
     };
     step("workflow policy (hosted runners only, pins, read-only token, D-0045)");
     workflows::check(Path::new(".github/workflows"))?;
+    step("push credentials only in the push service (D-0097)");
+    secret_scope::check(Path::new("."))?;
     step("rustfmt");
     run(cargo().args(["fmt", "--all", "--", "--check"]))?;
     step("clippy (pedantic + selected restriction lints, -D warnings)");

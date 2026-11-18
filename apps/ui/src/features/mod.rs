@@ -10,6 +10,7 @@ pub mod devices;
 pub mod gallery;
 pub mod groups;
 pub mod media;
+pub mod notify;
 pub mod onboarding;
 pub mod plans;
 pub mod server;

@@ -37,6 +37,7 @@ macro_rules! mark_prune {
 }
 
 mod db;
+pub mod push_store;
 pub mod push_token;
 
 use std::time::Duration;
@@ -58,6 +59,7 @@ pub mod packs;
 pub mod profile;
 pub mod reports;
 pub use db::{Db, DbError, SurrealSettings};
+pub use push_store::PushStore;
 
 /// Ed25519 public key length.
 pub const AUTH_KEY_LEN: usize = 32;
@@ -69,6 +71,12 @@ pub const ATTACHMENT_MAX_AGE: Duration = Duration::from_hours(30 * 24);
 pub const GRANT_MAX_AGE: Duration = Duration::from_hours(24);
 
 const SCHEMA: &str = "
+-- Legacy (D-0095, D-0100): push registrations live in their own database now. The table stays
+-- defined (and empty once moved) so deletions can still clear and verify rows written before the
+-- move; dropped when every environment has moved.
+DEFINE TABLE IF NOT EXISTS push_token SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS sealed ON push_token TYPE bytes;
+DEFINE FIELD IF NOT EXISTS at ON push_token TYPE datetime;
 DEFINE TABLE IF NOT EXISTS account SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS at ON account TYPE datetime;
 DEFINE FIELD IF NOT EXISTS deleting ON account TYPE bool;
@@ -181,9 +189,6 @@ DEFINE FIELD IF NOT EXISTS expires ON report TYPE datetime;
 DEFINE INDEX IF NOT EXISTS report_expires ON report FIELDS expires;
 DEFINE TABLE IF NOT EXISTS directory SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS version ON directory TYPE int;
-DEFINE TABLE IF NOT EXISTS push_token SCHEMAFULL;
-DEFINE FIELD IF NOT EXISTS sealed ON push_token TYPE bytes;
-DEFINE FIELD IF NOT EXISTS at ON push_token TYPE datetime;
 DEFINE TABLE IF NOT EXISTS upload_grant SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS device ON upload_grant TYPE bytes;
 DEFINE FIELD IF NOT EXISTS size ON upload_grant TYPE int;
@@ -614,8 +619,6 @@ pub struct Remnants {
     pub account: u64,
     /// Device rows.
     pub devices: u64,
-    /// Push tokens of the devices.
-    pub push_tokens: u64,
     /// Upload grants and unfinished packs of the devices (Prompt 6).
     pub grants: u64,
     /// Usernames still naming the account.
@@ -1969,16 +1972,13 @@ impl Registry {
         &self,
         account: &AccountId,
         devices: &[DeviceId],
-        push_index: &[[u8; 32]],
     ) -> Result<Remnants, RegistryError> {
         let ds: Vec<Value> = devices.iter().map(|d| bytes(d.as_bytes())).collect();
-        let ps: Vec<Value> = push_index.iter().map(|p| bytes(p)).collect();
         let v = self
             .db
             .query(
                 "RETURN count(SELECT id FROM account:[$a]);
                  RETURN count(SELECT id FROM device WHERE account = $a OR meta::id(id)[0] IN $ds);
-                 RETURN count(SELECT id FROM push_token WHERE meta::id(id)[0] IN $ps);
                  RETURN count(SELECT id FROM upload_grant WHERE device IN $ds)
                    + count(SELECT id FROM pack WHERE device IN $ds);
                  RETURN count(SELECT id FROM username WHERE account = $a);
@@ -1995,7 +1995,6 @@ impl Registry {
                 vec![
                     var("a", bytes(account.as_bytes())),
                     var("ds", Value::Array(ds)),
-                    var("ps", Value::Array(ps)),
                 ],
             )
             .await?;
@@ -2008,64 +2007,13 @@ impl Registry {
         Ok(Remnants {
             account: n(0)?,
             devices: n(1)?,
-            push_tokens: n(2)?,
-            grants: n(3)?,
-            usernames: n(4)?,
-            links: n(5)?,
-            prekeys: n(6)?,
-            group_requests: n(7)?,
-            group_marks: n(8)?,
+            grants: n(2)?,
+            usernames: n(3)?,
+            links: n(4)?,
+            prekeys: n(5)?,
+            group_requests: n(6)?,
+            group_marks: n(7)?,
         })
-    }
-
-    // ----- push tokens -----
-
-    /// Stores (or replaces) a device's sealed push token under its keyed hash.
-    ///
-    /// # Errors
-    /// [`RegistryError`].
-    pub async fn put_push_token(
-        &self,
-        index: &[u8; 32],
-        sealed: &[u8],
-    ) -> Result<(), RegistryError> {
-        self.db
-            .query(
-                "UPSERT push_token:[$p] SET sealed = $s, at = time::now() RETURN NONE;",
-                vec![var("p", bytes(index)), var("s", bytes(sealed))],
-            )
-            .await?;
-        Ok(())
-    }
-
-    /// A device's sealed push token.
-    ///
-    /// # Errors
-    /// [`RegistryError`].
-    pub async fn push_token(&self, index: &[u8; 32]) -> Result<Option<Bytes>, RegistryError> {
-        let v = self
-            .db
-            .query1(
-                "SELECT VALUE sealed FROM ONLY push_token:[$p];",
-                vec![var("p", bytes(index))],
-            )
-            .await?;
-        Ok(v.as_bytes().cloned())
-    }
-
-    /// Deletes push tokens (unregistered, or their device deleted).
-    ///
-    /// # Errors
-    /// [`RegistryError`].
-    pub async fn delete_push_tokens(&self, index: &[[u8; 32]]) -> Result<(), RegistryError> {
-        let ps: Vec<Value> = index.iter().map(|p| bytes(p)).collect();
-        self.db
-            .query(
-                "FOR $p IN $ps { DELETE push_token:[$p] RETURN NONE; };",
-                vec![var("ps", Value::Array(ps))],
-            )
-            .await?;
-        Ok(())
     }
 
     // ----- uploads and attachments -----

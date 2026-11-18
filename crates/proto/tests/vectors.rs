@@ -97,9 +97,14 @@ fn send_frames_with_hints() {
         commitment: Some([0x55; 32]),
         expire_after_s: Some(3600),
         group: None,
+        silent: false,
     };
     let mut contact = SendFrame::per_device(10, [0x11; 16], one(b"z"));
     contact.hints.access = Some([0x66; 16]);
+    // Prompt 8 (D-0095): a receipt to a contact, sent silent: stored, delivered, wakes nobody.
+    let mut receipt = SendFrame::per_device(11, [0x11; 16], one(b"r"));
+    receipt.hints.access = Some([0x66; 16]);
+    receipt.hints.silent = true;
     let cases = [
         (
             request,
@@ -112,6 +117,12 @@ fn send_frames_with_hints() {
             "01 0000000a 11111111111111111111111111111111 04 \
              66666666666666666666666666666666 \
              0001 22222222222222222222222222222222 00000001 7a",
+        ),
+        (
+            receipt,
+            "01 0000000b 11111111111111111111111111111111 84 \
+             66666666666666666666666666666666 \
+             0001 22222222222222222222222222222222 00000001 72",
         ),
     ];
     for (frame, hex) in cases {

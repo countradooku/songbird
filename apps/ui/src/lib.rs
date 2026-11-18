@@ -17,6 +17,30 @@ use nsh_core::prelude::*;
 
 use crate::store::Store;
 
+/// A developer or preview build: debug, or built with `SONGBIRD_PREVIEW_BUILD=1` exactly (for
+/// screenshots and notification checks on emulators and devices). Preview builds skip the first
+/// run on request, show the Calls tab's test rows and honour `SONGBIRD_DEMO_ARRIVALS`; a release
+/// build does none of it, whatever else the variable holds (D-0100).
+pub const PREVIEW_BUILD: bool = cfg!(debug_assertions) || is_one(option_env!("SONGBIRD_PREVIEW_BUILD"));
+
+const fn is_one(v: Option<&str>) -> bool {
+    match v {
+        Some(s) => s.len() == 1 && s.as_bytes()[0] == b'1',
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    #[test]
+    fn only_exactly_one_marks_a_preview_build() {
+        assert!(super::is_one(Some("1")));
+        for v in [None, Some(""), Some("0"), Some("true"), Some("11"), Some(" 1")] {
+            assert!(!super::is_one(v), "{v:?}");
+        }
+    }
+}
+
 /// The app's UI set (`nsh.json` `"rust"`).
 #[native_module("songbird/native")]
 fn native(registry: &mut Registry) {
@@ -32,6 +56,8 @@ pub fn App() -> impl IntoElement {
     backend::restore();
     theming::follow_settings(s);
     features::desktop::install_shortcuts();
+    features::notify::install(features::desktop::current_chat);
+    features::notify::demo_from_env();
     let onboarded = move || s.session.with(|x| x.onboarded);
     view()
         .flex_1()

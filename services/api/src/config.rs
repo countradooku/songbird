@@ -51,6 +51,15 @@ impl Validate for ApiConfig {
                 "is required in staging and production",
             );
             v.check(
+                api.push_tokens.as_ref().is_some_and(|p| {
+                    p.tls_ca.is_some()
+                        && p.user != api.surrealdb.user
+                        && p.database != api.surrealdb.database
+                }),
+                "api.push_tokens",
+                "is required in staging and production, with TLS, its own user and its own database",
+            );
+            v.check(
                 api.valkey_hot.tls() && api.jobs.valkey.tls(),
                 "api.valkey_hot.tls_ca",
                 "and api.jobs.valkey.tls_ca are required in staging and production",
@@ -104,6 +113,10 @@ pub struct ApiSettings {
     pub tls: Option<TlsSettings>,
     /// The account registry.
     pub surrealdb: songbird_accounts::SurrealSettings,
+    /// Push registrations: a database of their own with a credential for it alone (D-0095).
+    /// Absent in development: a database beside the registry's, with its credential.
+    #[serde(default)]
+    pub push_tokens: Option<songbird_accounts::SurrealSettings>,
     /// `valkey-hot`: single-use nonces.
     pub valkey_hot: songbird_valkey::ValkeySettings,
     /// The job queue.

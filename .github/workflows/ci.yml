@@ -179,3 +179,9 @@ jobs:
           python3 -m venv /tmp/ansible && . /tmp/ansible/bin/activate
           pip install --require-hashes -r deploy/ansible/requirements.txt
           deploy/bin/validate-iac ansible
+      # Alert rules (Prompt 8, D-0097): promtool from the image the bastion runs, by digest.
+      - name: alert rules (promtool check and unit tests)
+        run: |
+          img=prom/prometheus@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996
+          docker run --rm -v "$PWD/deploy/monitoring:/m:ro" --entrypoint promtool "$img" check rules /m/rules/songbird.yml
+          docker run --rm -v "$PWD/deploy/monitoring:/m:ro" --entrypoint promtool "$img" test rules /m/tests/songbird.test.yml

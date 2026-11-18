@@ -1,0 +1,56 @@
+# Managed by Ansible: songbird-push on {{ inventory_hostname }} ({{ songbird_env }}).
+# The only configuration that names push provider credentials (D-0036, D-0097): they are files
+# under /run/songbird/secrets, mounted into this container alone (roles/songbird/tasks/push.yml).
+{% set data = hostvars[groups['data'][0]] %}
+[common]
+environment = "{{ songbird_env_kind }}"
+admin_listen = "{{ private_ip }}:{{ songbird_admin_ports['push'] }}"
+shutdown_grace_secs = 30
+
+[common.log]
+format = "json"
+filter = "info"
+
+[push]
+push_key = { file = "/run/songbird/secrets/push_key" }
+push_index_secret = { file = "/run/songbird/secrets/push_index_secret" }
+
+[push.push_tokens]
+addr = "{{ data.private_ip }}:8000"
+host = "{{ data.fqdn }}"
+tls_ca = "/etc/songbird/tls/ca.crt"
+user = "push_service"
+pass = { file = "/run/songbird/secrets/push_db_password" }
+namespace = "songbird"
+database = "push"
+
+[push.jobs]
+secret = { file = "/run/songbird/secrets/jobs_secret" }
+
+[push.jobs.valkey]
+addr = "{{ data.private_ip }}:6380"
+tls_domain = "{{ data.fqdn }}"
+tls_ca = "/etc/songbird/tls/ca.crt"
+tls_cert = "/etc/songbird/tls/tls.crt"
+tls_key = { file = "/etc/songbird/tls/tls.key" }
+pass = { file = "/run/songbird/secrets/valkey_jobs_password" }
+{% if push_providers.apns %}
+
+[push.apns]
+team_id = "{{ secrets.push_apns_team_id }}"
+key_id = "{{ secrets.push_apns_key_id }}"
+bundle_id = "{{ push_bundle_id }}"
+key = { file = "/run/songbird/secrets/apns_key.p8" }
+sandbox = {{ (songbird_env_kind != 'production') | lower }}
+{% endif %}
+{% if push_providers.fcm %}
+
+[push.fcm]
+service_account = { file = "/run/songbird/secrets/fcm_service_account.json" }
+{% endif %}
+{% if push_providers.webpush %}
+
+[push.webpush]
+vapid_subject = "{{ push_vapid_subject }}"
+vapid_key = { file = "/run/songbird/secrets/vapid_key.pem" }
+{% endif %}

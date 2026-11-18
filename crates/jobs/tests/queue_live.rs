@@ -59,7 +59,6 @@ async fn queue(url: &str, consumer: &str, tweak: impl FnOnce(&mut QueueConfig)) 
 fn push(b: u8) -> Job {
     Job::new(Work::Push {
         device: DeviceId::from_bytes([b; 16]),
-        call: false,
     })
     .unwrap()
 }

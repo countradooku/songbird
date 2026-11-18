@@ -187,3 +187,46 @@ async fn serve(
 fn main() -> std::process::ExitCode {
     songbird_service::main::<CallsService>()
 }
+
+#[cfg(test)]
+mod credential_scope_tests {
+    use super::*;
+
+    /// Push credentials can be configured in the push service only (D-0097): this service's
+    /// configuration refuses them, at the top level and in its own section.
+    #[test]
+    fn push_credentials_are_refused() {
+        for (name, value) in [
+            (
+                "apns",
+                r#"{ key = { file = "/run/songbird/secrets/apns_key.p8" } }"#,
+            ),
+            (
+                "fcm",
+                r#"{ service_account = { file = "/run/songbird/secrets/fcm.json" } }"#,
+            ),
+            (
+                "webpush",
+                r#"{ vapid_key = { file = "/run/songbird/secrets/vapid_key.pem" } }"#,
+            ),
+            ("push_key", r#"{ file = "/run/songbird/secrets/push_key" }"#),
+        ] {
+            for text in [
+                format!(
+                    "{name} = {value}\n[common]\nenvironment = \"dev\"\nadmin_listen = \"127.0.0.1:9100\"\n"
+                ),
+                format!(
+                    "[common]\nenvironment = \"dev\"\nadmin_listen = \"127.0.0.1:9100\"\n[calls]\n{name} = {value}\n"
+                ),
+            ] {
+                let e = songbird_types::config::load_from_parts::<CallsConfig, _>(
+                    &text,
+                    Vec::<(String, String)>::new(),
+                    "SONGBIRD",
+                )
+                .expect_err(name);
+                assert!(e.to_string().contains(name), "{name}: {e}");
+            }
+        }
+    }
+}

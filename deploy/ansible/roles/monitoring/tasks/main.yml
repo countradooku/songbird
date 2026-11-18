@@ -1,0 +1,120 @@
+---
+# Prometheus and Alertmanager on the bastion (Prompt 8, D-0097). Both listen on loopback only:
+# operators reach them through the SSH tunnel they already use (`ssh -L 9090:127.0.0.1:9090`).
+# Prometheus scrapes every Songbird service's admin port over the private network (opened to
+# private_cidr in nftables); the rules are deploy/monitoring/rules, tested in CI with promtool.
+- name: Monitoring directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.uid }}"
+    group: "{{ item.uid }}"
+    mode: "0750"
+  loop:
+    - { path: /etc/songbird/monitoring, uid: 65534 }
+    - { path: /etc/songbird/monitoring/rules, uid: 65534 }
+    - { path: /var/lib/songbird/prometheus, uid: 65534 }
+    - { path: /var/lib/songbird/alertmanager, uid: 65534 }
+
+- name: Alert rules (the files CI tests)
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../monitoring/rules/"
+    dest: /etc/songbird/monitoring/rules/
+    owner: "65534"
+    group: "65534"
+    mode: "0440"
+  notify: Reload Prometheus
+
+- name: Prometheus configuration
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: /etc/songbird/monitoring/prometheus.yml
+    owner: "65534"
+    group: "65534"
+    mode: "0440"
+  notify: Reload Prometheus
+
+# The same configuration with the rule paths as the check container sees them.
+- name: Prometheus configuration for the check
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: /etc/songbird/monitoring/prometheus-check.yml
+    owner: "65534"
+    group: "65534"
+    mode: "0440"
+  vars:
+    prometheus_rules_dir: /m/rules
+
+- name: Alertmanager configuration (the receiver is the owner's choice; none set means alerts show in its UI only)
+  ansible.builtin.template:
+    src: alertmanager.yml.j2
+    dest: /etc/songbird/monitoring/alertmanager.yml
+    owner: "65534"
+    group: "65534"
+    mode: "0440"
+  no_log: true
+  notify: Reload Alertmanager
+
+# A configuration that does not load fails the run here (invariant 8), before any reload.
+- name: Prometheus configuration and rules are valid
+  ansible.builtin.command:
+    argv: [docker, run, --rm, --network, none,
+           -v, /etc/songbird/monitoring:/m:ro, --entrypoint, promtool, "{{ images.prometheus }}",
+           check, config, /m/prometheus-check.yml]
+  changed_when: false
+
+- name: Alertmanager configuration is valid
+  ansible.builtin.command:
+    argv: [docker, run, --rm, --network, none,
+           -v, /etc/songbird/monitoring:/m:ro, --entrypoint, amtool, "{{ images.alertmanager }}",
+           check-config, /m/alertmanager.yml]
+  changed_when: false
+  no_log: true
+
+- name: Alertmanager
+  community.docker.docker_container:
+    name: songbird-alertmanager
+    image: "{{ images.alertmanager }}"
+    network_mode: host
+    restart_policy: unless-stopped
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opts: [no-new-privileges]
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --web.listen-address=127.0.0.1:9093
+      - --cluster.listen-address=
+    volumes:
+      - /etc/songbird/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - /var/lib/songbird/alertmanager:/alertmanager
+
+- name: Prometheus
+  community.docker.docker_container:
+    name: songbird-prometheus
+    image: "{{ images.prometheus }}"
+    network_mode: host
+    restart_policy: unless-stopped
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opts: [no-new-privileges]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.listen-address=127.0.0.1:9090
+    volumes:
+      - /etc/songbird/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - /etc/songbird/monitoring/rules:/etc/prometheus/rules:ro
+      - /var/lib/songbird/prometheus:/prometheus
+
+- name: Prometheus loads the rules and finds every target
+  ansible.builtin.uri:
+    url: http://127.0.0.1:9090/api/v1/rules
+    return_content: true
+  register: rules
+  until: rules.status == 200 and (rules.json.data.groups | length) > 0
+  retries: 30
+  delay: 2

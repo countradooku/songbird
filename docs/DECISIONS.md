@@ -20,6 +20,22 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 8, M4 and M5 rest (D-0099): **deferred by the owner on 2026-11-18 until the whole app
+  is built** ("lets do this after we have the whole app built"): the Xcode and Gradle host
+  projects (APNs token, PushKit with CallKit, FCM, UnifiedPush, ConnectionService), the Apple
+  bundle IDs and filtering entitlement, the Firebase Android app, and the real-provider checks
+  (APNs sandbox wake-up, VoIP on a physical iPhone, FCM on the emulator).
+- Prompt 8 gate (`P08-gate.md`, D-0095 to D-0100; PR #65): **approved by the owner on 2026-11-18**
+  ("Approve all"): M1, M2, M3, M6 and the first part of M4 and M5 with the security review's
+  fixes; the four threat-model §1 rows (`SILENT`; push registrations in their own database; call
+  rings on their own job stream; a ring's timing seen by Apple). Still the owner's: where alerts
+  go (email, ntfy or Matrix). The rest of M4 and M5 is deferred until the whole app is built.
+- Prompt 8 plan (`P08-plan.md`, D-0094): **approved by the owner on 2026-11-18** ("Approve
+  all"), every recommendation, desktop without a push service included. Still the owner's: where
+  alerts go (email, ntfy or Matrix; M3 builds with the receiver left to configure); before M4,
+  the bundle IDs `chat.songbird.app` and `chat.songbird.app.notify`, the App Group and the
+  filtering entitlement request (and whether to enrol an organisation first); before M5, the
+  Android app in Firebase `songbird-6fab1`.
 - App UI and A1 design (D-0092, `apps/ui`, `docs/design/`): the four-tab IA without Status, the brand
   (feather mark, Dusk violet palette, system fonts), and the mock-first plan; usability tests still to run.
 - Prompt 7 gate (`P07-gate.md`, D-0086 to D-0091; PR #62): **approved by the owner on 2026-11-17**
@@ -144,6 +160,298 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0100 — Prompt 8: the security review's fixes
+
+- Date: 2026-11-18
+- Status: accepted; part of the Prompt 8 gate (`P08-gate.md`, "Security review")
+- Decided by: agent, on an independent read-only review of the whole Prompt 8 diff (a separate
+  agent given the code, configuration and documents, not the reports' conclusions).
+- Context: no high findings; two medium, five low, three informational.
+- Decision:
+  1. **The post-rollout check printed other containers' secrets** (medium): it ran `docker
+     inspect` whole, so LiveKit's keys and Valkey passwords on the calls hosts could reach
+     Ansible's output. Now a `--format` template returns each container's name, mount sources
+     and environment variable *names* only (cut at `=`), the task is `no_log`, and the name check
+     accepts Docker's and podman's forms. Checked against a local container: names only.
+  2. **The token move could revive a deleted device's token** (medium): during a rolling deploy a
+     row still in the registry escaped deletion, and the next `api` start moved it back.
+     - The worker now deletes and verifies push rows in both the push database and the registry
+       (`PushStore::delete_legacy`, `count_legacy`) until every environment has moved.
+     - The registry keeps the old table defined, empty once moved, so that works.
+     - The move is one idempotent `UPSERT … SET sealed = sealed ?? $s`, so two `api` instances
+       moving at once neither fail nor overwrite a newer registration.
+     - Test: `push_registrations_live_apart_and_old_rows_move_once` (concurrent moves; a legacy
+       row deleted with its device is never moved back).
+  3. **Parent-folder mounts escaped the check** (low): a mount of `/`, `/etc`, `/etc/songbird`
+     or `/etc/songbird/secrets` now fails it too.
+  4. **The push uid was shared** (low): every Songbird container ran as 65532, so a process
+     escaping another service's container could read the provider keys. Push now runs as its own
+     uid (`push_uid`, 65533), which owns its secrets and TLS files. The xtask scope check stays
+     lexical and advisory; the post-rollout check enforces.
+  5. **Any value of `SONGBIRD_PREVIEW_BUILD` made a preview build** (low): now exactly `1`, in one
+     constant (`PREVIEW_BUILD`, tested).
+  6. **Monitoring could be stopped silently, and alerts carried private addresses** (low):
+     - the lifecycle API is off; reloads go by `SIGHUP` after `promtool check config` and
+       `amtool check-config`, and a bad configuration fails the run;
+     - SMTP and webhook values are JSON-escaped;
+     - alerts leave without the `instance` label (private IP:port), and summaries name the
+       inventory `host`. Rule tests updated and passing.
+  7. **Ring deadlines and clock skew** (low/info): the deadline is set on `api` and checked on
+     `push`. Every host runs `chrony` (common role). The residual risk: a push host more than
+     30 s ahead drops rings, one behind sends them late by the skew. Recorded, not changed.
+  8. **The ring stream's timing in `valkey-jobs`** (info): now a threat-model §1 row.
+  9. **What `SILENT` reveals** (info): the §1 row now says the server learns "a receipt or sync",
+     as with Signal's `urgent=false`.
+  10. **Registry credentials of `api` and `worker`** (info): the separation of the push database
+     holds against the backup user and the push service. `api` and `worker` must also use
+     registry users other than SurrealDB's root before production. Listed in the gate.
+
+## D-0099 — Prompt 8, milestones 4 and 5 (first part): the iOS notification extension and on-device checks; what waits for the owner
+
+- Date: 2026-11-18
+- Status: in progress; reports `docs/reports/P08-M4.md`, `docs/reports/P08-M5.md`
+- Decided by: agent, with the owner's go-ahead to download the iOS tooling and use the local
+  Android SDK (2026-11-18)
+- Built:
+  - `apps/ios/NotifyRules` (Swift package, 6 tests): what the Notification Service Extension
+    shows, from the user's preferences in the App Group, the same rules as
+    `apps/ui/src/features/notify.rs`.
+  - `apps/ios/NotificationService`: the extension (`chat.songbird.app.notify`), and
+    `apps/ios/build-simulator.sh`, which builds the app with `nsh package --target
+    ios-simulator`, compiles the extension for the simulator, puts it in the app and signs both
+    ad hoc (no Apple account needed).
+  - Preview builds (debug, or `SONGBIRD_PREVIEW_BUILD`) show the Calls tab's test rows and honour
+    `SONGBIRD_DEMO_ARRIVALS`, to exercise notifications on devices; release builds never do.
+- Checked on devices:
+  - **iOS Simulator** (iPhone 18 Pro Max, iOS 27.2): `simctl push` of the exact payload our APNs
+    client sends is delivered as a banner (authorization granted); the extension is installed
+    and registered, but the simulator does not start service extensions for `simctl push`, so
+    the extension runs only with a real APNs delivery (needs the registered bundle ID).
+  - **Android emulator** (Pixel, Android 36, Google APIs): the app's notifier posts "Ana Popescu ·
+    Incoming voice call" (tag `chat:1`, importance high) for a test call, read back with
+    `dumpsys notification` and seen in the shade.
+  - **macOS**: the notifier fires for a message and a call while the window is closed to the
+    tray, and NSH hands both to the system, which refuses them: "Notifications are not allowed
+    for this application" (an ad hoc signed build that was never granted permission). Allowing
+    Songbird in System Settings › Notifications, or a signed build, shows them.
+- Not built yet, and why:
+  - The Xcode and Gradle **host projects** that register for remote pushes (APNs token, PushKit
+    with CallKit, FCM, UnifiedPush, ConnectionService) and send the token to `PUT /v1/push`: a
+    packaged NSH app cannot hold them (D-0094 finding 7). Real APNs needs the bundle IDs and a
+    provisioning profile, FCM the Android app in Firebase `songbird-6fab1`
+    (`google-services.json`): the owner's steps (D-0094 §2, §5).
+  - VoIP and CallKit: PushKit does not deliver to the Simulator; needs a physical iPhone.
+
+## D-0098 — Prompt 8, milestone 6: desktop notifications decided on the device; close to the tray; the real login item
+
+- Date: 2026-11-18
+- Status: accepted (agent, under D-0094's approved plan, finding 10); report `docs/reports/P08-M6.md`
+- Decided by: agent
+- Context: desktops use no push service (D-0094): the app keeps its connection while it runs.
+  The app had the tray icon and the settings switches, but nothing raised a notification, closing
+  the window ended the app, and "Open at login" was a mock (NSH 0.5 had no API; 0.6 has one).
+- Decision (`apps/ui`):
+  - **One rule set, pure** (`features::notify::decide`): a message notifies unless its kind is
+    switched off (direct, groups), the chat is muted, or the user is reading that chat with the
+    window focused; reactions follow their own switches; a call rings even in a muted chat and
+    even in the open chat; hidden content shows "Songbird" and "New message" / "Incoming call"
+    only; no sound when sounds are off. The mobile notification extensions use the same rules
+    (M4, M5).
+  - **Decided at arrival.** The store tells the notifier at once (`Store::arrive`,
+    `on_arrival`), not through an effect: an effect runs later, with the chat and settings as
+    they are then (a headless test caught a muted chat notifying because it was unmuted before
+    the effect ran), and sees only the last of two messages in one batch.
+  - The notifier asks for permission once, keeps the badge at the unread count, and opens the
+    chat (and the window) a pressed notification is about.
+  - **Close to the tray:** while the tray icon shows, closing the main window hides it
+    (`close_on_press: false`, `on_close_press` → `hide`), and the app stays connected; quit from
+    the tray menu or the app menu. Without the icon, closing works as the system's does. The tray
+    choice is remembered.
+  - **Open at login** through NSH 0.6 (`set_launch_at_login`, `launch_at_login`), read again
+    whenever the switch shows; a refusal puts the switch back with a toast.
+  - Dev-dependencies `nsh-engine` and `nsh-testing` 0.6.0 (the same release as `nsh-core`, NSH's
+    own test harness) for tests on the real engine, headless.
+- Evidence: 121 app tests pass; six rule tests (`a_message_notifies_with_its_chat_and_text`,
+  `muted_chats_stay_quiet_but_calls_still_ring`, `each_switch_turns_its_kind_off`,
+  `the_chat_being_read_is_not_notified_but_a_background_one_is`,
+  `hidden_content_shows_no_name_and_no_text`, `sounds_follow_the_setting`) and one on the engine
+  (`the_store_s_events_reach_the_notifier`: a message from someone else notifies; the user's own,
+  one in a muted chat and one in the chat being read do not; two in one batch both notify; a ring
+  does).
+- Not verified: a notification on screen from the running app on macOS, Windows and Linux (the
+  headless engine does not capture system notifications); the plan's screenshots are still to
+  take.
+
+## D-0097 — Prompt 8, milestone 3: push credentials provably in `push` alone; alert rules and monitoring
+
+- Date: 2026-11-18
+- Status: accepted (agent, under D-0094's approved plan); report `docs/reports/P08-M3.md`
+- Decided by: agent, on the owner-approved plan (D-0094 §6, finding 9; question 4)
+- Context: the deployed configuration carried `[common]` only, for every service; push
+  credentials had no way onto a host and nothing proved where they were. Every service exports
+  metrics, but nothing scraped them or alerted: the "alert on dead letters" of the runbooks had no
+  metric behind it either (`QueueStats` was never exported).
+- Decision:
+  - **Deployment.** `roles/songbird/tasks/push.yml` writes the push service's secrets from SOPS
+    (`push_x25519_key`, the push-index and job secrets, its push-database password, and the APNs
+    `.p8`, FCM service account and VAPID key for the providers switched on in
+    `push_providers`) as files of mode 0400, uid 65532, under `/etc/songbird/secrets/push`, mounted
+    read-only into `songbird-push` alone; `push.toml.j2` is the only configuration that names
+    them. `deploy/bin/secrets-init` generates the keys and leaves the provider keys `CHANGE_ME`
+    (production keys are created straight into SOPS). The data role defines the `push` database
+    and its three users (D-0095).
+  - **Proof, three ways:** (1) `api`, `delivery`, `worker` and `calls` refuse a provider section
+    or a push key in their configuration (tests in each); (2) `cargo xtask secret-scope` (in
+    `ci fast`) fails if any file in `deploy/` or `config/` other than the push task and
+    `secrets-init` names a push credential, or mounts the secrets directory outside the push
+    container's own line (the data host may name the push database user's password, which it must
+    define); (3) after every rollout, `verify-push-credentials.yml` inspects every container on the
+    host: only `songbird-push` mounts the directory, no environment names a push credential, the
+    files are 0400 and the push uid's.
+  - **Alerts.** `deploy/monitoring/rules/songbird.yml`: `JobsDeadLettered`, `PushProviderDown`
+    (retries and no sends for 10 minutes), `PushPermanentFailures`, `PushRingsTooLate`,
+    `PushRegistrationsUnopenable`, `WakeUpsDropped`, `RegistryBusy`, `ServiceDown`; each names its
+    runbook; unit-tested with `promtool test rules` in the CI `iac` job (image pinned by digest).
+    New process-wide counters `songbird_jobs_dead_lettered_total` and `songbird_jobs_retried_total`
+    (the D-0093 pattern), exported by `push` and `worker`.
+  - **Monitoring.** A `monitoring` role on the bastion: Prometheus v3.5.0 and Alertmanager v0.28.1
+    (pinned by digest), loopback only (reached over the operators' SSH tunnel), 30 days of
+    retention, scraping every service's admin port over the private network (already open to
+    `private_cidr`). The receiver is the owner's choice (email through an SMTP relay, or a webhook
+    for ntfy or Matrix); until set, alerts show in Alertmanager's UI only.
+- Evidence: `secret_scope` tests (the repository passes; a credential named elsewhere and the
+  directory mounted into another container both fail); four configuration tests;
+  `promtool test rules` SUCCESS (8 rules, 4 test groups); `deploy/bin/validate-iac ansible`
+  (syntax and lint) passes in a Python 3.12 container with the pinned requirements.
+- Consequences: the other services' deployed configuration is still `[common]` only (a gap
+  older than Prompt 8, recorded for Prompt 13); the alert receiver waits for the owner.
+
+## D-0096 — Prompt 8, milestone 2: outages and numbers; one reader connection per job stream
+
+- Date: 2026-11-18
+- Status: accepted (agent, under D-0094); report `docs/reports/P08-M2.md`
+- Decided by: agent
+- Context: the prompt asks for pushes per second, p99 from job to provider, and an outage
+  simulation proving messages stay safe and pushes resume.
+- Finding, and fix: the first measurement gave **~850 pushes/s**. Each part alone was fast (queue
+  read and finish ~38,000 jobs/s, direct APNs sends ~38,000/s), the consume loop with no provider
+  ~800/s. Cause: `Queue` had **one reader connection** for every stream; Valkey runs a
+  connection's commands in order, so the ring consumer's `XREADGROUP BLOCK 250` on an empty
+  `j:ring` held every `j:push` read for up to 250 ms (256 jobs a round ≈ 1,000/s). The worker had
+  the same flaw since D-0036 (its cleanup reads behind its deletion reads). Now one reader
+  connection per stream, opened at its first read: the consume loop went from ~800 to ~34,000
+  jobs/s with no provider.
+- Evidence (Apple M5 Pro, 18 cores, 48 GiB, macOS 27.2.1; compose SurrealDB v4.0.1, valkey-jobs;
+  release build; mock APNs over TLS and HTTP/2 on loopback, 4 connections; consumer batch 256,
+  concurrency 256; `services/push/tests/outage_live.rs` `m2_numbers`):
+  - a burst of 20,000 wake-ups: **9,800 to 28,600 pushes/s** over 5 runs; the spread follows the
+    local SurrealDB's load (one token lookup per job; the server held many test databases);
+    enqueue→provider p99 0.51 to 1.5 s, which is the burst queueing behind itself;
+  - steady 1,000 wake-ups/s, one job at a time: **enqueue→provider p50 1.3 to 1.9 ms, p99 6.5 to
+    11 ms**, max 26 to 37 ms (2 runs).
+  - Outages (all pass): FCM 503 for 3 s (67 requests refused thanks to the breaker; all 200
+    devices woken 2.0 s after recovery); APNs black-holed (accepts, never answers; 300 ms
+    timeout; breaker open; all woken after recovery); `retry-after: 1` honoured (retry ≥ 0.95 s
+    later); `push` crashed mid-burst (its runtime dropped with jobs in hand): every one of 300
+    devices woken after reclaim, 64 twice, nothing dead-lettered. End to end
+    (`gate_m5::an_offline_device_receives_a_push_end_to_end`): APNs down while Bob writes to
+    Alice's offline phone, the three messages wait in her mailbox, the wake-up goes out once APNs
+    is back, she reads them in order.
+- Consequences: production numbers wait for the production host class (with the D-0043 soak at
+  the end of the project); the mock records requests with their arrival time
+  (`RecordedRequest::at`) and counts them cheaply (`request_count`).
+
+## D-0095 — Prompt 8, milestone 1: rings on their own stream, trailing wake-ups, `SILENT` sends, push tokens in their own database
+
+- Date: 2026-11-18
+- Status: accepted (agent, under D-0094); its threat-model §1 rows **approved by the owner on
+  2026-11-18** with the Prompt 8 gate; report `docs/reports/P08-M1.md`
+- Decided by: agent, on the owner-approved plan (D-0094 questions 1 and 3, findings 1 and 2)
+- Decision:
+  - **Rings.** `Work::Ring { device, until_ms }` on `j:ring` (sealed like every job; the push kind's
+    old call flag retired and refused), a consumer of its own in `push` (`ring_concurrency`), never
+    debounced. `api` gives a ring 30 s (`RING_LIFE_MS`; the offer expires after 60 s); `push` drops
+    a ring past its deadline, retries one only while it can still ring in time, and never
+    dead-letters one (`push_rings_expired`). On FCM and Web Push a ring is the same message as any
+    wake-up; on APNs it is the `VoIP` push it was (expiry 0, empty payload).
+  - **Coalescing, leading and trailing.** `crates/send` (`Coalescer`, pure) and `push`
+    (`Debounce` → `Admit::{Now, Defer, Drop}`): the first wake-up in a window goes at once; any
+    later one schedules a single wake-up at the window's end (`push` returns the job to the queue
+    for the rest of the window). A burst is at most two identical pushes and the last message
+    always has a wake-up after it.
+  - **`SILENT` (`0x80`) on `Send`** (WebSocket and `PUT /v1/messages`, one encoding): stored and
+    delivered as usual, no wake-up (`routes_silent`). With it, every bit of the flags byte is
+    assigned: a future flag needs a new block. Test vector in `crates/proto/tests/vectors.rs`,
+    PROTOCOL §1.
+  - **Push tokens in their own database** (`songbird_accounts::PushStore`): table `push_token` as
+    before, moved out of the registry; `api` (register, remove, GDPR export), `worker` (delete
+    with devices and accounts, verify) and `push` (read, delete) each connect with
+    `[<service>.push_tokens]`, required in staging and production with TLS, its own user and its
+    own database; development uses `PushStore::beside` (`<registry>_push`). `push` no longer
+    connects to the registry. `api` moves rows a registry still holds once at start
+    (`move_from_registry`: never over a newer registration). `Remnants` lost `push_tokens`; the
+    worker checks the store itself.
+  - **Mocks:** `Behaviour::Hang` (accepts, never answers), `Behaviour::Reset` (stream reset), and
+    `outage`/`recover` (a behaviour for every unscripted request).
+- Evidence: unit and property tests (`a_burst_is_one_leading_and_one_trailing_wake_up`,
+  `no_request_is_left_without_a_later_push`, `every_wake_up_has_a_job_at_or_after_it`,
+  `the_retired_call_flag_no_longer_opens`, the `SILENT` vector and flag rules); live:
+  `offline_devices_get_one_constant_wake_up` (leading and trailing pushes byte-identical; rings
+  to the VoIP token with expiry 0; rings on FCM and Web Push equal to wake-ups; a late ring
+  dropped; **a ring reaches APNs in 52 ms behind 10,000 queued wake-ups**, 9,984 still queued),
+  `a_silent_send_is_stored_and_delivered_but_wakes_nobody`,
+  `push_registrations_live_apart_and_old_rows_move_once`, the provider tests for hanging and reset
+  requests and a black-holed APNs opening and closing its breaker.
+- Consequences: a client must set `SILENT` on receipts and sync messages (app-core, A2); three
+  threat-model §1 rows for the owner.
+
+## D-0094 — Prompt 8: the plan, and the owner's decisions it needs
+
+- Date: 2026-11-18
+- Status: accepted (owner, 2026-11-18, "Approve all": every recommendation)
+- Decided by: owner, on the agent's plan `docs/reports/P08-plan.md`
+- Context: Prompt 2, milestone 5 (D-0036) already built `services/push` and
+  `crates/push-providers`: sealed jobs, sealed and keyed-hashed tokens, APNs (alert and VoIP), FCM
+  HTTP v1, Web Push with RFC 8291 and VAPID, collapse IDs, a breaker per provider, pooled HTTP/2,
+  dead letters. Prompt 8 closes the gaps the plan lists:
+  - calls queue behind message wake-ups on one stream;
+  - the leading-edge debounce can leave a stored message without a wake-up;
+  - every stored envelope wakes the device, receipts included;
+  - mute on iOS needs Apple's filtering entitlement;
+  - tokens sit in the registry's database;
+  - nothing alerts on dead letters;
+  - nothing deploys or proves where the push credentials are;
+  - no numbers or outage simulation exist;
+  - the NSH app cannot receive remote pushes as packaged (NSH 0.6 has local notifications only);
+  - desktop has no notifications while the window is closed.
+- Options considered and evidence: in the plan ("What Prompt 8 starts from", "Findings").
+- Decisions asked of the owner (recommendations first):
+  1. an `urgent` flag on sends, so receipts and sync wake nobody (one bit per send, never stored);
+  2. register the bundle IDs `chat.songbird.app`, `chat.songbird.app.notify` and the App Group,
+     then request `com.apple.developer.usernotifications.filtering` (the account is an Individual
+     enrolment: the owner's name goes on the app);
+  3. a SurrealDB database of its own for push tokens, a credential per service, left out of
+     backups;
+  4. Prometheus and Alertmanager on the bastion with CI-tested rules, and where alerts go;
+  5. the app embedded in Songbird's own Xcode and Gradle hosts (`apps/ios`, `apps/android`) for the
+     notification extension, PushKit with CallKit, FCM, UnifiedPush and ConnectionService; the
+     Android app registered in Firebase `songbird-6fab1`.
+- Agent decisions, unless the owner objects:
+  - `j:push-call` with a 30 s life;
+  - leading and trailing coalescing;
+  - call pushes identical to message pushes on FCM and Web Push;
+  - the debounce stays per process;
+  - two new mock behaviours;
+  - three checks that prove the credentials are only in `push`;
+  - desktop uses no push service (no APNs on macOS, no WNS on Windows): the app stays connected
+    in the tray and notifies locally, through NSH 0.6's tray, hidden window, login item and
+    notifications; Linux UnifiedPush is future work;
+  - real-provider tests read key paths from the environment and skip without them;
+  - one branch and one PR for every milestone.
+- Consequences: M1 starts. M4 and M5 also wait for the owner's Apple and Firebase steps; M3
+  leaves the alert receiver to configure until the owner chooses it. Production provider keys are created at deployment, straight
+  into SOPS.
 
 ## D-0093 — Registry write conflicts: jittered retries within a time budget, then `Busy`
 

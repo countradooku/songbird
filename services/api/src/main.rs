@@ -369,6 +369,7 @@ async fn build(
 ) -> Result<(Arc<App>, Vec<tokio::task::JoinHandle<()>>), BoxError> {
     let db = songbird_accounts::Db::connect(s.surrealdb.config()?).await?;
     let registry = Arc::new(songbird_accounts::Registry::connect(db).await?);
+    let push_store = Arc::new(push_store(s, &registry).await?);
     let s3 = songbird_s3::Client::new(s3_config(&s.s3)?)?;
     s3.create_bucket().await?;
     let queue = songbird_jobs::Queue::connect(
@@ -443,6 +444,7 @@ async fn build(
         reports,
         requests,
         server_name: s.server_name.clone(),
+        push_store,
         registry,
         s3,
         queue,
@@ -566,4 +568,26 @@ impl Service for Api {
 
 fn main() -> std::process::ExitCode {
     songbird_service::main::<Api>()
+}
+
+/// The push registrations' own database (D-0095; development without one: beside the
+/// registry's), with the registrations written to the registry before D-0095 moved once.
+async fn push_store(
+    s: &ApiSettings,
+    registry: &songbird_accounts::Registry,
+) -> Result<songbird_accounts::PushStore, BoxError> {
+    let store = match &s.push_tokens {
+        Some(p) => {
+            songbird_accounts::PushStore::connect(
+                songbird_accounts::Db::connect(p.config()?).await?,
+            )
+            .await?
+        }
+        None => songbird_accounts::PushStore::beside(registry).await?,
+    };
+    let moved = store.move_from_registry(registry).await?;
+    if moved > 0 {
+        tracing::info!(moved, "push registrations moved to their own database");
+    }
+    Ok(store)
 }

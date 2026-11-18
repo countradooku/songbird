@@ -20,10 +20,12 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
-- Native camera module (`CAM-plan.md`, D-0110): **waiting for the owner**: the plan and its
-  seven questions (the Android host now, a primary with no camera, the first build's scope, a
-  physical iPhone, Linux packaging, `unsafe` in `songbird-camera`, link codes only from the
-  live camera).
+- Native camera module (`CAM-plan.md`, D-0110): **approved by the owner on 2026-11-18**
+  ("approve all on the camera plan", relayed by the Prompt 9 session), every recommendation:
+  the minimal Android host now (its push parts stay deferred), "connect a camera" for a
+  primary without one, video clips on Windows and Linux later, portal then V4L2 on Linux,
+  `unsafe` in `songbird-camera`'s platform modules only, link codes only from the live camera.
+  Still the owner's: a physical iPhone and the personal team for the iOS checks (question 4).
 - Prompt 8, M4 and M5 rest (D-0099): **deferred by the owner on 2026-11-18 until the whole app
   is built** ("lets do this after we have the whole app built"): the Xcode and Gradle host
   projects (APNs token, PushKit with CallKit, FCM, UnifiedPush, ConnectionService), the Apple
@@ -168,7 +170,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0110 — The native camera module: the plan, and the owner's decisions it needs
 
 - Date: 2026-11-18
-- Status: proposed (waiting for the owner). D-0101 to D-0109 are left to Prompt 9 (PR #67).
+- Status: accepted (owner, 2026-11-18, "approve all on the camera plan": every recommendation).
+  D-0101 to D-0109 are left to Prompt 9 (PR #67).
 - Decided by: owner, on the agent's plan `docs/reports/CAM-plan.md`
 - Context: the owner rejected linking a device by pasting a text code and asked for native
   camera code on each platform, since the camera also serves photos and videos in chat and

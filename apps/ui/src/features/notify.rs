@@ -157,6 +157,35 @@ fn watch(
     });
 }
 
+/// Preview builds only (debug, or `SONGBIRD_PREVIEW_BUILD` at compile time):
+/// `SONGBIRD_DEMO_ARRIVALS=<seconds>` hides the window as closing it to the
+/// tray would, then has the first direct contact write and, later, call: to
+/// see the notifications on screen without driving the UI (D-0098).
+pub fn demo_from_env() {
+    let preview = cfg!(debug_assertions) || option_env!("SONGBIRD_PREVIEW_BUILD").is_some();
+    let Some(secs) = std::env::var("SONGBIRD_DEMO_ARRIVALS").ok().and_then(|v| v.parse::<u64>().ok()) else {
+        return;
+    };
+    if !preview {
+        return;
+    }
+    let s = store();
+    let Some((chat, peer)) = s.chats.get_untracked().iter().find_map(|c| match c.kind {
+        ChatKind::Direct(p) if !c.muted => Some((c.id, p)),
+        _ => None,
+    }) else {
+        return;
+    };
+    let after = std::time::Duration::from_secs(secs);
+    set_timeout(after, || nsh_core::element::desktop::main_window().hide());
+    set_timeout(after + std::time::Duration::from_secs(2), move || {
+        s.push_message(chat, Some(peer), crate::store::Body::Text("Are we still on for tonight?".into()));
+    });
+    set_timeout(after + std::time::Duration::from_secs(8), move || {
+        crate::features::calls::simulate_incoming(chat, true);
+    });
+}
+
 fn notify(s: Store, chat: u64, event: &Event, focus: Focus, sink: &dyn Fn(Notice)) {
     let Some(c) = s.chat(chat) else { return };
     if let Some(n) = s.settings.with_untracked(|st| decide(event, &c, st, focus)) {

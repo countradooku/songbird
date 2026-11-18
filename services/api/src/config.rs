@@ -305,6 +305,13 @@ pub struct StorageSettings {
     /// Their burst.
     #[serde(default = "default_storage_write_burst")]
     pub write_burst: u32,
+    /// Records written (deleted plus inserted) per hour per account, besides the writes'
+    /// count: a write costs one unit per record it touches (D-0108).
+    #[serde(default = "default_storage_record_units")]
+    pub record_units_per_hour: u32,
+    /// Their burst: one key rotation of a full store (deletes and inserts).
+    #[serde(default = "default_storage_record_burst")]
+    pub record_units_burst: u32,
     /// Reads (head, IDs, records, objects) per hour per account.
     #[serde(default = "default_storage_reads")]
     pub reads_per_hour: u32,
@@ -327,6 +334,12 @@ const fn default_storage_writes() -> u32 {
 }
 const fn default_storage_write_burst() -> u32 {
     120
+}
+const fn default_storage_record_units() -> u32 {
+    60_000
+}
+const fn default_storage_record_burst() -> u32 {
+    40_000
 }
 const fn default_storage_reads() -> u32 {
     7_200
@@ -369,11 +382,18 @@ impl Validate for StorageSettings {
         for (name, n) in [
             ("writes_per_hour", self.writes_per_hour),
             ("write_burst", self.write_burst),
+            ("record_units_per_hour", self.record_units_per_hour),
+            ("record_units_burst", self.record_units_burst),
             ("reads_per_hour", self.reads_per_hour),
             ("read_burst", self.read_burst),
         ] {
             v.check((1..=3_600_000).contains(&n), name, "must be in 1..=3600000");
         }
+        v.check(
+            self.record_units_burst >= self.max_records.saturating_mul(2),
+            "record_units_burst",
+            "must allow one key rotation (twice max_records)",
+        );
     }
 }
 

@@ -55,31 +55,76 @@ pub(super) fn link_device(s: Store, f: Flow) -> View {
     // The code this device shows; a problem replaces the wait.
     let link = signal(String::new());
     let failed = signal(None::<String>);
-    // The real backend: a provisioning channel and a fresh X25519 key; the phone
-    // scans the code and sends the account sealed to that key.
-    let attempt = move || {
-        failed.set(None);
-        link.set(String::new());
-        spawn(async move {
-            let result = match crate::backend::link::open_channel().await {
-                Ok(w) => {
-                    let _ = link.try_set(w.code());
-                    crate::backend::link::complete(w).await
-                }
-                Err(p) => Err(p),
-            };
-            match result {
-                Ok(()) => {
+    // The account's two-step PIN, when it has one (the server asks before linking).
+    let pending = Rc::new(std::cell::RefCell::new(
+        None::<crate::backend::link::Pending>,
+    ));
+    let need_pin = signal(false);
+    let wrong_pin = signal(false);
+    let pin = signal(String::new());
+    let on_step = {
+        let pending = pending.clone();
+        move |step: Result<crate::backend::link::Step, crate::backend::Problem>| {
+            use crate::backend::link::Step;
+            match step {
+                Ok(Step::Linked) => {
+                    let _ = need_pin.try_set(false);
                     let _ = linked.try_set(true);
                 }
+                Ok(Step::NeedsPin(p)) => {
+                    *pending.borrow_mut() = Some(p);
+                    let _ = need_pin.try_set(true);
+                }
+                Ok(Step::WrongPin(p)) => {
+                    *pending.borrow_mut() = Some(p);
+                    let _ = pin.try_set(String::new());
+                    let _ = wrong_pin.try_set(true);
+                }
                 Err(p) => {
+                    let _ = need_pin.try_set(false);
                     let _ = failed.try_set(Some(p.to_string()));
                 }
             }
-        });
+        }
+    };
+    let on_step = Rc::new(on_step);
+    let send_pin = {
+        let (pending, on_step) = (pending.clone(), on_step.clone());
+        move || {
+            let code = pin.get_untracked();
+            if !(6..=12).contains(&code.len()) || !code.bytes().all(|b| b.is_ascii_digit()) {
+                return;
+            }
+            let Some(p) = pending.borrow_mut().take() else {
+                return;
+            };
+            wrong_pin.set(false);
+            let on_step = on_step.clone();
+            spawn(async move { on_step(crate::backend::link::with_pin(p, code).await) });
+        }
+    };
+    // The real backend: a provisioning channel and a fresh X25519 key; the phone
+    // scans the code and sends the account sealed to that key.
+    let attempt = {
+        let on_step = on_step.clone();
+        move || {
+            failed.set(None);
+            link.set(String::new());
+            let on_step = on_step.clone();
+            spawn(async move {
+                let result = match crate::backend::link::open_channel().await {
+                    Ok(w) => {
+                        let _ = link.try_set(w.code());
+                        crate::backend::link::complete(w).await
+                    }
+                    Err(p) => Err(p),
+                };
+                on_step(result);
+            });
+        }
     };
     if crate::backend::is_live() && !crate::backend::registered() {
-        attempt();
+        (attempt.clone())();
     } else {
         // mock: the phone scans this code and approves after a moment.
         set_timeout(Duration::from_millis(4500), move || {
@@ -147,8 +192,30 @@ pub(super) fn link_device(s: Store, f: Flow) -> View {
                             .child(numbered_step(2, "Go to You → Linked devices → Link a device."))
                             .child(numbered_step(3, "Point your phone at this code.")),
                     )
-                    .child(muted("Your phone may ask for your two-step PIN.").text_center()),
-                view().gap_2().child(
+                    .child(muted("If your account has a two-step PIN, this device asks for it.").text_center()),
+                view().gap_2().child(when(
+                    move || need_pin.get(),
+                    {
+                        let send_pin = send_pin.clone();
+                        move || {
+                            let send_pin = send_pin.clone();
+                            view()
+                                .gap_3()
+                                .child(passcode_field_pin(pin, send_pin.clone()))
+                                .child(when(move || wrong_pin.get(), || {
+                                    status_line(
+                                        || StatusTone::Problem,
+                                        || Icon::Alert,
+                                        || "That PIN isn't right. Try again.".into(),
+                                    )
+                                }))
+                                .child(btn("Link this device", Variant::Primary, BtnSize::Lg, send_pin).w_full())
+                        }
+                    },
+                ).otherwise({
+                    let attempt = attempt.clone();
+                    move || {
+                    let attempt = attempt.clone();
                     when(
                         move || failed.get().is_none(),
                         || {
@@ -166,11 +233,26 @@ pub(super) fn link_device(s: Store, f: Flow) -> View {
                                 || Icon::Alert,
                                 move || failed.get().unwrap_or_default().into(),
                             ))
-                            .child(btn("Show a new code", Variant::Primary, BtnSize::Lg, attempt).w_full())
-                    }),
-                ),
+                            .child(btn("Show a new code", Variant::Primary, BtnSize::Lg, attempt.clone()).w_full())
+                    })
+                }})),
             )
         }),
+    )
+}
+
+/// The account's two-step PIN: 6 to 12 digits, sent with Enter.
+fn passcode_field_pin(pin: Signal<String>, send: impl Fn() + Clone + 'static) -> View {
+    labelled_field(
+        "Your two-step PIN",
+        field("PIN", pin)
+            .on_submit(move |_: &str| send())
+            .keyboard_type(KeyboardType::Number)
+            .masked(true)
+            .auto_correct(false)
+            .max_length(12),
+        "Your account has a two-step PIN. Enter it to link this device.",
+        || false,
     )
 }
 

@@ -10,11 +10,13 @@
 pub const LINK: &str = "SONGBIRD:LINK:";
 /// The scheme of a safety-number code: `SONGBIRD:SAFETY:<digits>`.
 pub const SAFETY: &str = "SONGBIRD:SAFETY:";
-/// The parent's code: `SONGBIRD:SUPERVISE:<policy key hex>:<link secret hex>`.
+/// The parent's first code: `SONGBIRD:SUPERVISE:<commitment hex>`, a commitment to the policy
+/// key and the link secret, revealed later in the policy code (D-0108).
 pub const SUPERVISE: &str = "SONGBIRD:SUPERVISE:";
 /// The child's code: `SONGBIRD:CHILD:<account hex>:<unlink date, seconds>`.
 pub const CHILD: &str = "SONGBIRD:CHILD:";
-/// The parent's signed first policy: `SONGBIRD:POLICY:<policy hex>`.
+/// The parent's signed first policy and the link secret: `SONGBIRD:POLICY:<secret hex>:<policy
+/// hex>` (the policy names the key).
 pub const POLICY: &str = "SONGBIRD:POLICY:";
 /// The longest policy a code carries, in bytes (a policy with the most client rules).
 pub const MAX_POLICY: usize = 1 + 16 + 32 + 8 + 1 + 8 + 2 + 512 + 64;
@@ -33,13 +35,8 @@ pub enum Scanned {
     },
     /// A contact's safety number, digits only.
     Safety(String),
-    /// A parent's code: the policy key for this child and the link secret.
-    Supervise {
-        /// The parent's Ed25519 policy key.
-        key: [u8; 32],
-        /// The link secret the client rules are sealed under.
-        secret: [u8; 32],
-    },
+    /// A parent's first code: the commitment to the policy key and the link secret.
+    Supervise([u8; 32]),
     /// A child's code: their account and the date supervision ends (computed on their phone).
     Child {
         /// The child's account ID.
@@ -47,8 +44,14 @@ pub enum Scanned {
         /// When supervision ends by itself (seconds since 1970).
         unlink_at_s: u64,
     },
-    /// The parent's signed first policy, as bytes (checked by the child's phone).
-    Policy(Vec<u8>),
+    /// The parent's signed first policy, as bytes, and the link secret (both checked by the
+    /// child's phone against the commitment it scanned first).
+    Policy {
+        /// The link secret.
+        secret: [u8; 32],
+        /// The encoded policy.
+        policy: Vec<u8>,
+    },
 }
 
 /// The link code a new device shows.
@@ -64,10 +67,10 @@ pub fn safety_code(number: &str) -> String {
     format!("{SAFETY}{digits}")
 }
 
-/// The parent's code (parental linking).
+/// The parent's first code (parental linking): the commitment only.
 #[must_use]
-pub fn supervise_code(key: &[u8; 32], secret: &[u8; 32]) -> String {
-    format!("{SUPERVISE}{}:{}", hex_upper(key), hex_upper(secret))
+pub fn supervise_code(commitment: &[u8; 32]) -> String {
+    format!("{SUPERVISE}{}", hex_upper(commitment))
 }
 
 /// The child's code (parental linking).
@@ -76,10 +79,10 @@ pub fn child_code(account: &[u8; 16], unlink_at_s: u64) -> String {
     format!("{CHILD}{}:{unlink_at_s}", hex_upper(account))
 }
 
-/// The code of a signed policy (parental linking).
+/// The code of a signed first policy and the link secret (parental linking).
 #[must_use]
-pub fn policy_code(policy: &[u8]) -> String {
-    format!("{POLICY}{}", hex_upper(policy))
+pub fn policy_code(secret: &[u8; 32], policy: &[u8]) -> String {
+    format!("{POLICY}{}:{}", hex_upper(secret), hex_upper(policy))
 }
 
 /// What `text` is, if it is a code the app understands.
@@ -93,10 +96,7 @@ pub fn parse(text: &str) -> Option<Scanned> {
         return Some(Scanned::Link { channel, key });
     }
     if let Some(rest) = strip_prefix_ignore_case(text, SUPERVISE) {
-        let (key, secret) = rest.split_once(':')?;
-        let key: [u8; 32] = unhex(key)?.try_into().ok()?;
-        let secret: [u8; 32] = unhex(secret)?.try_into().ok()?;
-        return Some(Scanned::Supervise { key, secret });
+        return Some(Scanned::Supervise(unhex(rest)?.try_into().ok()?));
     }
     if let Some(rest) = strip_prefix_ignore_case(text, CHILD) {
         let (account, date) = rest.split_once(':')?;
@@ -110,10 +110,15 @@ pub fn parse(text: &str) -> Option<Scanned> {
         });
     }
     if let Some(rest) = strip_prefix_ignore_case(text, POLICY) {
-        if rest.is_empty() || rest.len() > 2 * MAX_POLICY {
+        let (secret, policy) = rest.split_once(':')?;
+        let secret: [u8; 32] = unhex(secret)?.try_into().ok()?;
+        if policy.is_empty() || policy.len() > 2 * MAX_POLICY {
             return None;
         }
-        return unhex_any(rest).map(Scanned::Policy);
+        return Some(Scanned::Policy {
+            secret,
+            policy: unhex_any(policy)?,
+        });
     }
     if let Some(digits) = strip_prefix_ignore_case(text, SAFETY)
         && digits.len() == 60
@@ -225,13 +230,10 @@ mod tests {
 
     #[test]
     fn parental_codes_round_trip_and_stay_apart() {
-        let code = supervise_code(&[1; 32], &[2; 32]);
+        let code = supervise_code(&[1; 32]);
         assert_eq!(
             parse(&code.to_lowercase()),
-            Some(Scanned::Supervise {
-                key: [1; 32],
-                secret: [2; 32]
-            })
+            Some(Scanned::Supervise([1; 32]))
         );
         let child = child_code(&[3; 16], 1_900_000_000);
         assert_eq!(
@@ -241,8 +243,14 @@ mod tests {
                 unlink_at_s: 1_900_000_000
             })
         );
-        let policy = policy_code(&[6; 200]);
-        assert_eq!(parse(&policy), Some(Scanned::Policy(vec![6; 200])));
+        let policy = policy_code(&[2; 32], &[6; 200]);
+        assert_eq!(
+            parse(&policy),
+            Some(Scanned::Policy {
+                secret: [2; 32],
+                policy: vec![6; 200]
+            })
+        );
         // None is ever read as a link code, nor the other way round.
         for code in [&code, &child, &policy] {
             assert!(!matches!(parse(code), Some(Scanned::Link { .. })), "{code}");
@@ -250,15 +258,21 @@ mod tests {
         let link = link_code(&[4; 16], &[5; 32]);
         assert!(matches!(parse(&link), Some(Scanned::Link { .. })));
         for bad in [
-            format!("{SUPERVISE}{}:{}", "01".repeat(32), "02".repeat(31)),
-            format!("{SUPERVISE}{}", "01".repeat(32)),
+            format!("{SUPERVISE}{}", "01".repeat(31)),
+            format!("{SUPERVISE}{}:{}", "01".repeat(32), "02".repeat(32)),
             format!("{CHILD}{}:-1", "03".repeat(16)),
             format!("{CHILD}{}:1:x", "03".repeat(16)),
             format!("{CHILD}{}:", "03".repeat(16)),
             format!("{CHILD}{}:1234567890123", "03".repeat(16)),
             format!("{POLICY}"),
-            format!("{POLICY}ABC"),
-            format!("{POLICY}{}", "00".repeat(MAX_POLICY + 1)),
+            format!("{POLICY}{}:", "02".repeat(32)),
+            format!("{POLICY}{}:ABC", "02".repeat(32)),
+            format!("{POLICY}{}", "00".repeat(40)),
+            format!(
+                "{POLICY}{}:{}",
+                "02".repeat(32),
+                "00".repeat(MAX_POLICY + 1)
+            ),
         ] {
             assert_eq!(parse(&bad), None, "{bad}");
         }

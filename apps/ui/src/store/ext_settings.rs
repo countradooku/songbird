@@ -484,7 +484,7 @@ impl Store {
             return;
         };
         if crate::backend::is_live() && crate::backend::registered() {
-            crate::backend::run(async move { sup::upload(&policy).await });
+            crate::backend::run(async move { sup::update(&policy).await });
         }
     }
 

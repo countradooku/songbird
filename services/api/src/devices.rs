@@ -337,6 +337,20 @@ impl Devices {
     // ----- provisioning -----
 
     /// `POST /v1/provisioning`.
+    /// The per-IP-range budget for unsigned policy updates (`PUT /v1/supervision/update`,
+    /// D-0108): the channel budget's numbers, under their own key.
+    pub async fn policy_budget(&self, hot: &ValkeyConn, peer: IpAddr) -> Result<(), Outcome> {
+        let s = &self.settings;
+        self.throttle(
+            hot,
+            "sv",
+            &self.range(peer),
+            s.channels_per_hour,
+            s.channel_burst,
+        )
+        .await
+    }
+
     pub async fn open_channel(&self, hot: &ValkeyConn, peer: IpAddr) -> Outcome {
         let s = &self.settings;
         if let Err(o) = self

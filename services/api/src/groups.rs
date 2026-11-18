@@ -322,30 +322,6 @@ impl Groups {
         proofs: &AddProofs,
     ) -> Result<(), Outcome> {
         let dir = m.path.directory();
-        // A supervised child whose policy needs the parent's approval for groups (D-0105): every
-        // add of its devices, its own joins included, carries an approval for this group signed by
-        // the parent's policy key, not expired and at most a week ahead.
-        let now_s = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        for a in joined {
-            let account = AccountId::from_bytes(*a);
-            let Some(key) = dir.access(&account).approval_key else {
-                continue;
-            };
-            let approved = proofs.approvals.iter().any(|(expires, sig)| {
-                *expires > now_s
-                    && *expires <= now_s.saturating_add(songbird_proto::supervision::MAX_APPROVAL_S)
-                    && songbird_keys::ed25519_verify(
-                        &key,
-                        &songbird_proto::supervision::approval_bytes(group, &account, *expires),
-                        sig,
-                    )
-            });
-            if !approved {
-                return Err(Outcome::Forbidden("approval"));
-            }
-        }
         let add_key = proofs.add_key;
         let committer = dir.listed_account(device);
         let mut combined = [0u8; 16];
@@ -371,17 +347,41 @@ impl Groups {
                 None => keyless = true,
             }
         }
-        if !gated {
-            return Ok(());
+        if gated {
+            let proved = add_key.is_some_and(|k| {
+                aws_lc_rs::constant_time::verify_slices_are_equal(&k, &combined).is_ok()
+            });
+            if !proved || keyless {
+                return Err(Outcome::Forbidden("access"));
+            }
         }
-        let proved = add_key.is_some_and(|k| {
-            aws_lc_rs::constant_time::verify_slices_are_equal(&k, &combined).is_ok()
-        });
-        if proved && !keyless {
-            Ok(())
-        } else {
-            Err(Outcome::Forbidden("access"))
+        // After the contacts check (D-0108): a supervised child takes adds from contacts only, so
+        // a stranger is refused as for any such account and never learns of the supervision.
+        // A supervised child whose policy needs the parent's approval for groups (D-0105): every
+        // add of its devices, its own joins included, carries an approval for this group signed by
+        // the parent's policy key, not expired and at most a week ahead.
+        let now_s = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        for a in joined {
+            let account = AccountId::from_bytes(*a);
+            let Some(key) = dir.access(&account).approval_key else {
+                continue;
+            };
+            let approved = proofs.approvals.iter().any(|(expires, sig)| {
+                *expires > now_s
+                    && *expires <= now_s.saturating_add(songbird_proto::supervision::MAX_APPROVAL_S)
+                    && songbird_keys::ed25519_verify(
+                        &key,
+                        &songbird_proto::supervision::approval_bytes(group, &account, *expires),
+                        sig,
+                    )
+            });
+            if !approved {
+                return Err(Outcome::Forbidden("approval"));
+            }
         }
+        Ok(())
     }
 
     /// Validates, stores and fans out a commit; `link` is `(handle, usable)` for a join by

@@ -34,15 +34,18 @@ pub fn install(s: Store) {
     if s.settings.with_untracked(|x| x.app_lock) && lock::is_set() {
         locked().set(Locked(true));
     }
-    let left_at = stored(None::<f64>);
+    // When the app went away, on both clocks: the wall clock (counts while the phone sleeps)
+    // and the monotonic one (can't be set). Either reaching the delay locks, and so does the
+    // wall clock going backwards (D-0108).
+    let left_at = stored(None::<(f64, nsh_core::time::Instant)>);
     effect(move || {
         let state = lifecycle();
         untracked(|| match state {
             Lifecycle::Background => {
-                left_at.replace(Some(unix_ms()));
+                left_at.replace(Some((unix_ms(), nsh_core::time::now())));
             }
             Lifecycle::Active => {
-                let Some(t) = left_at.replace(None) else {
+                let Some((t, mono)) = left_at.replace(None) else {
                     return;
                 };
                 let (on, after) = (
@@ -54,7 +57,9 @@ pub fn install(s: Store) {
                     LockAfter::Minute => 60_000.0,
                     LockAfter::Hour => 3_600_000.0,
                 };
-                if on && lock::is_set() && unix_ms() - t >= wait_ms {
+                let wall = unix_ms() - t;
+                let elapsed = wall.max(mono.elapsed().as_secs_f64() * 1000.0);
+                if on && lock::is_set() && (wall < 0.0 || elapsed >= wait_ms) {
                     locked().set(Locked(true));
                 }
             }
@@ -70,17 +75,20 @@ pub fn layer() -> AnyElement {
 
 fn lock_screen() -> AnyElement {
     let code = signal(String::new());
-    // Saved on the device: closing the app doesn't reset the count or the wait.
-    let (fails, until) = lock::failures();
+    // Saved on the device: closing the app doesn't reset the count or the wait. The wait is
+    // measured on the monotonic clock from this screen's start (`mono`), never the wall clock.
+    let base = nsh_core::time::now();
+    let mono = move || base.elapsed().as_secs_f64() * 1000.0;
+    let (fails, left) = lock::failures();
     let wrong = signal(fails);
-    let wait_until = signal(until);
-    if until > unix_ms() {
-        tick_until(wait_until);
+    let wait_until = signal(left as f64);
+    if left > 0 {
+        tick_until(wait_until, mono);
     }
     let checking = signal(false);
     let shake = signal(false);
     let message = move || {
-        let left = ((wait_until.get() - unix_ms()) / 1000.0).ceil();
+        let left = ((wait_until.get() - mono()) / 1000.0).ceil();
         if left > 0.0 {
             format!("Too many tries. Try again in {left:.0} seconds.")
         } else if wrong.get() > 0 {
@@ -90,7 +98,7 @@ fn lock_screen() -> AnyElement {
         }
     };
     let submit = move || {
-        if checking.get_untracked() || unix_ms() < wait_until.get_untracked() {
+        if checking.get_untracked() || mono() < wait_until.get_untracked() {
             return;
         }
         let entered = code.get_untracked();
@@ -107,13 +115,13 @@ fn lock_screen() -> AnyElement {
                 wrong.set(0);
                 locked().set(Locked(false));
             } else {
-                let (n, until) = lock::record_failure(unix_ms());
+                let (n, left) = lock::record_failure();
                 wrong.set(n);
                 shake.set(true);
-                if until > unix_ms() {
-                    wait_until.set(until);
+                if left > 0 {
+                    wait_until.set(mono() + left as f64);
                     // The countdown's sentence follows the clock.
-                    tick_until(wait_until);
+                    tick_until(wait_until, mono);
                 }
             }
         });
@@ -180,17 +188,21 @@ fn lock_screen() -> AnyElement {
         .into_element()
 }
 
-/// Rewrites the countdown every second until `until`.
-fn tick_until(until: Signal<f64>) {
-    let now = signal(0_u32);
-    fn step(until: Signal<f64>, now: Signal<u32>) {
-        if unix_ms() < until.get_untracked() {
-            now.update(|n| *n += 1);
+/// Rewrites the countdown every second until `until` (on the screen's
+/// monotonic clock `mono`), saving what is left so a restart resumes it.
+fn tick_until(until: Signal<f64>, mono: impl Fn() -> f64 + Copy + 'static) {
+    fn step(until: Signal<f64>, mono: impl Fn() -> f64 + Copy + 'static) {
+        let Some(end) = until.try_get() else {
+            return;
+        };
+        let left = (end - mono()).max(0.0);
+        lock::wait_left(left as u64);
+        if left > 0.0 {
             until.update(|_| {});
-            set_timeout(Duration::from_secs(1), move || step(until, now));
+            set_timeout(Duration::from_secs(1), move || step(until, mono));
         }
     }
-    step(until, now);
+    step(until, mono);
 }
 
 /// Turning the lock on: a passcode typed twice.
@@ -368,7 +380,6 @@ mod headless {
     /// A wait earned before the app was closed still holds when it opens.
     #[test]
     fn closing_the_app_does_not_reset_the_wait() -> Result<(), String> {
-        let until = nsh_core::time::unix_ms() + 600_000.0;
         let storage = nsh_testing::MemoryStorage::new([
             (
                 "sb.app_lock".to_string(),
@@ -378,7 +389,7 @@ mod headless {
                 "sb.device_settings".to_string(),
                 r#"{"app_lock":"1"}"#.to_string(),
             ),
-            ("sb.app_lock_fails".to_string(), format!("5:{until}")),
+            ("sb.app_lock_fails".to_string(), "5:600000".to_string()),
         ]);
         let mut config = nsh_engine::EngineConfig::new(nsh_engine::Root::of::<LockProbe>());
         config.storage = Some(storage);

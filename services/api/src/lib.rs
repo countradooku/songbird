@@ -23,8 +23,9 @@
 //! | `POST /v1/calls`, `/v1/calls/group`, `/v1/calls/join`, `/v1/calls/links…` | Calls: LiveKit rooms and tokens, call links ([`calls`]) |
 //! | `PUT /v1/messages` | A WebSocket `Send` frame, for clients with no open socket; answers its `SendResult` ([`messages`]) |
 //!
-//! Every request but the two registration steps, opening and reading a provisioning channel and
-//! linking is signed by the device ([`auth`]); there are no
+//! Every request but the two registration steps, opening and reading a provisioning channel,
+//! linking and a parent's later policy (`PUT /v1/supervision/update`, authorized by the policy's
+//! signature, D-0108) is signed by the device ([`auth`]); there are no
 //! tokens or cookies. Registration is paid for with proof of work and throttled per IP range. Bodies are
 //! bounded before they are read. Responses carry status codes and small JSON; errors say nothing
 //! about whether a device, account or object exists beyond what the caller already proved.
@@ -437,6 +438,7 @@ impl App {
                 | "/v1/account/groups"
                 | "/v1/supervision",
             ) => self.account_settings(req).await,
+            (_, "/v1/supervision/update") => self.supervision_update(req).await,
             (_, p) if p.starts_with("/v1/account/") => self.factors(req).await,
             (_, p) if p.starts_with("/v1/kt/") => self.kt(req).await,
             (_, p) if p.starts_with("/v1/provisioning") || p.starts_with("/v1/devices") => {
@@ -987,6 +989,27 @@ impl App {
             _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
         };
         Ok(device_outcome(out))
+    }
+
+    /// `PUT /v1/supervision/update`, unsigned, throttled per IP range ([`account`], D-0108).
+    async fn supervision_update(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        if req.method() != Method::PUT {
+            return Err(Refusal::Status(StatusCode::METHOD_NOT_ALLOWED));
+        }
+        let d = self.devices.as_ref().ok_or_else(unavailable)?;
+        let peer = req
+            .extensions()
+            .get::<registration::Peer>()
+            .map(|p| p.0)
+            .ok_or_else(unavailable)?;
+        if let Err(o) = d.policy_budget(&self.hot, peer).await {
+            return Ok(device_outcome(o));
+        }
+        let body = bounded_body(req, songbird_proto::supervision::MAX_POLICY_LEN).await?;
+        Ok(device_outcome(
+            account::update_supervision(&self.registry, &body).await,
+        ))
     }
 
     /// `/v1/provisioning…` and `/v1/devices…` ([`devices`]).

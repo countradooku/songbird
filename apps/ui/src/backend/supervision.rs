@@ -23,7 +23,7 @@
 use nsh_core::storage::Storage;
 use serde_json::{Value, json};
 use songbird_content::supervision::{
-    ClientRules, PolicyKey, consent_age, link_code, open_rules, seal_rules, unlink_at,
+    ClientRules, PolicyKey, consent_age, link_code, link_commit, open_rules, seal_rules, unlink_at,
 };
 use songbird_proto::supervision::{GROUP_APPROVAL, HIDDEN, NO_REQUESTS, Policy, UNLINK};
 use songbird_types::AccountId;
@@ -98,7 +98,13 @@ fn save_parent(l: &ParentLink) {
 }
 
 /// A fresh policy key and link secret for `child`, saved on this device.
+/// A link already in force (a policy signed) is never replaced: its key is
+/// the only way to change, approve for or unlink that child (D-0108); it is
+/// returned as it is.
 pub fn start_link(child: [u8; 16], unlink_at_s: u64) -> ParentLink {
+    if let Some(l) = parent_link().filter(|l| l.version >= 1) {
+        return l;
+    }
     let l = ParentLink {
         seed: wire::random(),
         secret: wire::random(),
@@ -144,10 +150,11 @@ pub fn public(l: &ParentLink) -> Option<[u8; 32]> {
     PolicyKey::from_seed(&l.seed).ok().map(|k| k.public())
 }
 
-/// What the parent's QR code holds: the policy key and the link secret
-/// (`SONGBIRD:SUPERVISE:…`, read only by the child's live camera).
+/// What the parent's first QR code holds: a commitment to the policy key
+/// and the link secret (`SONGBIRD:SUPERVISE:…`, read only by the child's
+/// live camera), revealed after the child's code (D-0108).
 pub fn qr_payload(l: &ParentLink) -> String {
-    codes::supervise_code(&public(l).unwrap_or_default(), &l.secret)
+    codes::supervise_code(&link_commit(&public(l).unwrap_or_default(), &l.secret))
 }
 
 /// The six digits both screens show.
@@ -348,20 +355,23 @@ pub fn rules_in_force(p: &Policy, secret: Option<&[u8; 32]>) -> Vec<String> {
     out
 }
 
-// ---------------------------------------------------------------- linking, live (D-0107)
+// ---------------------------------------------------------------- linking, live (D-0107, D-0108)
 //
 // Three codes, read only by the live camera, and nothing through the
 // server between the two accounts (so it never learns who parents whom):
 //
-// 1. The parent's device shows `SONGBIRD:SUPERVISE:<policy key>:<secret>`.
+// 1. The parent's device shows `SONGBIRD:SUPERVISE:<commitment>`, a
+//    commitment to its policy key and link secret.
 // 2. The child's phone scans it, takes the child's age and shows
 //    `SONGBIRD:CHILD:<account>:<unlink date>`; the birth date stays there.
-// 3. The parent's device scans that; both show the same six digits.
-// 4. On the parent's "same code", it signs the first policy (version 1)
-//    and shows it as `SONGBIRD:POLICY:<policy>`.
-// 5. The child's phone scans it and installs it as the primary (`PUT
-//    /v1/supervision`) only if it is the first, for this account, with the
-//    date it computed, and signed by the key it scanned.
+// 3. The parent's device scans that, signs the first policy (version 1)
+//    and shows it with the secret, `SONGBIRD:POLICY:<secret>:<policy>`, and
+//    the six digits.
+// 4. The child's phone scans it, checks the commitment, the signature,
+//    its account and its date, and shows the six digits. Only when both
+//    screens show the same digits does it install the policy as the
+//    primary (`PUT /v1/supervision`). The commitment means nobody relaying
+//    the codes can choose values after seeing the other side's.
 
 /// This device's account (live).
 fn my_account() -> Option<[u8; 16]> {
@@ -371,11 +381,11 @@ fn my_account() -> Option<[u8; 16]> {
         .and_then(|b| b.try_into().ok())
 }
 
-/// The child's side while linking: what it scanned and what it shows.
+/// The child's side while linking: the commitment it scanned and what it
+/// shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildLinking {
-    pub key: [u8; 32],
-    pub secret: [u8; 32],
+    pub commitment: [u8; 32],
     pub account: [u8; 16],
     pub birth_year: i32,
     pub birth_month: u32,
@@ -389,29 +399,34 @@ impl ChildLinking {
     pub fn code(&self) -> String {
         codes::child_code(&self.account, self.unlink_at_s)
     }
-
-    /// The six digits both screens show.
-    #[must_use]
-    pub fn digits(&self) -> String {
-        link_code(&self.key, &self.secret, &self.account)
-    }
 }
 
-/// On the child's phone, after scanning the parent's code: the date
-/// supervision ends, from the child's age.
+/// A first policy the child's phone scanned and checked, waiting for the
+/// six digits to be compared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Revealed {
+    pub policy: Policy,
+    pub secret: [u8; 32],
+    /// The six digits this phone shows.
+    pub digits: String,
+}
+
+/// On the child's phone, after scanning the parent's first code: the date
+/// supervision ends, from the child's age. `None`: no date could be worked
+/// out, and linking stops rather than start supervision that ends at once.
 pub fn start_child(
-    key: [u8; 32],
-    secret: [u8; 32],
+    commitment: [u8; 32],
     age: u8,
     country: String,
 ) -> Result<ChildLinking, Problem> {
     let account = my_account().ok_or_else(|| Problem("This phone isn't registered yet.".into()))?;
     let now = nsh_core::time::unix_ms().max(0.0) as u64;
     let (birth_year, birth_month) = born(age, now);
-    let unlink_at_s = ends(birth_year, birth_month, &country).unwrap_or(0);
+    let unlink_at_s = ends(birth_year, birth_month, &country)
+        .filter(|at| *at > now / 1000)
+        .ok_or_else(|| Problem("Supervision would already have ended at that age.".into()))?;
     Ok(ChildLinking {
-        key,
-        secret,
+        commitment,
         account,
         birth_year,
         birth_month,
@@ -420,37 +435,42 @@ pub fn start_child(
     })
 }
 
-/// Checks a first policy the child's phone scanned.
-fn accept_first(c: &ChildLinking, bytes: &[u8]) -> Result<Policy, Problem> {
+/// Checks the policy and secret the child's phone scanned against the
+/// commitment it scanned first.
+pub fn reveal(c: &ChildLinking, secret: [u8; 32], bytes: &[u8]) -> Result<Revealed, Problem> {
     let p = Policy::decode(bytes)
         .map_err(|_| Problem("That code isn't a set of rules from your parent's phone.".into()))?;
-    let ok = verify(&p, Some(&c.key))
+    let ok = link_commit(&p.policy_key, &secret) == c.commitment
+        && verify(&p, Some(&p.policy_key))
         && *p.child.as_bytes() == c.account
         && p.unlink_at_s == c.unlink_at_s
         && p.policy_version == 1
         && p.flags & UNLINK == 0;
-    if ok {
-        Ok(p)
-    } else {
-        Err(Problem(
-            "These rules don't match the code you scanned, so they weren't applied.".into(),
-        ))
+    if !ok {
+        return Err(Problem(
+            "These rules don't match the code you scanned first, so they weren't applied.".into(),
+        ));
     }
+    let digits = link_code(&p.policy_key, &secret, &c.account);
+    Ok(Revealed {
+        policy: p,
+        secret,
+        digits,
+    })
 }
 
-/// On the child's phone: checks the scanned policy, installs it and keeps
-/// the scanned key and secret.
-pub async fn finish_child(c: ChildLinking, bytes: Vec<u8>) -> Result<Policy, Problem> {
-    let p = accept_first(&c, &bytes)?;
-    upload(&p).await?;
+/// On the child's phone, once both screens showed the same six digits:
+/// installs the policy and keeps the key and the secret.
+pub async fn finish_child(c: ChildLinking, r: Revealed) -> Result<Policy, Problem> {
+    upload(&r.policy).await?;
     save_child(&ChildLink {
-        policy_key: c.key,
-        secret: c.secret,
+        policy_key: r.policy.policy_key,
+        secret: r.secret,
         birth_year: c.birth_year,
         birth_month: c.birth_month,
         country: c.country,
     });
-    Ok(p)
+    Ok(r.policy)
 }
 
 /// On the parent's device: the six digits for the child whose code it scanned.
@@ -459,16 +479,17 @@ pub fn digits_for(l: &ParentLink, child: &[u8; 16]) -> String {
     link_code(&public(l).unwrap_or_default(), &l.secret, child)
 }
 
-/// On the parent's device, after both screens showed the same code: the
-/// first policy for that child, signed, as the code the child's phone
-/// scans. Signing it again (the code shown again) gives the same version.
+/// On the parent's device, after scanning the child's code: the first
+/// policy for that child, signed, with the secret, as the code the child's
+/// phone scans. Showing it again for the same child signs the same version;
+/// a link in force for another child is never touched.
 pub fn first_policy(
     rules: &ParentalRules,
     child: [u8; 16],
     unlink_at_s: u64,
 ) -> Result<String, Problem> {
     let mut l = parent_link()
-        .filter(|l| l.version <= 1)
+        .filter(|l| l.version == 0 || (l.version == 1 && l.child == child))
         .ok_or_else(|| Problem("Start linking again from Parental controls.".into()))?;
     l.child = child;
     l.unlink_at_s = unlink_at_s;
@@ -476,13 +497,21 @@ pub fn first_policy(
         .ok_or_else(|| Problem("The rules couldn't be signed.".into()))?;
     l.version = 1;
     save_parent(&l);
-    Ok(codes::policy_code(&p.encode()))
+    Ok(codes::policy_code(&l.secret, &p.encode()))
+}
+
+/// The parent said the digits didn't match: the link is dropped, and the
+/// next attempt starts with a fresh key.
+pub fn abandon_first() {
+    if parent_link().is_some_and(|l| l.version <= 1) {
+        forget_parent();
+    }
 }
 
 // ---------------------------------------------------------------- the server
 
-/// `PUT /v1/supervision`: the first policy (from the child's primary) or a
-/// later one (from any signed device; the parent's signature authorizes it).
+/// `PUT /v1/supervision`, signed by the child's own device: the first
+/// policy, from the child's primary.
 pub async fn upload(p: &Policy) -> Result<(), Problem> {
     let (status, body) = super::signed("PUT", "/v1/supervision", Some(p.encode()), false).await?;
     match status {
@@ -490,8 +519,37 @@ pub async fn upload(p: &Policy) -> Result<(), Problem> {
         409 => Err(Problem(
             "A newer set of rules is already in force. Open the rules again.".into(),
         )),
+        403 if body.windows(7).any(|w| w == b"primary") => Err(Problem(
+            "Link with your parent on your main phone, the one you signed up on.".into(),
+        )),
         403 if body.windows(9).any(|w| w == b"signature") => Err(Problem(
-            "The rules' signature didn't check out, so they weren't changed.".into(),
+            "The rules' signature didn't check out, so they weren't applied.".into(),
+        )),
+        _ => Err(super::explain(status, &body)),
+    }
+}
+
+/// `PUT /v1/supervision/update`, unsigned (D-0108): a later policy from
+/// the parent's device. The parent's signature is the only authority, so
+/// the server never learns which account the parent is.
+pub async fn update(p: &Policy) -> Result<(), Problem> {
+    let api = super::endpoint().api;
+    let body = p.encode();
+    let req = nsh_core::platform::HttpRequest::new("PUT", format!("{api}/v1/supervision/update"))
+        .header("content-type", "application/octet-stream")
+        .header("content-length", body.len().to_string())
+        .body(body);
+    let (status, body) = super::send(req).await?;
+    match status {
+        200..=299 => Ok(()),
+        409 if body.windows(4).any(|w| w == b"date") => Err(Problem(
+            "Supervision can only end sooner than the date set when you linked.".into(),
+        )),
+        409 => Err(Problem(
+            "A newer set of rules is already in force. Open the rules again.".into(),
+        )),
+        403 => Err(Problem(
+            "Your child's account didn't take these rules. Supervision may have ended.".into(),
         )),
         _ => Err(super::explain(status, &body)),
     }
@@ -585,30 +643,37 @@ mod tests {
     }
 
     /// The child's phone takes only the first policy for this account,
-    /// signed by the key it scanned, with the date it computed.
+    /// signed by the key it was committed to, with the date it computed.
     #[test]
     fn a_child_accepts_only_the_first_policy_meant_for_it() {
         let mut parent = link();
         let child = ChildLinking {
-            key: public(&parent).expect("key"),
-            secret: parent.secret,
+            commitment: link_commit(&public(&parent).expect("key"), &parent.secret),
             account: [7; 16],
             birth_year: 2015,
             birth_month: 3,
             country: "RO".into(),
             unlink_at_s: 1_900_000_000,
         };
+        assert_eq!(
+            codes::parse(&qr_payload(&parent)),
+            Some(codes::Scanned::Supervise(child.commitment))
+        );
         parent.child = [7; 16];
         parent.unlink_at_s = 1_900_000_000;
         let first = sign_policy(&parent, &rules(), false, 1).expect("policy");
-        assert!(accept_first(&child, &first.encode()).is_ok());
-        // What the parent's device shows is what the child's phone reads.
-        let shown = codes::policy_code(&first.encode());
+        let r = reveal(&child, parent.secret, &first.encode()).expect("accepted");
+        // Both screens show the same digits.
+        assert_eq!(r.digits, code(&parent));
+        assert_eq!(r.digits, digits_for(&parent, &[7; 16]));
+        let shown = codes::policy_code(&parent.secret, &first.encode());
         assert_eq!(
             codes::parse(&shown),
-            Some(codes::Scanned::Policy(first.encode()))
+            Some(codes::Scanned::Policy {
+                secret: parent.secret,
+                policy: first.encode()
+            })
         );
-        assert_eq!(child.digits(), code(&parent));
         assert_eq!(
             codes::parse(&child.code()),
             Some(codes::Scanned::Child {
@@ -617,8 +682,8 @@ mod tests {
             })
         );
         let refused = |p: &ParentLink, version: u64, unlink: bool| {
-            let p = sign_policy(p, &rules(), unlink, version).expect("policy");
-            accept_first(&child, &p.encode()).is_err()
+            let pol = sign_policy(p, &rules(), unlink, version).expect("policy");
+            reveal(&child, p.secret, &pol.encode()).is_err()
         };
         assert!(refused(&parent, 2, false), "not the first");
         assert!(refused(&parent, 1, true), "an unlinking");
@@ -632,12 +697,18 @@ mod tests {
             ..parent.clone()
         };
         assert!(refused(&other_date, 1, false), "another date");
+        // Another key or secret than the ones committed to: refused, even if self-consistent.
         let other_key = ParentLink {
             seed: [9; 32],
             ..parent.clone()
         };
         assert!(refused(&other_key, 1, false), "another key");
-        assert!(accept_first(&child, b"junk").is_err());
+        let other_secret = ParentLink {
+            secret: [9; 32],
+            ..parent.clone()
+        };
+        assert!(refused(&other_secret, 1, false), "another secret");
+        assert!(reveal(&child, parent.secret, b"junk").is_err());
     }
 
     #[test]
@@ -646,7 +717,10 @@ mod tests {
         let key = public(&l).expect("public");
         assert_eq!(code(&l), link_code(&key, &l.secret, &l.child));
         assert_eq!(code(&l).len(), 6);
-        assert!(qr_payload(&l).contains(&wire::hex(&l.secret)));
+        // The first code commits to the key and the secret without showing either (D-0108).
+        let shown = qr_payload(&l).to_ascii_lowercase();
+        assert!(!shown.contains(&wire::hex(&l.secret)));
+        assert!(!shown.contains(&wire::hex(&key)));
     }
 
     #[test]

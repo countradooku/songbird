@@ -88,11 +88,13 @@ pub async fn set_groups(registry: &Registry, row: &DeviceRow, body: &[u8]) -> Ou
     )
 }
 
-/// `PUT /v1/supervision` (Prompt 9, M4, D-0105). The first policy for a child comes from the
-/// child's own primary (the child consents in person; the parent's signature proves the parent
-/// does); every later one is authorized by the parent's signature alone, whoever carries it, so
-/// the server never learns which account the parent is. The signature always verifies against
-/// the key in force (or, for the first, the key the policy names).
+/// `PUT /v1/supervision` (Prompt 9, M4, D-0105; D-0108), signed by one of the child's own
+/// devices: the first policy from the child's primary (the child consents in person; the
+/// parent's signature proves the parent does), or a later one the child's device carries. A
+/// policy for another account is refused with one answer whether or not that account is
+/// supervised, so the endpoint tells nobody which accounts are children's. A parent's device
+/// sends later policies unsigned ([`update_supervision`]), so the server never learns which
+/// account the parent is.
 pub async fn put_supervision(registry: &Registry, row: &DeviceRow, body: &[u8]) -> Outcome {
     use songbird_proto::supervision::Policy;
     let Ok(p) = Policy::decode(body) else {
@@ -101,22 +103,58 @@ pub async fn put_supervision(registry: &Registry, row: &DeviceRow, body: &[u8]) 
     if row.pending {
         return Outcome::Forbidden("pending");
     }
+    if p.child != row.account {
+        return Outcome::Forbidden("account");
+    }
     let Ok(current) = registry.supervision(&p.child).await else {
         return Outcome::Unavailable;
     };
     let first = current.is_none();
-    if first && (p.child != row.account || !row.primary) {
+    if first && !row.primary {
         return Outcome::Forbidden("primary");
     }
     let key = current.as_ref().map_or(p.policy_key, |c| c.key);
     if !songbird_keys::ed25519_verify(&key, &p.signed_bytes(), &p.signature) {
         return Outcome::Forbidden("signature");
     }
-    match registry.put_supervision(&p, body, first).await {
+    store_policy(registry, &p, body, first).await
+}
+
+/// `PUT /v1/supervision/update`, unsigned (D-0108): a later policy from the parent's device,
+/// authorized by the parent's signature against the key in force alone. No device or account
+/// is named, as for sealed sends; the caller throttles it per IP range. One answer, 403
+/// `signature`, for a bad signature and for an account with no policy in force, after the same
+/// work, so it reveals nothing about who is supervised. A first policy never comes this way.
+pub async fn update_supervision(registry: &Registry, body: &[u8]) -> Outcome {
+    use songbird_proto::supervision::Policy;
+    let Ok(p) = Policy::decode(body) else {
+        return Outcome::Malformed("policy");
+    };
+    let Ok(current) = registry.supervision(&p.child).await else {
+        return Outcome::Unavailable;
+    };
+    // With none in force, verify against the policy's own key anyway (the same work), then refuse.
+    let key = current.as_ref().map_or(p.policy_key, |c| c.key);
+    let signed = songbird_keys::ed25519_verify(&key, &p.signed_bytes(), &p.signature);
+    if current.is_none() || !signed {
+        return Outcome::Forbidden("signature");
+    }
+    store_policy(registry, &p, body, false).await
+}
+
+async fn store_policy(
+    registry: &Registry,
+    p: &songbird_proto::supervision::Policy,
+    body: &[u8],
+    first: bool,
+) -> Outcome {
+    match registry.put_supervision(p, body, first).await {
         Ok(()) => Outcome::Done,
         Err(RegistryError::Exists) => Outcome::Conflict("exists"),
         Err(RegistryError::Rollback) => Outcome::Conflict("version"),
-        Err(RegistryError::NotFound) => Outcome::NotFound,
+        Err(RegistryError::Later) => Outcome::Conflict("date"),
+        // The policy went between the read and the write (the date, an unlink).
+        Err(RegistryError::NotFound) => Outcome::Forbidden("signature"),
         Err(_) => Outcome::Unavailable,
     }
 }

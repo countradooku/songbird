@@ -84,6 +84,39 @@ impl Signals {
     }
 }
 
+/// The class of an event in the ephemeral lane (D-0108). The server writes it in front of each
+/// payload it routes, so the receiving session hands an attention event (a nudge, which passed
+/// the attention budgets and blocks) to the client in its own frame, and an event a client sent
+/// as an ordinary ephemeral can never pass for one. Clients never write it.
+pub mod class {
+    use bytes::{BufMut as _, Bytes, BytesMut};
+
+    /// An ordinary ephemeral event (typing, presence).
+    pub const EPHEMERAL: u8 = 0;
+    /// An attention event.
+    pub const ATTENTION: u8 = 1;
+
+    /// `payload` with its class in front, for the lane.
+    #[must_use]
+    pub fn tag(class: u8, payload: &[u8]) -> Bytes {
+        let mut b = BytesMut::with_capacity(1 + payload.len());
+        b.put_u8(class);
+        b.put_slice(payload);
+        b.freeze()
+    }
+
+    /// The class and the payload of what the lane carried (`None`: nothing after the class).
+    #[must_use]
+    pub fn untag(mut b: Bytes) -> Option<(u8, Bytes)> {
+        if b.len() < 2 {
+            return None;
+        }
+        let c = b[0];
+        b = b.slice(1..);
+        Some((c, b))
+    }
+}
+
 /// Inbox sizes for one session.
 #[derive(Debug, Clone, Copy)]
 pub struct InboxSizes {

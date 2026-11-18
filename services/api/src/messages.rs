@@ -105,7 +105,9 @@ impl<M: StoreSend, R: Router> Submit for SendStack<M, R> {
         Box::pin(async move {
             let mut queued = 0;
             for (d, p) in events {
-                if self.router.route_ephemeral(&d, p).await == songbird_router::Routed::Queued {
+                let tagged = songbird_router::class::tag(songbird_router::class::EPHEMERAL, &p);
+                if self.router.route_ephemeral(&d, tagged).await == songbird_router::Routed::Queued
+                {
                     queued += 1;
                 }
             }

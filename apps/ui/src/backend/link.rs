@@ -98,9 +98,35 @@ impl Waiting {
     }
 }
 
+/// A link waiting for its second factor: the request is signed and the
+/// token is still unspent (the server checks the factor before spending it).
+pub struct Pending {
+    provision: Provision,
+    auth_seed: [u8; 32],
+    identity_seed: [u8; 32],
+    request: LinkRequest,
+}
+
+impl std::fmt::Debug for Pending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pending").finish_non_exhaustive()
+    }
+}
+
+/// Where linking stands on the new device.
+#[derive(Debug)]
+pub enum Step {
+    /// Linked: the account, the device and the storage key are saved here.
+    Linked,
+    /// The account has a two-step PIN: ask for it ([`with_pin`]).
+    NeedsPin(Pending),
+    /// The PIN given wasn't right; ask again.
+    WrongPin(Pending),
+}
+
 /// Waits for the main phone's message, then links this device with keys of
-/// its own. The account, the device and the storage key are saved here.
-pub async fn complete(w: Waiting) -> Result<(), Problem> {
+/// its own (or asks for the account's PIN first).
+pub async fn complete(w: Waiting) -> Result<Step, Problem> {
     let ep = endpoint();
     let plain = w.receive().await?;
     let p = Provision::decode(&plain)
@@ -113,12 +139,42 @@ pub async fn complete(w: Waiting) -> Result<(), Problem> {
     let auth_seed: [u8; 32] = wire::random();
     let identity_seed: [u8; 32] = wire::random();
     let request = link_request(&p, &auth_seed, &identity_seed, &ep.api_name)?;
-    let body = request.encode();
+    submit(Pending {
+        provision: p,
+        auth_seed,
+        identity_seed,
+        request,
+    })
+    .await
+}
+
+/// Links with the account's two-step PIN (6 to 12 digits).
+pub async fn with_pin(mut pending: Pending, pin: String) -> Result<Step, Problem> {
+    pending.request.factor = Factor::Pin(pin);
+    submit(pending).await
+}
+
+async fn submit(pending: Pending) -> Result<Step, Problem> {
+    let ep = endpoint();
+    let body = pending.request.encode();
     let req = HttpRequest::post(format!("{}/v1/devices/link", ep.api), body.clone())
         .header("content-type", "application/octet-stream")
         .header("content-length", body.len().to_string());
     let (status, answer) = send(req).await?;
+    if status == 403 && answer.windows(6).any(|w| w == b"factor") {
+        return Ok(if matches!(pending.request.factor, Factor::None) {
+            Step::NeedsPin(pending)
+        } else {
+            Step::WrongPin(pending)
+        });
+    }
     ok_json(status, &answer)?;
+    let Pending {
+        provision: p,
+        auth_seed,
+        identity_seed,
+        ..
+    } = pending;
     put(super::K_DEVICE_SEED, &wire::hex(&auth_seed));
     put(K_DEVICE_IDENTITY, &wire::hex(&identity_seed));
     let account = p.account.to_hex_unredacted();
@@ -133,7 +189,7 @@ pub async fn complete(w: Waiting) -> Result<(), Problem> {
         l.device = Some(device);
     });
     super::connect();
-    Ok(())
+    Ok(Step::Linked)
 }
 
 /// The link request for provisioning `p`, signed by the new keys.

@@ -377,6 +377,9 @@ pub enum RegistryError {
     /// A parent's policy locks this setting (Prompt 9, D-0105).
     #[error("locked by supervision")]
     Supervised,
+    /// A later policy would move the unlink date later (Prompt 9, D-0108).
+    #[error("the unlink date may only come earlier")]
+    Later,
 }
 
 /// One device's stored keys (opaque stored forms, `songbird_proto::keys`).

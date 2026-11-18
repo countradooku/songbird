@@ -88,6 +88,8 @@ filter = "info"
 # max_objects = 16                                                # custom wallpapers, 2 MiB each
 # writes_per_hour = 3600
 # write_burst = 120
+# record_units_per_hour = 60000                                   # records deleted + inserted
+# record_units_burst = 40000                                      # at least 2 × max_records
 # reads_per_hour = 7200
 # read_burst = 240
 #

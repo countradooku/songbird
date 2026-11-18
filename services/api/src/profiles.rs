@@ -300,6 +300,7 @@ impl Profiles {
             }
             Err(RegistryError::Rollback) => Outcome::Conflict("version"),
             Err(RegistryError::NotPrimary) => Outcome::Forbidden("primary"),
+            Err(RegistryError::Supervised) => Outcome::Forbidden("supervised"),
             Err(_) => Outcome::Unavailable,
         }
     }
@@ -588,8 +589,10 @@ impl Profiles {
                 || aws_lc_rs::constant_time::verify_slices_are_equal(&expected, &presented)
                     .is_ok());
         if !ok {
+            // Refused whole, with the same answer as a batch that reached everyone (D-0108):
+            // 204 says nothing about which device IDs are listed or which accounts are open.
             self.metrics.sealed_refused.inc();
-            return Outcome::Unauthorized;
+            return Outcome::Done;
         }
         self.metrics.presence.inc();
         let _queued = m.path.ephemeral(events).await;

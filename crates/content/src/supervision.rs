@@ -148,7 +148,11 @@ fn rules_aad(child: &[u8; 16], version: u64) -> Vec<u8> {
     a
 }
 
-/// Encrypts client rules for the policy `version` of `child`.
+/// Client rules are padded to this many bytes before encryption (`be16(len) ‖ protobuf ‖
+/// zeros`), so the stored policy doesn't show how many rules are on (D-0108).
+pub const RULES_PADDED: usize = 64;
+
+/// Encrypts client rules for the policy `version` of `child`, padded to [`RULES_PADDED`].
 ///
 /// # Errors
 /// [`Error::Crypto`].
@@ -160,7 +164,15 @@ pub fn seal_rules(
 ) -> Result<Vec<u8>, Error> {
     let mut nonce = [0u8; NONCE_LEN];
     aws_lc_rs::rand::fill(&mut nonce).map_err(|_| Error::Crypto)?;
-    let mut buf = rules.encode_to_vec();
+    let proto = rules.encode_to_vec();
+    let len = u16::try_from(proto.len())
+        .ok()
+        .filter(|n| usize::from(*n) + 2 <= RULES_PADDED)
+        .ok_or(Error::Crypto)?;
+    let mut buf = Vec::with_capacity(RULES_PADDED + 16);
+    buf.extend_from_slice(&len.to_be_bytes());
+    buf.extend_from_slice(&proto);
+    buf.resize(RULES_PADDED, 0);
     rules_key(link_secret)?
         .seal_in_place_append_tag(
             Nonce::assume_unique_for_key(nonce),
@@ -192,7 +204,11 @@ pub fn open_rules(
             &mut buf,
         )
         .map_err(|_| Error::Crypto)?;
-    ClientRules::decode(&*plain).map_err(|_| Error::Decode)
+    let (len, rest) = plain.split_first_chunk::<2>().ok_or(Error::Decode)?;
+    let body = rest
+        .get(..usize::from(u16::from_be_bytes(*len)))
+        .ok_or(Error::Decode)?;
+    ClientRules::decode(body).map_err(|_| Error::Decode)
 }
 
 /// The parent's policy key for one child.
@@ -249,6 +265,20 @@ impl PolicyKey {
     }
 }
 
+/// The commitment the parent's first code carries (D-0108): its key and secret are revealed only
+/// after the child's code is fixed, so nobody relaying the codes can pick values that make two
+/// different links show the same six digits.
+#[must_use]
+pub fn link_commit(policy_key: &[u8; 32], link_secret: &[u8; 32]) -> [u8; 32] {
+    let mut ctx = digest::Context::new(&digest::SHA256);
+    ctx.update(b"songbird.v1/link-commit\0");
+    ctx.update(policy_key);
+    ctx.update(link_secret);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(ctx.finish().as_ref());
+    out
+}
+
 /// The six-digit code both devices show at linking, from both QR codes' contents: the parent
 /// and child compare it, so nobody in between can swap a key.
 #[must_use]
@@ -302,6 +332,22 @@ mod tests {
         assert!(open_rules(&[1; 32], &[2; 16], 4, &b).is_err());
         assert!(open_rules(&[9; 32], &[2; 16], 3, &b).is_err());
         assert!(r.quiet(22 * 60) && r.quiet(60) && !r.quiet(12 * 60));
+        // Padded: no rules on and every rule on seal to the same length.
+        let none = seal_rules(&[1; 32], &[2; 16], 3, &ClientRules::default()).unwrap();
+        assert_eq!(none.len(), b.len());
+        assert_eq!(b.len(), 12 + RULES_PADDED + 16);
+        assert_eq!(
+            open_rules(&[1; 32], &[2; 16], 3, &none).unwrap(),
+            ClientRules::default()
+        );
+    }
+
+    #[test]
+    fn the_commitment_binds_the_key_and_the_secret() {
+        let c = link_commit(&[1; 32], &[2; 32]);
+        assert_eq!(c, link_commit(&[1; 32], &[2; 32]));
+        assert_ne!(c, link_commit(&[3; 32], &[2; 32]));
+        assert_ne!(c, link_commit(&[1; 32], &[3; 32]));
     }
 
     #[test]

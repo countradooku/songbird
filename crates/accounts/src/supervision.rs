@@ -78,7 +78,9 @@ impl Registry {
     ///
     /// # Errors
     /// [`RegistryError::Exists`] for a first policy when one is in force; [`RegistryError::Rollback`]
-    /// for a version that does not grow or another key; [`RegistryError::NotFound`] for an update
+    /// for a version that does not grow or another key; [`RegistryError::Later`] for an update
+    /// that moves the unlink date later (it may only come earlier: supervision never outlives the
+    /// date set at linking, D-0108); [`RegistryError::NotFound`] for an update
     /// with none in force, or an account being deleted.
     pub async fn put_supervision(
         &self,
@@ -97,6 +99,8 @@ impl Registry {
                  IF $first AND $cur.pkey != NONE { THROW 'songbird:exists' };
                  IF !$first AND $cur.pkey = NONE { THROW 'songbird:gone' };
                  IF !$first AND ($cur.pkey != $k OR $cur.pv >= $v) { THROW 'songbird:rollback' };
+                 IF !$first AND !$unlink AND time::from_secs($until) > $cur.unlink_at {
+                   THROW 'songbird:later' };
                  IF $unlink {
                    DELETE superv:[$a] RETURN NONE;
                  } ELSE {
@@ -105,7 +109,8 @@ impl Registry {
                  };
                  UPDATE account:[$a] SET sv_requests = $req, sv_hidden = $hid, sv_groups = $grp,
                    grp_approval = IF $grp { $k } ELSE { NONE } RETURN NONE;
-                 IF $req { UPDATE account:[$a] SET requests_off = true RETURN NONE; };
+                 IF $req { UPDATE account:[$a] SET requests_off = true, uak_open = false
+                   RETURN NONE; };
                  IF $hid { UPDATE account:[$a] SET hidden = true RETURN NONE; };
                  IF $grp { UPDATE account:[$a] SET grp_contacts = true RETURN NONE; };
                  UPDATE directory:v SET version += 1 RETURN NONE;
@@ -130,6 +135,7 @@ impl Registry {
             Err(DbError::Statement(k)) => match k.as_str() {
                 "Thrown:exists" => Err(RegistryError::Exists),
                 "Thrown:rollback" => Err(RegistryError::Rollback),
+                "Thrown:later" => Err(RegistryError::Later),
                 "Thrown:gone" => Err(RegistryError::NotFound),
                 k if k == db::TRANSACTION_CONFLICT => Err(RegistryError::Busy),
                 _ => Err(DbError::Statement(k).into()),

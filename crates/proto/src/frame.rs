@@ -9,10 +9,12 @@
 //! | `0x01` | C→S | `Send` | `req_id u32`, `idempotency_key [16]`, `flags u8`, [MLS: `group [16]`, `epoch u64`], [access: `access_key [16]`], [franked: `commitment [32]`], [expires: `expire_after_s u32`], `count u16`, then per device `count ×` (`device_id [16]`, `len u32`, `envelope [len]`) or shared `count × device_id [16]`, `len u32`, `body [len]` |
 //! | `0x02` | C→S | `Ack` | `up_to_seq u64` |
 //! | `0x03` | C→S | `Ephemeral` | `to [16]`, `payload` |
+//! | `0x04` | C→S | `Attention` | `to [16]`, `payload` (a nudge, Prompt 9, D-0104) |
 //! | `0x10` | C→S | `Auth` | protobuf [`control::Auth`] |
 //! | `0x81` | S→C | `Deliver` | `seq u64`, `envelope` |
 //! | `0x82` | S→C | `SendResult` | `req_id u32`, `status u8`, status body |
 //! | `0x83` | S→C | `Ephemeral` | `payload` |
+//! | `0x84` | S→C | `Attention` | `payload`: an event that came through the attention class (D-0108) |
 //! | `0x90` | S→C | `Hello` | protobuf [`control::Hello`] |
 //! | `0x91` | S→C | `AuthOk` | protobuf [`control::AuthOk`] |
 //! | `0x92` | S→C | `Error` | protobuf [`control::Error`] |
@@ -49,6 +51,9 @@ pub mod ty {
     pub const SEND_RESULT: u8 = 0x82;
     /// Server → client: ephemeral event.
     pub const EPHEMERAL_DELIVER: u8 = 0x83;
+    /// Server → client: an attention event, which passed the attention class's budgets and the
+    /// recipient's blocks (D-0108). Apps honour a nudge only from this frame.
+    pub const ATTENTION_DELIVER: u8 = 0x84;
     /// Server → client: challenge (protobuf).
     pub const HELLO: u8 = 0x90;
     /// Server → client: authenticated (protobuf).
@@ -503,6 +508,11 @@ pub enum ServerFrame {
         /// Opaque payload; the sender is identified only inside it.
         payload: Bytes,
     },
+    /// An attention event (a nudge) that came through the attention class (D-0108).
+    Attention {
+        /// Opaque payload; the sender is identified only inside it.
+        payload: Bytes,
+    },
 }
 
 /// Bounds-checked reader over a frame. Never panics.
@@ -942,14 +952,17 @@ impl ServerFrame {
                 c.finish()?;
                 Ok(Self::SendResult { req_id, status })
             }
-            ty::EPHEMERAL_DELIVER => {
+            t @ (ty::EPHEMERAL_DELIVER | ty::ATTENTION_DELIVER) => {
                 let r = 1..msg.len();
                 if r.is_empty() {
                     return Err(FrameError::EmptyPayload);
                 }
                 check_len("ephemeral", r.len(), limits.max_ephemeral_bytes)?;
-                Ok(Self::Ephemeral {
-                    payload: msg.slice(r),
+                let payload = msg.slice(r);
+                Ok(if t == ty::ATTENTION_DELIVER {
+                    Self::Attention { payload }
+                } else {
+                    Self::Ephemeral { payload }
                 })
             }
             ty::HELLO => {
@@ -994,6 +1007,11 @@ impl ServerFrame {
             Self::Ephemeral { payload } => {
                 out.reserve(1 + payload.len());
                 out.put_u8(ty::EPHEMERAL_DELIVER);
+                out.put_slice(payload);
+            }
+            Self::Attention { payload } => {
+                out.reserve(1 + payload.len());
+                out.put_u8(ty::ATTENTION_DELIVER);
                 out.put_slice(payload);
             }
         }
@@ -1119,6 +1137,7 @@ mod tests {
                 }
             }),
             arb_payload(64).prop_map(|payload| ServerFrame::Ephemeral { payload }),
+            arb_payload(64).prop_map(|payload| ServerFrame::Attention { payload }),
             (any::<[u8; 32]>(), any::<u64>(), any::<u64>()).prop_map(|(n, t, g)| {
                 ServerFrame::Hello(control::Hello {
                     nonce: n.to_vec(),

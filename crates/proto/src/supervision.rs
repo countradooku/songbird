@@ -38,6 +38,8 @@ pub const UNLINK: u8 = 0x80;
 pub const KNOWN: u8 = NO_REQUESTS | GROUP_APPROVAL | HIDDEN | UNLINK;
 /// Largest client-rules ciphertext.
 pub const MAX_CLIENT_RULES: usize = 512;
+/// The longest encoded policy.
+pub const MAX_POLICY_LEN: usize = 1 + 16 + 32 + 8 + 1 + 8 + 2 + MAX_CLIENT_RULES + 64;
 /// Domain separation of the policy signature.
 pub const POLICY_CONTEXT: &[u8] = b"songbird.v1/supervision\0";
 /// Domain separation of a group approval.

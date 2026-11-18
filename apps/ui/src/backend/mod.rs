@@ -232,6 +232,7 @@ fn explain(status: u16, body: &[u8]) -> Problem {
         (401, _) => "The server didn't recognise this device.",
         (403, "pending") => "This device is still waiting to be approved by your phone.",
         (403, "primary") => "Only your main phone can do that.",
+        (423, _) => "Too many wrong PINs. Wait a while, or set a new PIN on your main phone.",
         (429, _) => "Too many tries. Wait a moment and try again.",
         (503, _) => "The server isn't offering this yet.",
         _ => {

@@ -168,6 +168,39 @@ impl Storage {
         }
     }
 
+    /// The second write budget (D-0108): one unit per record a write deletes or inserts, so a
+    /// stream of full rewrites can't churn the database at the writes' count alone.
+    /// Cost-weighted GCRA on Valkey's clock.
+    async fn record_units(
+        &self,
+        hot: &ValkeyConn,
+        account: &AccountId,
+        w: &Write,
+    ) -> Result<(), Outcome> {
+        let s = &self.settings;
+        let cost = 1 + w.deletes.len() + w.inserts.len();
+        let interval_us = 3_600_000_000 / u64::from(s.record_units_per_hour.max(1));
+        let wait = hot
+            .query::<i64>(
+                redis::cmd("EVAL")
+                    .arg(songbird_send::gate::GCRA_COST)
+                    .arg(1)
+                    .arg(self.record("u", account))
+                    .arg(interval_us)
+                    .arg(interval_us.saturating_mul(u64::from(s.record_units_burst.max(1))))
+                    .arg(cost),
+            )
+            .await;
+        match wait.map(|w| u64::try_from(w).unwrap_or(0)) {
+            Ok(0) => Ok(()),
+            Ok(wait) => {
+                self.metrics.throttled.inc();
+                Err(Outcome::Throttled(wait))
+            }
+            Err(_) => Err(Outcome::Unavailable),
+        }
+    }
+
     /// `GET /v1/storage`.
     pub async fn head(
         &self,
@@ -234,6 +267,9 @@ impl Storage {
             return Outcome::Malformed("storage");
         };
         if let Err(o) = self.throttle(hot, true, account).await {
+            return o;
+        }
+        if let Err(o) = self.record_units(hot, account, &w).await {
             return o;
         }
         match registry.storage_write(account, &w, self.caps()).await {

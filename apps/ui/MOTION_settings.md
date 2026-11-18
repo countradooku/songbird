@@ -40,8 +40,9 @@ Verified in the macOS screenshots run (`Screens_settings.test.tsx`): theme switc
 | Parental link: "We both see the same code" | Native pop, then the Rules page pushes | Native |
 | Parental rules: radio, toggles, quiet-hours segment | As every radio, toggle and segment above; each change signs a new policy silently (no spinner: the control is the state) | Same |
 | Unlink | Native destructive alert, then pop | Native |
-| Parental link, live (parent): code → scan → same code → rules code → Done | Each step replaces the last in place, as the device link sheet's do; the camera's own states (asking, running, refused) are `camera_view`'s; Done pops and pushes the Rules page natively | Same |
-| Parental link, live (child): scan → age → code → scan the rules → applying → rules | Steps replace each other in place; applying is the `busy_bar`'s indeterminate sweep (still under reduced motion, as everywhere); a problem is a status line above the camera | Busy bar still |
+| Parental link, live (parent): commitment code → scan → rules code and six digits → same / don't match | Each step replaces the last in place, as the device link sheet's do; the camera's own states (asking, running, refused) are `camera_view`'s; "same code" pops and pushes the Rules page natively, "don't match" pops | Same |
+| Parental link, live (child): scan → age → code → scan the rules → six digits → applying → rules | Steps replace each other in place; applying is the `busy_bar`'s indeterminate sweep (still under reduced motion, as everywhere); a problem is a status line above the camera or the digits | Busy bar still |
+| Linking a device (new device): waiting → PIN asked → linked | The PIN form replaces the wait in place; a wrong PIN clears the field and a status line appears (no shake) | Same |
 | Child's view: rules load (live) | Rows swap in when the server answers; an error is a row in words, not a toast | Same |
 | What Songbird can see: the new facts | Rows of the two lists, as before (expanders above) | Same |
 | Loading | Child's view only, a single fetch; no skeleton (a short list, shown as soon as known) | — |

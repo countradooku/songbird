@@ -375,6 +375,66 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   THREAT_MODEL §1. Calls get the local preview now and send frames once app-core (A2) and
   LiveKit are in the app.
 
+## D-0108 — Prompt 9: the security review's fixes
+
+- Date: 2026-11-18
+- Status: accepted; part of the Prompt 9 gate (`P09-gate.md`, "Security review")
+- Decided by: agent, on an independent read-only review of the whole Prompt 9 diff (a separate
+  agent given the code and the specifications, not the reports' conclusions)
+- Context: one high finding, four medium, seven low and four informational. Each was checked in
+  the code before fixing.
+- Decision (finding → fix):
+  - **H1** A supervised child could turn "anyone may send" on and be reached without a request.
+    Fix: a profile upload opening the account answers 403 `supervised` when message requests are
+    locked off, and installing such a policy closes the account.
+  - **M1** A later policy could push the unlink date out without limit. Fix: the date may only
+    move earlier (409 `date`).
+  - **M2** `PUT /v1/supervision` answered differently for supervised accounts. Fix: a signed
+    policy for another account is refused with one answer (403 `account`) whatever its state.
+  - **M3** A nudge sent as an ordinary ephemeral event got around the attention budgets and blocks.
+    Fix: the server marks each event in the ephemeral lane with its class, and delivery hands
+    attention events over in their own frame (`0x84`, `Event::Attention`). Apps honour a nudge only
+    from it.
+  - **M4** Linking a second child replaced the key for the first. Fix: a link in force is never
+    replaced; the screen says to unlink first.
+  - **L1** A parent's later policies named the parent's account to the server. Fix:
+    `PUT /v1/supervision/update`, unsigned, authorized by the policy key alone and throttled per
+    IP range; one answer for a bad signature and for no policy in force.
+  - **L2** The group-add checks revealed supervision to strangers. Fix: the contacts-only check
+    runs before the approval check.
+  - **L3** The six digits could be ground by someone relaying the codes. Fix: commit then reveal
+    (the parent's first code carries only a commitment; key and secret come after the child's
+    code), and the child's phone installs only after the digits are compared.
+  - **L4** The app lock's wait could be skipped by moving the clock. Fix: the wait is saved as time
+    left and counted down on the monotonic clock. "Lock after" locks if either clock says the time
+    is up, or the wall clock went backwards.
+  - **L5** Storage write budgets counted requests, not records. Fix: a second, cost-weighted
+    budget per record written (60,000 an hour, burst 40,000).
+  - **L6** Client rules showed how many were on by their length. Fix: padded to 64 bytes.
+  - **L7** Linking a device failed on accounts with a PIN. Fix: the new device asks for the PIN
+    and sends it with the same request; the token is spent only after the factor checks out.
+  - **I1** A device that never scanned the parent's code showed the server's rules unchecked.
+    Fix: it says it can't check them.
+  - **I2** An age giving no unlink date started supervision ending at once. Fix: linking stops.
+  - **I4** Presence batches answered 401 or 204 depending on which devices exist. Fix: always 204;
+    a refused batch reaches nobody.
+  - **I3** (secrets in plain app storage) is the known A0 mock: the platform keystore comes with
+    the host projects. Recorded, not changed.
+- Evidence:
+  - the parental gate (H1, M1, M2, L1);
+  - the nudge gate (M3: a nudge sent as ephemeral never arrives as attention);
+  - the presence gate (I4);
+  - `a_child_accepts_only_the_first_policy_meant_for_it` and
+    `the_link_code_matches_on_both_sides` (L3);
+  - `client_rules_open_only_for_their_child_and_version` and
+    `the_commitment_binds_the_key_and_the_secret` (L6);
+  - `closing_the_app_does_not_reset_the_wait` (L4);
+  - the frame proptests (`0x84`).
+- Consequences:
+  - The parental linking flow has five steps, and the parent's later policies go unsigned.
+  - Not exercised between two real phones yet: device and parental linking, and the PIN step
+    (P09-M6 "Not verified").
+
 ## D-0107 — Prompt 9, milestone 6: the app's presence, profiles, nudges, contacts, device and parental linking
 
 - Date: 2026-11-18

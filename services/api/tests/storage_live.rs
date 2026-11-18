@@ -58,6 +58,8 @@ fn settings(max_records: u32) -> StorageSettings {
         max_objects: 2,
         writes_per_hour: 3_600_000,
         write_burst: 100_000,
+        record_units_per_hour: 3_600_000,
+        record_units_burst: 1_000_000,
         reads_per_hour: 3_600_000,
         read_burst: 100_000,
     }

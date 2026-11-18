@@ -201,6 +201,13 @@ pub enum Event {
         /// Opaque payload.
         payload: Bytes,
     },
+    /// An attention event (a nudge) that came through the server's attention class, within its
+    /// budgets and the recipient's blocks (D-0108). The app honours `Content.attention` only
+    /// from this event, never from [`Event::Ephemeral`].
+    Attention {
+        /// Opaque payload.
+        payload: Bytes,
+    },
     /// The server's data was restored from a backup: the client resends every message in its
     /// send log.
     StoreGenerationChanged {
@@ -1120,6 +1127,10 @@ impl Task {
             ServerFrame::Ephemeral { payload } => {
                 // Ephemeral events never block the connection: dropped if the app is behind.
                 let _ = self.events.try_send(Event::Ephemeral { payload });
+                Ok(())
+            }
+            ServerFrame::Attention { payload } => {
+                let _ = self.events.try_send(Event::Attention { payload });
                 Ok(())
             }
             ServerFrame::Error(_) => Ok(()),

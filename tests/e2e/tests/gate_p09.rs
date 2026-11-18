@@ -333,6 +333,20 @@ async fn ephemerals_within(ev: &mut mpsc::Receiver<Event>, ms: u64) -> Vec<Bytes
     }
 }
 
+/// Attention payloads (nudges, frame `0x84`) that arrive within `ms`; ordinary ephemeral
+/// events are not among them (D-0108).
+async fn attentions_within(ev: &mut mpsc::Receiver<Event>, ms: u64) -> Vec<Bytes> {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(ms);
+    let mut out = Vec::new();
+    loop {
+        match tokio::time::timeout_at(deadline, ev.recv()).await {
+            Ok(Some(Event::Attention { payload })) => out.push(payload),
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => return out,
+        }
+    }
+}
+
 /// `PUT /v1/ephemeral/sealed`: no signature, the recipients' combined key in the header.
 async fn sealed(s: &Stack, key: [u8; 16], events: Vec<(DeviceId, Vec<u8>)>) -> (u16, Bytes) {
     let body = SealedBatch { events }.encode().unwrap();
@@ -393,11 +407,22 @@ async fn presence_reaches_only_contacts_and_invisible_sends_nothing() {
     assert_eq!(ephemerals_within(&mut b1, 500).await.len(), 1);
     assert_eq!(accepted(), 1);
 
-    // A batch reaching Carol without her key is refused whole: nobody gets anything.
+    // A batch reaching Carol without her key is refused whole: nobody gets anything, and the
+    // answer is the same 204 (it says nothing about which devices or accounts exist, D-0108).
     let mut with_carol = events.clone();
     with_carol.push((carol.devices[0].id, payload.clone()));
-    assert_eq!(sealed(&s, bob.access, with_carol.clone()).await.0, 401);
-    assert_eq!(sealed(&s, [0; 16], events.clone()).await.0, 401);
+    assert_eq!(sealed(&s, bob.access, with_carol.clone()).await.0, 204);
+    assert_eq!(sealed(&s, [0; 16], events.clone()).await.0, 204);
+    assert_eq!(
+        sealed(
+            &s,
+            [0; 16],
+            vec![(DeviceId::from_bytes([0xEE; 16]), payload.clone())]
+        )
+        .await
+        .0,
+        204
+    );
     assert!(ephemerals_within(&mut b0, 300).await.is_empty());
     assert!(ephemerals_within(&mut c0, 300).await.is_empty());
     assert_eq!(accepted(), 1);
@@ -476,19 +501,19 @@ async fn nudges_are_held_to_their_budgets_and_blocks_drop_them() {
     for _ in 0..6 {
         a.attention(bob.devices[0].id, nudge.clone()).await.unwrap();
     }
-    assert_eq!(ephemerals_within(&mut be, 1_000).await.len(), 3);
+    assert_eq!(attentions_within(&mut be, 1_000).await.len(), 3);
     // Another sender has its own pair budget.
     for _ in 0..3 {
         d.attention(bob.devices[0].id, nudge.clone()).await.unwrap();
     }
-    assert_eq!(ephemerals_within(&mut be, 1_000).await.len(), 3);
+    assert_eq!(attentions_within(&mut be, 1_000).await.len(), 3);
     // Alice's own budget across recipients is five: two are left for Erin.
     for _ in 0..3 {
         a.attention(erin.devices[0].id, nudge.clone())
             .await
             .unwrap();
     }
-    assert_eq!(ephemerals_within(&mut ee, 1_000).await.len(), 2);
+    assert_eq!(attentions_within(&mut ee, 1_000).await.len(), 2);
 
     // Bob blocks Frank: Frank's nudges are dropped, and Frank is told nothing.
     s.registry
@@ -499,7 +524,11 @@ async fn nudges_are_held_to_their_budgets_and_blocks_drop_them() {
         .await
         .unwrap();
     f.attention(bob.devices[0].id, nudge.clone()).await.unwrap();
-    assert!(ephemerals_within(&mut be, 800).await.is_empty());
+    assert!(attentions_within(&mut be, 800).await.is_empty());
+    // Frank sends the same nudge as an ordinary ephemeral event: Bob gets it, if at all, only
+    // as an ephemeral, never as attention, so the app doesn't treat it as a nudge.
+    f.ephemeral(bob.devices[0].id, nudge.clone()).await.unwrap();
+    assert!(attentions_within(&mut be, 800).await.is_empty());
     assert_eq!(m.attention_routed.get(), 3 + 3 + 2);
     assert_eq!(m.attention_dropped.get(), 3 + 1 + 1);
 }
@@ -610,6 +639,17 @@ async fn a_parents_policy_locks_rules_and_only_the_parent_or_the_date_ends_it() 
         p
     };
     let until = unlink_at(2014, 3, 16).unwrap();
+    // A parent's later policies go unsigned (D-0108): the signature is the only authority.
+    let update = |p: &Policy| {
+        unsigned_body(
+            s.api,
+            API,
+            "PUT",
+            "/v1/supervision/update",
+            &[],
+            Bytes::from(p.encode()),
+        )
+    };
     let first = policy(1, NO_REQUESTS | HIDDEN | GROUP_APPROVAL, until);
     // Only the child's primary installs the first policy.
     let st = |r: (u16, Bytes)| r.0;
@@ -682,23 +722,45 @@ async fn a_parents_policy_locks_rules_and_only_the_parent_or_the_date_ends_it() 
             "{path}"
         );
     }
-    // A replayed or older policy is refused; the parent's newer one (from the parent's own
-    // device: the signature is the authority) applies.
-    assert_eq!(
-        st(parent_api
-            .send("PUT", "/v1/supervision", Some(&first.encode()))
+    // "No message requests" also closes the account to "anyone may send" (D-0108): no lane
+    // lets a stranger in without a request.
+    assert!(matches!(
+        s.registry
+            .put_profile_as(&child.account, 50, b"profile", &[7; 16], true, true)
+            .await,
+        Err(songbird_accounts::RegistryError::Supervised)
+    ));
+    // A signed policy for another account is refused with one answer, supervised or not
+    // (D-0108): the endpoint tells nobody who is a child.
+    let stranger = person(&s, 1).await;
+    let mut probe = first.clone();
+    probe.child = stranger.account;
+    let probe_key = PolicyKey::generate().unwrap();
+    probe_key.sign(&mut probe);
+    let mut probe_child = first.clone();
+    probe_key.sign(&mut probe_child);
+    for p in [&first, &probe, &probe_child] {
+        let (code, b) = parent_api
+            .send("PUT", "/v1/supervision", Some(&p.encode()))
             .await
-            .unwrap()),
-        409
-    );
+            .unwrap();
+        assert_eq!((code, json(&b)["error"].as_str()), (403, Some("account")));
+    }
+    // Unsigned updates: a bad signature and an account with no policy get the same answer.
+    for p in [&probe, &probe_child] {
+        let (code, b) = update(p).await.unwrap();
+        assert_eq!((code, json(&b)["error"].as_str()), (403, Some("signature")));
+    }
+    // A replayed or older policy is refused, and so is one that moves the date later; the
+    // parent's newer one applies.
+    let (code, b) = update(&first).await.unwrap();
+    assert_eq!((code, json(&b)["error"].as_str()), (409, Some("version")));
+    let (code, b) = update(&policy(2, NO_REQUESTS, until + 86_400))
+        .await
+        .unwrap();
+    assert_eq!((code, json(&b)["error"].as_str()), (409, Some("date")));
     let second = policy(2, NO_REQUESTS, until);
-    assert_eq!(
-        st(parent_api
-            .send("PUT", "/v1/supervision", Some(&second.encode()))
-            .await
-            .unwrap()),
-        204
-    );
+    assert_eq!(st(update(&second).await.unwrap()), 204);
     assert_eq!(
         st(child_primary
             .send("PUT", "/v1/account/discoverable", Some(br#"{"on":true}"#))
@@ -735,13 +797,7 @@ async fn a_parents_policy_locks_rules_and_only_the_parent_or_the_date_ends_it() 
     );
     // The parent unlinks: the locks lift.
     let end = policy(3, UNLINK, until);
-    assert_eq!(
-        st(parent_api
-            .send("PUT", "/v1/supervision", Some(&end.encode()))
-            .await
-            .unwrap()),
-        204
-    );
+    assert_eq!(st(update(&end).await.unwrap()), 204);
     assert_eq!(
         st(child_primary
             .send(

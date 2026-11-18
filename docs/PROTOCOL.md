@@ -24,11 +24,12 @@ Implemented in `crates/proto` (shared by server and clients); decisions D-0019, 
 | `0x01` | C→S | `Send` | `req_id u32`, `idempotency_key [16]`, `flags u8`, [if flag `0x01`: `group [16]`, `epoch u64`], [if `0x04`: `access_key [16]`], [if `0x10`: `commitment [32]`], [if `0x20`: `expire_after_s u32`], [if `0x40`: `group [16]`], `count u16` (≥ 1; 0 with `0x40`), then per device (no flag `0x02`) `count ×` (`device_id [16]`, `len u32` (≥ 1), `envelope [len]`), or shared (flag `0x02`) `count × device_id [16]`, `len u32` (≥ 1), `body [len]` |
 | `0x02` | C→S | `Ack` | `up_to_seq u64` |
 | `0x03` | C→S | `Ephemeral` | `to [16]`, `payload` (≥ 1 byte) |
-| `0x04` | C→S | `Attention` | `to [16]`, `payload` (≥ 1 byte): a nudge, routed as `Ephemeral` within budgets per pair of accounts (§10.5); the recipient gets `0x83` |
+| `0x04` | C→S | `Attention` | `to [16]`, `payload` (≥ 1 byte): a nudge, routed within budgets per pair of accounts and blocks (§10.5); the recipient gets `0x84` |
 | `0x10` | C→S | `Auth` | protobuf `Auth` (§2) |
 | `0x81` | S→C | `Deliver` | `seq u64`, `envelope` (≥ 1 byte) |
 | `0x82` | S→C | `SendResult` | `req_id u32`, `status u8`; status 0 accepted; 1 rejected: `reason u16`, `retry_after_ms u32`; 2 device mismatch: protobuf `DeviceMismatch` |
 | `0x83` | S→C | `Ephemeral` | `payload` |
+| `0x84` | S→C | `Attention` | `payload`: an event that came through the attention class (§10.5, D-0108); apps honour a nudge only from this frame |
 | `0x90` | S→C | `Hello` | protobuf `Hello` (§2) |
 | `0x91` | S→C | `AuthOk` | protobuf `AuthOk` |
 | `0x92` | S→C | `Error` | protobuf `Error` (`code u32`, `retry_after_ms u32`), sent before a close when needed |
@@ -2082,7 +2083,8 @@ state. Every write is a compare-and-swap of the store's version:
 - Caps per account (`[api.storage]`): 10,000 records, 16 MiB of records, 16 objects. A write may
   delete and insert up to 20,000 records each, so a key rotation fits in one write.
 - Throttles per account, in `valkey-hot` under keyed names (`st:<kind>:<hmac>`): writes and reads
-  per hour.
+  per hour, and records written (one unit per record a write deletes or inserts; 60,000 an hour,
+  burst 40,000, at least one key rotation of a full store; D-0108).
 - No write time is stored; the server keeps the version counter only.
 
 **Keys.** The storage key is 32 random bytes made by the primary at registration, given to a
@@ -2200,8 +2202,8 @@ body: version u8 (1) | n u16 (1..=1024) | (device [16] | len u16 (1..=4096) | pa
 
 - The server maps devices to accounts from its directory snapshot, recomputes the combined key
   and compares it in constant time: "contacts only" is enforced cryptographically, and a stranger
-  cannot probe anyone. A wrong key refuses the whole batch (401); devices that are not listed are
-  left out.
+  cannot probe anyone. A wrong key refuses the whole batch, with the same 204 (D-0108); devices
+  that are not listed are left out.
 - Throttle: per IP range, counted per device addressed (1,000,000 an hour, burst 20,000).
 - Never stored; routed to connected devices only; the answer is always 204 with no body.
 - The server learns who receives presence and when, never who sent it, beyond correlating the
@@ -2219,31 +2221,38 @@ nobody sees nobody's.
 (`0x04`): the connection's ephemeral bucket, then budgets in `valkey-hot` per (sender,
 recipient) account pair (30 an hour, burst 3) and per sender (300 an hour, burst 20), under keyed
 names `q:n:` and `q:m:`, then the recipient's blocks. Over a budget, blocked, offline or the store
-down: dropped silently, like any ephemeral event (fail closed). The server learns that a nudge
+down: dropped silently, like any ephemeral event (fail closed). The recipient gets it in the
+attention frame (`0x84`): the server marks each event it routes with its class, so one a client
+sent as an ordinary ephemeral event (`0x03`, outside these budgets) arrives as `0x83` and is
+never taken for a nudge (D-0108). The server learns that a nudge
 happened between two accounts, never its content. A nudge to an offline contact is lost. The
 receiving app shakes the window (desktop) or vibrates, unless nudges are off, globally or for
 that contact. The stored `DataMessage.nudge` kind is superseded and never sent.
 
 ### 10.6 Parental supervision (M4, D-0105)
 
-**Linking, in person** (D-0107). Three QR codes, read only by the live camera; nothing passes
-through the server between the two accounts, so it never learns who parents whom.
+**Linking, in person** (D-0107, D-0108). Three QR codes, read only by the live camera; nothing
+passes through the server between the two accounts, so it never learns who parents whom.
 
 1. The parent's device makes a fresh Ed25519 **policy key** for this child (never linked to the
-   parent's account) and a 32-byte link secret, and shows
-   `SONGBIRD:SUPERVISE:<policy key hex>:<link secret hex>`.
+   parent's account) and a 32-byte link secret, and shows only a commitment to them:
+   `SONGBIRD:SUPERVISE:<hex(SHA-256("songbird.v1/link-commit\0" ‖ policy key ‖ link secret))>`.
 2. The child's phone scans it. The child enters their age; the phone computes the unlink date
    from it and the country's age of digital consent (THREAT_MODEL §5); the birth date never
    leaves the phone. It shows `SONGBIRD:CHILD:<account hex>:<unlink_at_s decimal>`.
-3. The parent's device scans it. Both screens show the same six-digit code
-   (`SHA-256("songbird.v1/link-code\0" ‖ policy key ‖ link secret ‖ child)`, first 4 bytes mod
-   10⁶), which parent and child compare.
-4. On the parent's confirmation, its device signs the first policy (version 1, for that child,
-   with that date) and shows it as `SONGBIRD:POLICY:<policy hex>` (at most 644 bytes; about 200
-   with the client rules the app writes).
-5. The child's phone scans it and installs it (`PUT /v1/supervision`, as the primary) only if it
-   is version 1, for this account, with the date it computed, not unlinking, and signed by the
-   key it scanned.
+3. The parent's device scans it, signs the first policy (version 1, for that child, with that
+   date) and shows it with the secret: `SONGBIRD:POLICY:<link secret hex>:<policy hex>` (the
+   policy names the key; at most 644 bytes, about 200 with the app's client rules). It shows the
+   six-digit code (`SHA-256("songbird.v1/link-code\0" ‖ policy key ‖ link secret ‖ child)`,
+   first 4 bytes mod 10⁶).
+4. The child's phone scans it and checks that the key and secret match the commitment, the
+   signature, that the policy is version 1, for this account, with the date it computed, and not
+   unlinking. It shows the six digits.
+5. Parent and child compare the digits. Only then does the child's phone install the policy
+   (`PUT /v1/supervision`, as the primary), and the parent's device keep the link. The parent
+   committed before seeing the child's account, and the child's account was fixed before the key
+   and secret were revealed, so nobody relaying the codes can choose values that make two
+   different links show the same digits.
 
 **The policy** (`songbird_proto::supervision::Policy`):
 
@@ -2267,7 +2276,8 @@ hours. Only the two devices read it; the child's app enforces it and shows it.
 
 | Request | Who | Answers |
 | --- | --- | --- |
-| `PUT /v1/supervision` (the policy) | The first: the child's primary (the child consents; the parent's signature proves the parent does). Later ones: any signed device, authorized by the parent's signature against the key in force, so the server never learns which account carries them | 204; 403 `primary` (a first from another device), 403 `signature`; 409 `exists` (a first when one is in force), 409 `version` (not newer, or another key) |
+| `PUT /v1/supervision` (the policy), signed | The child's own devices: the first from the child's primary (the child consents; the parent's signature proves the parent does), or a later one a child's device carries | 204; 403 `account` (a policy for another account, whatever its state), 403 `primary` (a first from another of the child's devices), 403 `signature`; 409 `exists`, `version` (not newer, or another key), `date` |
+| `PUT /v1/supervision/update` (a later policy), **unsigned** (D-0108) | Anyone: the parent's device. Authorized by the parent's signature against the key in force alone, so the server never learns which account the parent is (only the request's address, as for sealed sends); throttled per IP range | 204; 403 `signature` (a bad signature, or no policy in force: one answer after the same work); 409 `version`, `date` |
 | `GET /v1/supervision` | The child's devices | the policy as signed; 404 when none |
 
 - A locked setting answers 403 `supervised` to every device of the child, the primary included.
@@ -2275,7 +2285,13 @@ hours. Only the two devices read it; the child's app enforces it and shows it.
   comma-separated, at most 8), the signature by the policy key over
   `"songbird.v1/group-approval\0" ‖ group [16] ‖ child [16] ‖ expires_s`; valid only if not
   expired and at most a week ahead. Without one: 403 `approval`.
-- **The date:** the worker removes a policy past `unlink_at_s` and lifts its locks.
+- **The date:** the worker removes a policy past `unlink_at_s` and lifts its locks. A later
+  policy may move the date earlier, never later (409 `date`): supervision never outlives the date
+  set at linking (D-0108).
+- **No message requests** also closes the account to "anyone may send": the policy sets
+  `uak_open` off, and a profile upload opening it answers 403 `supervised` (D-0108).
+- **Group adds** check the contacts-only rule before the approval, so a stranger is refused
+  (403 `access`) as for any such account and never learns of the supervision.
 - **The child may delete their own account** (the owner's decision): the policy goes with it.
 - `GET /v1/account/settings` reports `"supervised"`.
 

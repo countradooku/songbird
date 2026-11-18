@@ -1,0 +1,382 @@
+//! Account security, pushed from settings: username and its link, the
+//! two-step PIN, passkeys, accounts on this device, the account report
+//! and deleting the account.
+
+use std::time::Duration;
+
+use nsh_core::prelude::*;
+
+use crate::{
+    nav,
+    store::{Store, store},
+    ui::*,
+};
+
+/// Account security, pushed (linked from You → Account).
+pub fn account_security() {
+    nav::push("account-security", || page("Account", body()));
+}
+
+fn body() -> AnyElement {
+    let s = store();
+    let extra = s.account_extra();
+    let switcher_open = signal(false);
+    let pin_open = signal(false);
+    let delete_open = signal(false);
+    let adding_passkey = signal(false);
+    let username = move || s.me.with(|m| m.username.clone());
+
+    let username_rows = group([
+        Row::new("Username")
+            .icon(Icon::User)
+            .trailing(
+                text(move || format!("@{}", username()))
+                    .text_size(px(font::SMALL + 1.0))
+                    .text_color(move || c::muted_fg()),
+            )
+            .build(),
+        view()
+            .px_4()
+            .py_3()
+            .gap_2()
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(icon_tile(Icon::Link))
+                    .child(
+                        view()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .gap(px(2.0))
+                            .child(text("Username link").text_size(px(font::body())))
+                            .child(
+                                text(move || extra.with(|a| a.username_link.clone()))
+                                    .font_family(MONO)
+                                    .text_size(px(font::SMALL))
+                                    .number_of_lines(1)
+                                    .text_color(move || c::muted_fg())
+                                    .select_text(),
+                            ),
+                    ),
+            )
+            .child(
+                view()
+                    .flex_row()
+                    .gap_2()
+                    .pl(px(42.0))
+                    .child(btn_with_icon("Copy", Some(Icon::Copy), Variant::Secondary, BtnSize::Sm, move || {
+                        set_clipboard(extra.with_untracked(|a| a.username_link.clone()));
+                        toast("Username link copied");
+                    }))
+                    .child(btn_with_icon("Reset link", Some(Icon::Refresh), Variant::Ghost, BtnSize::Sm, move || {
+                        confirm(
+                            "Reset your username link?",
+                            "Your old link and QR code stop working. People who already have you as a contact aren't affected.",
+                            "Reset",
+                            move || {
+                                s.reset_username_link();
+                                toast("New username link made");
+                            },
+                        )
+                    })),
+            )
+            .into_element(),
+    ]);
+
+    let pin_rows = group([
+        toggle_row_icon(
+            Icon::Shield,
+            "Two-step PIN",
+            Some("Asked when you link a device or register again on a new phone."),
+            move || s.settings.with(|x| x.two_step_pin),
+            move |v| {
+                if v {
+                    pin_open.set(true);
+                } else {
+                    confirm(
+                        "Turn off your PIN?",
+                        "Anyone who gets your recovery key or a linked device could then link a new device without it.",
+                        "Turn off",
+                        move || s.settings_update(|x| x.two_step_pin = false),
+                    );
+                }
+            },
+        ),
+        Row::new("Change PIN").icon(Icon::Key).chevron().on_press(move || pin_open.set(true)).build(),
+    ]);
+
+    let passkeys = dynamic(move || {
+        let keys = extra.with(|a| a.passkeys.clone());
+        let busy = adding_passkey.get();
+        untracked(move || {
+            let mut rows: Vec<AnyElement> = keys
+                .into_iter()
+                .enumerate()
+                .map(|(i, k)| {
+                    Row::new(k)
+                        .icon(Icon::Key)
+                        .subtitle("Added today")
+                        .trailing(
+                            icon_btn(Icon::Trash, "Remove passkey", move || {
+                                confirm("Remove this passkey?", "You can't sign in with it any more.", "Remove", move || {
+                                    s.remove_passkey(i)
+                                })
+                            })
+                            .text_color(move || c::destructive()),
+                        )
+                        .build()
+                })
+                .collect();
+            rows.push(
+                Row::new(if busy { "Waiting for your device…" } else { "Add a passkey" })
+                    .icon(Icon::Plus)
+                    .on_press(move || {
+                        if adding_passkey.get_untracked() {
+                            return;
+                        }
+                        adding_passkey.set(true);
+                        // mock: the platform's passkey sheet (app-core `add_passkey`).
+                        set_timeout(Duration::from_millis(1400), move || {
+                            if adding_passkey.try_set(false) {
+                                s.add_passkey();
+                                toast("Passkey added");
+                            }
+                        });
+                    })
+                    .build(),
+            );
+            group(rows).into_element()
+        })
+    });
+
+    let accounts = dynamic(move || {
+        let me = s.me.get();
+        untracked(move || {
+            group([
+                Row::new(me.name.clone())
+                    .leading(avatar(me.name.clone(), me.seed, 32.0))
+                    .subtitle(format!("@{} · Using now", me.username))
+                    .trailing(icon(Icon::Check, 18.0).text_color(move || c::primary()))
+                    .build(),
+                Row::new("Switch accounts")
+                    .icon(Icon::Users)
+                    .subtitle("Up to 3 accounts on this device")
+                    .chevron()
+                    .on_press(move || switcher_open.set(true))
+                    .build(),
+            ])
+            .into_element()
+        })
+    });
+
+    let report = dynamic(move || {
+        let state = extra.with(|a| a.report);
+        untracked(move || {
+            let row = match state {
+                None => Row::new("Request account info")
+                    .icon(Icon::Download)
+                    .subtitle("A report of your account and settings. It never includes messages.")
+                    .on_press(move || s.request_account_report()),
+                Some(false) => Row::new("Preparing your report…")
+                    .icon(Icon::Clock)
+                    .subtitle("This takes a moment."),
+                Some(true) => Row::new("Export report…")
+                    .icon(Icon::Download)
+                    .subtitle("Ready. It's available for 3 days.")
+                    .on_press(move || {
+                        // mock: the save dialog (app-core `export_account` writes the file).
+                        toast("Report saved to Downloads");
+                    }),
+            };
+            group([row.build()]).into_element()
+        })
+    });
+
+    view()
+        .flex_1()
+        .child(page_scroll(
+            view()
+                .w_full()
+                .max_w(px(760.0))
+                .self_center()
+                // Section titles name the group, never repeat its first row.
+                .child(section_title("How people find you"))
+                .child(username_rows)
+                .child(crate::features::settings::foot("People can find you only with your exact username or link."))
+                .child(section_title("Security"))
+                .child(pin_rows)
+                .child(section_title("Passkeys"))
+                .child(passkeys)
+                .child(crate::features::settings::foot("Sign in on a new device with your face, fingerprint or screen lock instead of your PIN."))
+                .child(section_title("Accounts"))
+                .child(accounts)
+                .child(section_title("Phone number"))
+                .child(group([Row::new("Not needed")
+                    .icon(Icon::Phone)
+                    .subtitle("Songbird doesn't use phone numbers, so there's nothing to change here.")
+                    .build()]))
+                .child(section_title("Your data"))
+                .child(report)
+                .child(view().pt_6().child(group([Row::new("Delete account")
+                    .leading(crate::features::settings::danger_tile(Icon::Trash))
+                    .danger()
+                    .on_press(move || delete_open.set(true))
+                    .build()])))
+                .child(crate::features::settings::foot("Only your main phone can delete your account.")),
+        ))
+        .child(account_switcher(switcher_open))
+        .child(pin_sheet(s, pin_open))
+        .child(delete_sheet(s, delete_open))
+        .into_element()
+}
+
+/// The quick account switcher, a sheet (also for the settings agent to
+/// mount, e.g. on a long press of the profile avatar).
+pub fn account_switcher(open: Signal<bool>) -> AnyElement {
+    let s = store();
+    let extra = s.account_extra();
+    app_sheet(
+        open,
+        "Accounts",
+        view().pb_2().gap_2().child(dynamic(move || {
+            let me = s.me.get();
+            let others = extra.with(|a| a.others.clone());
+            untracked(move || {
+                let mut rows = vec![Row::new(me.name.clone())
+                    .leading(avatar(me.name.clone(), me.seed, 36.0))
+                    .subtitle(format!("@{}", me.username))
+                    .trailing(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .child(icon(Icon::Check, 16.0).text_color(move || c::primary()))
+                            .child(text("Current").text_size(px(font::SMALL)).text_color(move || c::muted_fg())),
+                    )
+                    .build()];
+                for (i, a) in others.into_iter().enumerate() {
+                    let name = a.name.clone();
+                    rows.push(
+                        Row::new(a.name.clone())
+                            .leading(avatar(a.name.clone(), a.seed, 36.0))
+                            .subtitle(format!("@{}", a.username))
+                            .on_press(move || {
+                                s.switch_account(i);
+                                open.set(false);
+                                toast(format!("Switched to {name}"));
+                            })
+                            .build(),
+                    );
+                }
+                rows.push(
+                    Row::new("Add account")
+                        .icon(Icon::UserPlus)
+                        .on_press(move || {
+                            open.set(false);
+                            // mock: a second account starts its own onboarding (app-core keeps one store per account).
+                            toast("Adding accounts comes with multi-account support in app-core");
+                        })
+                        .build(),
+                );
+                group(rows).into_element()
+            })
+        })),
+    )
+    .into_element()
+}
+
+/// Setting or changing the PIN: twice, at least 4 digits.
+fn pin_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
+    let pin = signal(String::new());
+    let again = signal(String::new());
+    let digits = |p: &str| p.chars().filter(char::is_ascii_digit).collect::<String>();
+    let long_enough = move || pin.with(|p| p.len() >= 4);
+    let same = move || pin.get() == again.get();
+    let save = move || {
+        if long_enough() && same() {
+            // mock: app-core `set_pin` (Argon2id verifier on the server).
+            s.settings_update(|x| x.two_step_pin = true);
+            pin.set(String::new());
+            again.set(String::new());
+            open.set(false);
+            toast("PIN saved");
+        }
+    };
+    app_sheet(
+        open,
+        "Two-step PIN",
+        view()
+            .px_4()
+            .pb_4()
+            .gap_4()
+            .child(muted("Choose a PIN you'll remember. Songbird asks for it now and then, so you don't forget it."))
+            .child(labelled_field(
+                "New PIN",
+                field("At least 4 digits", pin)
+                    .on_change(move |t: &str| pin.set(digits(t)))
+                    .masked(true)
+                    .keyboard_type(KeyboardType::Number)
+                    .max_length(12),
+                move || if pin.with(|p| !p.is_empty() && p.len() < 4) { "Use at least 4 digits." } else { "" },
+                move || pin.with(|p| !p.is_empty() && p.len() < 4),
+            ))
+            .child(labelled_field(
+                "Confirm PIN",
+                field("Type it again", again)
+                    .on_change(move |t: &str| again.set(digits(t)))
+                    .on_submit(move |_: &str| save())
+                    .masked(true)
+                    .keyboard_type(KeyboardType::Number)
+                    .max_length(12),
+                move || if again.with(|a| !a.is_empty()) && !same() { "The PINs don't match." } else { "" },
+                move || again.with(|a| !a.is_empty()) && !same(),
+            ))
+            .child(
+                btn("Save PIN", Variant::Primary, BtnSize::Md, save).disabled(move || !(long_enough() && same())),
+            ),
+    )
+}
+
+/// Deleting the account: what goes, then the username typed to confirm.
+fn delete_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
+    let typed = signal(String::new());
+    let username = move || s.me.with(|m| m.username.clone());
+    let matches = move || typed.with(|t| t.trim().trim_start_matches('@').eq_ignore_ascii_case(&username()));
+    app_sheet(
+        open,
+        "Delete account",
+        view()
+            .px_4()
+            .pb_4()
+            .gap_4()
+            .child(banner(
+                Tone::Danger,
+                Icon::Alert,
+                "This deletes your account, your username, your backups and your messages on every linked device. It can't be undone.",
+            ))
+            .child(muted(
+                "Your contacts keep the messages you sent them. You'll leave all your groups.",
+            ))
+            .child(labelled_field(
+                "Type your username to confirm",
+                field("Your username", typed).auto_capitalize(AutoCapitalize::None).auto_correct(false),
+                "",
+                || false,
+            ))
+            .child(
+                btn("Delete account", Variant::Danger, BtnSize::Md, move || {
+                    confirm("Delete your account?", "This can't be undone.", "Delete account", move || {
+                        // mock: app-core `delete_account` (the server deletes every store, D-0041).
+                        open.set(false);
+                        typed.set(String::new());
+                        nav::pop_to_root();
+                        s.replay_onboarding();
+                        toast("Your account was deleted");
+                    })
+                })
+                .disabled(move || !matches()),
+            ),
+    )
+}

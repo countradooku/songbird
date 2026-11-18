@@ -248,7 +248,7 @@ impl Capture for AndroidCapture {
 
 impl Drop for AndroidCapture {
     fn drop(&mut self) {
-        // The scanner thread ends when its session goes.
+        // The scanner thread ends after its current frame, unwaited (D-0116).
         with(|s| s.sessions.remove(&self.id));
         let id = self.id;
         call_void("close", "(J)V", move |_| Some(vec![long(id)]));

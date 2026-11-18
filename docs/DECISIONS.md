@@ -26,6 +26,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   primary without one, video clips on Windows and Linux later, portal then V4L2 on Linux,
   `unsafe` in `songbird-camera`'s platform modules only, link codes only from the live camera.
   Still the owner's: a physical iPhone and the personal team for the iOS checks (question 4).
+- Camera gate (`CAM-gate.md`, D-0111 to D-0116; PR #68): **waiting for the owner**: M1–M5 and the
+  security review's fixes; `jpeg-encoder`'s IJG licence; a physical iPhone.
 - Prompt 8, M4 and M5 rest (D-0099): **deferred by the owner on 2026-11-18 until the whole app
   is built** ("lets do this after we have the whole app built"): the Xcode and Gradle host
   projects (APNs token, PushKit with CallKit, FCM, UnifiedPush, ConnectionService), the Apple
@@ -166,6 +168,25 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0116 — Camera: the security review's fixes
+
+- Date: 2026-11-18
+- Status: accepted; part of the camera gate (`docs/reports/CAM-gate.md`, "Security review")
+- Decided by: agent, on an independent read-only review of the whole camera diff
+- Context: no high findings; three medium, three low, informational notes.
+- Decision:
+  1. Scanner and desktop reading threads are never joined on the UI thread: they end after
+     their current frame or read, and publish nothing once stopped. QR decoding is capped at
+     640×480; the `qr_decode` fuzz target reaches large, repeated patterns.
+  2. V4L2 reads time out every 500 ms; Linux frame sizes are capped at 8192 and lengths checked
+     before allocation.
+  3. Apple: interruption, its end and runtime errors are observed and reported; a photo needs an
+     active video connection (else `NotRunning`, never an Objective-C exception).
+  4. Android: each session unbinds only its own use cases; the activity's stop closes every
+     camera; the torch answer reflects the camera.
+- Open: CI for the app workspaces (test, clippy, deny, audit); a pinned Gradle wrapper; Apple
+  reconfiguration on the session queue; `jpeg-encoder`'s IJG licence (owner).
 
 ## D-0115 — Camera, milestone 5: photos in chat, the camera in calls
 

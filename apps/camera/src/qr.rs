@@ -7,13 +7,12 @@
 
 #![forbid(unsafe_code)]
 
-use std::thread::JoinHandle;
-
 use crate::{Frame, Sink, mailbox};
 
-/// The most pixels decoded per frame; larger frames are scaled down first. 1280×720: enough for
-/// a code held at arm's length, and a bounded cost per frame.
-pub const MAX_PIXELS: usize = 1280 * 720;
+/// The most pixels decoded per frame; larger frames are scaled down first. 640×480: a link code
+/// (37 modules) filling a third of the frame still has 4 pixels a module, and the decoder's
+/// cost on a hostile, finder-dense image stays bounded (security review, D-0116).
+pub const MAX_PIXELS: usize = 640 * 480;
 /// The largest side accepted at all; larger frames are refused unread.
 pub const MAX_SIDE: usize = 8192;
 /// The most codes decoded from one frame.
@@ -89,10 +88,11 @@ pub fn decode_frame(frame: &Frame) -> Vec<String> {
 }
 
 /// Decodes frames on a thread of its own, the newest frame first: a slow decode skips frames,
-/// never delays the camera. Codes go to the capture's [`Sink`]. Dropping it ends the thread.
+/// never delays the camera. Codes go to the capture's [`Sink`]. Dropping it lets the thread end
+/// after the frame it is on, without waiting for it: a hostile image that makes one decode slow
+/// never holds up the screen that closes the scanner (D-0116).
 pub struct Scanner {
     frames: Option<mailbox::Sender<Frame>>,
-    thread: Option<JoinHandle<()>>,
 }
 
 impl Scanner {
@@ -100,7 +100,8 @@ impl Scanner {
     #[must_use]
     pub fn start(sink: Sink) -> Self {
         let (frames, rx) = mailbox::channel::<Frame>(1);
-        let thread = std::thread::Builder::new()
+        // Detached on purpose (see the type's notes); it ends once `frames` is dropped.
+        let _detached = std::thread::Builder::new()
             .name("songbird-qr".into())
             .spawn(move || {
                 while let Some(frame) = rx.recv_blocking() {
@@ -115,7 +116,6 @@ impl Scanner {
             .ok();
         Scanner {
             frames: Some(frames),
-            thread,
         }
     }
 
@@ -123,15 +123,6 @@ impl Scanner {
     pub fn offer(&self, frame: Frame) {
         if let Some(f) = &self.frames {
             f.send(frame);
-        }
-    }
-}
-
-impl Drop for Scanner {
-    fn drop(&mut self) {
-        self.frames = None; // the thread's `recv_blocking` ends
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
         }
     }
 }
@@ -256,7 +247,8 @@ pub(crate) mod tests {
             scanner.offer(frame.clone());
             std::thread::sleep(std::time::Duration::from_millis(30));
         }
-        drop(scanner); // joins: every offered frame is decoded or replaced
+        drop(scanner); // the thread ends after the frame it is on
+        std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(events.drain(), vec![Event::Code("SONGBIRD".into())]);
     }
 }

@@ -224,7 +224,7 @@ impl Pump {
 
     /// A frame: to the preview, then by purpose. Inconsistent frames are dropped.
     pub fn frame(&mut self, frame: Frame) {
-        if !frame.is_consistent() {
+        if self.stopped() || !frame.is_consistent() {
             return;
         }
         if let Some(image) = preview_of(&frame) {
@@ -301,11 +301,12 @@ impl ThreadCapture {
         Ok(())
     }
 
+    /// Tells the reading thread to end and lets it, without waiting: a camera that stops
+    /// sending frames (a stalled driver) never hangs the screen that closes it (D-0116). The
+    /// thread publishes nothing once stopped.
     fn halt(&mut self) {
         self.stop.store(true, Ordering::Release);
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
+        drop(self.thread.take());
     }
 }
 

@@ -210,6 +210,8 @@ struct AppleCapture {
     _delegate: Option<Retained<Delegate>>,
     /// Photo delegates until they are called (the photo output does not keep them).
     pending: Vec<Retained<PhotoDelegate>>,
+    /// The session's interruption and runtime-error observers, removed when it stops.
+    observers: Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
     purpose: Purpose,
     sink: Sink,
 }
@@ -294,6 +296,7 @@ impl AppleCapture {
             }
             session.commitConfiguration();
         }
+        let observers = observe(&session, &sink, &config.lens);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         sessions(|m| m.insert(id, SendSession(session.clone())));
         let starting = SendSession(session.clone());
@@ -320,6 +323,7 @@ impl AppleCapture {
             photo,
             _delegate: delegate,
             pending: Vec::new(),
+            observers,
             purpose: config.purpose,
             sink,
         })
@@ -382,6 +386,15 @@ impl Capture for AppleCapture {
         else {
             return done(Err(CaptureError::WrongPurpose));
         };
+        // Asking for a photo with no live video connection (a webcam unplugged, the camera
+        // taken by another app) raises an Objective-C exception: check first (D-0116).
+        // SAFETY: property reads of the output and its connection.
+        let live = unsafe {
+            photo.connectionWithMediaType(video()).is_some_and(|c| c.isActive() && c.isEnabled())
+        };
+        if !live {
+            return done(Err(CaptureError::NotRunning));
+        }
         self.pending.retain(|d| !d.is_done());
         let delegate = PhotoDelegate::new(done);
         // SAFETY: JPEG settings and our delegate, which `pending` keeps alive until it is
@@ -399,8 +412,43 @@ impl Capture for AppleCapture {
     }
 }
 
+/// Reports the session's losses and returns: an interruption (another app took the camera, a
+/// phone call, Split View, a covered window) and a runtime error as `Unavailable`, the end of
+/// an interruption as running again (D-0116).
+fn observe(session: &AVCaptureSession, sink: &Sink, lens: &str) -> Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>> {
+    let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+    let mut out = Vec::new();
+    let mut add = |name: &objc2_foundation::NSNotificationName, report: Box<dyn Fn() + 'static>| {
+        let block = RcBlock::new(move |_: std::ptr::NonNull<objc2_foundation::NSNotification>| report());
+        // SAFETY: an observer for this session's notifications only, delivered on the posting
+        // thread; the block owns what it reports into and is removed with the capture.
+        let token = unsafe { center.addObserverForName_object_queue_usingBlock(Some(name), Some(session), None, &block) };
+        out.push(token);
+    };
+    // SAFETY: constants AVFoundation exports.
+    let (lost, back, failed) = unsafe {
+        (
+            objc2_av_foundation::AVCaptureSessionWasInterruptedNotification,
+            objc2_av_foundation::AVCaptureSessionInterruptionEndedNotification,
+            objc2_av_foundation::AVCaptureSessionRuntimeErrorNotification,
+        )
+    };
+    let s = sink.clone();
+    add(lost, Box::new(move || s.unavailable(Unavailable::Interrupted)));
+    let (s, lens) = (sink.clone(), lens.to_owned());
+    add(back, Box::new(move || s.running(&lens)));
+    let s = sink.clone();
+    add(failed, Box::new(move || s.unavailable(Unavailable::Failed("AVFoundation runtime error".into()))));
+    out
+}
+
 impl Drop for AppleCapture {
     fn drop(&mut self) {
+        let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+        for token in self.observers.drain(..) {
+            // SAFETY: removing an observer this capture added.
+            unsafe { center.removeObserver(token.as_ref()) };
+        }
         sessions(|m| m.remove(&self.id));
         let s = SendSession(self.session.clone());
         // `stopRunning` blocks: on the session's queue, after anything queued before it.

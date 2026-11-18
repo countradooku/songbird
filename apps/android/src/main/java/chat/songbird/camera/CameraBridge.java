@@ -35,7 +35,8 @@ import androidx.lifecycle.LifecycleRegistry;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -71,8 +72,9 @@ public final class CameraBridge {
     /** The application's context: lives as long as the process, so a static holds no leak. */
     @android.annotation.SuppressLint("StaticFieldLeak")
     private static Context app;
-    private static final Map<Long, Session> SESSIONS = new HashMap<>(); // main thread only
-    private static final Map<Long, PreviewView> PREVIEWS = new HashMap<>(); // main thread only
+    /** Changed on the main thread; read from Rust's threads too (the torch). */
+    private static final Map<Long, Session> SESSIONS = new ConcurrentHashMap<>();
+    private static final Map<Long, PreviewView> PREVIEWS = new ConcurrentHashMap<>(); // main thread only
 
     // ------------------------------------------------------------ the activity
 
@@ -89,6 +91,17 @@ public final class CameraBridge {
         for (Session s : new ArrayList<>(SESSIONS.values())) s.close();
         SESSIONS.clear();
         activity = new java.lang.ref.WeakReference<>(null);
+    }
+
+    /**
+     * The activity stopped (another app is in front, the screen is off): every camera stops,
+     * whatever Rust asked for. Rust's own rule (no camera in the background) starts them again
+     * when the app returns.
+     */
+    public static void onActivityStopped(Activity a) {
+        if (activity.get() != a) return;
+        for (Session s : new ArrayList<>(SESSIONS.values())) s.close();
+        SESSIONS.clear();
     }
 
     /** The permission dialog answered. */
@@ -180,13 +193,13 @@ public final class CameraBridge {
         });
     }
 
-    /** Turns the torch on or off; false when the camera has none (answered at once, best effort). */
+    /** Turns the torch on or off; false when the camera has none, or is not bound yet. */
     public static boolean setTorch(long id, boolean on) {
+        Session session = SESSIONS.get(id);
+        if (session == null || !session.hasTorch) return false;
         MAIN.post(() -> {
             Session s = SESSIONS.get(id);
-            if (s != null && s.camera != null && s.camera.getCameraInfo().hasFlashUnit()) {
-                s.camera.getCameraControl().enableTorch(on);
-            }
+            if (s != null && s.camera != null) s.camera.getCameraControl().enableTorch(on);
         });
         return true;
     }
@@ -267,7 +280,11 @@ public final class CameraBridge {
         Camera camera;
         Preview preview;
         ImageCapture capture;
-        boolean closed;
+        /** This session's use cases: only these are unbound, never another session's. */
+        UseCase[] bound = new UseCase[0];
+        /** Read on the analysis thread. */
+        volatile boolean closed;
+        volatile boolean hasTorch;
 
         Session(long id, int purpose, String lens) {
             this.id = id;
@@ -314,7 +331,7 @@ public final class CameraBridge {
         @androidx.annotation.OptIn(markerClass = ExperimentalCamera2Interop.class)
         void bind() {
             if (provider == null || closed) return;
-            provider.unbindAll();
+            provider.unbind(bound);
             List<UseCase> cases = new ArrayList<>();
             preview = new Preview.Builder().build();
             cases.add(preview);
@@ -338,7 +355,9 @@ public final class CameraBridge {
                 cases.add(capture);
             }
             try {
-                camera = provider.bindToLifecycle(this, selector(), cases.toArray(new UseCase[0]));
+                bound = cases.toArray(new UseCase[0]);
+                camera = provider.bindToLifecycle(this, selector(), bound);
+                hasTorch = camera.getCameraInfo().hasFlashUnit();
             } catch (IllegalArgumentException e) {
                 nativeUnavailable(id, NO_CAMERA);
                 return;
@@ -376,7 +395,8 @@ public final class CameraBridge {
 
         void close() {
             closed = true;
-            if (provider != null) provider.unbindAll();
+            if (provider != null) provider.unbind(bound);
+            bound = new UseCase[0];
             if (lifecycle.getCurrentState().isAtLeast(Lifecycle.State.RESUMED)) {
                 lifecycle.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE);
                 lifecycle.handleLifecycleEvent(Lifecycle.Event.ON_STOP);

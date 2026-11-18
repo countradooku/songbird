@@ -42,6 +42,12 @@ public final class SongbirdActivity extends Activity {
     }
 
     @Override
+    protected void onStop() {
+        CameraBridge.onActivityStopped(this);
+        super.onStop();
+    }
+
+    @Override
     public void onConfigurationChanged(android.content.res.Configuration config) {
         super.onConfigurationChanged(config);
         SongbirdHost.systemBars(this);

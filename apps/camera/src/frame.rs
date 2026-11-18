@@ -203,8 +203,15 @@ pub(crate) fn nv12_from_yuyv(
     if width < 2 || height == 0 || !width.is_multiple_of(2) || stride < width.checked_mul(2)? {
         return None;
     }
-    let mut y = Vec::with_capacity(width * height);
-    let mut uv = Vec::with_capacity(width * height.div_ceil(2));
+    // The buffer must hold every row before anything proportional to the size is allocated.
+    let needed = stride
+        .checked_mul(height - 1)?
+        .checked_add(width.checked_mul(2)?)?;
+    if data.len() < needed {
+        return None;
+    }
+    let mut y = Vec::with_capacity(width.checked_mul(height)?);
+    let mut uv = Vec::with_capacity(width.checked_mul(height.div_ceil(2))?);
     for row in 0..height {
         let start = row.checked_mul(stride)?;
         let line = data.get(start..start.checked_add(width * 2)?)?;

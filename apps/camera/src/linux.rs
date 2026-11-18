@@ -157,18 +157,27 @@ fn read(lens: &str, mut pump: Pump) {
         Ok(s) => s,
         Err(e) => return pump.unavailable(unavailable_of(&e)),
     };
+    // A driver's sizes are not trusted: at most 8192 a side, as on the other platforms.
+    if fmt.width == 0 || fmt.height == 0 || fmt.width > 8192 || fmt.height > 8192 {
+        return pump.unavailable(Unavailable::Failed("frame size".into()));
+    }
+    // Wake at least twice a second, so a stalled camera still sees the stop.
+    stream.set_timeout(std::time::Duration::from_millis(500));
     let (w, h, stride) = (fmt.width as usize, fmt.height as usize, fmt.stride as usize);
     while !pump.stopped() {
         let (data, meta) = match stream.next() {
             Ok(x) => x,
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
             Err(e) => return pump.unavailable(unavailable_of(&e)),
         };
         pump.running(lens);
         let Some(pixels) = nv12_from_yuyv(data, stride.max(w * 2), w, h) else {
             continue;
         };
-        let timestamp_us = u64::try_from(meta.timestamp.sec).unwrap_or(0) * 1_000_000
-            + u64::try_from(meta.timestamp.usec).unwrap_or(0);
+        let timestamp_us = u64::try_from(meta.timestamp.sec)
+            .unwrap_or(0)
+            .saturating_mul(1_000_000)
+            .saturating_add(u64::try_from(meta.timestamp.usec).unwrap_or(0));
         pump.frame(Frame {
             width: fmt.width,
             height: fmt.height,

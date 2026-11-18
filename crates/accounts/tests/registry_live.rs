@@ -13,11 +13,28 @@
 
 use std::time::Duration;
 
-use songbird_accounts::{Db, Grant, Registry, RegistryError, push_index};
+use songbird_accounts::{Db, Grant, PushStore, Registry, RegistryError, push_index};
 use songbird_jobs::{Job, ObjectKey, Outbox as _, Work};
 use songbird_types::{AccountId, DeviceId};
 
 async fn registry() -> Option<Registry> {
+    Some(
+        Registry::connect(Db::connect(db_config("accounts")?).await.unwrap())
+            .await
+            .unwrap(),
+    )
+}
+
+/// A push registration store in a database of its own (D-0095).
+async fn push_store() -> Option<PushStore> {
+    Some(
+        PushStore::connect(Db::connect(db_config("push")?).await.unwrap())
+            .await
+            .unwrap(),
+    )
+}
+
+fn db_config(prefix: &str) -> Option<songbird_surreal::Config> {
     let Ok(addr) = std::env::var("SONGBIRD_TEST_SURREALDB") else {
         assert!(
             std::env::var("SONGBIRD_REQUIRE_SURREALDB").is_err(),
@@ -33,18 +50,14 @@ async fn registry() -> Option<Registry> {
         pass: std::env::var("SONGBIRD_TEST_SURREALDB_PASS").expect("SONGBIRD_TEST_SURREALDB_PASS"),
         namespace: "test".into(),
         database: format!(
-            "accounts_{}",
+            "{prefix}_{}",
             DeviceId::random().unwrap().to_hex_unredacted()
         ),
         // Generous: CI's shared SurrealDB also serves the prekey gate's 400 concurrent claims.
         timeout: Duration::from_secs(30),
         max_message_bytes: 16 << 20,
     };
-    Some(
-        Registry::connect(Db::connect(cfg).await.unwrap())
-            .await
-            .unwrap(),
-    )
+    Some(cfg)
 }
 
 fn dev(b: u8) -> (DeviceId, [u8; 32]) {
@@ -95,6 +108,7 @@ async fn accounts_devices_and_the_directory() {
 #[tokio::test]
 async fn deletion_disables_writes_the_outbox_and_leaves_nothing() {
     let Some(r) = registry().await else { return };
+    let Some(p) = push_store().await else { return };
     let secret = [7u8; 32];
     let a = AccountId::random().unwrap();
     let (d1, d2) = (dev(1), dev(2));
@@ -103,9 +117,7 @@ async fn deletion_disables_writes_the_outbox_and_leaves_nothing() {
     let d3 = dev(3);
     r.create_account(&other, &[d3]).await.unwrap();
     for d in [d1.0, d2.0, d3.0] {
-        r.put_push_token(&push_index(&secret, &d), b"sealed")
-            .await
-            .unwrap();
+        p.put(&push_index(&secret, &d), b"sealed").await.unwrap();
     }
     let obj = ObjectKey::random().unwrap();
     r.create_grant(
@@ -144,25 +156,56 @@ async fn deletion_disables_writes_the_outbox_and_leaves_nothing() {
     // The worker's steps.
     let devices = r.account_devices(&a).await.unwrap();
     let index: Vec<[u8; 32]> = devices.iter().map(|d| push_index(&secret, d)).collect();
-    let before = r.remnants(&a, &devices, &index).await.unwrap();
+    let before = r.remnants(&a, &devices).await.unwrap();
     assert_eq!(before.account, 1);
     assert_eq!(before.devices, 2);
-    assert_eq!(before.push_tokens, 2);
+    assert_eq!(p.count(&index).await.unwrap(), 2);
     assert_eq!(before.grants, 1);
-    r.delete_push_tokens(&index).await.unwrap();
+    p.delete(&index).await.unwrap();
     for g in r.grants_of(&devices).await.unwrap() {
         r.delete_grant(&g).await.unwrap();
     }
     r.delete_account_rows(&a).await.unwrap();
-    assert!(r.remnants(&a, &devices, &index).await.unwrap().is_empty());
+    assert!(r.remnants(&a, &devices).await.unwrap().is_empty());
+    assert_eq!(p.count(&index).await.unwrap(), 0);
     // The other account is untouched.
     assert!(r.device(&d3.0).await.unwrap().is_some());
-    assert!(
-        r.push_token(&push_index(&secret, &d3.0))
+    assert!(p.get(&push_index(&secret, &d3.0)).await.unwrap().is_some());
+}
+
+/// Push registrations live in their own database (D-0095): the registry's database holds none,
+/// and rows a registry still holds from before are moved once, never over a newer registration.
+#[tokio::test]
+async fn push_registrations_live_apart_and_old_rows_move_once() {
+    let Some(r) = registry().await else { return };
+    let Some(p) = push_store().await else { return };
+    // Rows written by the registry before D-0095 (same table name, in the registry database).
+    let (old, newer) = ([0x0a; 32], [0x0b; 32]);
+    for (i, sealed) in [(old, b"old-a".as_slice()), (newer, b"old-b")] {
+        r.db()
+            .query(
+                "UPSERT push_token:[$p] SET sealed = $s, at = time::now() RETURN NONE;",
+                vec![
+                    ("p".into(), songbird_surreal::Value::Bytes(i.to_vec().into())),
+                    ("s".into(), songbird_surreal::Value::Bytes(sealed.to_vec().into())),
+                ],
+            )
             .await
-            .unwrap()
-            .is_some()
-    );
+            .unwrap();
+    }
+    // The device behind `newer` registered again since, in the new store.
+    p.put(&newer, b"new-b").await.unwrap();
+    assert_eq!(p.move_from_registry(&r).await.unwrap(), 2);
+    assert_eq!(p.get(&old).await.unwrap().as_deref(), Some(b"old-a".as_slice()));
+    assert_eq!(p.get(&newer).await.unwrap().as_deref(), Some(b"new-b".as_slice()));
+    // Nothing is left in the registry's database, and a second run moves nothing.
+    let left = r
+        .db()
+        .query1("RETURN count(SELECT id FROM push_token);", Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(left, songbird_surreal::Value::Int(0));
+    assert_eq!(p.move_from_registry(&r).await.unwrap(), 0);
 }
 
 #[tokio::test]
@@ -607,7 +650,7 @@ async fn keys_links_and_deletion() {
     assert_eq!(r.lookup_username(&current).await.unwrap(), None);
     // Deletion: nothing names the account any more.
     r.delete_account_rows(&a.account).await.unwrap();
-    let left = r.remnants(&a.account, &[a.device], &[]).await.unwrap();
+    let left = r.remnants(&a.account, &[a.device]).await.unwrap();
     assert!(left.is_empty(), "{left:?}");
     assert_eq!(r.username_link(&[3; 16]).await.unwrap(), None);
 }
@@ -729,7 +772,7 @@ async fn bundles_claim_one_time_keys_skip_the_requester_and_fall_back_to_last_re
     // Deletion leaves no prekey behind.
     r.delete_account_rows(&alice.account).await.unwrap();
     let left = r
-        .remnants(&alice.account, &[alice.device], &[])
+        .remnants(&alice.account, &[alice.device])
         .await
         .unwrap();
     assert!(left.is_empty(), "{left:?}");
@@ -912,7 +955,7 @@ async fn key_packages_are_single_use_expire_and_fall_back_to_last_resort() {
     assert!(r.delete_expired_key_packages(100).await.unwrap() >= 1);
     r.delete_account_rows(&alice.account).await.unwrap();
     let left = r
-        .remnants(&alice.account, &[alice.device], &[])
+        .remnants(&alice.account, &[alice.device])
         .await
         .unwrap();
     assert!(left.is_empty(), "{left:?}");

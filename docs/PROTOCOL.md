@@ -44,6 +44,7 @@ above, so every frame has one encoding):
 | `0x10` | `FRANKED`: the sender's franking commitment (§5.3), stamped by the server (§5.13) | |
 | `0x20` | `EXPIRES`: the disappearing hint, 1 s to 30 days (§5.13) | Zero or more than 30 days refused |
 | `0x40` | `GROUP`: a group message; `group [16]` follows every other block, `count` is 0 and the server fans the shared body out to the group's roster (§6.5) | Needs `0x02`; not with `0x01`, `0x04` or `0x08` |
+| `0x80` | `SILENT` (Prompt 8, D-0095): stored and delivered as usual, but an offline recipient gets no push wake-up. For delivery and read receipts, sync messages to one's own devices, and anything else the recipient need not see at once. The server keeps the bit only while it routes the send. | No block; goes with any other flag. Every bit of `flags` is now assigned: a future flag needs a new block. |
 
 Rejection reasons: 1 rate limited, 2 too large, 3 too many recipients, 4 unknown recipient
 (unused since milestone 2: unknown devices are reported in a device mismatch), 5 duplicate

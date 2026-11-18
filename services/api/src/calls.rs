@@ -38,6 +38,8 @@ const ROLE_MEMBER: u8 = 1;
 /// Wake-ups one caller may cause one receiver per hour, and their burst (D-0091).
 const WAKES_PER_PAIR_HOUR: u32 = 20;
 const WAKE_PAIR_BURST: u32 = 6;
+/// How long a call ring may still be sent (D-0095).
+const RING_LIFE_MS: u64 = 30_000;
 /// A group's call pointer younger than this is live without asking LiveKit: its starter may
 /// still be creating the room (D-0091).
 const YOUNG_CALL_MS: u64 = 15_000;
@@ -244,12 +246,15 @@ impl CallsApi {
         {
             return;
         }
+        // A ring is worth sending for 30 s (D-0095): the offer expires after 60 s, and a ring
+        // that arrives later than this would ring for a call already given up.
+        let until_ms = now_ms().saturating_add(RING_LIFE_MS);
         let jobs: Vec<Job> = devices
             .iter()
             .filter_map(|d| {
-                Job::new(Work::Push {
+                Job::new(Work::Ring {
                     device: *d,
-                    call: true,
+                    until_ms,
                 })
                 .ok()
             })

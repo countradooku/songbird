@@ -169,14 +169,15 @@ impl Registry {
     /// Everything the registry holds about an account, as JSON (GDPR export). Secrets derived
     /// from what the user knows (the PIN and username-key verifiers) are reported as present,
     /// not given out; sealed push registrations as present (only the push service can open
-    /// them).
+    /// them). Push registrations live in their own store (D-0095): give it, with the push-index
+    /// secret, to report them; without it the field is left out.
     ///
     /// # Errors
     /// [`RegistryError`].
     pub async fn export(
         &self,
         account: &AccountId,
-        push_index_secret: &[u8; 32],
+        push: Option<(&crate::PushStore, &[u8; 32])>,
     ) -> Result<serde_json::Value, RegistryError> {
         let a = vec![var("a", bytes(account.as_bytes()))];
         let acc = self
@@ -270,7 +271,7 @@ impl Registry {
         self.export_lists(account, &mut out).await?;
         out.insert(
             "devices".into(),
-            self.export_devices(account, push_index_secret)
+            self.export_devices(account, push)
                 .await?
                 .into(),
         );
@@ -281,7 +282,7 @@ impl Registry {
     async fn export_devices(
         &self,
         account: &AccountId,
-        push_index_secret: &[u8; 32],
+        push: Option<(&crate::PushStore, &[u8; 32])>,
     ) -> Result<Vec<serde_json::Value>, RegistryError> {
         let hex = |v: Option<&Value>| v.and_then(|b| b.as_bytes()).map(hex::encode);
         // Devices, each with its keys, counts, push registration and pending uploads.
@@ -300,9 +301,15 @@ impl Registry {
             };
             let (ec, kem) = self.prekey_counts(&id).await?;
             let (kp, lr) = self.key_package_counts(&id).await?;
-            let push = self
-                .push_token(&crate::push_index(push_index_secret, &id))
-                .await?;
+            let registration = match push {
+                Some((store, secret)) => Some(
+                    store
+                        .get(&crate::push_index(secret, &id))
+                        .await?
+                        .map_or("none", |_| "present, sealed to the push service"),
+                ),
+                None => None,
+            };
             let grants = self.grants_of(&[id]).await?;
             let packs = self.packs_of(&[id]).await?;
             devices.push(serde_json::json!({
@@ -315,7 +322,7 @@ impl Registry {
                 "created": d.get("at").and_then(Value::as_text),
                 "one_time_prekeys": {"x25519": ec, "ml_kem_1024": kem},
                 "key_packages": {"single_use": kp, "last_resort": lr},
-                "push_registration": push.map(|_| "present, sealed to the push service"),
+                "push_registration": registration,
                 "pending_uploads": grants.iter().map(songbird_jobs::ObjectKey::to_hex_unredacted).collect::<Vec<_>>(),
                 "packs_being_uploaded": packs.iter().map(|(p, _)| hex::encode(p)).collect::<Vec<_>>(),
             }));

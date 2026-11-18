@@ -369,6 +369,18 @@ async fn build(
 ) -> Result<(Arc<App>, Vec<tokio::task::JoinHandle<()>>), BoxError> {
     let db = songbird_accounts::Db::connect(s.surrealdb.config()?).await?;
     let registry = Arc::new(songbird_accounts::Registry::connect(db).await?);
+    let push_store = Arc::new(match &s.push_tokens {
+        Some(p) => {
+            songbird_accounts::PushStore::connect(songbird_accounts::Db::connect(p.config()?).await?)
+                .await?
+        }
+        None => songbird_accounts::PushStore::beside(&registry).await?,
+    });
+    // Registrations written to the registry before D-0095 move to their own database once.
+    let moved = push_store.move_from_registry(&registry).await?;
+    if moved > 0 {
+        tracing::info!(moved, "push registrations moved to their own database");
+    }
     let s3 = songbird_s3::Client::new(s3_config(&s.s3)?)?;
     s3.create_bucket().await?;
     let queue = songbird_jobs::Queue::connect(
@@ -443,6 +455,7 @@ async fn build(
         reports,
         requests,
         server_name: s.server_name.clone(),
+        push_store,
         registry,
         s3,
         queue,

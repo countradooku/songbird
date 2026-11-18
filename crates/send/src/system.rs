@@ -172,7 +172,8 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
                 retry_after_ms: RETRY_MS,
             })
         })?;
-        self.route(SendPayload::PerDevice(recipients), outcome.seqs)
+        // System frames wake their devices (a membership or device-list change).
+        self.route(SendPayload::PerDevice(recipients), outcome.seqs, false)
             .await;
         Ok(())
     }
@@ -225,7 +226,7 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
                 },
             }
         })?;
-        self.route(SendPayload::Shared { devices, body }, outcome.seqs)
+        self.route(SendPayload::Shared { devices, body }, outcome.seqs, false)
             .await;
         Ok(())
     }

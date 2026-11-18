@@ -186,6 +186,9 @@ async fn stack(limits: Limits, sends_per_sec: u32, send_burst: u32) -> Option<St
         reports: None,
         calls: None,
         server_name: API.into(),
+        push_store: Arc::new(
+            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+        ),
         registry,
         // Unused by these tests (attachments and deletion are M5's).
         s3: songbird_s3::Client::new(songbird_s3::Config::new(
@@ -611,6 +614,53 @@ async fn an_offline_recipient_of_an_http_send_gets_a_push_wake_up() {
     assert_eq!(
         next_delivery(&mut alice_events).await,
         (1, Bytes::from("wake"))
+    );
+}
+
+/// Prompt 8 (D-0095): a `SILENT` send (a receipt, a sync message) is stored and delivered like any
+/// other, but an offline recipient gets no wake-up for it; the next ordinary send wakes it as
+/// before, and both wait in order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_silent_send_is_stored_and_delivered_but_wakes_nobody() {
+    let Some(mut s) = default_stack().await else {
+        return;
+    };
+    let bob = s.bob1.api(&s);
+    let mut receipt = frame(key(), vec![to(s.alice.id, "receipt")]);
+    receipt.hints.silent = true;
+    assert_eq!(
+        bob.put_message(&receipt).await.unwrap().1.unwrap().1,
+        SendStatus::Accepted
+    );
+    assert_eq!(s.app.metrics.send.routes_offline.get(), 1);
+    assert_eq!(s.app.metrics.send.routes_silent.get(), 1);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(s.pushes.try_recv().is_err(), "a silent send woke the device");
+    // An ordinary send still wakes her.
+    assert_eq!(
+        bob.put_message(&frame(key(), vec![to(s.alice.id, "message")]))
+            .await
+            .unwrap()
+            .1
+            .unwrap()
+            .1,
+        SendStatus::Accepted
+    );
+    let woken = tokio::time::timeout(Duration::from_secs(5), s.pushes.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(woken, s.alice.id);
+    assert_eq!(s.app.metrics.send.routes_silent.get(), 1);
+    // Both wait for her, in order.
+    let (_alice, mut alice_events) = connect(&s, &s.alice).await;
+    assert_eq!(
+        next_delivery(&mut alice_events).await,
+        (1, Bytes::from("receipt"))
+    );
+    assert_eq!(
+        next_delivery(&mut alice_events).await,
+        (2, Bytes::from("message"))
     );
 }
 

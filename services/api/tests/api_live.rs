@@ -87,6 +87,9 @@ async fn stack() -> Option<Stack> {
         reports: None,
         calls: None,
         server_name: SERVER.into(),
+        push_store: Arc::new(
+            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+        ),
         registry,
         s3,
         queue: Arc::new(queue),
@@ -145,7 +148,7 @@ async fn push_registration_is_sealed_and_requests_are_authenticated() {
     let body = br#"{"fcm":{"token":"fcm-registration-token-123"}}"#;
     assert_eq!(c.send("PUT", "/v1/push", Some(body)).await.unwrap().0, 204);
     let index = push_index(&[9; 32], &d);
-    let sealed = s.app.registry.push_token(&index).await.unwrap().unwrap();
+    let sealed = s.app.push_store.get(&index).await.unwrap().unwrap();
     // The database holds no trace of the token; only the push key opens it, on this row only.
     assert!(!sealed.windows(9).any(|w| w == b"fcm-regis"));
     assert_eq!(
@@ -209,7 +212,7 @@ async fn push_registration_is_sealed_and_requests_are_authenticated() {
         400
     );
     assert_eq!(c.send("DELETE", "/v1/push", None).await.unwrap().0, 204);
-    assert!(s.app.registry.push_token(&index).await.unwrap().is_none());
+    assert!(s.app.push_store.get(&index).await.unwrap().is_none());
     let _ = s.stop.send(true);
 }
 

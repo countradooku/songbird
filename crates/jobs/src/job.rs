@@ -18,9 +18,12 @@ const VERSION: u8 = 1;
 const KIND_PUSH: u8 = 1;
 const KIND_DELETE_ACCOUNT: u8 = 2;
 const KIND_DELETE_OBJECT: u8 = 3;
+const KIND_RING: u8 = 5;
 const KIND_DELETE_DEVICES: u8 = 4;
 
-const FLAG_CALL: u8 = 0x01;
+/// The push kind's flags byte. Bit `0x01` was D-0036's call flag, retired by D-0095 (calls are
+/// [`Work::Ring`] on their own stream); a job carrying it no longer opens.
+const PUSH_FLAGS: u8 = 0;
 
 /// Largest sealed job accepted (checked before decrypting; real jobs are under 100 bytes).
 pub const MAX_SEALED: usize = 1024;
@@ -67,12 +70,19 @@ impl ObjectKey {
 /// The work a job asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Work {
-    /// Wake a device that has a message (or a call) waiting.
+    /// Wake a device that has a message waiting.
     Push {
         /// The device.
         device: DeviceId,
-        /// A call: the high-priority `VoIP` path.
-        call: bool,
+    },
+    /// Ring a device for an incoming call (Prompt 8, D-0095): the high-priority path (`VoIP` on
+    /// APNs), on a stream of its own so message wake-ups never delay it. Worthless after
+    /// `until_ms`: the push service drops it then instead of ringing late.
+    Ring {
+        /// The device.
+        device: DeviceId,
+        /// Unix time in milliseconds after which the ring is dropped unsent.
+        until_ms: u64,
     },
     /// Delete an account from every store (outbox, D-0036).
     DeleteAccount {
@@ -99,6 +109,7 @@ impl Work {
     pub fn stream(&self) -> crate::Stream {
         match self {
             Self::Push { .. } => crate::Stream::Push,
+            Self::Ring { .. } => crate::Stream::Ring,
             Self::DeleteAccount { .. } | Self::DeleteDevices { .. } => crate::Stream::Deletion,
             Self::DeleteObject { .. } => crate::Stream::Cleanup,
         }
@@ -165,10 +176,15 @@ impl Job {
         b.extend_from_slice(self.id.as_bytes());
         b.extend_from_slice(&self.attempt.to_be_bytes());
         match &self.work {
-            Work::Push { device, call } => {
+            Work::Push { device } => {
                 b.push(KIND_PUSH);
                 b.extend_from_slice(device.as_bytes());
-                b.push(if *call { FLAG_CALL } else { 0 });
+                b.push(PUSH_FLAGS);
+            }
+            Work::Ring { device, until_ms } => {
+                b.push(KIND_RING);
+                b.extend_from_slice(device.as_bytes());
+                b.extend_from_slice(&until_ms.to_be_bytes());
             }
             Work::DeleteAccount { account } => {
                 b.push(KIND_DELETE_ACCOUNT);
@@ -197,13 +213,20 @@ impl Job {
         let work = match (kind, rest.len()) {
             (KIND_PUSH, 17) => {
                 let (d, flags) = rest.split_at(16);
-                let flags = flags.first().copied().ok_or(JobError::Malformed)?;
-                if flags & !FLAG_CALL != 0 {
+                if flags != [PUSH_FLAGS] {
                     return Err(JobError::Malformed);
                 }
                 Work::Push {
                     device: DeviceId::from_slice(d).map_err(|_| JobError::Malformed)?,
-                    call: flags & FLAG_CALL != 0,
+                }
+            }
+            (KIND_RING, 24) => {
+                let (d, until) = rest.split_at(16);
+                Work::Ring {
+                    device: DeviceId::from_slice(d).map_err(|_| JobError::Malformed)?,
+                    until_ms: u64::from_be_bytes(
+                        until.try_into().map_err(|_| JobError::Malformed)?,
+                    ),
                 }
             }
             (KIND_DELETE_ACCOUNT, 16) => Work::DeleteAccount {
@@ -300,15 +323,14 @@ mod tests {
                 attempt: 0,
                 work: Work::Push {
                     device: DeviceId::from_bytes([1; 16]),
-                    call: false,
                 },
             },
             Job {
                 id,
                 attempt: 513,
-                work: Work::Push {
+                work: Work::Ring {
                     device: DeviceId::from_bytes([2; 16]),
-                    call: true,
+                    until_ms: 1_795_000_000_123,
                 },
             },
             Job {
@@ -365,6 +387,21 @@ mod tests {
             // Two seals of one job differ (random nonce): equal jobs are not linkable.
             assert_ne!(sealed, s.seal("j:push", &j).unwrap());
         }
+    }
+
+    #[test]
+    fn the_retired_call_flag_no_longer_opens() {
+        // D-0036's `Push { call: true }`: kind 1, flags 0x01. Calls are `Ring` now (D-0095).
+        let mut b = Job {
+            id: JobId::from_bytes([7; 16]),
+            attempt: 0,
+            work: Work::Push {
+                device: DeviceId::from_bytes([1; 16]),
+            },
+        }
+        .encode();
+        *b.last_mut().unwrap() = 0x01;
+        assert_eq!(Job::decode(&b), Err(JobError::Malformed));
     }
 
     #[test]

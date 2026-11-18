@@ -190,6 +190,8 @@ impl WorkerMetrics {
 pub struct Worker {
     /// Account registry.
     pub registry: Arc<Registry>,
+    /// Push registrations, in their own database (D-0095).
+    pub push_store: Arc<songbird_accounts::PushStore>,
     /// Attachment store (the worker's own credential).
     pub s3: songbird_s3::Client,
     /// Job queue.
@@ -314,7 +316,7 @@ impl Worker {
                 Err(_) => Outcome::Retry(None),
             },
             // Not this service's stream.
-            Work::Push { .. } => Outcome::Dead,
+            Work::Push { .. } | Work::Ring { .. } => Outcome::Dead,
         }
     }
 
@@ -338,8 +340,8 @@ impl Worker {
             .map(|d| push_index(&self.push_index_secret, d))
             .collect();
         self.delivery.forget(&devices).await?;
-        self.registry
-            .delete_push_tokens(&index)
+        self.push_store
+            .delete(&index)
             .await
             .map_err(unavailable)?;
         let grants = self
@@ -413,10 +415,11 @@ impl Worker {
             .map_err(unavailable)?;
         let r = self
             .registry
-            .remnants(account, &devices, &index)
+            .remnants(account, &devices)
             .await
             .map_err(unavailable)?;
-        if !r.is_empty() {
+        let tokens = self.push_store.count(&index).await.map_err(unavailable)?;
+        if !r.is_empty() || tokens != 0 {
             return Err(Left::Rows);
         }
         Ok(())
@@ -445,8 +448,8 @@ impl Worker {
             .map(|d| push_index(&self.push_index_secret, d))
             .collect();
         self.delivery.forget(&devices).await?;
-        self.registry
-            .delete_push_tokens(&index)
+        self.push_store
+            .delete(&index)
             .await
             .map_err(unavailable)?;
         let grants = self
@@ -489,12 +492,7 @@ impl Worker {
             .device_remnants(&devices)
             .await
             .map_err(unavailable)?;
-        let tokens = self
-            .registry
-            .remnants(account, &[], &index)
-            .await
-            .map_err(unavailable)?
-            .push_tokens;
+        let tokens = self.push_store.count(&index).await.map_err(unavailable)?;
         let grants_left = self
             .registry
             .grants_of(&devices)
@@ -528,10 +526,7 @@ impl Worker {
                 let jobs: Vec<Job> = devices
                     .iter()
                     .filter_map(|d| {
-                        Job::new(Work::Push {
-                            device: *d,
-                            call: false,
-                        })
+                        Job::new(Work::Push { device: *d })
                         .ok()
                     })
                     .collect();

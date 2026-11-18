@@ -60,6 +60,15 @@ impl Validate for WorkerConfig {
                 "is required in staging and production (deleting blocks, D-0062)",
             );
             v.check(
+                w.push_tokens.as_ref().is_some_and(|p| {
+                    p.tls_ca.is_some()
+                        && p.user != w.surrealdb.user
+                        && p.database != w.surrealdb.database
+                }),
+                "worker.push_tokens",
+                "is required in staging and production, with TLS, its own user and its own database",
+            );
+            v.check(
                 w.s3.tls_ca.is_some() && w.surrealdb.tls_ca.is_some() && w.jobs.valkey.tls(),
                 "worker.s3.tls_ca",
                 "worker.surrealdb.tls_ca and worker.jobs.valkey.tls_ca are required in staging and production",
@@ -73,6 +82,10 @@ impl Validate for WorkerConfig {
 #[serde(deny_unknown_fields)]
 struct WorkerSettings {
     surrealdb: songbird_accounts::SurrealSettings,
+    /// Push registrations' own database and credential (D-0095); development may omit it (a
+    /// database beside the registry's).
+    #[serde(default)]
+    push_tokens: Option<songbird_accounts::SurrealSettings>,
     jobs: JobsSettings,
     s3: S3Settings,
     push_index_secret: SecretRef,
@@ -321,6 +334,15 @@ impl Service for WorkerService {
         };
         let db = songbird_accounts::Db::connect(s.surrealdb.config()?).await?;
         let registry = Arc::new(songbird_accounts::Registry::connect(db).await?);
+        let push_store = Arc::new(match &s.push_tokens {
+            Some(p) => {
+                songbird_accounts::PushStore::connect(
+                    songbird_accounts::Db::connect(p.config()?).await?,
+                )
+                .await?
+            }
+            None => songbird_accounts::PushStore::beside(&registry).await?,
+        });
         let queue = Arc::new(
             Queue::connect(
                 s.jobs.valkey.client()?,
@@ -364,6 +386,7 @@ impl Service for WorkerService {
         };
         let block_keys = block_keys(s.requests_secret.as_ref(), &registry).await?;
         let worker = Arc::new(Worker {
+            push_store,
             registry,
             s3: songbird_s3::Client::new(s3_config(&s.s3)?)?,
             queue: Arc::clone(&queue),

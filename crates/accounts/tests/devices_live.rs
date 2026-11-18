@@ -374,7 +374,7 @@ async fn linked_devices_remove_themselves_the_primary_cannot() {
     assert!(r.removed_devices(&n.account).await.unwrap().is_empty());
     r.delete_account_rows(&n.account).await.unwrap();
     assert!(
-        r.remnants(&n.account, &[n.device, d2], &[])
+        r.remnants(&n.account, &[n.device, d2])
             .await
             .unwrap()
             .is_empty()
@@ -602,7 +602,7 @@ async fn departing_devices_mark_the_groups_that_hold_them() {
     // Deletion strips the devices from the marks that remain: nothing names them after.
     r.delete_device_rows(&[d3]).await.unwrap();
     r.delete_account_rows(&a).await.unwrap();
-    let left = r.remnants(&a, &[n.device, d2, d3], &[]).await.unwrap();
+    let left = r.remnants(&a, &[n.device, d2, d3]).await.unwrap();
     assert!(left.is_empty(), "{left:?}");
     let g2_mark = r.groups_to_prune(10).await.unwrap();
     assert_eq!(g2_mark.len(), 1);
@@ -631,6 +631,6 @@ async fn departing_devices_mark_the_groups_that_hold_them() {
     let marks = r.groups_to_prune(10).await.unwrap();
     assert_eq!(marks.len(), 1);
     assert_eq!(marks[0].gone, vec![other.device]);
-    let left = r.remnants(&a, &[n.device, d2, d3], &[]).await.unwrap();
+    let left = r.remnants(&a, &[n.device, d2, d3]).await.unwrap();
     assert!(left.is_empty(), "{left:?}");
 }

@@ -34,7 +34,7 @@ type Labels = Vec<(&'static str, &'static str)>;
 #[derive(Debug, Clone, Default)]
 pub struct PushMetrics {
     /// Per provider and result: `sent`, `unregistered`, `retried`, `failed`, `debounced`,
-    /// `unconfigured`.
+    /// `deferred` (a trailing wake-up scheduled), `unconfigured`.
     pub results: Family<Labels, Counter>,
     /// Jobs for devices without a registration (done; the device fetches at next connection).
     pub no_registration: Counter,
@@ -44,6 +44,8 @@ pub struct PushMetrics {
     pub calls_without_voip: Counter,
     /// Registry failures (job retried).
     pub registry_errors: Counter,
+    /// Rings dropped unsent because their call could no longer ring in time (D-0095).
+    pub rings_expired: Counter,
 }
 
 impl PushMetrics {
@@ -90,6 +92,11 @@ impl PushMetrics {
             "push_registry_errors",
             "Registry failures while handling push jobs",
             self.registry_errors.clone(),
+        )?;
+        m.register(
+            "push_rings_expired",
+            "Call rings dropped unsent because they were too late",
+            self.rings_expired.clone(),
         )?;
         Ok(())
     }

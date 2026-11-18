@@ -24,6 +24,7 @@ struct Resolved {
     index_secret: Zeroizing<[u8; 32]>,
     providers: Providers,
     concurrency: usize,
+    ring_concurrency: usize,
     debounce: Duration,
 }
 
@@ -40,13 +41,14 @@ impl std::fmt::Debug for Push {
 
 fn resolve(p: &PushSettings) -> Result<Resolved, BoxError> {
     Ok(Resolved {
-        surreal: p.surrealdb.config()?,
+        surreal: p.push_tokens.config()?,
         jobs: p.jobs.valkey.client()?,
         jobs_secret: p.jobs.secret.resolve_key32()?,
         push_key: p.push_key.resolve_key32()?,
         index_secret: p.push_index_secret.resolve_key32()?,
         providers: p.providers()?,
         concurrency: p.concurrency,
+        ring_concurrency: p.ring_concurrency,
         debounce: Duration::from_millis(p.debounce_ms),
     })
 }
@@ -80,7 +82,7 @@ impl Service for Push {
             return songbird_service::idle_until_shutdown(ctx).await;
         };
         let db = songbird_accounts::Db::connect(r.surreal).await?;
-        let registry = Arc::new(songbird_accounts::Registry::connect(db).await?);
+        let store = Arc::new(songbird_accounts::PushStore::connect(db).await?);
         let mut id = [0u8; 8];
         aws_lc_rs::rand::fill(&mut id).map_err(|_| "no system randomness")?;
         let queue = Queue::connect(
@@ -89,9 +91,9 @@ impl Service for Push {
             QueueConfig::new(format!("push-{}", hex::encode(id))),
         )
         .await?;
-        queue.ensure_groups(&[Stream::Push]).await?;
+        queue.ensure_groups(&[Stream::Push, Stream::Ring]).await?;
         let handler = Handler::new(
-            registry,
+            store,
             &r.index_secret,
             &r.push_key,
             r.providers,
@@ -105,8 +107,12 @@ impl Service for Push {
                 concurrency: r.concurrency,
                 ..ConsumeConfig::default()
             },
+            ConsumeConfig {
+                concurrency: r.ring_concurrency,
+                ..ConsumeConfig::default()
+            },
         );
-        tracing::info!("consuming push jobs");
+        tracing::info!("consuming push and ring jobs");
         ctx.health.set_ready(true);
         ctx.shutdown().await;
         ctx.health.set_ready(false);

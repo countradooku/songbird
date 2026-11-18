@@ -238,6 +238,9 @@ async fn account_deletion_is_verified_across_every_store() {
         reports: None,
         calls: None,
         server_name: API.into(),
+        push_store: Arc::new(
+            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+        ),
         registry: Arc::clone(&registry),
         s3: s3.clone(),
         queue: queue(&e, "gate-api").await,
@@ -366,6 +369,9 @@ async fn account_deletion_is_verified_across_every_store() {
     journal_s3.create_bucket_locked().await.unwrap();
     let worker = Worker {
         block_keys: None,
+        push_store: Arc::new(
+            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+        ),
         registry: Arc::clone(&registry),
         s3: s3.clone(),
         queue: queue(&e, "gate-worker").await,
@@ -430,11 +436,13 @@ async fn account_deletion_is_verified_across_every_store() {
         .iter()
         .map(|d| push_index(&PUSH_INDEX, d))
         .collect();
-    let r = registry
-        .remnants(&alice, &[a1.id, a2.id], &index)
-        .await
-        .unwrap();
+    let r = registry.remnants(&alice, &[a1.id, a2.id]).await.unwrap();
     assert!(r.is_empty(), "{r:?}");
+    // Push registrations live in their own database (D-0095): none of Alice's left there.
+    assert_eq!(
+        songbird_accounts::PushStore::beside(&registry).await.unwrap().count(&index).await.unwrap(),
+        0
+    );
     assert!(registry.device(&a1.id).await.unwrap().is_none());
     assert!(registry.grant(&pending).await.unwrap().is_none());
     // Mailbox (Iggy in CI): nothing pending, no counters, for either device.
@@ -474,8 +482,10 @@ async fn account_deletion_is_verified_across_every_store() {
     // Bob is untouched.
     assert!(registry.device(&b1.id).await.unwrap().is_some());
     assert!(
-        registry
-            .push_token(&push_index(&PUSH_INDEX, &b1.id))
+        songbird_accounts::PushStore::beside(&registry)
+            .await
+            .unwrap()
+            .get(&push_index(&PUSH_INDEX, &b1.id))
             .await
             .unwrap()
             .is_some()
@@ -552,6 +562,9 @@ async fn device_removal_is_verified_across_every_store_and_spares_the_rest() {
         reports: None,
         calls: None,
         server_name: API.into(),
+        push_store: Arc::new(
+            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+        ),
         registry: Arc::clone(&registry),
         s3: s3.clone(),
         queue: queue(&e, "gate-devices-api").await,
@@ -664,6 +677,9 @@ async fn device_removal_is_verified_across_every_store_and_spares_the_rest() {
     // The worker runs the job.
     let worker = Worker {
         block_keys: None,
+        push_store: Arc::new(
+            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+        ),
         registry: Arc::clone(&registry),
         s3: s3.clone(),
         queue: queue(&e, "gate-devices-worker").await,
@@ -700,8 +716,10 @@ async fn device_removal_is_verified_across_every_store_and_spares_the_rest() {
     assert!(registry.device(&a2.id).await.unwrap().is_none());
     assert_eq!(registry.device_remnants(&[a2.id]).await.unwrap(), 0);
     assert!(
-        registry
-            .push_token(&push_index(&PUSH_INDEX, &a2.id))
+        songbird_accounts::PushStore::beside(&registry)
+            .await
+            .unwrap()
+            .get(&push_index(&PUSH_INDEX, &a2.id))
             .await
             .unwrap()
             .is_none()
@@ -731,8 +749,10 @@ async fn device_removal_is_verified_across_every_store_and_spares_the_rest() {
     assert!(!row.disabled);
     assert_eq!(row.account, alice);
     assert!(
-        registry
-            .push_token(&push_index(&PUSH_INDEX, &a1.id))
+        songbird_accounts::PushStore::beside(&registry)
+            .await
+            .unwrap()
+            .get(&push_index(&PUSH_INDEX, &a1.id))
             .await
             .unwrap()
             .is_some()
@@ -817,6 +837,9 @@ async fn an_offline_device_receives_a_push_end_to_end() {
         reports: None,
         calls: None,
         server_name: API.into(),
+        push_store: Arc::new(
+            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+        ),
         registry: Arc::clone(&registry),
         s3,
         queue: queue(&e, "gate-api").await,
@@ -863,7 +886,7 @@ async fn an_offline_device_receives_a_push_end_to_end() {
     apns_cfg.base_url = apns_mock.url();
     apns_cfg.http = ca.http_config();
     let handler = songbird_push::Handler::new(
-        Arc::clone(&registry),
+        Arc::new(songbird_accounts::PushStore::beside(&registry).await.unwrap()),
         &PUSH_INDEX,
         &push_key,
         songbird_push::Providers {
@@ -877,6 +900,10 @@ async fn an_offline_device_receives_a_push_end_to_end() {
     let running = songbird_push::spawn(
         queue(&e, "gate-push").await,
         Arc::new(handler),
+        songbird_jobs::ConsumeConfig {
+            housekeeping: Duration::from_millis(50),
+            ..songbird_jobs::ConsumeConfig::default()
+        },
         songbird_jobs::ConsumeConfig {
             housekeeping: Duration::from_millis(50),
             ..songbird_jobs::ConsumeConfig::default()
@@ -900,7 +927,8 @@ async fn an_offline_device_receives_a_push_end_to_end() {
             .unwrap();
         assert_eq!(r, SendStatus::Accepted);
     }
-    // One wake-up for the burst, with the constant alert and nothing of the device.
+    // The burst wakes the phone at once, and once more at the debounce window's end for what
+    // came after the first wake-up (D-0095): two identical pushes, nothing of the device.
     let mut woke = false;
     for _ in 0..200 {
         if !apns_mock.requests().is_empty() {
@@ -910,9 +938,11 @@ async fn an_offline_device_receives_a_push_end_to_end() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert!(woke, "no push reached APNs");
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
     let reqs = apns_mock.requests();
-    assert_eq!(reqs.len(), 1, "one push per burst");
+    assert_eq!(reqs.len(), 2, "a leading and a trailing push per burst");
+    assert_eq!(reqs[0].body, reqs[1].body);
+    assert_eq!(reqs[0].path, reqs[1].path);
     let r = &reqs[0];
     assert_eq!(r.path, format!("/3/device/{}", hex::encode(token)));
     assert_eq!(r.header("apns-push-type"), Some("alert"));
@@ -945,7 +975,7 @@ async fn an_offline_device_receives_a_push_end_to_end() {
     bob_c.send(key(), vec![to(a1.id, "live")]).await.unwrap();
     assert_eq!(&next_delivery(&mut a1_ev).await.1[..], b"live");
     assert_eq!(metrics.push_jobs.get(), before);
-    assert_eq!(apns_mock.requests().len(), 1);
+    assert_eq!(apns_mock.requests().len(), 2);
 
     running.stop().await;
     let _ = stop.send(true);
@@ -985,7 +1015,6 @@ async fn m5_numbers() {
             .map(|_| {
                 Job::new(Work::Push {
                     device: DeviceId::random().unwrap(),
-                    call: false,
                 })
                 .unwrap()
             })
@@ -1041,6 +1070,9 @@ async fn m5_numbers() {
         reports: None,
         calls: None,
         server_name: API.into(),
+        push_store: Arc::new(
+            songbird_accounts::PushStore::beside(&registry).await.unwrap(),
+        ),
         registry: Arc::clone(&registry),
         s3,
         queue: Arc::clone(&q),

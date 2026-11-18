@@ -46,6 +46,8 @@ pub struct DeliveryMetrics {
     pub routes_lagged: Counter,
     /// Envelopes stored for devices with no session (push jobs from milestone 5).
     pub routes_offline: Counter,
+    /// Of those, envelopes of `SILENT` sends: no wake-up (D-0095).
+    pub routes_silent: Counter,
     /// ACKs processed (cumulative; deletes are batched by the mailbox).
     pub acks: Counter,
     /// Ephemeral events delivered to a session's lane.
@@ -91,6 +93,7 @@ impl DeliveryMetrics {
             envelopes_stored: self.envelopes_stored.clone(),
             routes_lagged: self.routes_lagged.clone(),
             routes_offline: self.routes_offline.clone(),
+            routes_silent: self.routes_silent.clone(),
             mailbox_errors: self.mailbox_errors.clone(),
             requests: self.requests.clone(),
             requests_dropped: self.requests_dropped.clone(),
@@ -120,7 +123,7 @@ impl DeliveryMetrics {
             "WebSocket connections open",
             self.connections_open.clone(),
         )?;
-        let counters: [(&str, &str, &Counter); 31] = [
+        let counters: [(&str, &str, &Counter); 32] = [
             (
                 "delivery_connections",
                 "WebSocket connections accepted",
@@ -201,6 +204,11 @@ impl DeliveryMetrics {
                 "delivery_routes_offline",
                 "Envelopes for devices without a session",
                 &self.routes_offline,
+            ),
+            (
+                "delivery_routes_silent",
+                "Envelopes for devices without a session, sent silent (no wake-up)",
+                &self.routes_silent,
             ),
             (
                 "delivery_acks",

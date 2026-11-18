@@ -44,8 +44,8 @@ impl Validate for PushConfig {
             );
             if let Some(p) = &self.push {
                 v.check(
-                    p.surrealdb.tls_ca.is_some(),
-                    "push.surrealdb.tls_ca",
+                    p.push_tokens.tls_ca.is_some(),
+                    "push.push_tokens.tls_ca",
                     "is required in staging and production",
                 );
                 v.check(
@@ -76,8 +76,9 @@ impl Validate for PushConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PushSettings {
-    /// The account registry (sealed push registrations).
-    pub surrealdb: songbird_accounts::SurrealSettings,
+    /// The push registrations' own database (D-0095), with a credential for it alone: this
+    /// service holds no registry credential.
+    pub push_tokens: songbird_accounts::SurrealSettings,
     /// The job queue.
     pub jobs: JobsSettings,
     /// The push service's X25519 private key, 64 hex characters (registrations are sealed to its
@@ -93,6 +94,9 @@ pub struct PushSettings {
     /// window are done without a push.
     #[serde(default = "default_debounce_ms")]
     pub debounce_ms: u64,
+    /// Call rings handled at once, on their own consumer (D-0095).
+    #[serde(default = "default_concurrency")]
+    pub ring_concurrency: usize,
     /// Apple.
     #[serde(default)]
     pub apns: Option<ApnsSettings>,
@@ -114,11 +118,16 @@ const fn default_debounce_ms() -> u64 {
 
 impl Validate for PushSettings {
     fn validate(&self, v: &mut Validator) {
-        v.section("surrealdb", &self.surrealdb);
+        v.section("push_tokens", &self.push_tokens);
         v.section("jobs", &self.jobs);
         v.check(
             (1..=1024).contains(&self.concurrency),
             "concurrency",
+            "must be in 1..=1024",
+        );
+        v.check(
+            (1..=1024).contains(&self.ring_concurrency),
+            "ring_concurrency",
             "must be in 1..=1024",
         );
         v.check(
@@ -286,7 +295,7 @@ filter = "info"
 [push]
 push_key = { env = "PUSH_KEY" }
 push_index_secret = { env = "PUSH_INDEX" }
-[push.surrealdb]
+[push.push_tokens]
 addr = "127.0.0.1:47800"
 host = "localhost"
 user = "root"
@@ -328,7 +337,7 @@ sandbox = true
     fn production_rules() {
         let e = load(&format!("{BASE}{PUSH}").replace("\"dev\"", "\"production\"")).unwrap_err();
         assert!(e.contains("push.apns.sandbox"), "{e}");
-        assert!(e.contains("push.surrealdb.tls_ca"), "{e}");
+        assert!(e.contains("push.push_tokens.tls_ca"), "{e}");
         assert!(e.contains("push.jobs.valkey.tls_ca"), "{e}");
         let e = load(&BASE.replace("\"dev\"", "\"production\"")).unwrap_err();
         assert!(e.contains("\"push\""), "{e}");
@@ -340,7 +349,7 @@ sandbox = true
         assert!(e.contains("push.apns.team_id"), "{e}");
         let e = load(
             &format!("{BASE}{PUSH}")
-                .replace("[push.surrealdb]", "concurrency = 0\n[push.surrealdb]"),
+                .replace("[push.push_tokens]", "concurrency = 0\n[push.push_tokens]"),
         )
         .unwrap_err();
         assert!(e.contains("push.concurrency"), "{e}");

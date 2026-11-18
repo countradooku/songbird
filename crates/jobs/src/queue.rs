@@ -26,8 +26,10 @@ use crate::job::{Job, Sealer};
 /// The job streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Stream {
-    /// Push wake-ups (consumed by `push`).
+    /// Message wake-ups (consumed by `push`).
     Push,
+    /// Call rings (consumed by `push` on a consumer of its own, D-0095).
+    Ring,
     /// Attachment and expiry cleanup (consumed by `worker`).
     Cleanup,
     /// Account deletion (consumed by `worker`).
@@ -36,13 +38,14 @@ pub enum Stream {
 
 impl Stream {
     /// Every stream.
-    pub const ALL: [Self; 3] = [Self::Push, Self::Cleanup, Self::Deletion];
+    pub const ALL: [Self; 4] = [Self::Push, Self::Ring, Self::Cleanup, Self::Deletion];
 
     /// The Valkey key of the stream.
     #[must_use]
     pub const fn key(self) -> &'static str {
         match self {
             Self::Push => "j:push",
+            Self::Ring => "j:ring",
             Self::Cleanup => "j:cleanup",
             Self::Deletion => "j:deletion",
         }
@@ -53,6 +56,7 @@ impl Stream {
     pub const fn delayed_key(self) -> &'static str {
         match self {
             Self::Push => "j:push:later",
+            Self::Ring => "j:ring:later",
             Self::Cleanup => "j:cleanup:later",
             Self::Deletion => "j:deletion:later",
         }
@@ -63,6 +67,7 @@ impl Stream {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Push => "push",
+            Self::Ring => "ring",
             Self::Cleanup => "cleanup",
             Self::Deletion => "deletion",
         }

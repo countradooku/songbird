@@ -186,6 +186,8 @@ pub struct App {
     pub server_name: String,
     /// Account registry.
     pub registry: Arc<Registry>,
+    /// Push registrations, in their own database (D-0095).
+    pub push_store: Arc<songbird_accounts::PushStore>,
     /// Attachment store.
     pub s3: songbird_s3::Client,
     /// Job queue.
@@ -345,8 +347,8 @@ impl App {
             }
             (&Method::DELETE, "/v1/push") => {
                 let (device, _) = self.authenticate_json(req).await?;
-                self.registry
-                    .delete_push_tokens(&[push_index(&self.push_index_secret, &device)])
+                self.push_store
+                    .delete(&[push_index(&self.push_index_secret, &device)])
                     .await
                     .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
                 Ok(empty(StatusCode::NO_CONTENT))
@@ -594,7 +596,7 @@ impl App {
     ) -> Result<serde_json::Value, songbird_accounts::RegistryError> {
         let mut v = self
             .registry
-            .export(account, &self.push_index_secret)
+            .export(account, Some((&self.push_store, &self.push_index_secret)))
             .await?;
         let off = self.registry.requests_off(account).await?;
         let blocks = match &self.requests {
@@ -1380,8 +1382,8 @@ impl App {
         let index = push_index(&self.push_index_secret, &device);
         let sealed = push_token::seal(&self.push_public, &index, &reg)
             .map_err(|_| Refusal::Status(StatusCode::BAD_REQUEST))?;
-        self.registry
-            .put_push_token(&index, &sealed)
+        self.push_store
+            .put(&index, &sealed)
             .await
             .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
         self.metrics.push_registrations.inc();

@@ -631,7 +631,7 @@ impl<M: Mailbox, R: Router> Session<M, R> {
             Ok(Err(_)) => return Err(Exit::Gone),
             Err(_) => return Err(Exit::Close(CloseCode::SlowConsumer, Some(RETRY_MS))),
         }
-        path.route(s.payload, outcome.seqs).await;
+        path.route(s.payload, outcome.seqs, s.hints.silent).await;
         self.flush(ws, t).await
     }
 }

@@ -14,6 +14,8 @@
 //! `unsafe` is allowed in the platform modules only (D-0110 §5); everything here is
 //! `#![forbid(unsafe_code)]` per module.
 
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub mod apple;
 pub mod fake;
 pub mod frame;
 pub mod jpeg;
@@ -303,6 +305,9 @@ impl SeenCodes {
 /// The platform's camera, or `None` where Songbird has none yet (the web, a TUI, tests).
 #[must_use]
 pub fn platform() -> Option<Arc<dyn Backend>> {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    return Some(Arc::new(apple::AppleCamera));
+    #[allow(unreachable_code)]
     None
 }
 

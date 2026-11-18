@@ -53,7 +53,7 @@ Runs: `apps/camera` `cargo test` 21 passed, `cargo clippy --all-targets` (pedant
 
 `cargo xtask fuzz --secs 120 <target>` on Apple M5 Pro, macOS 27.2.1, nightly libFuzzer, from the
 committed seeds (`seed-songbird-v1`: a real version 1 code at 4 px a module; `seed-exif-gps-tail`:
-a JPEG with EXIF, GPS text, XMP-free ICC, a comment and appended data):
+a JPEG with EXIF, GPS text, an ICC profile, a comment and appended data):
 
 | Target | Runs | Coverage (edges / features) | Corpus | Crashes |
 | --- | --- | --- | --- | --- |

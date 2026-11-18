@@ -167,6 +167,29 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0112 — Camera, milestone 2: AVFoundation from Rust on macOS and iOS
+
+- Date: 2026-11-18
+- Status: accepted by the agent within the approved plan (D-0110); report `docs/reports/CAM-M2.md`
+- Decided by: agent
+- Context: M2 of the camera plan. NSH 0.6 registers `#[native_components(ios)]` in the packaged
+  app (D-0110 finding 1), so one Rust module serves both Apple platforms.
+- Decision:
+  1. `apps/camera/src/apple.rs`, the only module allowed `unsafe` so far: `objc2` bindings of
+     AVFoundation, Core Media and Core Video, a `SAFETY:` comment on every block.
+  2. One `AVCaptureSession` per capture, started and stopped on its own serial queue (both
+     block); a registry by preview id lets the `songbird/camera` component attach a preview
+     layer on the main thread.
+  3. QR through `AVCaptureMetadataOutput` only when the device lists the QR type; otherwise NV12
+     frames to the `rqrr` scanner (the built-in camera of this Mac lists none).
+  4. Photo delegates are held by the capture until called; stills go through the M1 filter.
+  5. Purpose strings in `nsh.json` `ios.infoPlist` and `macos.infoPlist`; the
+     `com.apple.security.device.camera` entitlement on macOS.
+- Evidence: the on-device probe on this Mac: 1080p NV12 at 30.6 frames/s, a 1920×1080 JPEG with
+  no EXIF or GPS, a link code read once through Continuity Camera.
+- Consequences: the iOS camera check needs a physical iPhone (the Simulator has none); the
+  probe documents how to run without the app (inside a bundle with a purpose string).
+
 ## D-0111 — Camera, milestone 1: one interface, newest-wins mailboxes, real QR codes, strict code formats
 
 - Date: 2026-11-18

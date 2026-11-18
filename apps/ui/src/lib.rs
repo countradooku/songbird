@@ -52,6 +52,18 @@ fn native(registry: &mut Registry) {
     registry.register::<App>();
 }
 
+/// The camera's live preview, `songbird/camera` (D-0110): AVFoundation on macOS.
+#[native_components(macos)]
+fn camera_components_macos(components: &nsh_platform_macos::Components) {
+    songbird_camera::apple::register(components);
+}
+
+/// The camera's live preview on iOS, in the packaged app.
+#[native_components(ios)]
+fn camera_components_ios(components: &nsh_platform_ios::Components) {
+    songbird_camera::apple::register(components);
+}
+
 /// Songbird's root: the store, the theme the user chose, the first run
 /// or the app, and the layers over everything (calls, toasts).
 #[component]

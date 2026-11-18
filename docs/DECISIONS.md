@@ -375,6 +375,103 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   THREAT_MODEL §1. Calls get the local preview now and send frames once app-core (A2) and
   LiveKit are in the app.
 
+## D-0107 — Prompt 9, milestone 6: the app's presence, profiles, nudges, contacts, device and parental linking
+
+- Date: 2026-11-18
+- Status: accepted for the milestone (agent, under the approved plan D-0101); its threat-model rows
+  await the owner
+- Decided by: agent (with owner approval of the plan, and of the camera plan D-0110: link codes
+  only from the live camera)
+- Context: the app's side of M2–M4, and linking (devices and parent with child) now that the
+  camera exists (PR #68, merged into this branch at the owner's word).
+- Options considered:
+  - Device linking: a pasted or typed code (rejected by the owner) or the live camera (chosen).
+  - The first parental policy: relayed sealed through a provisioning channel, or shown as a
+    third QR code. The relay was built first and replaced: the parent's signed write followed by
+    the child's install would let the server tie the two accounts by timing, against D-0105.
+    Chosen: the policy as a code; it is about 200 bytes.
+  - A newly linked device: re-keying its replica, or an empty replica under the account's key.
+    Re-keying was rejected: its first-run defaults are stamped later than the phone's choices and
+    would overwrite them on the first sync. Chosen: an empty replica.
+- Evidence:
+  - `a_linked_device_reads_the_account_settings_and_a_rotation_shuts_out_the_old_key`;
+  - `a_waiting_device_shows_a_link_code_the_main_phone_reads`;
+  - `a_link_request_proves_its_keys_and_the_confirmation_key`;
+  - `a_child_accepts_only_the_first_policy_meant_for_it` (another account, date or key, a later
+    version or an unlinking: refused);
+  - `parental_codes_round_trip_and_stay_apart` (no parental code is ever read as a link code);
+  - the presence lane's tests (`invisible_sends_nothing_ever`, one send per debounce, a batch
+    only for sealed devices with their combined key);
+  - `nothing_is_sent_without_known_devices` (nudges);
+  - the contacts, profile and supervision unit tests; the app's 199 tests.
+- Decision:
+  - `backend::presence`: the `Presencer` from the privacy settings and the lifecycle, sending
+    sealed batches.
+  - `backend::profile`: profiles sealed for contacts, a key rotation when a field narrows to
+    Nobody.
+  - `backend::nudge`: confirmed once, ever.
+  - `features::contacts` and `store::ext_contacts`: saved contacts are `k/` records.
+  - `backend::link`:
+    - the new device shows `SONGBIRD:LINK`;
+    - the main phone links what its camera read, after the confirmation;
+    - the storage key goes in provisioning v2;
+    - logging a device out signs a list without it;
+    - the key is rotated when the main phone is left alone.
+  - Parental linking: three codes (`SONGBIRD:SUPERVISE`, `SONGBIRD:CHILD`, `SONGBIRD:POLICY`,
+    PROTOCOL §10.6).
+- Consequences:
+  - Presence and nudges send nothing until app-core (A2) can seal for contacts' devices, which
+    the mock's contacts lack. No plaintext is ever sent.
+  - With other devices still linked, a logged-out device keeps the storage key until A2 delivers a
+    new one end to end (D-0106).
+  - The live linking flows (devices, parent and child) are built and unit tested. They have not
+    yet run between two real phones.
+
+## D-0106 — Prompt 9, milestone 5: the app's settings saved, synced and enforced; app lock; proxy dialing
+
+- Date: 2026-11-18
+- Status: accepted for the milestone (agent, under the approved plan D-0101); its threat-model rows
+  await the owner
+- Decided by: agent (with owner approval of the plan: every Settings row made real except
+  Prompts 10, 11 and 14's)
+- Context: every setting saved, synced across devices or kept on one, and the server-enforced ones
+  written to the server. Also the app lock, the two-step PIN, the account report, deletion, and
+  dialing through a Songbird proxy.
+- Options considered:
+  - Settings: one JSON blob, or a record per setting on `songbird-sync` (chosen: per-key merge,
+    PROTOCOL §10.2).
+  - The app lock's passcode: kept, or only a salted slow hash (chosen: PBKDF2-HMAC-SHA256,
+    600,000 rounds).
+  - Wrong guesses: counted in memory, or saved on the device (chosen, after a first build that
+    reset on restart).
+  - Proxy dialing: a plain TCP relay or TLS-in-TLS with the inner session's channel binding
+    (chosen).
+  - The storage key when a device is removed:
+    - rotate always, which strands the other devices until A2 can tell them;
+    - rotate only when the main phone is left alone (chosen until A2).
+- Evidence:
+  - `every_synced_and_device_setting_round_trips`, `device_only_settings_are_never_records`,
+    `two_devices_converge_through_the_store`, `settings_survive_a_restart` (headless, real
+    engine);
+  - `the_app_opens_locked_and_only_the_passcode_opens_it`, `closing_the_app_does_not_reset_the_wait`,
+    `a_passcode_is_kept_only_as_a_salted_slow_hash`, `wrong_guesses_wait_longer_and_longer`;
+  - `a_client_reaches_delivery_through_a_proxy_link` (e2e through the real relay to a TLS
+    delivery node);
+  - the storage live suite (4 of 4) and the P04/P05/P09 gates.
+- Decision:
+  - `backend::records`:
+    - the codec tables `SYNCED` and `DEVICE`;
+    - `restore`, `changed`, `schedule`, `periodic`, `under`, `put`;
+    - the HTTP `Remote`;
+    - `storage_key`, `adopt_key`, `rotate_key`.
+  - `backend::account`: the server settings, the PIN, the export and its summary.
+  - `backend::lock` and `features::lock`.
+  - `crates/client`: `ProxyRoute`, with the proxy-link parser moved to `songbird-types`.
+- Consequences:
+  - The app lock is a gate in the app, not storage encryption: the device's own protection
+    guards the app's storage (THREAT_MODEL §3.26).
+  - Face ID and fingerprints come with the native host projects.
+
 ## D-0105 — Prompt 9, milestone 4: parental supervision with a per-child policy key
 
 - Date: 2026-11-18

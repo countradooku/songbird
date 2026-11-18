@@ -2,7 +2,11 @@
 
 - Date: 2026-11-18
 - Prompt: [09-settings-presence.md](../prompts/09-settings-presence.md)
-- Status: **proposed, awaiting the owner's approval** (D-0101). Nothing is built until then.
+- Status: **approved by the owner on 2026-11-18** ("Approve all"), every recommendation (D-0101):
+  the scope inventory, the manifest, sealed presence, last seen without server state, passcode
+  app lock now, server-enforced group adds, "My contacts" and "Nobody" for profile fields,
+  parental controls without the parent's identity (a supervised child may delete their own
+  account), WhatsApp's defaults, and the agent decisions.
 - Base: `main` at `8271b89` (Prompt 8 merged, PR #65; the Floating redesign, PR #66).
 - Scope set by the owner on 2026-11-18, while this plan was being written: "implement every
   single setting implemented on settings except those handled in later Prompts". So the plan

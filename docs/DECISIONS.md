@@ -20,13 +20,10 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
-- Prompt 9 plan (`P09-plan.md`, D-0101): **awaiting the owner.** Scope set by the owner on
-  2026-11-18: every setting on the app's Settings screens made real, except those later prompts
-  own. Ten questions, recommendations first: scope inventory, record integrity (manifest),
-  sealed presence, last seen without server state, app lock by passcode now, server-enforced
-  "who can add me to groups", profile visibility choices, parental controls without the
-  parent's identity (and whether a child may delete their account), defaults, agent decisions.
-
+- Prompt 9 plan (`P09-plan.md`, D-0101): **approved by the owner on 2026-11-18** ("Approve
+  all"), every recommendation, the scope inventory included (every Settings row made real except
+  Prompts 10, 11 and 14's; host-only rows after the whole app is built). A supervised child may
+  delete their own account. M1 (the record store) is next.
 - Prompt 8, M4 and M5 rest (D-0099): **deferred by the owner on 2026-11-18 until the whole app
   is built** ("lets do this after we have the whole app built"): the Xcode and Gradle host
   projects (APNs token, PushKit with CallKit, FCM, UnifiedPush, ConnectionService), the Apple
@@ -171,7 +168,8 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0101 — Prompt 9: the plan, and the owner's decisions it needs
 
 - Date: 2026-11-18
-- Status: proposed (awaiting the owner)
+- Status: accepted (owner, 2026-11-18, "Approve all": every recommendation; a supervised child
+  may delete their own account)
 - Decided by: owner, on the agent's plan `docs/reports/P09-plan.md`
 - Context: Prompt 9 asks for encrypted settings sync, server-enforced settings, presence and
   last seen, statuses, nudges, scenes and sound stickers, contacts sync and parental controls.
@@ -205,7 +203,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   with pair and sender budgets, the stored `Nudge` kind removed; discoverability off keeps links
   and QR codes working; `SettingsSync` and `starred` sync replaced by records; the pack item
   limit lowered to 16 MiB; proxy dialing in `crates/client`; one branch and one PR.
-- Consequences: nothing is built until the owner answers. M1 (the record store) starts first.
+- Consequences: M1 (the record store) starts first.
 
 ## D-0100 — Prompt 8: the security review's fixes
 

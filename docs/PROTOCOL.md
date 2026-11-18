@@ -417,7 +417,7 @@ Decision D-0049 (unique handles, the owner's choice). Every request is signed by
 | --- | --- | --- |
 | `PUT /v1/username` | `hash [32] \|\| proof [64]` | 204; 409 `{"error":"taken"}` (another account's, held, or reserved); 400 `{"error":"proof"}`; 429 |
 | `DELETE /v1/username` | none | 204 |
-| `POST /v1/username/lookup` | `{"hash": hex, "key"?: digits}` | 200 `{"account": hex}`; 404; 400 for a malformed hash or key; 429 |
+| `POST /v1/username/lookup` | `{"hash": hex, "key"?: digits, "link"?: handle hex}` (the link: §10.3) | 200 `{"account": hex}`; 404; 400 for a malformed hash or key; 429 |
 | `PUT /v1/username/key` | `{"key": "4 to 10 digits"}` | 204 |
 | `DELETE /v1/username/key` | none | 204 |
 | `PUT /v1/username/link` | the link's ciphertext, 1 to 256 bytes | 200 `{"handle": 32 hex}`; 409 `{"error":"no username"}` |
@@ -2131,6 +2131,53 @@ Inside the ciphertext only:
 | `p/<id>` | An installed pack |
 
 The values of each setting are defined with the app's settings (M5).
+
+### 10.3 Server-enforced settings (M2, D-0103)
+
+The few settings the server must see to enforce (THREAT_MODEL §4). Tightening is any listed
+device's; loosening is the primary's, checked in the write's transaction (D-0058), so a stolen
+linked device cannot open the account up. A pending device changes nothing (403 `pending`).
+
+| Request | Body | Answers |
+| --- | --- | --- |
+| `GET /v1/account/settings` | — | `{"discoverable": bool, "groups": "everyone" \| "contacts", "requests": "everyone" \| "nobody", "inactivity_months": 6 \| 12 \| 24}` |
+| `PUT /v1/account/discoverable` | `{"on": bool}` | 204; 403 `primary` for turning it on from a linked device |
+| `PUT /v1/account/groups` | `{"from": "everyone" \| "contacts"}` | 204; 403 `primary` for "everyone" from a linked device |
+| `PUT /v1/account/requests` | `{"from": "everyone" \| "nobody"}` (§5.10) | as before |
+| `PUT /v1/account/inactivity` | `{"months"}` (§4.10) | as before |
+
+- **Not discoverable:** `POST /v1/username/lookup` answers 404, exactly as for an unknown
+  username (same budgets, one statement of the same work), unless the request carries
+  `"link": <handle hex>` naming one of the account's own username links: a link or QR code the
+  user handed out keeps working. Existing contacts need no lookup.
+- **Group adds from contacts only:** a `POST /v1/groups/commit` that adds devices of such an
+  account must carry the header `Group-Add-Access-Key: hex(16)`, the XOR of the access keys of
+  every such account it adds (as broadcasts do, §5.10), compared in constant time; otherwise 403
+  `access`, the same whichever account was missing. Exempt: the committer's own account, and an
+  account with a pending request to join that group (it asked). Apps offer "Nobody" by
+  answering adds with an invitation the user accepts (a client rule). The app sets "contacts" at
+  registration (D-0101 question 9); the server's default for older accounts is "everyone".
+
+### 10.4 The profile's contents (M2, D-0103)
+
+The blob of `PUT /v1/profile` (§4.8) is, for every app (`songbird_content::profile`):
+
+```text
+blob = nonce [12] ‖ AES-256-GCM-SIV(key, nonce, aad = "songbird.v1/profile\0" ‖ be64(version),
+                                    be32(len) ‖ ProfilePlain ‖ zeros to a multiple of 256)
+key  = HKDF-SHA256(salt = "songbird.v1/profile", ikm = profile key, info = "profile")
+```
+
+`ProfilePlain`: name (≤ 128 bytes), about (≤ 280), status (text ≤ 140, emoji ≤ 32, `expires_ms`,
+0 for until changed), avatar (object ID and key, 32 bytes each), up to 5 links. The version is
+bound in, so an old profile cannot be served under a newer version.
+
+- **Visibility** of photo, about and status is "My contacts" or "Nobody": only contacts hold the
+  profile key, so a field shared with nobody is left out of the blob. Narrowing one rotates the
+  profile key (sent to remaining contacts with their next message, §5.10).
+- **A status** stops showing at its expiry on every reader, with no further message.
+- **After any change** the app sends its contacts `Content.profile_changed {version}`: sealed,
+  stored, `SILENT` (no wake-up). They fetch the profile again if the version is newer.
 
 ## 11. Backup format and vault access (Prompt 10)
 

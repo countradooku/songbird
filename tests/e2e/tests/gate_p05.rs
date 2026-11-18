@@ -1514,3 +1514,91 @@ async fn a_channels_rate_class_is_shared_by_the_websocket_and_http() {
     let gid = hex::encode(GID);
     assert!(keys.iter().all(|k| !k.contains(&gid)), "{keys:?}");
 }
+
+/// A commit with the `Group-Add-Access-Key` header (Prompt 9, D-0103).
+async fn commit_keyed(s: &Stack, who: usize, bundle: &[u8], key: [u8; 16]) -> (u16, String) {
+    let b = body(bundle);
+    let (authz, hash) = s.people[who]
+        .api
+        .sign("POST", "/v1/groups/commit", Some(&b));
+    let req = hyper::Request::builder()
+        .method("POST")
+        .uri("/v1/groups/commit")
+        .header("host", API)
+        .header(songbird_api::auth::AUTHORIZATION, authz)
+        .header(songbird_api::auth::CONTENT_SHA256, hash.unwrap())
+        .header("group-add-access-key", hex::encode(key));
+    let (st, reply) = s.people[who].api.raw(req, Bytes::from(b)).await.unwrap();
+    (st, String::from_utf8_lossy(&reply).into_owned())
+}
+
+/// Prompt 9, M2 (D-0103): an account that takes group adds from contacts only is added only by
+/// a commit carrying its access key (or after it asked to join); others are added as before.
+#[tokio::test]
+async fn group_adds_from_contacts_only_need_the_access_key() {
+    let Some(mut s) = stack(4).await else { return };
+    let (careful, asked, open) = (1, 2, 3);
+    let key = [0x31; 16];
+    for (i, k) in [(careful, key), (asked, [0x32; 16])] {
+        let a = s.people[i].mls.account;
+        s.registry
+            .put_profile(&a, 1, b"profile", &k, false)
+            .await
+            .unwrap();
+        s.registry
+            .set_groups_contacts(&a, true, false)
+            .await
+            .unwrap();
+    }
+    s.shared
+        .directory
+        .store(Directory::from_registry(&s.registry).await.unwrap());
+    create(&mut s, 0).await;
+
+    // No key, and a wrong key: refused alike, nothing stored.
+    let epoch = s.registry.group(&GID).await.unwrap().unwrap().epoch;
+    let kp = published(&s, careful, 0).await;
+    let b = s.people[0].mls.add(&[kp]);
+    let (st, reply) = commit(&s, 0, &b).await;
+    assert_eq!((st, reply["error"].as_str()), (403, Some("access")));
+    let (st, reply) = commit_keyed(&s, 0, &b, [0x99; 16]).await;
+    assert_eq!(st, 403, "{reply}");
+    assert_eq!(s.registry.group(&GID).await.unwrap().unwrap().epoch, epoch);
+    // With its key (Alice is a contact): added.
+    let (st, reply) = commit_keyed(&s, 0, &b, key).await;
+    assert_eq!(st, 200, "{reply}");
+    s.people[0].mls.merge();
+
+    // An account that asked to join (a pending request) is added without its key.
+    let asked_account = s.people[asked].mls.account;
+    s.registry
+        .db()
+        .exec(
+            "CREATE grp_req:[$g, $a] SET grp = $g, acct = $a, at = time::now();",
+            vec![
+                (
+                    "g".into(),
+                    songbird_surreal::Value::Bytes(Bytes::copy_from_slice(&GID)),
+                ),
+                (
+                    "a".into(),
+                    songbird_surreal::Value::Bytes(Bytes::copy_from_slice(
+                        asked_account.as_bytes(),
+                    )),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+    let kp = published(&s, asked, 0).await;
+    let b = s.people[0].mls.add(&[kp]);
+    let (st, reply) = commit(&s, 0, &b).await;
+    assert_eq!(st, 200, "{reply}");
+    s.people[0].mls.merge();
+
+    // An account that takes adds from everyone needs nothing.
+    let kp = published(&s, open, 0).await;
+    let b = s.people[0].mls.add(&[kp]);
+    let (st, reply) = commit(&s, 0, &b).await;
+    assert_eq!(st, 200, "{reply}");
+}

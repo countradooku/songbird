@@ -22,6 +22,7 @@
 pub mod attachment;
 pub mod call;
 pub mod pack;
+pub mod profile;
 pub mod schema;
 pub mod state;
 pub mod validate;
@@ -65,6 +66,9 @@ pub enum Error {
     /// A field breaks its bound (the field's path).
     #[error("invalid field: {0}")]
     Invalid(&'static str),
+    /// A ciphertext does not open (another key, a changed byte), or a primitive failed.
+    #[error("does not open")]
+    Crypto,
 }
 
 /// A decoded, validated plaintext. `Debug` shows only whether it is franked.

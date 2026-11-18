@@ -48,7 +48,7 @@ pub struct Content {
     pub message_id: Vec<u8>,
     #[prost(uint64, tag = "4")]
     pub sent_at_ms: u64,
-    #[prost(oneof = "content::Body", tags = "10, 11, 12, 13, 14, 15")]
+    #[prost(oneof = "content::Body", tags = "10, 11, 12, 13, 14, 15, 16")]
     pub body: Option<content::Body>,
 }
 
@@ -68,6 +68,8 @@ pub mod content {
         RequestResponse(super::RequestResponse),
         #[prost(message, tag = "15")]
         Call(super::CallMessage),
+        #[prost(message, tag = "16")]
+        ProfileChanged(crate::profile::ProfileChanged),
     }
 }
 

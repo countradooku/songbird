@@ -78,6 +78,8 @@ pub struct Access {
     pub open: bool,
     /// Message requests to it are dropped (silently).
     pub requests_off: bool,
+    /// Group adds need its access key (Prompt 9, D-0103).
+    pub groups_contacts: bool,
 }
 
 impl Access {
@@ -87,6 +89,7 @@ impl Access {
         key: None,
         open: true,
         requests_off: false,
+        groups_contacts: false,
     };
 }
 
@@ -262,6 +265,7 @@ impl Directory {
                             key: r.key,
                             open: r.open,
                             requests_off: r.requests_off,
+                            groups_contacts: r.groups_contacts,
                         },
                     )
                 })),

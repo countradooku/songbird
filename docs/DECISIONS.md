@@ -165,6 +165,44 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0103 — Prompt 9, milestone 2: discoverability, group adds from contacts, the profile's contents
+
+- Date: 2026-11-18
+- Status: accepted for the milestone (agent, under the approved plan D-0101); its threat-model rows
+  await the owner
+- Decided by: agent (with owner approval of the plan)
+- Context: the prompt's server-enforced settings (username discoverability, who may reach you,
+  inactivity, plan), "who can add me to groups" (D-0101 question 6), and statuses and the about
+  line in the encrypted profile with a "profile changed" signal.
+- Options considered: discoverability off hiding the username from links too (breaks the links
+  and QR codes the user handed out) or only from lookups by name (chosen: a lookup through one of
+  the account's own link handles still resolves); group adds gated per added account with a key
+  each, or one XOR of all gated accounts' keys as broadcasts do (chosen: one answer whichever
+  account was missing); a server default of "contacts" for group adds (would refuse adds for every
+  existing account and test) or "everyone" with the app setting "contacts" at registration
+  (chosen).
+- Evidence: `a_hidden_account_is_found_only_through_its_own_link` (usernames live: 404 as for an
+  unknown name, a wrong link 404, the own link 200, a linked device 403 when loosening);
+  `group_adds_from_contacts_only_need_the_access_key` (groups gate, 13 of 13 pass: no key and a
+  wrong key 403 with nothing stored, the right key 200, a join request exempt, "everyone"
+  unchanged); `profiles_round_trip_bound_to_their_version`, `a_status_disappears_at_its_expiry`,
+  `fields_are_bounded_and_a_full_profile_fits_the_server_limit`.
+- Decision:
+  - `account.hidden` and `account.grp_contacts`; `GET /v1/account/settings`,
+    `PUT /v1/account/discoverable`, `PUT /v1/account/groups`; loosening by the primary only, in
+    the transaction; the directory snapshot carries `groups_contacts`.
+  - Lookups take an optional `link` handle; one SurrealQL statement of the same work in every case.
+  - Commits take `Group-Add-Access-Key`; exempt: the committer's account and accounts with a
+    pending join request.
+  - `songbird_content::profile`: `ProfilePlain` (name, about, status with emoji and expiry,
+    avatar, links), sealed with AES-256-GCM-SIV under a key from the profile key, the version in
+    the AAD, padded to 256 bytes; `Content.profile_changed` (tag 16).
+  - THREAT_MODEL §4 lists every server-enforced setting; plan is reserved for Prompt 11, parental
+    supervision for M4.
+- Consequences: the app (M5) sets "contacts" at registration, sends `profile_changed` after
+  edits, and adds the header when it adds contacts to groups. M4 makes a supervised account's
+  rules unloosenable.
+
 ## D-0102 — Prompt 9, milestone 1: the account record store, with a manifest and a hybrid logical clock
 
 - Date: 2026-11-18

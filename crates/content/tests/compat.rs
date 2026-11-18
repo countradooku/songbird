@@ -88,7 +88,7 @@ mod v2 {
         pub(crate) message_id: Vec<u8>,
         #[prost(message, optional, tag = "10")]
         pub(crate) data: Option<DataMessage>,
-        #[prost(bytes = "vec", tag = "16")]
+        #[prost(bytes = "vec", tag = "31")]
         pub(crate) new_body: Vec<u8>,
         #[prost(string, tag = "99")]
         pub(crate) new_top: String,

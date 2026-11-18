@@ -93,6 +93,8 @@ server in plaintext. Adding to this list requires the owner's approval.
 | **The account record store** (Prompt 9, D-0102; `srec`, SurrealDB): per account, records of opaque ciphertext under random 16-byte IDs the devices drew, each padded to a Padmé size of 256 to 4,096 bytes (most settings share the smallest); their **count**, their **sizes**, and which IDs are replaced at each write. The account row's store **version** (a counter) and the **manifest** (76 bytes of ciphertext: the version and a digest of the IDs; its first 8 bytes name the storage key). **No write time is stored** | Sync settings, per-chat preferences, contacts and lists across the account's devices; detect withheld, replayed or rolled-back records | Until replaced or deleted by a device; all of it with the account; in registry backups like every row. Write times are in memory only (and in `api`'s request counts, which carry no account) | Prompt 9 (M1), D-0102; **awaiting the owner's approval** |
 | **Storage objects** (Prompt 9, D-0102; `sobj` and `RustFS` `s/<id>`): up to 16 opaque objects per account (custom wallpapers, at most 2 MiB, encrypted under the storage key), their sizes, and which account owns them | Keep custom wallpapers beyond an attachment's 30 days | Until the account's devices delete them; with the account | Prompt 9 (M1), D-0102; **awaiting the owner's approval** |
 | Keyed throttle records of the record store (`st:<kind>:<hmac>` in `valkey-hot`, HMAC of the account under the storage secret), with the next allowed time | Hold reads and writes to their budgets | At most the budget's window (an hour) | Prompt 9 (M1), D-0102; keyed form of an ID already listed; **awaiting the owner's approval** |
+| **Discoverable by username** (Prompt 9, D-0103): one bit on the account row (`hidden`) | Answer lookups by username for a hidden account as for an unknown one, except through the account's own link | Until changed; with the account; in registry backups | Prompt 9 (M2), D-0103; **awaiting the owner's approval** |
+| **Group adds from contacts only** (Prompt 9, D-0103): one bit on the account row (`grp_contacts`), in the directory snapshot of `api` and `delivery`; at a commit, whether the adder proved contact (the access key, already listed, compared and dropped) | Refuse group adds of the account by people who are not its contacts | Until changed; with the account; the comparison in memory only | Prompt 9 (M2), D-0103; **awaiting the owner's approval** |
 
 Prompt 1 adds two operational views, neither of which is user data on the server:
 
@@ -542,6 +544,11 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
 | A removed (stolen) device reading future settings | I | Thief of a linked device | It can no longer authenticate; the primary rotates the storage key and rewrites every record in one write | `a_key_rotation_rewrites_everything_and_old_keys_cannot_read_it`; live rotation |
 | Filling the store or the database | D | Malicious client | Caps per account (records, bytes, objects), bounded decoders, write and read budgets per account | `the_server_checks_versions_lengths_caps_accounts_and_pending_devices`; `objects_are_the_accounts_own…`; fuzz `storage` |
 | Another account, or a pending device, reading or writing the store | E | Other user, an unconfirmed linked device | Rows keyed by the authenticated account; objects served to their own account only (one 404 for any other); pending devices refused | as above |
+| Finding a hidden account by guessing its username | I | Anyone | Lookups answer 404 as for an unknown username, in one statement of the same work; only the account's own link handle (unguessable, 16 random bytes) resolves it | `a_hidden_account_is_found_only_through_its_own_link` |
+| Adding a stranger to a group (harassment, spam groups) | E | Anyone with an account | Accounts that take adds from contacts only need their access key on the commit, combined by XOR and compared in constant time; join requests exempt | `group_adds_from_contacts_only_need_the_access_key` |
+| A stolen linked device opening the account up (discoverable, group adds) | E | Thief of a linked device | Loosening is the primary's, checked in the write's transaction | `a_hidden_account_is_found_only_through_its_own_link` (403 `primary`) |
+| An old profile served under a newer version, or another account's profile swapped in | T | Malicious server | The version is in the profile's AAD; the profile key is per account | `profiles_round_trip_bound_to_their_version` |
+| A status shown after its time | I | — | The expiry is inside the profile; readers stop showing it at that time | `a_status_disappears_at_its_expiry` |
 
 ## 4. Server-enforced settings
 
@@ -550,6 +557,11 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
 | Message requests from everyone or nobody (Prompt 4, D-0062) | Refusing: any listed device; accepting again: the primary | The send path (requests dropped silently) |
 | Blocks (Prompt 4, D-0062) | Blocking: any listed device; unblocking: the primary | The send path (requests from blocked senders dropped) |
 | "Anyone may send" (Prompt 3, D-0054; widened by D-0062) | Any listed device, with the profile | The send path and the sealed endpoint |
+| Discoverable by username (Prompt 9, D-0103) | Hiding: any listed device; showing again: the primary | `POST /v1/username/lookup` (404 as for an unknown username; the account's own links still resolve) |
+| Who may add me to groups: everyone or contacts (Prompt 9, D-0103) | Contacts: any listed device; everyone: the primary | `POST /v1/groups/commit` (403 `access` without the added accounts' combined access key, unless they asked to join) |
+| Inactivity period: 6, 12 or 24 months (Prompt 3, D-0047) | The primary | The worker's sweep (warnings, then deletion) |
+| Plan and entitlements | — (Prompt 11) | Reserved: entitlements arrive with Prompt 11; nothing is stored for them yet |
+| Parental supervision of a child account | The parent's policy key (Prompt 9, M4) | Added by M4 |
 
 ## 5. Compliance notes (GDPR, age of digital consent per EU country)
 

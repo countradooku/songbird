@@ -185,6 +185,10 @@ pub struct LookupBody {
     /// The username key, if the requester has one.
     #[serde(default)]
     pub key: Option<String>,
+    /// The handle of the username link the requester followed (32 hex), if any: an account
+    /// that is not discoverable is found only through one of its own links (Prompt 9).
+    #[serde(default)]
+    pub link: Option<String>,
 }
 
 impl std::fmt::Debug for LookupBody {
@@ -442,8 +446,14 @@ impl Usernames {
             Some(_) => return Outcome::Malformed("key"),
             None => None,
         };
+        let mut link = [0u8; 16];
+        let link = match req.link {
+            Some(l) if hex::decode_to_slice(&l, &mut link).is_ok() => Some(link),
+            Some(_) => return Outcome::Malformed("link"),
+            None => None,
+        };
         self.metrics.lookups.inc();
-        let Ok(row) = registry.lookup_username(&hash).await else {
+        let Ok(row) = registry.lookup_username_via(&hash, link.as_ref()).await else {
             return Outcome::Unavailable;
         };
         let out = match key {

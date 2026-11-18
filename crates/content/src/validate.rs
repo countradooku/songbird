@@ -89,6 +89,7 @@ pub fn content(c: &Content) -> R {
         Some(Body::Sync(s)) => sync(s),
         Some(Body::RequestResponse(r)) => request_response(r),
         Some(Body::Call(c)) => crate::call::validate(c),
+        Some(Body::ProfileChanged(p)) => check(p.version > 0, "profile_changed.version"),
     }
 }
 

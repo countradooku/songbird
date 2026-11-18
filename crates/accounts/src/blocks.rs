@@ -33,6 +33,8 @@ pub struct AccessRow {
     pub open: bool,
     /// Message requests are refused (dropped silently).
     pub requests_off: bool,
+    /// Group adds need the account's access key (Prompt 9, D-0103).
+    pub groups_contacts: bool,
 }
 
 impl Registry {
@@ -223,7 +225,7 @@ impl Registry {
         let v = self
             .db
             .query1(
-                "SELECT meta::id(id)[0] AS a, uak, uak_open, requests_off FROM account
+                "SELECT meta::id(id)[0] AS a, uak, uak_open, requests_off, grp_contacts FROM account
                    WHERE deleting = false;",
                 Vec::new(),
             )
@@ -241,6 +243,7 @@ impl Registry {
                     .and_then(|b| <[u8; 16]>::try_from(b.as_ref()).ok()),
                 open: matches!(r.get("uak_open"), Some(Value::Bool(true))),
                 requests_off: matches!(r.get("requests_off"), Some(Value::Bool(true))),
+                groups_contacts: matches!(r.get("grp_contacts"), Some(Value::Bool(true))),
             });
         }
         Ok(out)

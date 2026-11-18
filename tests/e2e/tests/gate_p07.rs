@@ -165,6 +165,7 @@ async fn stack(people: usize) -> Option<Stack> {
                     key: (i == 1).then_some(BOB_KEY),
                     open: i == 3,
                     requests_off: false,
+                    groups_contacts: false,
                 },
             )
         })

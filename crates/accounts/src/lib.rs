@@ -58,6 +58,7 @@ pub mod kt;
 pub mod packs;
 pub mod profile;
 pub mod reports;
+pub mod settings;
 pub mod storage;
 pub use db::{Db, DbError, SurrealSettings};
 pub use push_store::PushStore;
@@ -290,6 +291,8 @@ DEFINE INDEX IF NOT EXISTS srec_account ON srec FIELDS account;
 DEFINE TABLE IF NOT EXISTS sobj SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS account ON sobj TYPE bytes;
 DEFINE INDEX IF NOT EXISTS sobj_account ON sobj FIELDS account;
+DEFINE FIELD IF NOT EXISTS hidden ON account TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS grp_contacts ON account TYPE option<bool>;
 ";
 
 /// Registry failures. They carry no identifiers.
@@ -1078,23 +1081,52 @@ impl Registry {
         &self,
         hash: &[u8; 32],
     ) -> Result<Option<UsernameRow>, RegistryError> {
-        // One statement, the same work whether or not the username exists: an absent username
-        // reads the key of an account ID that cannot exist (all zeros), so the answer's timing
-        // does not depend on existence.
+        self.lookup_username_via(hash, None).await
+    }
+
+    /// [`Registry::lookup_username`] for a lookup that may come through a username link
+    /// (`link`, its handle): an account that is not discoverable (Prompt 9, D-0103) is found
+    /// only through one of its own links.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn lookup_username_via(
+        &self,
+        hash: &[u8; 32],
+        link: Option<&[u8; 16]>,
+    ) -> Result<Option<UsernameRow>, RegistryError> {
+        // One statement, the same work whether or not the username exists or a link is given:
+        // an absent username or link reads rows of IDs that cannot exist (all zeros), so the
+        // answer's timing does not depend on them.
         let v = self
             .db
-            .query1(
-                "RETURN [username:[$h].account, account:[username:[$h].account ?? $zero].ukey,
-                   account:[username:[$h].account ?? $zero].deleting];",
-                vec![var("h", bytes(hash)), var("zero", bytes(&[0u8; 16]))],
+            .query(
+                "LET $acc = username:[$h].account ?? $zero;
+                 RETURN [username:[$h].account, account:[$acc].ukey, account:[$acc].deleting,
+                   account:[$acc].hidden, ulink:[$l].account];",
+                vec![
+                    var("h", bytes(hash)),
+                    var("zero", bytes(&[0u8; 16])),
+                    var("l", bytes(link.unwrap_or(&[0u8; 16]))),
+                ],
             )
             .await?;
-        let r = rows(v);
+        let r = v
+            .into_iter()
+            .next_back()
+            .and_then(Value::into_array)
+            .unwrap_or_default();
         let Some(account) = r.first().and_then(id16).map(AccountId::from_bytes) else {
             return Ok(None);
         };
         // An account being deleted is found by nobody.
         if matches!(r.get(2), Some(Value::Bool(true))) {
+            return Ok(None);
+        }
+        // Not discoverable: only through one of its own links.
+        if matches!(r.get(3), Some(Value::Bool(true)))
+            && r.get(4).and_then(id16) != Some(*account.as_bytes())
+        {
             return Ok(None);
         }
         let key = r.get(1).and_then(|k| k.as_bytes().cloned());

@@ -31,6 +31,7 @@
 //! Nothing here logs identifiers or object names (invariant 6).
 #![forbid(unsafe_code)]
 
+pub mod account;
 pub mod admin;
 pub mod auth;
 pub mod calls;
@@ -428,6 +429,9 @@ impl App {
                 | "/v1/communities/state"
                 | "/v1/communities/delete",
             ) => self.groups(req).await,
+            (_, "/v1/account/settings" | "/v1/account/discoverable" | "/v1/account/groups") => {
+                self.account_settings(req).await
+            }
             (_, p) if p.starts_with("/v1/account/") => self.factors(req).await,
             (_, p) if p.starts_with("/v1/kt/") => self.kt(req).await,
             (_, p) if p.starts_with("/v1/provisioning") || p.starts_with("/v1/devices") => {
@@ -714,6 +718,16 @@ impl App {
         let m = self.messages.as_ref().ok_or_else(unavailable)?;
         let g = m.groups.as_ref().ok_or_else(unavailable)?;
         let path = req.uri().path().to_owned();
+        // Prompt 9 (D-0103): proof that the committer is a contact of every added account that
+        // takes group adds from contacts only.
+        let add_key = req
+            .headers()
+            .get("group-add-access-key")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| {
+                let mut k = [0u8; 16];
+                hex::decode_to_slice(v, &mut k).ok().map(|()| k)
+            });
         let (device, body) = self.authenticate_body(req, groups::MAX_BODY).await?;
         let row = self
             .registry
@@ -754,7 +768,7 @@ impl App {
             .flatten();
         let outcome = match path.as_str() {
             "/v1/groups" => g.create(r, m, device, body).await,
-            "/v1/groups/commit" => g.commit(r, m, device, body).await,
+            "/v1/groups/commit" => g.commit(r, m, device, body, add_key).await,
             "/v1/groups/propose" => g.propose(r, m, device, body).await,
             "/v1/groups/meta" => g.meta(r, device, body).await,
             "/v1/groups/log" => g.log(r, m, device, body).await,
@@ -930,6 +944,31 @@ impl App {
                 }
                 None => not_primary(),
             },
+            _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
+        };
+        Ok(device_outcome(out))
+    }
+
+    /// Server-enforced settings (Prompt 9, M2, D-0103; [`account`]).
+    async fn account_settings(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let method = req.method().clone();
+        let path = req.uri().path().to_owned();
+        let (device, body) = self.authenticate_json(req).await?;
+        let row = self
+            .registry
+            .device(&device)
+            .await
+            .map_err(|_| unavailable())?
+            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+        let out = match (&method, path.as_str()) {
+            (&Method::GET, "/v1/account/settings") => account::get(&self.registry, &row).await,
+            (&Method::PUT, "/v1/account/discoverable") => {
+                account::set_discoverable(&self.registry, &row, &body).await
+            }
+            (&Method::PUT, "/v1/account/groups") => {
+                account::set_groups(&self.registry, &row, &body).await
+            }
             _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
         };
         Ok(device_outcome(out))

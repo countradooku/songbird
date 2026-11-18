@@ -824,7 +824,8 @@ async fn an_offline_device_receives_a_push_end_to_end() {
     tokio::spawn(songbird_delivery::push::run(
         queue(&e, "gate-delivery").await,
         rx,
-        Duration::from_secs(5),
+        // The coalescing window (D-0095): a burst is one wake-up now and one at its end.
+        Duration::from_secs(1),
         metrics.push(),
         stop_rx.clone(),
     ));
@@ -976,6 +977,55 @@ async fn an_offline_device_receives_a_push_end_to_end() {
     assert_eq!(&next_delivery(&mut a1_ev).await.1[..], b"live");
     assert_eq!(metrics.push_jobs.get(), before);
     assert_eq!(apns_mock.requests().len(), 2);
+
+    // Prompt 8 (D-0096): APNs goes down while the phone is offline. Messages wait in its
+    // mailbox, every wake-up attempt fails, nothing is lost; when APNs is back the wake-up goes
+    // out without an operator, and the phone reads everything in order.
+    a1_c.ack(4).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    a1_c.close().await;
+    drop(a1_ev);
+    apns_mock.outage(songbird_push_providers::test_support::Behaviour::Unavailable);
+    let failed_from = apns_mock.requests().len();
+    for i in 0..3 {
+        let r = bob_c
+            .send(key(), vec![to(a1.id, format!("down-{i}"))])
+            .await
+            .unwrap();
+        assert_eq!(r, SendStatus::Accepted);
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        apns_mock.requests().len() > failed_from,
+        "the wake-up was attempted during the outage"
+    );
+    assert_eq!(
+        shared.mailbox.count_pending(&a1.id).await.unwrap(),
+        3,
+        "the messages wait in the mailbox"
+    );
+    let recovered_from = apns_mock.requests().len();
+    apns_mock.recover();
+    let mut woke = false;
+    for _ in 0..400 {
+        if apns_mock.requests().len() > recovered_from {
+            woke = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(woke, "no wake-up after the outage");
+    let after = &apns_mock.requests()[recovered_from];
+    assert_eq!(after.path, format!("/3/device/{}", hex::encode(token)));
+    assert_eq!(after.body, reqs[0].body, "the same constant push");
+    let (mut a1_c, mut a1_ev) =
+        songbird_client::Client::start(client_cfg(), a1.key(), ResumeState::default());
+    a1_c.wait_for(songbird_client::State::Connected).await;
+    for i in 0..3u64 {
+        let (seq, env) = next_delivery(&mut a1_ev).await;
+        assert_eq!(seq, 5 + i);
+        assert_eq!(&env[..], format!("down-{i}").as_bytes());
+    }
 
     running.stop().await;
     let _ = stop.send(true);

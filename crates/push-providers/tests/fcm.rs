@@ -259,3 +259,17 @@ async fn a_slow_provider_times_out_as_retry() {
     mock.push(Behaviour::Slow(Duration::from_secs(2)));
     assert_eq!(fcm.send(&target()).await, Outcome::Retry { after: None });
 }
+
+/// A black-holed provider ends at the request timeout (2 s here) as a retry, and a reset
+/// stream is a retry too; the client keeps working once the provider answers (D-0095).
+#[tokio::test]
+async fn hanging_and_reset_requests_are_retries() {
+    let f = fixture().await;
+    f.mock.push(Behaviour::Hang);
+    let t = tokio::time::Instant::now();
+    assert_eq!(f.fcm.send(&target()).await, Outcome::Retry { after: None });
+    assert!(t.elapsed() < Duration::from_secs(4), "bounded by the timeout");
+    f.mock.push(Behaviour::Reset);
+    assert!(matches!(f.fcm.send(&target()).await, Outcome::Retry { .. }));
+    assert_eq!(f.fcm.send(&target()).await, Outcome::Delivered);
+}

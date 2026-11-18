@@ -68,7 +68,12 @@
       "switch-track": "#F2F1F6",
       "switch-on": "#4B3FA8",
       "raised": "#FFFFFF",
-      "control": "#EFEEF5"
+      "control": "#EFEEF5",
+      "canvas": "#EEEDF3",
+      "pane": "#FAFAFC",
+      "pane-border": "#E0DEE8",
+      "capsule": "#FFFFFF",
+      "capsule-border": "#E3E1EB"
     },
     "dark": {
       "background": "#0E0D13",
@@ -131,7 +136,12 @@
       "switch-track": "#201D2B",
       "switch-on": "#6B5CD3",
       "raised": "#3A3550",
-      "control": "#2B2838"
+      "control": "#2B2838",
+      "canvas": "#060509",
+      "pane": "#0E0D13",
+      "pane-border": "#24222E",
+      "capsule": "#1C1A25",
+      "capsule-border": "#2E2B3B"
     }
   },
   "skins": {
@@ -162,7 +172,12 @@
         "switch-track": "#E5E1EC",
         "chat-bg": "#F6F2FC",
         "bubble-in": "#FFFFFF",
-        "info-bg": "#EAE5FF"
+        "info-bg": "#EAE5FF",
+        "canvas": "#EDE8F4",
+        "pane": "#FCF8FF",
+        "pane-border": "#E5E1EC",
+        "capsule": "#EBE6F2",
+        "capsule-border": "#E0DBE8"
       },
       "dark": {
         "background": "#141318",
@@ -188,7 +203,12 @@
         "raised": "#48454F",
         "switch-track": "#36343B",
         "chat-bg": "#141318",
-        "bubble-in": "#211F26"
+        "bubble-in": "#211F26",
+        "canvas": "#09080C",
+        "pane": "#141318",
+        "pane-border": "#211F26",
+        "capsule": "#2B2930",
+        "capsule-border": "#36343B"
       }
     },
     "fluent": {
@@ -205,7 +225,12 @@
         "control": "#FFFFFF",
         "raised": "#FFFFFF",
         "switch-track": "#FAFAFC",
-        "chat-bg": "#F5F4F8"
+        "chat-bg": "#F5F4F8",
+        "canvas": "#EFEEF3",
+        "pane": "#FAFAFC",
+        "pane-border": "#E3E1EA",
+        "capsule": "#FFFFFF",
+        "capsule-border": "#E0DEE7"
       },
       "dark": {
         "background": "#26252B",
@@ -229,7 +254,12 @@
         "switch-track": "#28272D",
         "chat-bg": "#222127",
         "bubble-in": "#33323A",
-        "bubble-in-foreground": "#F1F0F5"
+        "bubble-in-foreground": "#F1F0F5",
+        "canvas": "#1A191E",
+        "pane": "#26252B",
+        "pane-border": "#37363D",
+        "capsule": "#2C2B32",
+        "capsule-border": "#3A3842"
       }
     },
     "adwaita": {
@@ -247,7 +277,12 @@
         "control": "#E9E8EE",
         "raised": "#FFFFFF",
         "switch-track": "#8C88A0",
-        "chat-bg": "#F2F1F5"
+        "chat-bg": "#F2F1F5",
+        "canvas": "#EBEBEF",
+        "pane": "#FAFAFB",
+        "pane-border": "#DEDCE4",
+        "capsule": "#FFFFFF",
+        "capsule-border": "#DEDCE4"
       },
       "dark": {
         "background": "#222126",
@@ -271,7 +306,12 @@
         "switch-track": "#5E5A70",
         "chat-bg": "#1D1C21",
         "bubble-in": "#2C2B31",
-        "bubble-in-foreground": "#FFFFFF"
+        "bubble-in-foreground": "#FFFFFF",
+        "canvas": "#18171C",
+        "pane": "#222126",
+        "pane-border": "#0E0D11",
+        "capsule": "#2C2B31",
+        "capsule-border": "#0E0D11"
       }
     }
   }

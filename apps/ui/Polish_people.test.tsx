@@ -53,17 +53,20 @@ async function run(phone: boolean, dark: boolean) {
   };
   const openChat = async (name: string) => {
     await tab("Chats");
-    await pick(name);
+    // Pinned chats show short names: press them by their accessibility label.
+    await app.press(`label:/^${name},/`);
     await pause(300);
     await groupInfo();
     await pause(300);
   };
 
-  // Communities tab and a community's home.
-  await tab("Communities");
-  await shot("01-communities");
+  // Spaces tab and a space's home.
+  // REDESIGN: on desktop the destination bar inside the list pane replaces
+  // the rail; this assumes its items are still buttons named by their label.
+  await tab("Spaces");
+  await shot("01-spaces");
   await pick("Cluj Climbers");
-  await shot("02-community-home");
+  await shot("02-space-home");
 
   // Weekend trips: the user is a Member.
   await pick("Weekend trips");
@@ -104,7 +107,7 @@ async function run(phone: boolean, dark: boolean) {
   await pause(300);
 
   // New group flow.
-  await tab("Communities");
+  await tab("Spaces");
   await pick("Cluj Climbers");
   await pause(300);
   await pick("Add group");
@@ -127,7 +130,7 @@ async function run(phone: boolean, dark: boolean) {
   await shot("19-new-group-opened");
 
   // Find channels.
-  await tab("Communities");
+  await tab("Spaces");
   await pick("Find channels");
   await shot("20-find-channels");
 
@@ -142,8 +145,8 @@ async function run(phone: boolean, dark: boolean) {
   await app.press("Select all");
   await shot("23-chat-storage");
   await tab("You");
-  // You → Chats (the settings row: before the tab bar on phones, after the rail on desktops).
-  await app.press("Chats >> nth=" + (phone ? 0 : app.count("Chats") - 1));
+  // You → Chats: the settings row comes before the destination bar and the tab bar.
+  await app.press("Chats >> nth=0");
   await pause(300);
   await app.press("Stickers and packs");
   await shot("24-packs");

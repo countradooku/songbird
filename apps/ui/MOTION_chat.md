@@ -1,5 +1,9 @@
 # Motion inventory — A5 conversation
 
+> **Superseded in part by [REDESIGN.md](REDESIGN.md) (Floating, 2026-11-18).** Where the two disagree,
+> REDESIGN.md wins: floating panes instead of the rail, Spaces instead of Communities, the Lists capsule
+> instead of filter chips, no per-bubble ticks or times, per-chat themes, and ⌘K jump-to.
+
 Tokens from `ui::motion`; every motion goes through `Motion::play` / transitions, which land at their end
 (no movement) when `motion::reduced()` is on. Colour and opacity fades stay under reduced motion.
 
@@ -28,3 +32,16 @@ Tokens from `ui::motion`; every motion goes through `Motion::play` / transitions
 | Page push (chat info, message info, media) | Native stack transition | Native |
 | Bubble/row hover & press | `pressable`: dims to 0.7, `FAST` | Same |
 | Open with reply / search (`chat::reply_to`, `chat::search_in`) | The chat opens as usual (pane or push); the reply bar then rises in as above, or the search bar replaces the header | As above |
+
+## Floating redesign (REDESIGN.md)
+
+| Change | Motion | Reduced |
+| --- | --- | --- |
+| Theme changed | The canvas cross-fades over `SLOW` | Kept (a colour fade) |
+| Composer grows with lines | Height animates over `FAST`, ease-out | Instant |
+| Send button appears | Fades and scales 0.6→1 from the mic over `BASE` | Fade only |
+| Status under your latest message changes | Fades in and rises 2pt | Fade only |
+| Bubble pressed | Dims and settles to 0.98 | Dim only |
+| Messages under the header and composer | Fade out at the scroll edges (static scrims) | Same |
+| ⌘K opens | Card scales 0.98→1 and fades over `FAST`; the dim fades in | Fade only |
+| ⌘K closes | Card and dim fade out over `INSTANT` | Same |

@@ -17,16 +17,16 @@ async function run(layout: "desktop" | "phone", scheme: "light" | "dark") {
   await pause(600);
   const tag = `shots/skin-${SKIN}-${layout}-${scheme}`;
   await app.screenshot(`${tag}-chats.png`);
-  await app.press("Ana Popescu >> nth=0");
+  await app.press("label:/^Ana Popescu,/");
   await pause(600);
   await app.screenshot(`${tag}-chat.png`);
-  while (layout === "phone" && !app.texts().includes("Communities")) {
+  while (layout === "phone" && !app.texts().includes("Spaces")) {
     await app.press("Back >> nth=0");
     await pause(300);
   }
-  await app.press("label:Communities >> nth=0");
+  await app.press("label:Spaces >> nth=0");
   await pause(400);
-  await app.screenshot(`${tag}-communities.png`);
+  await app.screenshot(`${tag}-spaces.png`);
   await app.press("label:You >> nth=0");
   await pause(400);
   await app.screenshot(`${tag}-you.png`);

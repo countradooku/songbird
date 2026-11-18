@@ -37,7 +37,7 @@ pub fn lists() {
             }
         };
         view()
-            .child(super::foot("Lists show as filters at the top of Chats. Add a chat to a list from its menu.").pt_4())
+            .child(super::foot("Your lists sit beside All at the top of Chats. Add a chat to a list from its menu.").pt_4())
             .child(view().pt_3().child(dynamic(move || {
                 let names = ext.with(|x| x.lists.clone());
                 let len = names.len();

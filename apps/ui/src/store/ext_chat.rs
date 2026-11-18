@@ -54,6 +54,32 @@ impl Store {
         })
     }
 
+    /// The user's latest message that went out (not a system notice): the
+    /// only one that shows its delivery status under it.
+    pub fn latest_own(&self, chat: ChatId) -> Option<MsgId> {
+        self.messages.with(|m| {
+            m.get(&chat)?
+                .iter()
+                .rev()
+                .find(|x| x.mine() && !matches!(x.body, Body::System(_)))
+                .map(|x| x.id)
+        })
+    }
+
+    /// How many people a group holds (the user included) and how many of
+    /// the others are online now: the header's "5 people · 2 online".
+    pub fn people_online(&self, chat: ChatId) -> (usize, usize) {
+        let Some(c) = self.chat(chat) else { return (0, 0) };
+        let online = self.contacts.with(|cs| {
+            c.members
+                .iter()
+                .filter_map(|m| m.contact)
+                .filter(|id| cs.iter().any(|x| x.id == *id && x.presence == Presence::Online))
+                .count()
+        });
+        (c.members.len(), online)
+    }
+
     /// Messages of the chat matching `keep`, newest first.
     fn messages_where(&self, chat: ChatId, keep: impl Fn(&Message) -> bool) -> Vec<Message> {
         self.messages.with(|m| {
@@ -92,6 +118,16 @@ impl Store {
     }
 
     // ------------------------------------------------------------ intents
+
+    /// Gives the conversation another theme (its canvas and the user's
+    /// bubbles). Only this device's view of the chat changes.
+    // mock: app-core syncs it to the user's other devices as an encrypted
+    // chat setting; the other people in the chat never see it.
+    pub fn set_chat_theme(&self, chat: ChatId, theme: ChatTheme) {
+        if self.chat(chat).is_some_and(|c| c.theme != theme) {
+            self.edit_chat(chat, |c| c.theme = theme);
+        }
+    }
 
     /// Stars (or unstars) several messages at once (multi-select).
     pub fn star_messages(&self, chat: ChatId, ids: &[MsgId], starred: bool) {

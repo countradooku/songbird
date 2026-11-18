@@ -17,7 +17,7 @@ async function start(w: number, h: number, scheme: "light" | "dark" = "light") {
 
 test("desktop: Ana, every type, menu, info", async () => {
   const app = await start(1180, 780);
-  await app.press("Ana Popescu");
+  await app.press("label:/^Ana Popescu,/");
   await pause(700);
   await app.screenshot("shots/chat-desktop-ana.png");
   await app.scroll("Messages", -700);
@@ -38,7 +38,7 @@ test("desktop: Ana, every type, menu, info", async () => {
 
 test("desktop: attach, reply, send, chat info", async () => {
   const app = await start(1180, 780);
-  await app.press("Ana Popescu");
+  await app.press("label:/^Ana Popescu,/");
   await pause(600);
   await app.press("Attach");
   await pause(600);
@@ -55,18 +55,21 @@ test("desktop: attach, reply, send, chat info", async () => {
   await app.press("Send");
   await pause(2600);
   await app.screenshot("shots/chat-desktop-sent.png");
-  await app.press("Ana Popescu, chat info");
+  await app.press("label:/^Ana Popescu, .*chat info$/");
   await pause(600);
   await app.screenshot("shots/chat-desktop-info.png");
 });
 
 test("desktop: group, failed, 10k, dark", async () => {
   const app = await start(1180, 780);
-  await app.press("Familia 🏡");
+  await app.press("label:/^Familia 🏡,/");
   await pause(700);
   await app.screenshot("shots/chat-desktop-group.png");
-  // Ioana's 10k-message chat is archived in the seed.
-  await app.press("Archived");
+  // Ioana's 10k-message chat is archived in the seed. "Archived · 2" is a
+  // quiet row at the end of the chat list now.
+  // REDESIGN: if the virtual list makes that row only near its end, scroll
+  // the list down before this press.
+  await app.press("label:/^Archived, /");
   await pause(500);
   await app.press("Ioana Ștefănescu");
   await pause(900);
@@ -85,7 +88,7 @@ test("desktop: group, failed, 10k, dark", async () => {
 
 test("phone: Ana, menu, attach, info", async () => {
   const app = await start(390, 844);
-  await app.press("Ana Popescu");
+  await app.press("label:/^Ana Popescu,/");
   await pause(900);
   await app.screenshot("shots/chat-phone-ana.png");
   await app.scroll("Messages", -700);
@@ -103,14 +106,14 @@ test("phone: Ana, menu, attach, info", async () => {
   await app.screenshot("shots/chat-phone-attach.png");
   await app.press("Close");
   await pause(500);
-  await app.press("Ana Popescu, chat info");
+  await app.press("label:/^Ana Popescu, .*chat info$/");
   await pause(800);
   await app.screenshot("shots/chat-phone-info.png");
 });
 
 test("phone: group dark", async () => {
   const app = await start(390, 844, "dark");
-  await app.press("Familia 🏡");
+  await app.press("label:/^Familia 🏡,/");
   await pause(900);
   await app.screenshot("shots/chat-phone-group-dark.png");
 });

@@ -5,6 +5,8 @@
 /// What a shortcut does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
+    /// The ⌘K jump-to palette (`jump.rs`).
+    JumpTo,
     Search,
     NewChat,
     NextChat,
@@ -29,7 +31,7 @@ pub struct Shortcut {
 }
 
 pub const SHORTCUTS: &[Shortcut] = &[
-    Shortcut { keys: "mod+k", label: "Search chats", group: "Chats", command: Command::Search },
+    Shortcut { keys: "mod+k", label: "Jump to a chat, person or setting", group: "Chats", command: Command::JumpTo },
     Shortcut { keys: "mod+f", label: "Search chats", group: "Chats", command: Command::Search },
     Shortcut { keys: "mod+n", label: "New chat", group: "Chats", command: Command::NewChat },
     Shortcut { keys: "mod+shift+u", label: "Mark as read", group: "Chats", command: Command::MarkRead },
@@ -39,7 +41,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     Shortcut { keys: "ctrl+shift+tab", label: "Previous chat", group: "Navigation", command: Command::PreviousChat },
     Shortcut { keys: "mod+1", label: "Chats", group: "Navigation", command: Command::Tab(0) },
     Shortcut { keys: "mod+2", label: "Calls", group: "Navigation", command: Command::Tab(1) },
-    Shortcut { keys: "mod+3", label: "Communities", group: "Navigation", command: Command::Tab(2) },
+    Shortcut { keys: "mod+3", label: "Spaces", group: "Navigation", command: Command::Tab(2) },
     Shortcut { keys: "mod+4", label: "You", group: "Navigation", command: Command::Tab(3) },
     Shortcut { keys: "mod+,", label: "Settings", group: "Navigation", command: Command::Settings },
     Shortcut { keys: "mod+/", label: "Keyboard shortcuts", group: "Help", command: Command::Shortcuts },
@@ -128,6 +130,7 @@ mod tests {
     #[test]
     fn menus_find_their_keys() {
         assert_eq!(keys_for(Command::NewChat), Some("mod+n"));
-        assert_eq!(keys_for(Command::Search), Some("mod+k"));
+        assert_eq!(keys_for(Command::JumpTo), Some("mod+k"));
+        assert_eq!(keys_for(Command::Search), Some("mod+f"));
     }
 }

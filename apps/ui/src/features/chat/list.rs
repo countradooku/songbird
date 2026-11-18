@@ -8,9 +8,10 @@ use std::time::Duration;
 use nsh_core::prelude::*;
 
 use super::{Conv, bubbles, logic};
+use crate::ui::floating;
 use crate::{
     features::devices,
-    store::{Body, ChatKind, Message, day_label},
+    store::{Body, ChatKind, Message},
     ui::*,
 };
 
@@ -39,11 +40,8 @@ enum RowKind {
 /// How far from the end still counts as "at the end".
 const END_SLOP: f32 = 80.0;
 
-/// The jump-to-latest button's side, and the room it takes at the list's
-/// end (its side and its 12pt from the bottom).
-fn jump_side() -> f32 {
-    if is_desktop() { 38.0 } else { 44.0 }
-}
+/// The room the jump-to-latest button takes at the list's end (a
+/// capsule's height and its 8pt above the composer).
 const JUMP_ROOM: f32 = 56.0;
 
 /// The list of messages.
@@ -55,11 +53,14 @@ pub(crate) fn message_list(cv: Conv) -> impl IntoElement {
         .alignment(ListAlignment::Bottom)
         .follow_end(px(END_SLOP))
         .initial_scroll_at_end()
-        .content_padding_top(px(8.0))
+        // The messages scroll under the floating header and composer:
+        // their measured frames keep the first and last messages clear.
+        .content_padding_top(move || px(cv.top_inset.get() + 8.0))
         // While scrolled up, the jump-to-latest button floats over the
-        // list's end: room for it, so it never covers the last times and
-        // ticks.
-        .content_padding_bottom(move || px(if cv.following.get() { 10.0 } else { 10.0 + JUMP_ROOM }))
+        // list's end: room for it, so it never covers the status line.
+        .content_padding_bottom(move || {
+            px(cv.bottom_inset.get() + if cv.following.get() { 8.0 } else { 8.0 + JUMP_ROOM })
+        })
         .footer(typing_indicator(cv))
         .keyboard_dismiss_mode(KeyboardDismissMode::Interactive)
         .event_throttle(100.0)
@@ -85,6 +86,16 @@ fn rise() -> MotionSpec {
     .values(MotionChannel::TranslateY, [8.0, 0.0])
 }
 
+/// The rhythm of a conversation (REDESIGN.md "Conversation details"):
+/// bubbles of one run 2pt apart, runs 10pt apart.
+pub(crate) const IN_RUN: f32 = 2.0;
+pub(crate) const BETWEEN_RUNS: f32 = 10.0;
+
+/// The messages' gutters: 12pt on phones, 20pt on wide layouts.
+pub(crate) fn gutter(cv: Conv) -> f32 {
+    if cv.wide { 20.0 } else { 12.0 }
+}
+
 /// One cell: made once, then bound to whichever message it shows.
 fn row(cv: Conv, at: Position) -> View {
     let (s, chat) = (cv.s, cv.chat);
@@ -105,11 +116,8 @@ fn row(cv: Conv, at: Position) -> View {
     });
     let id = sel(item, |i| i.m.id);
     let first = sel(item, |i| i.place.first);
-    // Photos, videos and maps keep a little more air from the bubble above
-    // in a run (their edge is the picture's, not a bubble's).
-    let media = sel(item, |i| matches!(i.m.body, Body::Image { .. } | Body::Video { .. } | Body::Location { .. }));
-    let day = sel(item, |i| i.place.day_break);
-    let day_text = sel(item, |i| day_label(i.m.at));
+    let time = sel(item, |i| i.place.time);
+    let time_text = sel(item, |i| logic::time_label(i.m.at, i.place.day_break));
     // The message just sent rises in once, whichever cell shows it.
     let enter = motion();
     effect(move || {
@@ -131,10 +139,9 @@ fn row(cv: Conv, at: Position) -> View {
             view()
                 .w_full()
                 .max_w(px(760.0))
-                .px(px(if cv.wide { 20.0 } else { 12.0 }))
-                // 2pt between bubbles of one run, 8pt between runs.
-                .pt(move || px(if first.get() { 8.0 } else if media.get() { 6.0 } else { 2.0 }))
-                .child(when(move || day.get(), move || date_pill(day_text)))
+                .px(px(gutter(cv)))
+                .pt(move || px(if first.get() { BETWEEN_RUNS } else { IN_RUN }))
+                .child(when(move || time.get(), move || time_label(time_text)))
                 .child(dynamic(move || {
                     let k = kind.get()?;
                     Some(untracked(|| match k {
@@ -146,25 +153,19 @@ fn row(cv: Conv, at: Position) -> View {
         )
 }
 
-/// "Today", "Yesterday", a weekday or a date, centred.
-fn date_pill(label: Memo<String>) -> View {
-    // A little more air above (a new day) than below (its first message).
-    view().w_full().items_center().pt_1().pb_2().child(
-        view()
-            .h(px(24.0))
-            .px_3()
-            .justify_center()
-            .rounded_full()
-            .bg(move || c::card())
-            .shadow_sm()
-            .role(AccessibilityRole::Header)
-            .child(
-                text(move || label.get())
-                    .text_size(px(font::CAPTION))
-                    .line_height(px(16.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(move || c::muted_fg()),
-            ),
+/// Where the conversation paused: "09:24", or "Today 09:24" at a day
+/// break. Plain centred text, no pill (REDESIGN.md "Quiet metadata").
+fn time_label(label: Memo<String>) -> View {
+    // 16pt above the label (the run gap and 6), 8pt below: it belongs to
+    // the run under it.
+    view().w_full().items_center().pt(px(6.0)).pb(px(8.0)).child(
+        text(move || label.get())
+            .text_size(px(font::CAPTION))
+            .line_height(px(16.0))
+            .font_weight(FontWeight::MEDIUM)
+            .tabular_nums()
+            .text_color(move || c::muted_fg())
+            .role(AccessibilityRole::Header),
     )
 }
 
@@ -189,8 +190,24 @@ fn notice_of(t: &str) -> Notice {
     }
 }
 
+/// The system line's text and its leading glyph (14pt).
+fn notice_line(glyph: impl Fn() -> Icon + Copy + 'static, words: impl Fn() -> String + 'static) -> Text {
+    text("")
+        .text_size(px(font::CAPTION))
+        .line_height(px(17.0))
+        .text_center()
+        .text_color(move || c::muted_fg())
+        .child(dynamic(move || {
+            let g = glyph();
+            Some(untracked(|| icon(g, 14.0)))
+        }))
+        .child("\u{2002}")
+        .child(text(words))
+}
+
 /// A centred notice: the encryption line at the top (lock), a key change
-/// (calm, with Verify), the timer, members coming and going.
+/// (calm, with Verify), the timer, members coming and going. Plain muted
+/// text with its icon, no pill.
 fn system_row(cv: Conv, item: ItemMemo) -> View {
     let (s, chat) = (cv.s, cv.chat);
     let raw = sel(item, |i| match &i.m.body {
@@ -199,7 +216,7 @@ fn system_row(cv: Conv, item: ItemMemo) -> View {
     });
     let notice = computed(move || raw.with(|t| notice_of(t)));
     let shown = move || raw.with(|t| t.trim_end_matches(" Tap to verify.").to_string());
-    let glyph = move |n: Notice| match n {
+    let glyph = move || match notice.get() {
         Notice::Encryption => Icon::Lock,
         Notice::KeyChange => Icon::ShieldCheck,
         Notice::Timer => Icon::Timer,
@@ -220,27 +237,14 @@ fn system_row(cv: Conv, item: ItemMemo) -> View {
                 }
             })
             .accessibility_label(super::say(move || raw.get()))
-            .max_w(px(520.0))
+            .max_w(px(480.0))
             .px_3()
-            .py_2()
-            .gap_2()
+            .py_1()
+            .gap_1()
             .items_center()
             .rounded(move || radius::control())
-            .bg(move || if notice.get() == Notice::Encryption { c::info_bg() } else { c::card() })
-            .shadow_sm()
-            .child(
-                text("")
-                    .text_size(px(font::CAPTION))
-                    .line_height(px(17.0))
-                    .text_center()
-                    .text_color(move || c::muted_fg())
-                    .child(dynamic(move || {
-                        let n = notice.get();
-                        Some(untracked(|| icon(glyph(n), 12.0)))
-                    }))
-                    .child("  ")
-                    .child(text(shown)),
-            )
+            .focus_visible(|st| st.outline(px(2.0)).outline_color(move || c::ring()))
+            .child(notice_line(glyph, shown))
             .child(when(
                 move || notice.get() == Notice::KeyChange,
                 move || btn("Verify", Variant::Ghost, BtnSize::Sm, verify),
@@ -249,54 +253,38 @@ fn system_row(cv: Conv, item: ItemMemo) -> View {
 }
 
 /// A nudge: a centred line with a zap (the conversation shakes when one
-/// arrives).
+/// arrives), as quiet as the other notices.
 fn nudge_row(cv: Conv, item: ItemMemo) -> View {
     let s = cv.s;
     let line = sel(item, |i| if i.m.mine() { "You sent a nudge".to_string() } else { String::new() });
     let from = sel(item, |i| i.m.from);
-    let time = sel(item, |i| crate::store::clock(i.m.at));
     let label = move || {
         let l = line.get();
         if l.is_empty() { format!("{} sent you a nudge", s.contact_name(from.get())) } else { l }
     };
-    view().w_full().items_center().py_1().child(
-        view()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .px_3()
-            .py(px(6.0))
-            .rounded_full()
-            .bg(move || c::card())
-            .shadow_sm()
-            .label(move || format!("{}, {}", label(), time.get()))
-            .child(icon(Icon::Zap, 14.0).text_color(move || c::warning()))
-            .child(
-                text(label)
-                    .text_size(px(font::CAPTION))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(move || c::foreground()),
-            )
-            .child(text(move || time.get()).text_size(px(11.0)).tabular_nums().text_color(move || c::muted_fg())),
-    )
+    view()
+        .w_full()
+        .items_center()
+        .py_1()
+        .label(label)
+        .role(AccessibilityRole::Text)
+        .child(notice_line(|| Icon::Zap, label))
 }
 
-/// A sender's message: selection mark, the sender's avatar in groups, the
-/// bubble with its reactions; swiped right on phones, it replies.
+/// A sender's message: selection mark, then the column (the sender's
+/// name and avatar in groups, the bubble, reactions, the status line);
+/// swiped right on phones, it replies.
 fn bubble_row(cv: Conv, item: ItemMemo) -> AnyElement {
     let s = cv.s;
-    let mine = sel(item, |i| i.m.mine());
-    let last = sel(item, |i| i.place.last);
-    let from = sel(item, |i| i.m.from);
     let id = sel(item, |i| i.m.id);
-    let avatars = s.chat(cv.chat).is_some_and(|c| matches!(c.kind, ChatKind::Group | ChatKind::Community));
+    let people = s.chat(cv.chat).is_some_and(|c| matches!(c.kind, ChatKind::Group | ChatKind::Community));
     let selected = move || cv.selected.with(|v| v.contains(&id.get()));
     // While selecting, the marks make a column of their own at the
     // leading edge (for both sides' messages), and the chosen rows are
     // tinted: shape and colour.
     let content = view()
         .flex_row()
-        .items_end()
+        .items_center()
         .gap(px(8.0))
         .w_full()
         .rounded(move || radius::control())
@@ -306,27 +294,7 @@ fn bubble_row(cv: Conv, item: ItemMemo) -> AnyElement {
         .transition_colors()
         .duration(motion::INSTANT)
         .child(when(cv.selecting, move || select_mark(selected)))
-        .child(
-            view()
-                .flex_1()
-                .min_w(px(0.0))
-                .flex_row()
-                .items_end()
-                .gap(px(6.0))
-                .style_when(move || mine.get(), |st| st.justify_end())
-                .child(avatars.then(|| {
-            view().w(px(28.0)).style_when(move || mine.get(), |st| st.hidden()).child(when(
-                move || last.get() && !mine.get(),
-                move || {
-                    dynamic(move || {
-                        let from = from.get();
-                        Some(untracked(|| avatar(s.contact_name(from), from.unwrap_or(0), 28.0)))
-                    })
-                },
-            ))
-        }))
-                .child(bubbles::bubble_column(cv, item)),
-        );
+        .child(view().flex_1().min_w(px(0.0)).child(bubbles::bubble_column(cv, item, people)));
     // While selecting, the whole row toggles the message.
     let picker = when(cv.selecting, move || {
         pressable()
@@ -396,7 +364,6 @@ fn select_mark(selected: impl Fn() -> bool + Copy + 'static) -> View {
     view()
         .size(px(22.0))
         .ml(px(4.0))
-        .mb(px(8.0))
         .rounded_full()
         .items_center()
         .justify_center()
@@ -429,16 +396,16 @@ fn typing_indicator(cv: Conv) -> AnyElement {
                     m
                 })
                 .collect();
-            view().w_full().items_center().pt_2().child(
-                view().w_full().max_w(px(760.0)).px(px(if cv.wide { 20.0 } else { 12.0 })).child(
+            view().w_full().items_center().pt(px(BETWEEN_RUNS)).child(
+                view().w_full().max_w(px(760.0)).px(px(gutter(cv))).child(
                     view()
                         .self_start()
                         .flex_row()
                         .gap(px(4.0))
                         .px_4()
                         .py(px(13.0))
-                        .rounded(move || radius::bubble())
-                        .rounded_bl(px(6.0))
+                        .rounded(px(bubbles::RADIUS))
+                        .border_curve(BorderCurve::Continuous)
                         .bg(move || c::bubble_in())
                         .label(who())
                         .role(AccessibilityRole::Text)
@@ -452,7 +419,8 @@ fn typing_indicator(cv: Conv) -> AnyElement {
     .into_element()
 }
 
-/// The round "jump to latest" button, with how many arrived meanwhile.
+/// The round "jump to latest" button, with how many arrived meanwhile: a
+/// small capsule over the list's end, just above the composer.
 pub(crate) fn jump_button(cv: Conv) -> AnyElement {
     when(
         move || !cv.following.get(),
@@ -462,37 +430,33 @@ pub(crate) fn jump_button(cv: Conv) -> AnyElement {
                 .values(MotionChannel::Opacity, [0.0, 1.0])
                 .values(MotionChannel::Scale, [0.9, 1.0]),
             );
+            let side = floating::capsule_height();
             view()
                 .absolute()
                 // On the messages' gutter (the outgoing bubbles' edge).
-                .right(px(if cv.wide { 20.0 } else { 8.0 }))
-                .bottom(px(12.0))
+                .right(px(gutter(cv)))
+                .bottom(move || px(cv.bottom_inset.get() + 8.0))
                 .bind_motion(&pop)
-                .child(
+                .child(floating::capsule(
                     pressable()
                         .on_press(move || cv.to_latest())
                         .accessibility_label(super::say(move || match cv.unseen.get() {
                             0 => "Scroll to latest message".to_string(),
                             n => format!("Scroll to latest message, {n} new"),
                         }))
-                        .size(px(jump_side()))
+                        .size(px(side))
                         .rounded_full()
                         .items_center()
                         .justify_center()
-                        // The popover surface with a visible edge: it
-                        // stands off the chat background in dark too.
-                        .bg(move || c::popover())
-                        .border_1()
-                        .border_color(move || c::input().opacity(0.45))
                         .text_color(move || c::foreground())
-                        .shadow_md()
                         .cursor_pointer()
                         .transition()
                         .duration(motion::FAST)
-                        .active(|st| if motion::reduced() { st.opacity(0.85) } else { st.scale(0.94) })
-                        .focus_visible(|st| st.outline(px(2.0)).outline_color(move || c::ring()))
+                        .hover(|st| st.bg(move || c::foreground().opacity(0.06)))
+                        .active(|st| if motion::reduced() { st.opacity(0.85) } else { st.scale(motion::ICON_PRESS_SCALE) })
+                        .focus_visible(|st| st.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
                         .child(icon(Icon::ChevronDown, 20.0)),
-                )
+                ))
                 .child(when(
                     move || cv.unseen.get() > 0,
                     move || {

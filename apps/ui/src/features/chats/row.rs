@@ -8,7 +8,7 @@ use nsh_core::{
     prelude::*,
 };
 
-use super::{ChatFilter, animate_change, filter, list_names, model::*, pages};
+use super::{animate_change, filter, list_names, model::*, pages, surface};
 use crate::{
     features,
     nav,
@@ -22,7 +22,7 @@ pub fn avatar_size() -> f32 {
 }
 
 /// The preview line's text size: a step under the title.
-fn preview_size() -> f32 {
+pub fn preview_size() -> f32 {
     if is_desktop() { font::SMALL } else { font::BODY_DESKTOP }
 }
 
@@ -33,18 +33,25 @@ fn line_height() -> f32 {
     if is_desktop() { 20.0 } else { 22.0 }
 }
 
-/// The status glyphs on a row (timer, muted, pinned) share one size, the
-/// optical size of the ticks beside them.
+/// The status glyphs on a row (timer, muted, pinned, a failed send) share
+/// one size.
 const MARK: f32 = 16.0;
 
 /// The row's leading gutter and the gap after the avatar: where the text
-/// column (and the inset separator) starts.
-const GUTTER: f32 = 16.0;
+/// column starts. The avatar column sits on the gutter, the same 16pt as
+/// the search field's edge and the pinned people's grid above.
+pub const GUTTER: f32 = 16.0;
 const AVATAR_GAP: f32 = 12.0;
 
-/// Where the text column starts, from the row's leading edge.
-pub fn text_inset() -> f32 {
-    GUTTER + avatar_size() + AVATAR_GAP
+/// The unread dot before the time.
+const DOT: f32 = 8.0;
+
+/// Wide layouts draw a row's hover, press and selection as a rounded fill
+/// inset in the pane (floating, like the pane itself), not a band from
+/// edge to edge; the content keeps its place on the gutter. Phones keep
+/// the platform's full-width press.
+pub fn fill_inset() -> f32 {
+    if wide() { 8.0 } else { 0.0 }
 }
 
 /// One device pixel, in points (a hairline).
@@ -71,8 +78,9 @@ fn photo_shown(r: &ChatRow) -> bool {
 }
 
 /// An avatar that follows the row: initials on the chat's hue, and a
-/// small group or channel mark at its corner (shape, not colour alone).
-fn live_avatar(row: Memo<ChatRow>, size: f32) -> View {
+/// small group or channel mark at its corner (shape, not colour alone),
+/// cut out of `surface` (the page on phones, the pane on wide layouts).
+pub fn live_avatar(row: Memo<ChatRow>, size: f32, surface: fn() -> AdaptiveColor) -> View {
     view()
         .size(px(size))
         .accessibility_elements_hidden(true)
@@ -123,7 +131,7 @@ fn live_avatar(row: Memo<ChatRow>, size: f32) -> View {
                 .rounded_full()
                 .items_center()
                 .justify_center()
-                .bg(move || c::background())
+                .bg(move || surface())
                 .style_when(move || !row.with(|r| r.group), |st| st.hidden())
                 .child(
                     view()
@@ -154,7 +162,10 @@ pub fn chat_row(s: Store, row: Memo<ChatRow>, scope: ListScope, query: Option<Si
     let desktop_layout = wide();
     let open = nav::open_chat();
     let selected = move || desktop_layout && open.with(|o| o.0) == Some(row.with(|r| r.id));
+    // Unread and not muted: the name steps up a weight and the dot is the
+    // accent. Muted and unread: a neutral dot, the name stays quiet.
     let loud = move || row.with(|r| r.is_unread() && !r.muted);
+    let unread = move || row.with(ChatRow::is_unread);
     // What the second line shows: the open chat's draft is in its
     // composer, so its row keeps the last message.
     let shown = computed(move || {
@@ -162,11 +173,7 @@ pub fn chat_row(s: Store, row: Memo<ChatRow>, scope: ListScope, query: Option<Si
         row.with(|r| r.shown(open_here).clone())
     });
     let typing = move || shown.with(|p| matches!(p, Preview::Typing(_)));
-    let tick = move || match shown.get() {
-        Preview::Message { tick: Some(t), .. } => t,
-        _ => Tick::Sent,
-    };
-    let has_tick = move || shown.with(|p| matches!(p, Preview::Message { tick: Some(_), .. }));
+    let failed = move || shown.with(|p| matches!(p, Preview::Message { tick: Some(Tick::Failed), .. }));
     let voice = move || row.with(|r| r.voice) && shown.with(|p| matches!(p, Preview::Message { .. }));
     // The name, cut around the query's match (search results).
     let cut = computed(move || {
@@ -176,8 +183,9 @@ pub fn chat_row(s: Store, row: Memo<ChatRow>, scope: ListScope, query: Option<Si
             .unwrap_or((title, String::new(), String::new()))
     });
 
-    // Title and time share a baseline; the marks and the tag are centred
-    // on the line.
+    // Three text sizes in the whole list: the name (body), the preview a
+    // step under it, and caption for the time and the counts. The name
+    // leads, the preview is muted, the time is the quietest.
     let title_line = view()
         .flex_row()
         .items_center()
@@ -195,10 +203,10 @@ pub fn chat_row(s: Store, row: Memo<ChatRow>, scope: ListScope, query: Option<Si
                 .number_of_lines(1)
                 .text_size(px(font::body()))
                 .line_height(px(line_height()))
-                // One weight step marks an unread chat (with the time in
-                // the primary colour and the preview in full ink).
-                .font_weight(FontWeight::MEDIUM)
-                .style_when(move || row.with(ChatRow::is_unread), |st| st.font_weight(FontWeight::SEMIBOLD))
+                // One weight step marks an unread chat; the dot by the
+                // time says it again in shape, not weight alone.
+                .font_weight(FontWeight::NORMAL)
+                .style_when(loud, |st| st.font_weight(FontWeight::SEMIBOLD))
                 .text_color(move || c::foreground()),
         )
         .child(icon(Icon::ShieldCheck, 15.0).text_color(move || c::primary()).style_when(
@@ -212,20 +220,34 @@ pub fn chat_row(s: Store, row: Memo<ChatRow>, scope: ListScope, query: Option<Si
             move || row.with(|r| r.whatsapp),
             move || {
                 view()
-                    .px(px(5.0))
-                    .py(px(1.0))
+                    .px(px(4.0))
                     .rounded(move || radius::sm())
                     .border_1()
                     .border_color(move || c::whatsapp())
                     .child(
                         text("WhatsApp")
-                            .text_size(px(font::CAPTION - 1.0))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(px(font::CAPTION))
+                            .line_height(px(16.0))
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(move || c::whatsapp()),
                     )
             },
         ))
         .child(view().flex_1().min_w(px(8.0)))
+        // The unread dot, before the time. Centred on the line box it would
+        // sit on the digits' middle; the 2pt drop puts its centre on the
+        // time's x-height middle instead (the time is caption text a point
+        // below the box centre, with its x-height middle ~3pt above the
+        // baseline), so dot and digits read as one optical line.
+        .child(
+            view()
+                .size(px(DOT))
+                .rounded_full()
+                .flex_shrink(0.0)
+                .translate_y(px(2.0))
+                .bg(move || if loud() { c::primary() } else { c::muted_fg() })
+                .style_when(move || !unread(), |st| st.hidden()),
+        )
         .child(
             text(move || row.with(|r| r.when.clone()))
                 .flex_shrink(0.0)
@@ -235,8 +257,8 @@ pub fn chat_row(s: Store, row: Memo<ChatRow>, scope: ListScope, query: Option<Si
                 // difference of the two sizes' descent.
                 .translate_y(px(1.0))
                 .tabular_nums()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(move || if loud() { c::primary() } else { c::muted_fg() }),
+                .font_weight(FontWeight::NORMAL)
+                .text_color(move || c::muted_fg()),
         );
 
     let preview = text(move || shown.with(|p| p.text().0))
@@ -246,20 +268,12 @@ pub fn chat_row(s: Store, row: Memo<ChatRow>, scope: ListScope, query: Option<Si
         .line_height(px(line_height()))
         .font_weight(FontWeight::MEDIUM)
         .text_color(move || {
-            if shown.with(|p| matches!(p, Preview::Draft(_))) { c::primary() } else { c::foreground() }
+            if shown.with(|p| matches!(p, Preview::Draft(_))) { c::primary() } else { c::muted_fg() }
         })
         .child(
             text(move || shown.with(|p| p.text().1))
                 .font_weight(FontWeight::NORMAL)
-                .text_color(move || {
-                    if typing() {
-                        c::primary()
-                    } else if loud() {
-                        c::foreground()
-                    } else {
-                        c::muted_fg()
-                    }
-                }),
+                .text_color(move || if typing() { c::primary() } else { c::muted_fg() }),
         );
 
     let preview_line = view()
@@ -267,12 +281,16 @@ pub fn chat_row(s: Store, row: Memo<ChatRow>, scope: ListScope, query: Option<Si
         .items_center()
         .h(px(line_height()))
         .gap_1()
-        .child(view().style_when(move || !has_tick(), |st| st.hidden()).child(ticks(tick)))
+        // No delivery ticks on rows (the conversation says it once, under
+        // the latest message); only a send that failed shows, as a warning.
+        .child(view().style_when(move || !failed(), |st| st.hidden()).child(ticks(|| Tick::Failed)))
         .child(mark(Icon::Mic, MARK, voice))
         .child(preview)
         // Chat state, at the end with mute and pin: disappearing messages.
         .child(mark(Icon::Timer, MARK, move || row.with(|r| r.disappearing)))
         .child(mark(Icon::BellOff, MARK, move || row.with(|r| r.muted)))
+        // Pinned chats are the people above the list; a pin here is one
+        // past the grid's eight.
         .child(mark(Icon::Pin, MARK, move || row.with(|r| r.pinned) && scope == ListScope::Inbox))
         .child(
             view()
@@ -280,37 +298,29 @@ pub fn chat_row(s: Store, row: Memo<ChatRow>, scope: ListScope, query: Option<Si
                 .rounded_full()
                 .items_center()
                 .justify_center()
-                .bg(move || c::primary())
+                .bg(move || if loud() { c::primary() } else { c::muted_fg() })
                 .style_when(move || !row.with(|r| r.mention), |st| st.hidden())
                 .child(
                     text("@")
                         .text_size(px(font::CAPTION))
                         .font_weight(FontWeight::BOLD)
-                        .text_color(move || c::on_primary()),
+                        .text_color(move || if loud() { c::on_primary() } else { c::background() }),
                 ),
         )
+        // The count only when it says more than the dot does (> 1).
         .child(
             view()
-                .style_when(move || row.with(|r| r.unread == 0), |st| st.hidden())
+                .style_when(move || row.with(|r| r.unread <= 1), |st| st.hidden())
                 .child(unread_badge(move || row.with(|r| r.unread), move || row.with(|r| r.muted))),
-        )
-        // Marked as unread: a dot, as the count's place.
-        .child(
-            view()
-                .size(px(10.0))
-                .mx(px(5.0))
-                .rounded_full()
-                .bg(move || if row.with(|r| r.muted) { c::muted_fg() } else { c::primary() })
-                .style_when(move || row.with(|r| r.unread > 0 || !r.marked_unread), |st| st.hidden()),
         );
 
     let body = view()
         .flex_row()
         .items_center()
         .gap(px(AVATAR_GAP))
-        .px(px(GUTTER))
+        .px(px(GUTTER - fill_inset()))
         .h(px(if is_desktop() { 68.0 } else { 76.0 }))
-        .child(live_avatar(row, avatar_size()))
+        .child(live_avatar(row, avatar_size(), surface()))
         .child(
             view()
                 .flex_1()
@@ -318,24 +328,17 @@ pub fn chat_row(s: Store, row: Memo<ChatRow>, scope: ListScope, query: Option<Si
                 .gap(px(2.0))
                 .child(title_line)
                 .child(preview_line),
-        )
-        // The WhatsApp-style hairline under the text column (not under the
-        // avatar), hidden on the open chat where the highlight is enough.
-        .child(
-            view()
-                .absolute()
-                .bottom_0()
-                .right_0()
-                .left(px(text_inset()))
-                .h(px(hairline()))
-                .bg(move || c::border())
-                .style_when(selected, |st| st.hidden().border_color(AdaptiveColor::TRANSPARENT)),
         );
 
+    // No separators: rows breathe on their height, and the hover, press
+    // and selection fills say where one ends.
+    let inset = fill_inset();
     let trigger = button()
         .on_press(move || features::chat::open(row.with_untracked(|r| r.id)))
         .accessibility_label(move || Some(SharedString::from(row.with(|r| r.spoken()))))
         .selected(selected)
+        .mx(px(inset))
+        .when(inset > 0.0, |b| b.rounded(move || radius::control()))
         .cursor_pointer()
         .bg(move || if selected() { c::accent() } else { AdaptiveColor::TRANSPARENT })
         .transition_colors()
@@ -345,6 +348,12 @@ pub fn chat_row(s: Store, row: Memo<ChatRow>, scope: ListScope, query: Option<Si
         .focus_visible(|st| st.bg(move || c::accent()))
         .child(body);
 
+    with_menu(s, row, scope, trigger)
+}
+
+/// `trigger` with the chat's menu: a right click on desktops, a held
+/// finger on phones (as a sheet). Rows and pinned people share it.
+pub fn with_menu(s: Store, row: Memo<ChatRow>, scope: ListScope, trigger: impl IntoElement) -> impl IntoElement {
     context_menu()
         .popup_style(popup_style)
         .popup_starting_style(|st| {
@@ -428,7 +437,7 @@ pub fn icon_trigger(glyph: Icon, label: &'static str) -> View {
         .child(icon(glyph, if is_desktop() { 18.0 } else { 22.0 }))
 }
 
-fn separator_item() -> nsh_base::MenuSeparatorElement {
+pub fn separator_item() -> nsh_base::MenuSeparatorElement {
     menu_separator().h(px(hairline())).my_1().mx_3().bg(move || c::border())
 }
 
@@ -567,9 +576,9 @@ fn lists_submenu(s: Store, row: Memo<ChatRow>) -> impl IntoElement {
                             let id = row.with_untracked(|r| r.id);
                             held.with(|n| s.toggle_in_list(id, n));
                             // Taken out of the list being shown: show all.
-                            let shown = f.with_untracked(|x| held.with(|n| matches!(&x.0, Filter::List(l) if l == n)));
+                            let shown = f.with_untracked(|x| held.with(|n| matches!(&x.list, Filter::List(l) if l == n)));
                             if shown && !inside() {
-                                f.set(ChatFilter(Filter::All));
+                                f.update(|x| x.list = Filter::All);
                             }
                         })
                         .flex_row()

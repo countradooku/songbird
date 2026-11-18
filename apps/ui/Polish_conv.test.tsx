@@ -43,7 +43,7 @@ for (const scheme of ["light", "dark"] as const) {
         await app.scroll("text:Mihai Ionescu", -3000);
       });
       await step("ana", async () => {
-        await app.press("text:Ana Popescu");
+        await app.press("label:/^Ana Popescu,/");
         await shot(`${lay}-ana-${scheme}`);
         await app.scroll("label:Messages", -1200);
         await shot(`${lay}-ana2-${scheme}`);
@@ -55,7 +55,7 @@ for (const scheme of ["light", "dark"] as const) {
     test(`${lay} ${scheme} menu`, async () => {
       const { app, shot } = await start(w, h, scheme);
       await step("menu", async () => {
-        await app.press("text:Ana Popescu");
+        await app.press("label:/^Ana Popescu,/");
         await pause(600);
         if (lay === "d") await app.rightClick(BUDGET);
         else await app.longPress(BUDGET);
@@ -79,7 +79,7 @@ for (const scheme of ["light", "dark"] as const) {
     test(`${lay} ${scheme} compose`, async () => {
       const { app, shot } = await start(w, h, scheme);
       await step("open", async () => {
-        await app.press("text:Ana Popescu");
+        await app.press("label:/^Ana Popescu,/");
         await pause(600);
       });
       await step("attach", async () => {
@@ -95,7 +95,7 @@ for (const scheme of ["light", "dark"] as const) {
         await shot(`${lay}-sent-${scheme}`);
       });
       await step("info", async () => {
-        await app.press("label:Ana Popescu, chat info");
+        await app.press("label:/^Ana Popescu, .*chat info$/");
         await shot(`${lay}-info-${scheme}`);
         await app.scroll("text:Media, links and docs", 400);
         await shot(`${lay}-info2-${scheme}`);
@@ -105,7 +105,7 @@ for (const scheme of ["light", "dark"] as const) {
     test(`${lay} ${scheme} group+10k`, async () => {
       const { app, shot } = await start(w, h, scheme);
       await step("group", async () => {
-        await app.press("text:Familia 🏡");
+        await app.press("label:/^Familia 🏡,/");
         await shot(`${lay}-group-${scheme}`);
       });
       if (lay === "p") await step("back", async () => app.press("label:Back"));

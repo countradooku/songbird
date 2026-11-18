@@ -6,10 +6,7 @@ use std::{collections::HashMap, time::Duration};
 use nsh_core::prelude::*;
 
 use super::{Conv, logic};
-use crate::{
-    store::{Body, MsgId},
-    ui::*,
-};
+use crate::store::{Body, MsgId};
 
 /// Which note plays, where each note is, how fast.
 #[derive(Clone, Copy)]
@@ -117,8 +114,14 @@ pub(crate) fn install(cv: Conv) {
     });
 }
 
-/// The waveform: bars drawn from tokens, the played part in the accent.
-pub(crate) fn waveform(cv: Conv, id: impl Fn() -> MsgId + Copy + 'static, secs: impl Fn() -> u32 + Copy + 'static) -> View {
+/// The waveform: bars in the bubble's quiet ink, the played part in its
+/// accent (the user's full-colour bubble draws both from its text colour).
+pub(crate) fn waveform(
+    cv: Conv,
+    id: impl Fn() -> MsgId + Copy + 'static,
+    secs: impl Fn() -> u32 + Copy + 'static,
+    ink: impl Fn() -> super::theme::Ink + Copy + 'static,
+) -> View {
     const BARS: usize = 28;
     let player = cv.voice;
     let shape = computed(move || logic::waveform(id(), BARS));
@@ -135,7 +138,7 @@ pub(crate) fn waveform(cv: Conv, id: impl Fn() -> MsgId + Copy + 'static, secs: 
                 .w(px(3.0))
                 .rounded_full()
                 .h(move || px(4.0 + 22.0 * shape.with(|s| s.get(i).copied().unwrap_or(0.4))))
-                .bg(move || if on() { c::primary() } else { c::bubble_meta() })
+                .bg(move || if on() { ink().accent } else { ink().quiet })
                 .opacity(move || if on() { 1.0_f32 } else { 0.55 })
         }))
 }

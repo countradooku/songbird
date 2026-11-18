@@ -1,5 +1,9 @@
 # Motion inventory: groups, communities, channels, media, packs (A6, A7)
 
+> **Superseded in part by [REDESIGN.md](REDESIGN.md) (Floating, 2026-11-18).** Where the two disagree,
+> REDESIGN.md wins: floating panes instead of the rail, Spaces instead of Communities, the Lists capsule
+> instead of filter chips, no per-bubble ticks or times, per-chat themes, and ⌘K jump-to.
+
 Tokens from `ui::motion` (`INSTANT` 120, `FAST` 180, `BASE` 240, `SLOW` 360,
 settle curve `(0.22, 1, 0.36, 1)`). "Reduced" is what `motion::reduced()` does.
 "Checked" = seen in the running app (`Screens_groups.test.tsx`, macOS) or, for

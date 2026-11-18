@@ -13,6 +13,9 @@ pub enum Icon {
     Chats,
     Calls,
     Communities,
+    /// Four circles in a square: the Spaces destination (SF Symbols'
+    /// `circle.grid.2x2`, drawn in the set's 2pt stroke).
+    Spaces,
     You,
     Search,
     Plus,
@@ -132,6 +135,9 @@ impl Icon {
             Chats => r#"<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>"#,
             Calls | Phone => r#"<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92Z"/>"#,
             Communities | Users => r#"<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>"#,
+            // r 3.5 at 6.5/17.5: 2pt clear between the strokes, the mass
+            // centred on the grid's middle like the other tab glyphs.
+            Spaces => r#"<circle cx="6.5" cy="6.5" r="3.5"/><circle cx="17.5" cy="6.5" r="3.5"/><circle cx="6.5" cy="17.5" r="3.5"/><circle cx="17.5" cy="17.5" r="3.5"/>"#,
             You | User => r#"<circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/>"#,
             Search => r#"<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>"#,
             Plus => r#"<path d="M5 12h14"/><path d="M12 5v14"/>"#,

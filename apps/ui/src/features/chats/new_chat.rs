@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use nsh_core::{element::Position, prelude::*};
 
-use super::{model, search};
+use super::{model, row, search};
 use crate::{
     features,
     nav::{self, Tab},
@@ -40,7 +40,7 @@ fn action(glyph: Icon, label: &'static str, on_press: impl Fn() + 'static) -> im
             .flex_row()
             .items_center()
             .gap_3()
-            .px_4()
+            .px(px(row::GUTTER - row::fill_inset()))
             .min_h(px(if is_desktop() { 52.0 } else { 60.0 }))
             .child(action_tile(glyph))
             .child(text(label).flex_1().text_size(px(font::body())).font_weight(FontWeight::MEDIUM)),
@@ -74,7 +74,7 @@ fn body() -> impl IntoElement {
                             .child(action(Icon::Users, "New group", features::groups::new_group))
                             .child(action(Icon::Communities, "New community", || {
                                 nav::pop_to_root();
-                                nav::tab().set(Tab::Communities);
+                                nav::tab().set(Tab::Spaces);
                             }))
                             .child(action(Icon::Megaphone, "New broadcast list", open_broadcast))
                             .child(action(Icon::Share, "Invite a friend", move || {

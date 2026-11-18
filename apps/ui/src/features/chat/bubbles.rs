@@ -1,5 +1,6 @@
 //! The bubbles: one look per `Body` variant, inside the shared frame
-//! (forwarded label, sender, reply quote, meta line, reactions). Every
+//! (forwarded label, reply quote, marks), and around it the sender's name
+//! and avatar (groups), reactions and the status line. Every
 //! part binds to the cell's current row, so a recycled cell shows the
 //! next message without being made again unless its kind changes.
 
@@ -9,10 +10,11 @@ use super::{
     Conv, MenuAt,
     list::{ItemMemo, sel},
     logic,
+    theme::{self, Ink},
 };
 use crate::{
     features::{calls, media},
-    store::{Body, clock},
+    store::Body,
     ui::*,
 };
 
@@ -61,9 +63,9 @@ impl Kind {
     }
 }
 
-/// Whether the bubble ends in a paragraph the time and ticks can sit
-/// inside (WhatsApp's wrap: the meta takes the last line's end when it
-/// fits): text, links, and captioned photos and videos.
+/// Whether the bubble ends in a paragraph its marks (starred, pinned,
+/// edited) can sit inside (the marks take the last line's end when they
+/// fit): text, links, and captioned photos and videos.
 fn inline_meta(b: &Body) -> bool {
     match b {
         Body::Text(_) | Body::Link { .. } => true,
@@ -73,21 +75,51 @@ fn inline_meta(b: &Body) -> bool {
 }
 
 /// The bubble's padding: 12pt at the sides, 8pt above and below text.
+/// With the body's line heights (20pt for 14pt text, 22pt for 16pt) the
+/// cap height sits within half a point of the line box's centre, so 8pt
+/// above and below put 13pt between the bubble's edge and the caps on
+/// both sides: about the 12pt at the sides, an optically even margin.
 const PAD_X: f32 = 12.0;
 const PAD_Y: f32 = 8.0;
 /// Media, cards and quotes sit this far in from the bubble's edge; their
-/// radius is the bubble's minus this inset (concentric: 18 − 4 = 14, the
-/// large radius).
+/// radius is the bubble's minus this inset (concentric: 20 − 4 = 16).
 const INSET: f32 = 4.0;
-/// The corner a run of bubbles shares on the sender's side.
+/// The bubble's corner (REDESIGN.md "Conversation details": 20, no
+/// tails), drawn continuous (squircle) where the platform can.
+pub(crate) const RADIUS: f32 = 20.0;
+/// The corners a run's bubbles turn to each other on the sender's side.
 const JOINED: f32 = 6.0;
-/// The meta line's text (time, "Edited").
+/// An inner surface's corner (a quote, a photo, a card): concentric with
+/// the bubble's.
+const INNER: f32 = RADIUS - INSET;
+/// The marks' text (starred, pinned, "Edited"), the status line's.
 const META_SIZE: f32 = 11.0;
 const META_LINE: f32 = 14.0;
+/// The avatar beside a group's runs, and its gap to the bubbles.
+const AVATAR: f32 = 28.0;
+const AVATAR_GAP: f32 = 8.0;
+/// At most this share of the row (REDESIGN.md: 72%).
+const MAX_SHARE: f32 = 0.72;
 
 /// A paragraph's line height (whole points: no blur on 1x screens).
 fn line() -> f32 {
     if is_desktop() { 20.0 } else { 22.0 }
+}
+
+/// Cards carry the app's own controls (buttons, choices), drawn for the
+/// app's surfaces: the user's cards sit on the theme's soft tint.
+fn card_kind(b: &Body) -> bool {
+    matches!(
+        b,
+        Body::Poll { .. } | Body::Event { .. } | Body::Contact { .. } | Body::Call { .. } | Body::File { .. } | Body::ViewOnce { .. }
+    )
+}
+
+/// The colours inside the row's bubble, following the chat's look.
+fn ink_of(cv: Conv, item: ItemMemo) -> impl Fn() -> Ink + Copy + 'static {
+    let mine = sel(item, |i| i.m.mine());
+    let card = sel(item, |i| card_kind(&i.m.body));
+    move || Ink::of(cv.look.get(), mine.get(), card.get())
 }
 
 /// Opens the message menu on the bubble `frame` draws: measured first, so
@@ -104,104 +136,178 @@ fn open_menu(cv: Conv, item: ItemMemo, frame: ElementRef) {
     });
 }
 
-/// The bubble and what hangs under it (reactions, a failed send).
-pub(crate) fn bubble_column(cv: Conv, item: ItemMemo) -> View {
+/// The bubble and what hangs around it: in groups the sender's name over
+/// the run's first bubble and their avatar beside its last; reactions on
+/// the bubble's bottom edge; the status line under the user's latest
+/// message (or under any that failed).
+///
+/// Edges: the name starts where the bubble's text starts (the avatar's
+/// column, its gap and the bubble's padding in), and the avatar's bottom
+/// is the bubble's bottom (they share a row aligned to its end).
+pub(crate) fn bubble_column(cv: Conv, item: ItemMemo, people: bool) -> View {
+    let s = cv.s;
     let mine = sel(item, |i| i.m.mine());
-    // ~560pt on desktops (a readable measure), about three quarters of
-    // the row on phones.
-    let column = view();
-    let column = if cv.wide { column.max_w(px(560.0)) } else { column.max_w(relative(0.78)) };
-    column
+    let last = sel(item, |i| i.place.last);
+    let from = sel(item, |i| i.m.from);
+    let named = sel(item, |i| i.place.first && !i.m.mine() && logic::in_bubble(&i.m.body));
+    let lead = if people { AVATAR + AVATAR_GAP } else { 0.0 };
+    view()
+        .w_full()
         .style_when(move || mine.get(), |s| s.items_end())
         .style_when(move || !mine.get(), |s| s.items_start())
-        .child(bubble(cv, item))
-        .child(reactions(cv, item))
-        .child(failed(cv, item))
+        .child(people.then(|| {
+            when(move || named.get(), move || {
+                text(move || s.contact_name(from.get()))
+                    .pl(px(lead + PAD_X))
+                    .pr(px(PAD_X))
+                    .pb(px(4.0))
+                    .number_of_lines(1)
+                    .text_size(px(font::CAPTION))
+                    .line_height(px(16.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(move || theme::sender_ink(from.get().unwrap_or(0), cv.canvas()))
+            })
+        }))
+        .child(
+            view()
+                .w_full()
+                .flex_row()
+                .items_end()
+                .style_when(move || mine.get(), |s| s.justify_end())
+                .child(people.then(|| {
+                    view()
+                        .w(px(AVATAR))
+                        .mr(px(AVATAR_GAP))
+                        .style_when(move || mine.get(), |st| st.hidden())
+                        .accessibility_elements_hidden(true)
+                        .child(when(
+                            move || last.get() && !mine.get(),
+                            move || {
+                                dynamic(move || {
+                                    let from = from.get();
+                                    Some(untracked(|| avatar(s.contact_name(from), from.unwrap_or(0), AVATAR)))
+                                })
+                            },
+                        ))
+                }))
+                .child(
+                    view()
+                        .max_w(relative(MAX_SHARE))
+                        .style_when(move || mine.get(), |s| s.items_end())
+                        .style_when(move || !mine.get(), |s| s.items_start())
+                        .child(bubble(cv, item)),
+                ),
+        )
+        .child(reactions(cv, item, lead))
+        .child(status(cv, item))
 }
 
 pub(crate) fn bubble(cv: Conv, item: ItemMemo) -> View {
     let mine = sel(item, |i| i.m.mine());
     let first = sel(item, |i| i.place.first);
+    let last = sel(item, |i| i.place.last);
     let id = sel(item, |i| i.m.id);
+    let at = sel(item, |i| i.m.at);
     let kind = computed(move || item.with(|i| i.as_ref().map(|i| Kind::of(&i.m.body)).unwrap_or_default()));
     let bare = move || kind.get() == Kind::Sticker;
     let inline = sel(item, |i| inline_meta(&i.m.body));
-    // Runs: on the sender's side the bottom corner is always the small one
-    // (the tail of a single bubble, the joint inside a run), and the top
-    // corner is small too except on the run's first bubble. The far side
-    // keeps the full radius.
-    let top = move |me: bool| {
-        move || if !bare() && mine.get() == me && !first.get() { px(JOINED) } else { radius::bubble() }
-    };
-    let bottom = move |me: bool| move || if !bare() && mine.get() == me { px(JOINED) } else { radius::bubble() };
+    let marked = sel(item, |i| i.m.starred || i.m.pinned || (i.m.edited && !matches!(i.m.body, Body::Deleted)));
+    let ink = ink_of(cv, item);
+    // Runs: on the sender's side the corners that face the run's other
+    // bubbles are small (the top one unless it is the run's first, the
+    // bottom one unless it is its last); the far side keeps the full
+    // radius. No tails: a single bubble is round all over.
+    let top = move |me: bool| move || px(if !bare() && mine.get() == me && !first.get() { JOINED } else { RADIUS });
+    let bottom = move |me: bool| move || px(if !bare() && mine.get() == me && !last.get() { JOINED } else { RADIUS });
     let frame = element_ref();
+    let reduced = motion::reduced();
     let picked = move || cv.selecting.get() && cv.selected.with(|v| v.contains(&id.get()));
     let bubble = view()
         .element_ref(&frame)
-        .min_w(px(64.0))
-        .rounded(move || radius::bubble())
+        .min_w(px(44.0))
         .rounded_tr(top(true))
         .rounded_tl(top(false))
         .rounded_br(bottom(true))
         .rounded_bl(bottom(false))
+        .border_curve(BorderCurve::Continuous)
         .overflow_hidden()
-        .bg(move || {
-            if bare() {
-                AdaptiveColor::TRANSPARENT
-            } else if mine.get() {
-                c::bubble_out()
-            } else {
-                c::bubble_in()
-            }
-        })
-        .text_color(move || if mine.get() { c::on_bubble_out() } else { c::on_bubble_in() })
-        .style_when(move || !bare(), |s| s.shadow_sm())
-        // Chosen while selecting: a primary edge keeps the bubble apart
-        // from the row's selection wash (dark incoming bubbles are close
-        // to it in tone).
-        .border_1()
-        .border_color(move || if picked() { c::primary().opacity(0.55) } else { AdaptiveColor::TRANSPARENT })
+        .bg(move || if bare() { AdaptiveColor::TRANSPARENT } else { ink().fill })
+        // No colour transition here: a recycled cell changes message (and
+        // side) as the list scrolls, and must not fade between them. The
+        // canvas cross-fades on a theme change; the bubbles follow at once.
+        .text_color(move || ink().text)
+        // Chosen while selecting: a ring 2pt outside keeps the bubble apart
+        // from the row's selection wash (dark incoming bubbles are close to
+        // it in tone, and the user's are the accent's own colour). An
+        // outline, so the bubble's size and padding never move.
+        .outline(px(2.0))
+        .outline_offset(px(2.0))
+        .outline_color(move || if picked() { c::ring() } else { AdaptiveColor::TRANSPARENT })
+        // Pressed (the hold that opens the menu): it dims and settles in a
+        // little, so the finger feels it land.
+        .active(move |st| if reduced { st.opacity(0.85) } else { st.opacity(0.9).scale(0.98) })
         .group()
         .on_long_press(move |_: &PressEvent| open_menu(cv, item, frame))
         .on_context_menu(move |_: &ContextMenuEvent| open_menu(cv, item, frame))
-        .child(forwarded(item))
-        .child(sender(cv, item))
+        .child(forwarded(cv, item))
         .child(quote(cv, item))
         .child(dynamic(move || {
             let k = kind.get();
             Some(untracked(|| body(cv, item, k)))
         }))
-        .child(meta(item, bare, move || inline.get(), move || kind.get() == Kind::Contact));
+        .child(when(move || marked.get(), move || marks(cv, item, bare, move || inline.get())));
     if !is_desktop() {
         return bubble;
     }
-    // Desktop: an actions button appears on hover or focus, a shortcut to
-    // the same menu a right click opens.
-    bubble.child(
-        pressable()
-            .absolute()
-            .top(px(4.0))
-            .right(px(4.0))
-            .size(px(24.0))
-            .rounded_full()
-            .items_center()
-            .justify_center()
-            .bg(move || if mine.get() { c::bubble_out() } else { c::bubble_in() })
-            .text_color(move || c::bubble_meta())
-            .opacity(0.0)
-            .group_hover(|s| s.opacity(1.0))
-            .focus_visible(|s| s.opacity(1.0))
-            .transition_opacity()
-            .duration(motion::INSTANT)
-            .accessibility_label("Message actions")
-            .on_press(move || open_menu(cv, item, frame))
-            .child(icon(Icon::ChevronDown, 16.0)),
-    )
+    // Desktop: the time it was sent shows when the pointer rests on the
+    // bubble (the platform's half second), and an actions button appears
+    // on hover or focus, a shortcut to the menu a right click opens.
+    bubble
+        .tooltip(
+            // `ui::hint`'s look; built here because its words follow the
+            // recycled cell's message (`hint` takes fixed text).
+            view()
+                .px_2()
+                .py_1()
+                .rounded(move || radius::control())
+                .bg(move || c::foreground())
+                .shadow_md()
+                .child(
+                    text(move || logic::sent_at(at.get()))
+                        .number_of_lines(1)
+                        .text_size(px(font::CAPTION))
+                        .font_weight(FontWeight::MEDIUM)
+                        .tabular_nums()
+                        .text_color(move || c::background()),
+                )
+                .into_element(),
+        )
+        .child(
+            pressable()
+                .absolute()
+                .top(px(INSET))
+                .right(px(INSET))
+                .size(px(24.0))
+                .rounded_full()
+                .items_center()
+                .justify_center()
+                .bg(move || ink().fill)
+                .text_color(move || ink().quiet)
+                .opacity(0.0)
+                .group_hover(|s| s.opacity(1.0))
+                .focus_visible(|s| s.opacity(1.0).outline(px(2.0)).outline_color(move || c::ring()))
+                .transition_opacity()
+                .duration(motion::INSTANT)
+                .accessibility_label("Message actions")
+                .on_press(move || open_menu(cv, item, frame))
+                .child(icon(Icon::ChevronDown, 16.0)),
+        )
 }
 
-fn forwarded(item: ItemMemo) -> AnyElement {
+fn forwarded(cv: Conv, item: ItemMemo) -> AnyElement {
     let on = sel(item, |i| i.m.forwarded);
-    when(move || on.get(), || {
+    let ink = ink_of(cv, item);
+    when(move || on.get(), move || {
         view()
             .flex_row()
             .items_center()
@@ -209,65 +315,18 @@ fn forwarded(item: ItemMemo) -> AnyElement {
             .px(px(PAD_X))
             .pt(px(PAD_Y))
             .mb(px(-4.0))
-            .text_color(move || c::bubble_meta())
+            .text_color(move || ink().quiet)
             .child(icon(Icon::Forward, 12.0))
             .child(text("Forwarded").italic().text_size(px(font::CAPTION)))
     })
     .into_element()
 }
 
-/// The sender's name on the first bubble of a run in groups, in their
-/// avatar's hue.
-fn sender(cv: Conv, item: ItemMemo) -> AnyElement {
-    let s = cv.s;
-    let named = s.chat(cv.chat).is_some_and(|c| {
-        matches!(c.kind, crate::store::ChatKind::Group | crate::store::ChatKind::Community)
-    });
-    if !named {
-        return view().into_element();
-    }
-    let show = sel(item, |i| i.place.first && !i.m.mine() && logic::in_bubble(&i.m.body));
-    let from = sel(item, |i| i.m.from);
-    when(move || show.get(), move || {
-        text(move || s.contact_name(from.get()))
-            .px(px(PAD_X))
-            .pt(px(PAD_Y))
-            // The text below keeps its own top padding: pull it up so the
-            // name and the message read as one block.
-            .mb(px(-4.0))
-            .number_of_lines(1)
-            .text_size(px(font::SMALL))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(move || sender_ink(from.get().unwrap_or(0)))
-    })
-    .into_element()
-}
-
-/// A sender's name colour: their avatar hue, darkened (light) or
-/// lightened (dark) until it reads at 4.5:1 or more on the incoming
-/// bubble in that theme.
-pub(crate) fn sender_ink(contact: u64) -> AdaptiveColor {
-    let (hue, under) = (c::avatar(contact), c::bubble_in());
-    AdaptiveColor::new(legible(hue.light, under.light), legible(hue.dark, under.dark))
-}
-
-fn legible(ink: Hsla, under: Hsla) -> Hsla {
-    let lighten = under.luminance() < 0.5;
-    let mut out = ink;
-    for _ in 0..50 {
-        if out.contrast_ratio(under) >= 4.6 {
-            break;
-        }
-        let l = if lighten { out.l + 0.02 } else { out.l - 0.02 };
-        out = out.lightness(l.clamp(0.0, 1.0));
-    }
-    out
-}
-
 /// The quoted message a reply answers; pressing it scrolls there.
 fn quote(cv: Conv, item: ItemMemo) -> AnyElement {
     let (s, chat) = (cv.s, cv.chat);
     let reply = sel(item, |i| i.m.reply_to);
+    let ink = ink_of(cv, item);
     let mine = sel(item, |i| i.m.mine());
     when(move || reply.get().is_some(), move || {
         let quoted = computed(move || reply.get().and_then(|r| s.message(chat, r)));
@@ -275,9 +334,16 @@ fn quote(cv: Conv, item: ItemMemo) -> AnyElement {
         let what = move || {
             quoted.with(|q| q.as_ref().map(|q| q.body.preview()).unwrap_or_else(|| "Message not found".into()))
         };
-        let hue = move || match quoted.with(|q| q.as_ref().and_then(|q| q.from)) {
-            Some(id) => sender_ink(id),
-            None => c::primary(),
+        // In the user's full-colour bubble everything is its text colour;
+        // elsewhere the quoted sender's hue, made legible on the bubble.
+        let hue = move || {
+            if mine.get() && cv.look.get().confident() {
+                return ink().text;
+            }
+            match quoted.with(|q| q.as_ref().and_then(|q| q.from)) {
+                Some(id) => theme::sender_ink(id, ink().fill),
+                None => c::primary(),
+            }
         };
         pressable()
             .on_press(move || {
@@ -289,15 +355,17 @@ fn quote(cv: Conv, item: ItemMemo) -> AnyElement {
             .mx(px(INSET))
             .mt(px(INSET))
             .flex_row()
-            .rounded(move || radius::lg())
+            .rounded(px(INNER))
+            .border_curve(BorderCurve::Continuous)
             .overflow_hidden()
-            .bg(move || if mine.get() { c::foreground().opacity(0.07) } else { c::muted() })
-            .child(view().w(px(4.0)).bg(hue))
+            .bg(move || ink().wash)
+            .focus_visible(|st| st.outline(px(2.0)).outline_color(move || c::ring()))
+            .child(view().w(px(3.0)).bg(hue))
             .child(
                 view()
                     .flex_1()
                     .min_w(px(0.0))
-                    .px_2()
+                    .px(px(PAD_X - INSET - 3.0))
                     .py(px(6.0))
                     .gap(px(2.0))
                     .child(
@@ -311,19 +379,24 @@ fn quote(cv: Conv, item: ItemMemo) -> AnyElement {
                         text(what)
                             .number_of_lines(2)
                             .text_size(px(font::SMALL))
-                            .text_color(move || c::bubble_meta()),
+                            .text_color(move || ink().text),
                     ),
             )
     })
     .into_element()
 }
 
-/// What the meta line holds, as text of the meta's own size, for the
-/// paragraph to keep room for it on its last line. The glyphs (star, pin,
-/// ticks) are stood in for by digits of about their width; the whole run
-/// is drawn transparent and never wraps inside.
+/// What the marks hold, as text of the marks' own size, for the paragraph
+/// to keep room for them on its last line. The glyphs (star, pin) are
+/// stood in for by digits of about their width; the whole run is drawn
+/// transparent and never wraps inside. Empty when there are no marks (no
+/// time sits in the bubble any more).
 fn meta_room(m: &crate::store::Message) -> String {
     const NB: char = '\u{00A0}';
+    let deleted = matches!(m.body, Body::Deleted);
+    if !(m.starred || m.pinned || (m.edited && !deleted)) {
+        return String::new();
+    }
     let mut room = String::from("  ");
     if m.starred {
         room.push_str("00");
@@ -331,35 +404,22 @@ fn meta_room(m: &crate::store::Message) -> String {
     if m.pinned {
         room.push_str("00");
     }
-    let deleted = matches!(m.body, Body::Deleted);
     if m.edited && !deleted {
         room.push_str("Edited");
         room.push(NB);
     }
-    room.push_str(&clock(m.at));
-    if m.mine() && !deleted {
-        room.push_str("000");
-    }
     room
 }
 
-/// Time, ticks and markers (starred, pinned, edited) at the bubble's end:
-/// inside the text's last line for text bubbles (`inline`), else a line
-/// of its own under the content.
-fn meta(
-    item: ItemMemo,
-    bare: impl Fn() -> bool + Copy + 'static,
-    inline: impl Fn() -> bool + Copy + 'static,
-    card: impl Fn() -> bool + Copy + 'static,
-) -> View {
-    let mine = sel(item, |i| i.m.mine());
+/// The marks a message carries (starred, pinned, edited) at the bubble's
+/// end: inside the text's last line for text bubbles (`inline`), else a
+/// line of its own under the content. Only when there are any.
+fn marks(cv: Conv, item: ItemMemo, bare: impl Fn() -> bool + Copy + 'static, inline: impl Fn() -> bool + Copy + 'static) -> View {
     let starred = sel(item, |i| i.m.starred);
     let pinned = sel(item, |i| i.m.pinned);
-    let edited = sel(item, |i| i.m.edited);
-    let time = sel(item, |i| clock(i.m.at));
-    let status = computed(move || item.with(|i| i.as_ref().map(|i| i.m.status).unwrap_or(Tick::Sent)));
-    let deleted = sel(item, |i| matches!(i.m.body, Body::Deleted));
-    // Baselines: the meta's 11pt text in a 14pt line, the body's in a
+    let edited = sel(item, |i| i.m.edited && !matches!(i.m.body, Body::Deleted));
+    let ink = ink_of(cv, item);
+    // Baselines: the marks' 11pt text in a 14pt line, the body's in a
     // 20pt (22pt) line ending 8pt above the bubble's edge: 10pt from the
     // bottom puts both on one baseline.
     view()
@@ -372,21 +432,18 @@ fn meta(
         .mb(px(6.0))
         .style_when(inline, |s| s.absolute().right(px(10.0)).bottom(px(9.0)).px(px(0.0)).mb(px(0.0)))
         .style_when(bare, |s| s.mt_1().mb(px(0.0)).px_2().h(px(20.0)).rounded_full().bg(c::card()))
-        // A shared contact keeps a line for it above its buttons.
-        .style_when(card, |s| s.absolute().right(px(10.0)).top(px(CARD_META_TOP)).px(px(0.0)).mb(px(0.0)))
-        .text_color(move || c::bubble_meta())
+        .text_color(move || ink().quiet)
         .child(when(move || starred.get(), || icon(Icon::Star, 11.0).label("Starred")))
         .child(when(move || pinned.get(), || icon(Icon::Pin, 11.0).label("Pinned")))
-        .child(when(move || edited.get() && !deleted.get(), || {
-            text("Edited").text_size(px(META_SIZE)).line_height(px(META_LINE))
-        }))
-        .child(text(move || time.get()).text_size(px(META_SIZE)).line_height(px(META_LINE)).tabular_nums())
-        .child(when(move || mine.get() && !deleted.get(), move || ticks(move || status.get())))
+        .child(when(move || edited.get(), || text("Edited").text_size(px(META_SIZE)).line_height(px(META_LINE))))
 }
 
-/// The user's and others' reactions under the bubble, with counts.
-fn reactions(cv: Conv, item: ItemMemo) -> AnyElement {
+/// Reactions: a small capsule on the bubble's bottom edge, half over it,
+/// ringed in the canvas's colour so it reads as lifted off both. It
+/// starts at the bubble's text edge (others') or ends there (the user's).
+fn reactions(cv: Conv, item: ItemMemo, lead: f32) -> AnyElement {
     let id = sel(item, |i| i.m.id);
+    let mine = sel(item, |i| i.m.mine());
     let list = computed(move || {
         item.with(|i| {
             i.as_ref()
@@ -403,8 +460,10 @@ fn reactions(cv: Conv, item: ItemMemo) -> AnyElement {
         view()
             .flex_row()
             .gap_1()
-            .mt(px(-4.0))
-            .px_2()
+            // Half the chip's 24pt over the bubble's edge.
+            .mt(px(-12.0))
+            .style_when(move || mine.get(), |s| s.pr(px(PAD_X - 2.0)))
+            .style_when(move || !mine.get(), move |s| s.pl(px(lead + PAD_X - 2.0)))
             .child(each(
                 move || list.get(),
                 |r: &(String, usize, bool)| r.0.clone(),
@@ -415,7 +474,7 @@ fn reactions(cv: Conv, item: ItemMemo) -> AnyElement {
                     } else {
                         motion()
                     };
-                    let mine = move || r.with(|r| r.2);
+                    let yours = move || r.with(|r| r.2);
                     pressable()
                         .bind_motion(&pop)
                         .on_press(move || cv.react(id.get_untracked(), &r.with_untracked(|r| r.0.clone())))
@@ -428,16 +487,18 @@ fn reactions(cv: Conv, item: ItemMemo) -> AnyElement {
                         .px(px(7.0))
                         .h(px(24.0))
                         .rounded_full()
-                        .border_1()
-                        .border_color(move || if mine() { c::primary() } else { c::border() })
-                        .bg(move || if mine() { c::accent() } else { c::card() })
-                        .shadow_sm()
-                        .child(text(move || r.with(|r| r.0.clone())).text_size(px(13.0)))
+                        .border_2()
+                        .border_color(move || cv.canvas())
+                        .bg(move || if yours() { c::accent() } else { c::card() })
+                        .cursor_pointer()
+                        .active(|st| if motion::reduced() { st.opacity(0.85) } else { st.scale(motion::ICON_PRESS_SCALE) })
+                        .focus_visible(|st| st.outline(px(2.0)).outline_color(move || c::ring()))
+                        .child(text(move || r.with(|r| r.0.clone())).text_size(px(font::SMALL)))
                         .child(when(move || r.with(|r| r.1 > 1), move || {
                             text(move || r.with(|r| r.1.to_string()))
-                                .text_size(px(11.0))
+                                .text_size(px(META_SIZE))
                                 .tabular_nums()
-                                .text_color(move || c::muted_fg())
+                                .text_color(move || if yours() { c::on_accent() } else { c::muted_fg() })
                         }))
                 },
             ))
@@ -445,44 +506,180 @@ fn reactions(cv: Conv, item: ItemMemo) -> AnyElement {
     .into_element()
 }
 
-/// "Not sent. Tap to retry." under a failed message.
-fn failed(cv: Conv, item: ItemMemo) -> AnyElement {
-    let failed = sel(item, |i| i.m.mine() && i.m.status == Tick::Failed);
+/// The status under the user's latest message only: Signal-style receipt
+/// circles (`receipt_mark`), spoken as "Sent", "Delivered", "Read" or, in
+/// groups, "Read by 4"; and under any message that failed, the words "Not
+/// sent · Retry". A new status fades in softly as it changes.
+fn status(cv: Conv, item: ItemMemo) -> AnyElement {
+    let group = cv.is_group();
     let id = sel(item, |i| i.m.id);
-    when(move || failed.get(), move || {
-        pressable()
-            .on_press(move || cv.s.retry(cv.chat, id.get_untracked()))
-            .accessibility_label("Not sent. Tap to retry.")
+    let failed = sel(item, |i| i.m.mine() && i.m.status == Tick::Failed);
+    let shown = move || {
+        let id = id.get();
+        failed.get() || (id != 0 && cv.latest_own.get() == Some(id))
+    };
+    let tick = computed(move || item.with(|i| i.as_ref().map(|i| i.m.status).unwrap_or(Tick::Sent)));
+    let read_by = sel(item, |i| i.m.receipts.iter().filter(|r| r.2.is_some()).count());
+    let words = computed(move || logic::status_words(tick.get(), group, read_by.get()));
+    when(shown, move || {
+        view()
             .flex_row()
             .items_center()
+            .h(px(16.0))
+            .mt(px(4.0))
+            .pr(px(4.0))
             .gap_1()
-            .py_1()
-            .px_1()
-            .text_color(move || c::destructive())
-            .child(icon(Icon::Alert, 13.0))
-            .child(text("Not sent. Tap to retry.").text_size(px(font::CAPTION)).font_weight(FontWeight::MEDIUM))
+            .child(dynamic(move || {
+                let w = words.get();
+                let tk = tick.get();
+                // A failure needs words and a Retry; every other status is
+                // Signal-style circles, its words kept for screen readers.
+                Some(untracked(move || {
+                    if failed.get_untracked() { status_words(cv, w, failed, id) } else { receipt_mark(cv, tk, w) }
+                }))
+            }))
     })
     .into_element()
+}
+
+/// One receipt circle's side and the overlap of a pair (points).
+const MARK: f32 = 12.0;
+const MARK_OVERLAP: f32 = 5.0;
+/// The canvas ring cut around the front circle of a pair.
+const MARK_CUT: f32 = 1.5;
+
+/// Signal-style receipt circles (not WhatsApp's ticks): a faint ring while
+/// sending, a ring with a check once sent, two overlapping rings once
+/// delivered, and both filled in the chat theme's bubble colour once read
+/// (or played). The front circle is cut out of the canvas so the overlap
+/// reads cleanly on every theme.
+fn receipt_mark(cv: Conv, tick: Tick, words: String) -> View {
+    let soft = if motion::reduced() {
+        motion().entering(MotionSpec::new(super::timing(motion::BASE, Easing::EaseOut)).values(MotionChannel::Opacity, [0.0, 1.0]))
+    } else {
+        motion().entering(
+            MotionSpec::new(super::timing(motion::BASE, Easing::EaseOut))
+                .values(MotionChannel::Opacity, [0.0, 1.0])
+                .values(MotionChannel::Scale, [0.8, 1.0]),
+        )
+    };
+    let read = matches!(tick, Tick::Read | Tick::Played);
+    let pair = matches!(tick, Tick::Delivered | Tick::Read | Tick::Played);
+    let checked = !matches!(tick, Tick::Sending);
+    // A circle: filled (read) or a ring on the canvas, with or without a check.
+    let circle = move |check: bool| {
+        let c = view()
+            .size(px(MARK))
+            .flex_shrink(0.0)
+            .rounded_full()
+            .items_center()
+            .justify_center()
+            .border_1();
+        let c = if read {
+            c.bg(move || cv.look.get().bubble()).border_color(move || cv.look.get().bubble())
+        } else {
+            c.bg(move || cv.canvas()).border_color(move || c::muted_fg())
+        };
+        let c = if matches!(tick, Tick::Sending) { c.opacity(0.5) } else { c };
+        if check {
+            c.child(
+                icon(Icon::Check, 8.0)
+                    .text_color(move || if read { cv.look.get().on_bubble() } else { c::muted_fg() }),
+            )
+        } else {
+            c
+        }
+    };
+    let mark = view().flex_row().items_center().bind_motion(&soft);
+    let mark = if pair {
+        // The back circle first; the front one overlaps it from the right,
+        // inside a 1.5pt ring of the canvas, so two filled circles read as a
+        // pair rather than one blob. Only the front one carries the check: a
+        // sliver of a hidden one reads as a glitch at this size.
+        mark.child(circle(false)).child(
+            view()
+                .ml(px(-MARK_OVERLAP - MARK_CUT))
+                .p(px(MARK_CUT))
+                .rounded_full()
+                .bg(move || cv.canvas())
+                .child(circle(true)),
+        )
+    } else {
+        mark.child(circle(checked))
+    };
+    mark.role(AccessibilityRole::Text).label(words)
+}
+
+fn status_words(cv: Conv, words: String, failed: Memo<bool>, id: Memo<u64>) -> View {
+    let soft = if motion::reduced() {
+        motion().entering(MotionSpec::new(super::timing(motion::BASE, Easing::EaseOut)).values(MotionChannel::Opacity, [0.0, 1.0]))
+    } else {
+        motion().entering(
+            MotionSpec::new(super::timing(motion::BASE, Easing::EaseOut))
+                .values(MotionChannel::Opacity, [0.0, 1.0])
+                .values(MotionChannel::TranslateY, [2.0, 0.0]),
+        )
+    };
+    let say = words.clone();
+    view()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .bind_motion(&soft)
+        .role(AccessibilityRole::Text)
+        .label(say)
+        .child(
+            text(words)
+                .text_size(px(META_SIZE))
+                .line_height(px(META_LINE))
+                .font_weight(FontWeight::MEDIUM)
+                .tabular_nums()
+                .text_color(move || if failed.get() { c::destructive() } else { c::muted_fg() }),
+        )
+        .child(when(move || failed.get(), move || {
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(text("·").text_size(px(META_SIZE)).text_color(move || c::destructive()))
+                .child(
+                    pressable()
+                        .on_press(move || cv.s.retry(cv.chat, id.get_untracked()))
+                        .accessibility_label("Retry sending")
+                        .px_1()
+                        .rounded(move || radius::sm())
+                        .cursor_pointer()
+                        .hover(|st| st.bg(move || c::destructive().opacity(0.08)))
+                        .focus_visible(|st| st.outline(px(2.0)).outline_color(move || c::ring()))
+                        .child(
+                            text("Retry")
+                                .text_size(px(META_SIZE))
+                                .line_height(px(META_LINE))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(move || c::destructive()),
+                        ),
+                )
+        }))
 }
 
 // ---------------------------------------------------------------- bodies
 
 fn body(cv: Conv, item: ItemMemo, kind: Kind) -> AnyElement {
     let el = match kind {
-        Kind::Text => text_body(item),
-        Kind::Link => link_body(item),
+        Kind::Text => text_body(cv, item),
+        Kind::Link => link_body(cv, item),
         Kind::Image => image_body(cv, item),
         Kind::Video => video_body(cv, item),
         Kind::Voice => voice_body(cv, item),
-        Kind::File => file_body(item),
+        Kind::File => file_body(cv, item),
         Kind::Poll => poll_body(cv, item),
         Kind::Event => event_body(cv, item),
         Kind::Contact => contact_body(cv, item),
-        Kind::Location => location_body(item),
+        Kind::Location => location_body(cv, item),
         Kind::Sticker => sticker_body(item),
         Kind::ViewOnce => view_once_body(cv, item),
         Kind::Call => call_body(cv, item),
-        Kind::Deleted => deleted_body(item),
+        Kind::Deleted => deleted_body(cv, item),
     };
     if kind.media() { view().p(px(INSET)).child(el).into_element() } else { el }
 }
@@ -499,7 +696,7 @@ fn room_run(room: Memo<String>) -> Text {
 /// Message text with `*bold*`, `_italic_` and links (most messages are
 /// one plain run, bound in place). With `room`, the paragraph ends with
 /// the meta's room so the time can sit on its last line.
-pub(crate) fn rich_text(t: Memo<String>, room: Option<Memo<String>>) -> AnyElement {
+pub(crate) fn rich_text(t: Memo<String>, room: Option<Memo<String>>, ink: impl Fn() -> Ink + Copy + 'static) -> AnyElement {
     let plain = computed(move || t.with(|t| logic::is_plain(t)));
     let size = font::body();
     when(move || plain.get(), move || {
@@ -527,12 +724,12 @@ pub(crate) fn rich_text(t: Memo<String>, room: Option<Memo<String>>) -> AnyEleme
                             el = el.italic();
                         }
                         if sp.mention {
-                            el = el.font_weight(FontWeight::SEMIBOLD).text_color(move || c::mention());
+                            el = el.font_weight(FontWeight::SEMIBOLD).text_color(move || ink().mention);
                         }
                         if sp.link {
                             let url = sp.text.clone();
                             el = el
-                                .text_color(move || c::link())
+                                .text_color(move || ink().link)
                                 .underline()
                                 .role(AccessibilityRole::Link)
                                 .on_press(move || {
@@ -548,18 +745,19 @@ pub(crate) fn rich_text(t: Memo<String>, room: Option<Memo<String>>) -> AnyEleme
     .into_element()
 }
 
-fn text_body(item: ItemMemo) -> AnyElement {
+fn text_body(cv: Conv, item: ItemMemo) -> AnyElement {
     let t = sel(item, |i| match &i.m.body {
         Body::Text(t) => t.clone(),
         _ => String::new(),
     });
     let room = sel(item, |i| meta_room(&i.m));
-    view().px(px(PAD_X)).py(px(PAD_Y)).child(rich_text(t, Some(room))).into_element()
+    view().px(px(PAD_X)).py(px(PAD_Y)).child(rich_text(t, Some(room), ink_of(cv, item))).into_element()
 }
 
 /// A link with its on-device preview (made by the sender's device, never
 /// fetched by the server).
-fn link_body(item: ItemMemo) -> AnyElement {
+fn link_body(cv: Conv, item: ItemMemo) -> AnyElement {
+    let ink = ink_of(cv, item);
     let t = sel(item, |i| match &i.m.body {
         Body::Link { text, .. } => text.clone(),
         _ => String::new(),
@@ -579,10 +777,12 @@ fn link_body(item: ItemMemo) -> AnyElement {
                 })
                 .accessibility_label(super::say(move || card.with(|c| format!("Link preview: {}, {}", c.1, c.2))))
                 .flex_row()
-                .rounded(move || radius::lg())
+                .rounded(px(INNER))
+                .border_curve(BorderCurve::Continuous)
                 .overflow_hidden()
-                .bg(move || c::foreground().opacity(0.06))
-                .child(view().w(px(4.0)).bg(move || c::link()))
+                .bg(move || ink().wash)
+                .focus_visible(|st| st.outline(px(2.0)).outline_color(move || c::ring()))
+                .child(view().w(px(3.0)).bg(move || ink().link))
                 .child(
                     view()
                         .flex_1()
@@ -595,7 +795,7 @@ fn link_body(item: ItemMemo) -> AnyElement {
                                 .flex_row()
                                 .items_center()
                                 .gap_1()
-                                .text_color(move || c::bubble_meta())
+                                .text_color(move || ink().quiet)
                                 .child(icon(Icon::Globe, 11.0))
                                 .child(text(move || card.with(|c| c.2.clone())).text_size(px(font::CAPTION))),
                         )
@@ -608,7 +808,7 @@ fn link_body(item: ItemMemo) -> AnyElement {
                 ),
         )
         // The paragraph lines up with plain text bubbles' (12pt in).
-        .child(view().px(px(PAD_X - INSET)).py(px(PAD_Y)).child(rich_text(t, Some(room))))
+        .child(view().px(px(PAD_X - INSET)).py(px(PAD_Y)).child(rich_text(t, Some(room), ink)))
         .into_element()
 }
 
@@ -623,7 +823,8 @@ fn photo_frame(shot: Memo<(String, u64, u32, u32)>, label: impl Fn() -> String +
         // Portrait media narrows, so it never towers over the chat.
         .w(move || px((base * ratio().clamp(0.75, 1.0)).round()))
         .aspect_ratio(ratio)
-        .rounded(move || radius::lg())
+        .rounded(px(INNER))
+        .border_curve(BorderCurve::Continuous)
         .overflow_hidden()
         .bg(move || c::foreground().opacity(0.07))
         .items_center()
@@ -653,7 +854,7 @@ fn photo_badge(content: impl IntoElement) -> View {
         .child(content)
 }
 
-fn caption(text_of: Memo<String>, room: Memo<String>) -> AnyElement {
+fn caption(text_of: Memo<String>, room: Memo<String>, ink: impl Fn() -> Ink + Copy + 'static) -> AnyElement {
     // Under media (inset 4pt), the caption's text lines up with text
     // bubbles' (12pt from the edge and from the bottom), the meta on its
     // last line.
@@ -662,7 +863,7 @@ fn caption(text_of: Memo<String>, room: Memo<String>) -> AnyElement {
             .px(px(PAD_X - INSET))
             .pt(px(6.0))
             .pb(px(PAD_Y - INSET))
-            .child(rich_text(text_of, Some(room)))
+            .child(rich_text(text_of, Some(room), ink))
     })
         .into_element()
 }
@@ -693,7 +894,7 @@ fn image_body(cv: Conv, item: ItemMemo) -> AnyElement {
                     ))
                 })),
         )
-        .child(caption(cap, sel(item, |i| meta_room(&i.m))))
+        .child(caption(cap, sel(item, |i| meta_room(&i.m)), ink_of(cv, item)))
         .into_element()
 }
 
@@ -737,7 +938,7 @@ fn video_body(cv: Conv, item: ItemMemo) -> AnyElement {
                     ),
                 ),
         )
-        .child(caption(cap, sel(item, |i| meta_room(&i.m))))
+        .child(caption(cap, sel(item, |i| meta_room(&i.m)), ink_of(cv, item)))
         .into_element()
 }
 
@@ -745,6 +946,7 @@ fn video_body(cv: Conv, item: ItemMemo) -> AnyElement {
 /// plays, time left, the speed while playing; a dot until it is played.
 fn voice_body(cv: Conv, item: ItemMemo) -> AnyElement {
     let player = cv.voice;
+    let ink = ink_of(cv, item);
     let id = sel(item, |i| i.m.id);
     let secs = sel(item, |i| match &i.m.body {
         Body::Voice { secs, .. } => *secs,
@@ -776,8 +978,11 @@ fn voice_body(cv: Conv, item: ItemMemo) -> AnyElement {
                 .rounded_full()
                 .items_center()
                 .justify_center()
-                .bg(move || c::primary())
-                .text_color(move || c::on_primary())
+                .bg(move || ink().accent)
+                .text_color(move || ink().on_accent)
+                .cursor_pointer()
+                .active(move |st| if reduced { st.opacity(0.85) } else { st.scale(motion::ICON_PRESS_SCALE) })
+                .focus_visible(|st| st.outline(px(2.0)).outline_offset(px(2.0)).outline_color(move || c::ring()))
                 .child(
                     view()
                         .size(px(20.0))
@@ -799,7 +1004,7 @@ fn voice_body(cv: Conv, item: ItemMemo) -> AnyElement {
             view()
                 .flex_1()
                 .gap(px(2.0))
-                .child(super::voice::waveform(cv, move || id.get(), move || secs.get()))
+                .child(super::voice::waveform(cv, move || id.get(), move || secs.get(), ink))
                 .child(
                     view()
                         .flex_row()
@@ -810,12 +1015,12 @@ fn voice_body(cv: Conv, item: ItemMemo) -> AnyElement {
                                 let left = if started() { player.remaining(id.get(), secs.get()) } else { secs.get() };
                                 logic::duration(left)
                             })
-                            .text_size(px(11.0))
+                            .text_size(px(META_SIZE))
                             .tabular_nums()
-                            .text_color(move || c::bubble_meta()),
+                            .text_color(move || ink().quiet),
                         )
-                        .child(when(move || unplayed.get(), || {
-                            view().size(px(7.0)).rounded_full().bg(move || c::primary()).label("Not played yet")
+                        .child(when(move || unplayed.get(), move || {
+                            view().size(px(7.0)).rounded_full().bg(move || ink().accent).label("Not played yet")
                         }))
                         .child(when(playing, move || {
                             pressable()
@@ -825,7 +1030,7 @@ fn voice_body(cv: Conv, item: ItemMemo) -> AnyElement {
                                 .h(px(18.0))
                                 .justify_center()
                                 .rounded_full()
-                                .bg(move || c::foreground().opacity(0.1))
+                                .bg(move || ink().wash)
                                 .child(
                                     text(move || player.speed_label())
                                         .text_size(px(11.0))
@@ -838,7 +1043,8 @@ fn voice_body(cv: Conv, item: ItemMemo) -> AnyElement {
         .into_element()
 }
 
-fn file_body(item: ItemMemo) -> AnyElement {
+fn file_body(cv: Conv, item: ItemMemo) -> AnyElement {
+    let ink = ink_of(cv, item);
     let info = sel(item, |i| match &i.m.body {
         Body::File { name, size, kind } => (name.clone(), size.clone(), kind.clone()),
         _ => Default::default(),
@@ -850,8 +1056,9 @@ fn file_body(item: ItemMemo) -> AnyElement {
         .m(px(INSET))
         .p_2()
         .w(px(260.0))
-        .rounded(move || radius::lg())
-        .bg(move || c::foreground().opacity(0.06))
+        .rounded(px(INNER))
+        .border_curve(BorderCurve::Continuous)
+        .bg(move || ink().wash)
         .child(
             view()
                 .size(px(40.0))
@@ -876,7 +1083,7 @@ fn file_body(item: ItemMemo) -> AnyElement {
                 .child(
                     text(move || info.with(|i| format!("{} · {}", i.2, i.1)))
                         .text_size(px(font::CAPTION))
-                        .text_color(move || c::bubble_meta()),
+                        .text_color(move || ink().quiet),
                 ),
         )
         .child(icon_btn(Icon::Download, "Download", move || {
@@ -1066,10 +1273,6 @@ fn event_body(cv: Conv, item: ItemMemo) -> AnyElement {
         .into_element()
 }
 
-/// Where a contact card's meta line sits (under the person, above the
-/// buttons).
-const CARD_META_TOP: f32 = 54.0;
-
 /// A shared contact: Message opens (or makes) the chat, Add saves them.
 /// A contact the user knows shows their own photo (seeded by contact id,
 /// as everywhere else).
@@ -1119,8 +1322,8 @@ fn contact_body(cv: Conv, item: ItemMemo) -> AnyElement {
                         ),
                 ),
         )
-        // The meta line's row (it is drawn over it, at its end).
-        .child(view().h(px(22.0)))
+        // Air between the person and the actions.
+        .child(view().h(px(PAD_X)))
         .child(view().h(px(1.0)).bg(rule))
         .child(
             view()
@@ -1207,7 +1410,8 @@ fn map_image(seed: u64, w: f32, h: f32) -> ImageSrc {
 
 /// A location: a map tile with the place's pin at its centre, then the
 /// place's name.
-fn location_body(item: ItemMemo) -> AnyElement {
+fn location_body(cv: Conv, item: ItemMemo) -> AnyElement {
+    let _ = cv;
     let info = sel(item, |i| match &i.m.body {
         Body::Location { label, live } => (label.clone(), *live),
         _ => Default::default(),
@@ -1220,7 +1424,8 @@ fn location_body(item: ItemMemo) -> AnyElement {
             view()
                 .w(px(w))
                 .h(px(h))
-                .rounded(move || radius::lg())
+                .rounded(px(INNER))
+                .border_curve(BorderCurve::Continuous)
                 .overflow_hidden()
                 .bg(AdaptiveColor::rgb(0xEEEAE1, 0xEEEAE1))
                 .role(AccessibilityRole::Image)
@@ -1290,6 +1495,7 @@ fn sticker_body(item: ItemMemo) -> AnyElement {
 /// A view-once photo or video: what it is, and what to do ("Tap to
 /// view"), then "Opened" once it has been seen.
 fn view_once_body(cv: Conv, item: ItemMemo) -> AnyElement {
+    let ink = ink_of(cv, item);
     let id = sel(item, |i| i.m.id);
     let mine = sel(item, |i| i.m.mine());
     let info = sel(item, |i| match &i.m.body {
@@ -1345,7 +1551,7 @@ fn view_once_body(cv: Conv, item: ItemMemo) -> AnyElement {
                         .items_center()
                         .justify_center()
                         .border_2()
-                        .border_color(move || if mine.get() { c::bubble_out() } else { c::bubble_in() })
+                        .border_color(move || ink().fill)
                         .bg(move || if spent() { c::bubble_meta() } else { c::primary() })
                         .child(
                             text("1")
@@ -1439,15 +1645,16 @@ fn call_body(cv: Conv, item: ItemMemo) -> AnyElement {
         .into_element()
 }
 
-fn deleted_body(item: ItemMemo) -> AnyElement {
+fn deleted_body(cv: Conv, item: ItemMemo) -> AnyElement {
     let mine = sel(item, |i| i.m.mine());
+    let ink = ink_of(cv, item);
     view()
         .flex_row()
         .items_center()
         .gap_2()
         .px(px(PAD_X))
-        .pt(px(PAD_Y))
-        .text_color(move || c::bubble_meta())
+        .py(px(PAD_Y))
+        .text_color(move || ink().quiet)
         .child(icon(Icon::Ban, 14.0))
         .child(
             text(move || if mine.get() { "You deleted this message" } else { "This message was deleted" })

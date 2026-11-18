@@ -2,7 +2,7 @@
 
 - Date: 2026-11-18
 - Plan: [CAM-plan.md](CAM-plan.md) (D-0110); decision D-0112
-- Status: macOS built and checked on this Mac's cameras; iOS built for the simulator and
+- Status: macOS built and checked on this Mac's cameras and in the running app; iOS built for the simulator and
   devices, its camera check waiting for a physical iPhone (the plan's question 4).
 
 ## What was built
@@ -40,9 +40,11 @@ own `NSCameraUsageDescription` (macOS refuses a bare binary without a prompt: `a
 
 The app itself: a preview build packaged with `nsh package --target macos` carries the purpose
 string in `Info.plist` and `com.apple.security.device.camera` in its entitlements (read back with
-`PlistBuddy` and `codesign -d --entitlements`). It was opened for the owner to try You › Linked
-devices › Link a device (explanation, prompt, live preview); **their look at the running screens
-is still to come**, and with it the design checklist's screenshots in light and dark.
+`PlistBuddy` and `codesign -d --entitlements`). **The owner ran it** (You › Linked devices › Link a
+device): the explanation, the system prompt, then the live preview in the sheet, a rounded
+220-point square with "Looking for a code…" under it (owner's screenshot, 2026-11-18). Still to
+do with the design checklist: the confirmation after a real scan in the app, and screenshots in
+light and dark.
 
 ## iOS
 

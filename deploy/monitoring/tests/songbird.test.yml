@@ -70,7 +70,7 @@ tests:
           - exp_labels: { severity: warn, instance: w1, job: songbird }
             exp_annotations:
               summary: "call rings dropped because they could no longer ring in time"
-              runbook: docs/RUNBOOKS/jobs-push-api-worker.md#call-rings-too-late
+              runbook: docs/RUNBOOKS/jobs-push-api-worker.md#call-rings-too-late-push_rings_expired-rising
       - eval_time: 3m
         alertname: PushRegistrationsUnopenable
         exp_alerts:

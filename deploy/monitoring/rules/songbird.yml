@@ -41,7 +41,7 @@ groups:
           severity: warn
         annotations:
           summary: "call rings dropped because they could no longer ring in time"
-          runbook: docs/RUNBOOKS/jobs-push-api-worker.md#call-rings-too-late
+          runbook: docs/RUNBOOKS/jobs-push-api-worker.md#call-rings-too-late-push_rings_expired-rising
 
       - alert: PushRegistrationsUnopenable
         # The push key does not open registrations: a wrong or rotated key.

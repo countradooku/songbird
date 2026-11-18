@@ -147,6 +147,9 @@ fn simulate_in(s: &Store, chat: ChatId, video: bool, elsewhere: bool) {
     call.answered_elsewhere = elsewhere;
     let name = call.title.clone();
     begin(call);
+    if !elsewhere {
+        s.ringing.set(Some((chat, video)));
+    }
     announce_for_accessibility(format!("{name} is calling"));
 }
 

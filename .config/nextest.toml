@@ -15,6 +15,10 @@ path = "junit.xml"
 # nextest runs each test in its own process.)
 [test-groups]
 valkey = { max-threads = 1 }
+# End-to-end tests that run their own job consumers (worker, push) share the job streams and their
+# one consumer group: run together, one test's consumer takes another's jobs (D-0096: faster reads
+# made it frequent). One at a time.
+jobs = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'binary(valkey_live) | binary(iggy_cluster)'
@@ -23,3 +27,12 @@ test-group = 'valkey'
 [[profile.ci.overrides]]
 filter = 'binary(valkey_live) | binary(iggy_cluster)'
 test-group = 'valkey'
+
+[[profile.default.overrides]]
+filter = 'package(songbird-e2e) & (binary(gate_m5) | binary(gate_p03) | binary(gate_p04) | binary(gate_p06))'
+test-group = 'jobs'
+
+[[profile.ci.overrides]]
+filter = 'package(songbird-e2e) & (binary(gate_m5) | binary(gate_p03) | binary(gate_p04) | binary(gate_p06))'
+test-group = 'jobs'
+

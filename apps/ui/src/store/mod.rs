@@ -23,6 +23,12 @@ pub use ext_extras::*;
 pub use ext_settings::*;
 pub use model::*;
 
+/// The seeded data, for other modules' tests.
+#[cfg(test)]
+pub(crate) mod seed_for_tests {
+    pub use super::seed::seed;
+}
+
 use crate::ui::Tick;
 
 /// "Now" in mock minutes: Tuesday 17 Nov 2026, 10:24.
@@ -123,6 +129,11 @@ pub struct Store {
     pub devices: Signal<Vec<Device>>,
     pub settings: Signal<Settings>,
     pub session: Signal<Session>,
+    /// The latest message from someone else: its chat, its sender's name and
+    /// a one-line preview (the notifier reads it, D-0098).
+    pub incoming: Signal<Option<(ChatId, Option<String>, String)>>,
+    /// The latest incoming call: its chat and whether it is video.
+    pub ringing: Signal<Option<(ChatId, bool)>>,
     next_id: Stored<u64>,
 }
 
@@ -175,6 +186,8 @@ impl Store {
             devices: signal(seed.devices),
             settings: signal(seed.settings),
             session: signal(Session { onboarded, ..seed.session }),
+            incoming: signal(None),
+            ringing: signal(None),
             next_id: stored(100_000),
         }
     }
@@ -350,7 +363,12 @@ impl Store {
             forwarded: false,
             receipts: Vec::new(),
         };
+        let incoming = (from.is_some() && !system).then(|| (msg.body.preview(), from));
         self.messages.update(|m| m.entry(chat).or_default().push(msg));
+        if let Some((preview, Some(from))) = incoming {
+            let sender = self.contact(from).map(|c| c.name);
+            self.incoming.set(Some((chat, sender, preview)));
+        }
         id
     }
 

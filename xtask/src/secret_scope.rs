@@ -123,12 +123,12 @@ mod tests {
             "key = \"{{ secrets.push_apns_key_p8 }}\"",
         );
         assert_eq!(p.len(), 1, "{p:?}");
-        assert!(
+        assert_eq!(
             check_file(
                 "deploy/ansible/roles/songbird/tasks/push.yml",
                 "push_apns_key_p8"
-            )
-            .is_empty()
+            ),
+            Vec::<String>::new()
         );
     }
 

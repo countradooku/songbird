@@ -15,6 +15,9 @@
     clippy::indexing_slicing,
     clippy::print_stdout,
     clippy::cast_precision_loss,
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
     reason = "tests"
 )]
 

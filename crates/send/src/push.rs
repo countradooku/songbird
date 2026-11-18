@@ -260,7 +260,7 @@ mod tests {
         assert!(!c.offer(dev(1), t0 + Duration::from_millis(900)));
         assert!(c.offer(dev(2), t0 + Duration::from_millis(900)));
         assert_eq!(c.next_due(), Some(t0 + Duration::from_secs(1)));
-        assert!(c.take_due(t0 + Duration::from_millis(999), 10).is_empty());
+        assert_eq!(c.take_due(t0 + Duration::from_millis(999), 10), Vec::new());
         assert_eq!(c.take_due(t0 + Duration::from_secs(1), 10), vec![dev(1)]);
         assert_eq!(c.next_due(), None);
         // The trailing job opened a new window.

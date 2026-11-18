@@ -53,7 +53,8 @@ impl PushStore {
     pub async fn beside(registry: &Registry) -> Result<Self, RegistryError> {
         let mut cfg = registry.db().config_clone()?;
         cfg.database = format!("{}_push", cfg.database);
-        Self::connect(Db::connect(cfg).await?).await
+        // Boxed: the connection future is large, and callers build it inside larger ones.
+        Box::pin(async move { Self::connect(Db::connect(cfg).await?).await }).await
     }
 
     /// The database handle (for tests and verification).

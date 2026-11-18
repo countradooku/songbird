@@ -626,11 +626,12 @@ fn respond(flavor: Flavor, b: &Behaviour) -> Response<Full<Bytes>> {
         (Flavor::WebPush, Behaviour::RateLimited { retry_after }) => {
             with_retry_after(json(StatusCode::TOO_MANY_REQUESTS, ""), *retry_after)
         }
-        (Flavor::WebPush, Behaviour::ServerError) => json(StatusCode::INTERNAL_SERVER_ERROR, ""),
+        // Hang and Reset are handled before answering; a 500 if one ever got here.
+        (Flavor::WebPush, Behaviour::ServerError) | (_, Behaviour::Hang | Behaviour::Reset) => {
+            json(StatusCode::INTERNAL_SERVER_ERROR, "")
+        }
         (Flavor::WebPush, Behaviour::Unavailable) => json(StatusCode::SERVICE_UNAVAILABLE, ""),
         (Flavor::WebPush, Behaviour::ExpiredAuth) => json(StatusCode::FORBIDDEN, ""),
-        // Handled before answering; a 500 if one ever got here.
-        (_, Behaviour::Hang | Behaviour::Reset) => json(StatusCode::INTERNAL_SERVER_ERROR, ""),
     }
 }
 

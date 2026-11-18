@@ -337,15 +337,6 @@ impl Service for WorkerService {
         };
         let db = songbird_accounts::Db::connect(s.surrealdb.config()?).await?;
         let registry = Arc::new(songbird_accounts::Registry::connect(db).await?);
-        let push_store = Arc::new(match &s.push_tokens {
-            Some(p) => {
-                songbird_accounts::PushStore::connect(
-                    songbird_accounts::Db::connect(p.config()?).await?,
-                )
-                .await?
-            }
-            None => songbird_accounts::PushStore::beside(&registry).await?,
-        });
         let queue = Arc::new(
             Queue::connect(
                 s.jobs.valkey.client()?,
@@ -389,7 +380,7 @@ impl Service for WorkerService {
         };
         let block_keys = block_keys(s.requests_secret.as_ref(), &registry).await?;
         let worker = Arc::new(Worker {
-            push_store,
+            push_store: Arc::new(push_store(s.push_tokens.as_ref(), &registry).await?),
             registry,
             s3: songbird_s3::Client::new(s3_config(&s.s3)?)?,
             queue: Arc::clone(&queue),
@@ -444,6 +435,23 @@ impl Service for WorkerService {
 
 fn main() -> std::process::ExitCode {
     songbird_service::main::<WorkerService>()
+}
+
+/// The push registrations' own database (D-0095); development without one: a database beside
+/// the registry's.
+async fn push_store(
+    settings: Option<&songbird_accounts::SurrealSettings>,
+    registry: &songbird_accounts::Registry,
+) -> Result<songbird_accounts::PushStore, BoxError> {
+    Ok(match settings {
+        Some(p) => {
+            songbird_accounts::PushStore::connect(
+                songbird_accounts::Db::connect(p.config()?).await?,
+            )
+            .await?
+        }
+        None => songbird_accounts::PushStore::beside(registry).await?,
+    })
 }
 
 #[cfg(test)]

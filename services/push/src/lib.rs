@@ -109,7 +109,7 @@ impl Debounce {
                     return Admit::Drop;
                 }
                 w.trailing = true;
-                return Admit::Defer(self.window - age);
+                return Admit::Defer(self.window.saturating_sub(age));
             }
         }
         if m.len() >= self.cap && !m.contains_key(&key) {
@@ -215,37 +215,8 @@ impl Handler {
             self.metrics.unopenable.inc();
             return Outcome::Dead;
         };
-        let (kind, target) = match reg {
-            Registration::Apns { token, voip } => {
-                if call {
-                    let Some(voip) = voip else {
-                        self.metrics.calls_without_voip.inc();
-                        return Outcome::Done;
-                    };
-                    (
-                        Kind::Apns,
-                        Target::Apns {
-                            token: voip,
-                            voip: true,
-                        },
-                    )
-                } else {
-                    (Kind::Apns, Target::Apns { token, voip: false })
-                }
-            }
-            Registration::Fcm { token } => (Kind::Fcm, Target::Fcm { token }),
-            Registration::WebPush {
-                endpoint,
-                p256dh,
-                auth,
-            } => (
-                Kind::WebPush,
-                Target::WebPush {
-                    endpoint,
-                    p256dh,
-                    auth,
-                },
-            ),
+        let Some((kind, target)) = self.target(reg, call) else {
+            return Outcome::Done;
         };
         let configured = match kind {
             Kind::Apns => self.providers.apns.is_some(),
@@ -312,6 +283,43 @@ impl Handler {
         }
     }
 
+    /// The provider target for a registration: the `PushKit` token for a ring, the alert token
+    /// for a message; `None` (counted) for a ring to an Apple device without a `PushKit` token.
+    fn target(&self, reg: Registration, call: bool) -> Option<(Kind, Target)> {
+        Some(match reg {
+            Registration::Apns { token, voip } => {
+                if call {
+                    let Some(voip) = voip else {
+                        self.metrics.calls_without_voip.inc();
+                        return None;
+                    };
+                    (
+                        Kind::Apns,
+                        Target::Apns {
+                            token: voip,
+                            voip: true,
+                        },
+                    )
+                } else {
+                    (Kind::Apns, Target::Apns { token, voip: false })
+                }
+            }
+            Registration::Fcm { token } => (Kind::Fcm, Target::Fcm { token }),
+            Registration::WebPush {
+                endpoint,
+                p256dh,
+                auth,
+            } => (
+                Kind::WebPush,
+                Target::WebPush {
+                    endpoint,
+                    p256dh,
+                    auth,
+                },
+            ),
+        })
+    }
+
     /// Deletes an unregistered registration, unless the device registered anew meanwhile (the
     /// row no longer holds what was sent to).
     async fn forget(&self, index: &[u8; 32], sealed: &[u8]) -> Outcome {
@@ -362,23 +370,37 @@ pub fn spawn(
     rings: ConsumeConfig,
 ) -> Running {
     let (stop, rx) = watch::channel(false);
-    let tasks = [(Stream::Push, messages), (Stream::Ring, rings)]
-        .into_iter()
-        .map(|(stream, cfg)| {
+    let ring_consumer = consumer(
+        Arc::clone(&queue),
+        Arc::clone(&handler),
+        Stream::Ring,
+        rings,
+        rx.clone(),
+    );
+    let message_consumer = consumer(queue, handler, Stream::Push, messages, rx);
+    Running {
+        stop,
+        tasks: vec![message_consumer, ring_consumer],
+    }
+}
+
+fn consumer(
+    queue: Arc<Queue>,
+    handler: Arc<Handler>,
+    stream: Stream,
+    cfg: ConsumeConfig,
+    stop: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(songbird_jobs::consume(
+        queue,
+        stream,
+        cfg,
+        move |job| {
             let h = Arc::clone(&handler);
-            tokio::spawn(songbird_jobs::consume(
-                Arc::clone(&queue),
-                stream,
-                cfg,
-                move |job| {
-                    let h = Arc::clone(&h);
-                    async move { h.handle(job).await }
-                },
-                rx.clone(),
-            ))
-        })
-        .collect();
-    Running { stop, tasks }
+            async move { h.handle(job).await }
+        },
+        stop,
+    ))
 }
 
 /// Unix time in milliseconds.

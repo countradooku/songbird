@@ -10,6 +10,7 @@
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
+    clippy::many_single_char_names,
     reason = "tests"
 )]
 

@@ -20,6 +20,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 8, M1 to M3 (D-0095 to D-0097; reports `P08-M1.md` to `P08-M3.md`): built and tested;
+  **awaiting the owner**: three threat-model §1 rows (`SILENT`; push registrations in their own
+  database; a ring's timing seen by Apple).
 - Prompt 8 plan (`P08-plan.md`, D-0094): **approved by the owner on 2026-11-18** ("Approve
   all"), every recommendation, desktop without a push service included. Still the owner's: where
   alerts go (email, ntfy or Matrix; M3 builds with the receiver left to configure); before M4,
@@ -150,6 +153,129 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0097 — Prompt 8, milestone 3: push credentials provably in `push` alone; alert rules and monitoring
+
+- Date: 2026-11-18
+- Status: accepted (agent, under D-0094's approved plan); report `docs/reports/P08-M3.md`
+- Decided by: agent, on the owner-approved plan (D-0094 §6, finding 9; question 4)
+- Context: the deployed configuration carried `[common]` only, for every service; push
+  credentials had no way onto a host and nothing proved where they were. Every service exports
+  metrics, but nothing scraped them or alerted: the "alert on dead letters" of the runbooks had no
+  metric behind it either (`QueueStats` was never exported).
+- Decision:
+  - **Deployment.** `roles/songbird/tasks/push.yml` writes the push service's secrets from SOPS
+    (`push_x25519_key`, the push-index and job secrets, its push-database password, and the APNs
+    `.p8`, FCM service account and VAPID key for the providers switched on in
+    `push_providers`) as files of mode 0400, uid 65532, under `/etc/songbird/secrets/push`, mounted
+    read-only into `songbird-push` alone; `push.toml.j2` is the only configuration that names
+    them. `deploy/bin/secrets-init` generates the keys and leaves the provider keys `CHANGE_ME`
+    (production keys are created straight into SOPS). The data role defines the `push` database
+    and its three users (D-0095).
+  - **Proof, three ways:** (1) `api`, `delivery`, `worker` and `calls` refuse a provider section
+    or a push key in their configuration (tests in each); (2) `cargo xtask secret-scope` (in
+    `ci fast`) fails if any file in `deploy/` or `config/` other than the push task and
+    `secrets-init` names a push credential, or mounts the secrets directory outside the push
+    container's own line (the data host may name the push database user's password, which it must
+    define); (3) after every rollout, `verify-push-credentials.yml` inspects every container on the
+    host: only `songbird-push` mounts the directory, no environment names a push credential, the
+    files are 0400 and the push uid's.
+  - **Alerts.** `deploy/monitoring/rules/songbird.yml`: `JobsDeadLettered`, `PushProviderDown`
+    (retries and no sends for 10 minutes), `PushPermanentFailures`, `PushRingsTooLate`,
+    `PushRegistrationsUnopenable`, `WakeUpsDropped`, `RegistryBusy`, `ServiceDown`; each names its
+    runbook; unit-tested with `promtool test rules` in the CI `iac` job (image pinned by digest).
+    New process-wide counters `songbird_jobs_dead_lettered_total` and `songbird_jobs_retried_total`
+    (the D-0093 pattern), exported by `push` and `worker`.
+  - **Monitoring.** A `monitoring` role on the bastion: Prometheus v3.5.0 and Alertmanager v0.28.1
+    (pinned by digest), loopback only (reached over the operators' SSH tunnel), 30 days of
+    retention, scraping every service's admin port over the private network (already open to
+    `private_cidr`). The receiver is the owner's choice (email through an SMTP relay, or a webhook
+    for ntfy or Matrix); until set, alerts show in Alertmanager's UI only.
+- Evidence: `secret_scope` tests (the repository passes; a credential named elsewhere and the
+  directory mounted into another container both fail); four configuration tests;
+  `promtool test rules` SUCCESS (8 rules, 4 test groups); `deploy/bin/validate-iac ansible`
+  (syntax and lint) passes in a Python 3.12 container with the pinned requirements.
+- Consequences: the other services' deployed configuration is still `[common]` only (a gap
+  older than Prompt 8, recorded for Prompt 13); the alert receiver waits for the owner.
+
+## D-0096 — Prompt 8, milestone 2: outages and numbers; one reader connection per job stream
+
+- Date: 2026-11-18
+- Status: accepted (agent, under D-0094); report `docs/reports/P08-M2.md`
+- Decided by: agent
+- Context: the prompt asks for pushes per second, p99 from job to provider, and an outage
+  simulation proving messages stay safe and pushes resume.
+- Finding, and fix: the first measurement gave **~850 pushes/s**. Each part alone was fast (queue
+  read and finish ~38,000 jobs/s, direct APNs sends ~38,000/s), the consume loop with no provider
+  ~800/s. Cause: `Queue` had **one reader connection** for every stream; Valkey runs a
+  connection's commands in order, so the ring consumer's `XREADGROUP BLOCK 250` on an empty
+  `j:ring` held every `j:push` read for up to 250 ms (256 jobs a round ≈ 1,000/s). The worker had
+  the same flaw since D-0036 (its cleanup reads behind its deletion reads). Now one reader
+  connection per stream, opened at its first read: the consume loop went from ~800 to ~34,000
+  jobs/s with no provider.
+- Evidence (Apple M5 Pro, 18 cores, 48 GiB, macOS 27.2.1; compose SurrealDB v4.0.1, valkey-jobs;
+  release build; mock APNs over TLS and HTTP/2 on loopback, 4 connections; consumer batch 256,
+  concurrency 256; `services/push/tests/outage_live.rs` `m2_numbers`):
+  - a burst of 20,000 wake-ups: **9,800 to 28,600 pushes/s** over 5 runs; the spread follows the
+    local SurrealDB's load (one token lookup per job; the server held many test databases);
+    enqueue→provider p99 0.51 to 1.5 s, which is the burst queueing behind itself;
+  - steady 1,000 wake-ups/s, one job at a time: **enqueue→provider p50 1.3 to 1.9 ms, p99 6.5 to
+    11 ms**, max 26 to 37 ms (2 runs).
+  - Outages (all pass): FCM 503 for 3 s (67 requests refused thanks to the breaker; all 200
+    devices woken 2.0 s after recovery); APNs black-holed (accepts, never answers; 300 ms
+    timeout; breaker open; all woken after recovery); `retry-after: 1` honoured (retry ≥ 0.95 s
+    later); `push` crashed mid-burst (its runtime dropped with jobs in hand): every one of 300
+    devices woken after reclaim, 64 twice, nothing dead-lettered. End to end
+    (`gate_m5::an_offline_device_receives_a_push_end_to_end`): APNs down while Bob writes to
+    Alice's offline phone, the three messages wait in her mailbox, the wake-up goes out once APNs
+    is back, she reads them in order.
+- Consequences: production numbers wait for the production host class (with the D-0043 soak at
+  the end of the project); the mock records requests with their arrival time
+  (`RecordedRequest::at`) and counts them cheaply (`request_count`).
+
+## D-0095 — Prompt 8, milestone 1: rings on their own stream, trailing wake-ups, `SILENT` sends, push tokens in their own database
+
+- Date: 2026-11-18
+- Status: accepted (agent, under D-0094); three threat-model §1 rows **awaiting the owner's
+  approval**; report `docs/reports/P08-M1.md`
+- Decided by: agent, on the owner-approved plan (D-0094 questions 1 and 3, findings 1 and 2)
+- Decision:
+  - **Rings.** `Work::Ring { device, until_ms }` on `j:ring` (sealed like every job; the push kind's
+    old call flag retired and refused), a consumer of its own in `push` (`ring_concurrency`), never
+    debounced. `api` gives a ring 30 s (`RING_LIFE_MS`; the offer expires after 60 s); `push` drops
+    a ring past its deadline, retries one only while it can still ring in time, and never
+    dead-letters one (`push_rings_expired`). On FCM and Web Push a ring is the same message as any
+    wake-up; on APNs it is the `VoIP` push it was (expiry 0, empty payload).
+  - **Coalescing, leading and trailing.** `crates/send` (`Coalescer`, pure) and `push`
+    (`Debounce` → `Admit::{Now, Defer, Drop}`): the first wake-up in a window goes at once; any
+    later one schedules a single wake-up at the window's end (`push` returns the job to the queue
+    for the rest of the window). A burst is at most two identical pushes and the last message
+    always has a wake-up after it.
+  - **`SILENT` (`0x80`) on `Send`** (WebSocket and `PUT /v1/messages`, one encoding): stored and
+    delivered as usual, no wake-up (`routes_silent`). With it, every bit of the flags byte is
+    assigned: a future flag needs a new block. Test vector in `crates/proto/tests/vectors.rs`,
+    PROTOCOL §1.
+  - **Push tokens in their own database** (`songbird_accounts::PushStore`): table `push_token` as
+    before, moved out of the registry; `api` (register, remove, GDPR export), `worker` (delete
+    with devices and accounts, verify) and `push` (read, delete) each connect with
+    `[<service>.push_tokens]`, required in staging and production with TLS, its own user and its
+    own database; development uses `PushStore::beside` (`<registry>_push`). `push` no longer
+    connects to the registry. `api` moves rows a registry still holds once at start
+    (`move_from_registry`: never over a newer registration). `Remnants` lost `push_tokens`; the
+    worker checks the store itself.
+  - **Mocks:** `Behaviour::Hang` (accepts, never answers), `Behaviour::Reset` (stream reset), and
+    `outage`/`recover` (a behaviour for every unscripted request).
+- Evidence: unit and property tests (`a_burst_is_one_leading_and_one_trailing_wake_up`,
+  `no_request_is_left_without_a_later_push`, `every_wake_up_has_a_job_at_or_after_it`,
+  `the_retired_call_flag_no_longer_opens`, the `SILENT` vector and flag rules); live:
+  `offline_devices_get_one_constant_wake_up` (leading and trailing pushes byte-identical; rings
+  to the VoIP token with expiry 0; rings on FCM and Web Push equal to wake-ups; a late ring
+  dropped; **a ring reaches APNs in 52 ms behind 10,000 queued wake-ups**, 9,984 still queued),
+  `a_silent_send_is_stored_and_delivered_but_wakes_nobody`,
+  `push_registrations_live_apart_and_old_rows_move_once`, the provider tests for hanging and reset
+  requests and a black-holed APNs opening and closing its breaker.
+- Consequences: a client must set `SILENT` on receipts and sync messages (app-core, A2); three
+  threat-model §1 rows for the owner.
 
 ## D-0094 — Prompt 8: the plan, and the owner's decisions it needs
 

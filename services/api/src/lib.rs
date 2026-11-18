@@ -997,14 +997,14 @@ impl App {
         if req.method() != Method::PUT {
             return Err(Refusal::Status(StatusCode::METHOD_NOT_ALLOWED));
         }
-        let d = self.devices.as_ref().ok_or_else(unavailable)?;
+        let p = self.profiles.as_ref().ok_or_else(unavailable)?;
         let peer = req
             .extensions()
             .get::<registration::Peer>()
             .map(|p| p.0)
             .ok_or_else(unavailable)?;
-        if let Err(o) = d.policy_budget(&self.hot, peer).await {
-            return Ok(device_outcome(o));
+        if let Err(o) = p.policy_budget(&self.hot, peer).await {
+            return Ok(profile_outcome(o));
         }
         let body = bounded_body(req, songbird_proto::supervision::MAX_POLICY_LEN).await?;
         Ok(device_outcome(

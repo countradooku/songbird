@@ -434,6 +434,13 @@ pub struct ProfileSettings {
     /// Its burst (devices).
     #[serde(default = "default_presence_burst")]
     pub presence_burst: u32,
+    /// Unsigned parental policy updates per hour per IP range (`PUT /v1/supervision/update`,
+    /// D-0108).
+    #[serde(default = "default_policy_updates")]
+    pub policy_updates_per_hour: u32,
+    /// Their burst.
+    #[serde(default = "default_policy_update_burst")]
+    pub policy_update_burst: u32,
     /// IPv4 prefix length of a range.
     #[serde(default = "default_v4")]
     pub ipv4_prefix: u8,
@@ -442,6 +449,12 @@ pub struct ProfileSettings {
     pub ipv6_prefix: u8,
 }
 
+const fn default_policy_updates() -> u32 {
+    120
+}
+const fn default_policy_update_burst() -> u32 {
+    20
+}
 const fn default_presence() -> u32 {
     1_000_000
 }
@@ -489,6 +502,8 @@ impl Validate for ProfileSettings {
             ("sealed_per_account_hour", self.sealed_per_account_hour),
             ("sealed_burst", self.sealed_burst),
             ("presence_per_hour", self.presence_per_hour),
+            ("policy_updates_per_hour", self.policy_updates_per_hour),
+            ("policy_update_burst", self.policy_update_burst),
             ("presence_burst", self.presence_burst),
         ] {
             v.check((1..=3_600_000).contains(&n), name, "must be in 1..=3600000");

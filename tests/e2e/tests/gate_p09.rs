@@ -201,6 +201,8 @@ async fn stack(limits: RequestLimits) -> Option<Stack> {
             sealed_burst: 200,
             presence_per_hour: 1_000_000,
             presence_burst: 20_000,
+            policy_updates_per_hour: 120,
+            policy_update_burst: 20,
             ipv4_prefix: 24,
             ipv6_prefix: 48,
         },
@@ -425,7 +427,9 @@ async fn presence_reaches_only_contacts_and_invisible_sends_nothing() {
     );
     assert!(ephemerals_within(&mut b0, 300).await.is_empty());
     assert!(ephemerals_within(&mut c0, 300).await.is_empty());
-    assert_eq!(accepted(), 1);
+    // The two refused batches are not counted; the one for an unknown device is (it was
+    // allowed, and reached nobody).
+    assert_eq!(accepted(), 2);
     // With both keys (Carol became a contact) both are reached.
     assert_eq!(
         sealed(&s, xor(bob.access, carol.access), with_carol)

@@ -5,5 +5,18 @@
   "build": 1,
   "appearance": "system",
   "rust": ".",
-  "root": "App"
+  "root": "App",
+  "ios": {
+    "infoPlist": {
+      "NSCameraUsageDescription": "Songbird uses the camera to scan codes when you link a device or verify a contact, to take photos and videos you choose to send, and for video calls. Nothing it sees leaves your device unless you send it, and what you send is end-to-end encrypted."
+    }
+  },
+  "macos": {
+    "infoPlist": {
+      "NSCameraUsageDescription": "Songbird uses the camera to scan codes when you link a device or verify a contact, to take photos and videos you choose to send, and for video calls. Nothing it sees leaves your device unless you send it, and what you send is end-to-end encrypted."
+    },
+    "entitlements": {
+      "com.apple.security.device.camera": true
+    }
+  }
 }

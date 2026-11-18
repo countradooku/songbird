@@ -348,6 +348,15 @@ const LICENCES: &[(&str, &str)] = &[
     ("env_logger", "MIT or Apache-2.0"),
     ("Taffy (layout)", "MIT"),
     ("tokio", "MIT"),
+    // The camera (D-0110 to D-0117).
+    ("qrcode (QR codes)", "MIT or Apache-2.0"),
+    ("rqrr (QR scanning)", "MIT or Apache-2.0, and ISC"),
+    // IJG's licence asks for this acknowledgement.
+    (
+        "jpeg-encoder (photos on Windows and Linux). This software is based in part on the work of the Independent JPEG Group.",
+        "MIT or Apache-2.0, and IJG",
+    ),
+    ("AndroidX CameraX (Android)", "Apache-2.0"),
 ];
 
 /// Version and licences, pushed.

@@ -2,10 +2,10 @@
 //! security (username link, two-step PIN, passkeys, accounts, deletion).
 
 mod account;
-
-use std::time::Duration;
+pub mod codes;
 
 use nsh_core::prelude::*;
+use songbird_camera::Purpose;
 
 pub use account::{account_security, account_switcher};
 
@@ -121,7 +121,7 @@ fn safety_body(contact: ContactId) -> AnyElement {
                     view()
                         .role(AccessibilityRole::Image)
                         .label(format!("Code for {first2} to scan"))
-                        .child(qr_code(&person.safety_number, if wide_layout { 168.0 } else { 152.0 })),
+                        .child(qr_code(&codes::safety_code(&person.safety_number), if wide_layout { 168.0 } else { 152.0 })),
                 )
                 .child(
                     view()
@@ -173,18 +173,21 @@ fn safety_body(contact: ContactId) -> AnyElement {
     view()
         .flex_1()
         .child(page_scroll(content))
-        .child(scan_sheet(s, contact, scanning, first))
+        .child(scan_sheet(s, contact, scanning, first, person.safety_number.clone()))
         .into_element()
 }
 
-/// The scanner, mocked: after a moment it reads a matching code.
+/// The scanner for a contact's safety-number code: the camera runs while the sheet is open and
+/// nothing is read yet; a code for another number says so, anything else is ignored.
 fn scan_sheet(
     s: Store,
     contact: ContactId,
     open: Signal<bool>,
     first: String,
+    number: String,
 ) -> nsh_base::SheetElement {
-    let matched = signal(false);
+    // None: scanning; Some(true) the numbers match; Some(false) they don't.
+    let result = signal(None::<bool>);
     let caption = format!("Point your camera at {first}'s code.");
     app_sheet(
         open,
@@ -197,42 +200,76 @@ fn scan_sheet(
             .child(dynamic(move || {
                 let is_open = open.get();
                 let caption = caption.clone();
+                let number = number.clone();
+                let first = first.clone();
                 untracked(move || {
                     if !is_open {
-                        matched.set(false);
+                        result.set(None);
                         return view().into_element();
                     }
-                    // mock: the camera reads their code after a moment (app-core compares fingerprints).
-                    set_timeout(Duration::from_millis(2200), move || {
-                        if open.try_get() == Some(true) {
-                            let _ = matched.try_set(true);
-                        }
-                    });
-                    when(move || matched.get(), move || {
-                        view()
-                            .items_center()
-                            .gap_3()
-                            .py_4()
-                            .child(hero_icon(Icon::ShieldCheck))
-                            .child(
-                                text("The numbers match")
-                                    .text_size(px(font::TITLE))
-                                    .font_weight(FontWeight::SEMIBOLD),
-                            )
-                            .child(muted("Your chat is end\u{2011}to\u{2011}end encrypted. Mark it as verified?").text_center())
-                            .child(
-                                view()
-                                    .flex_row()
-                                    .gap_2()
-                                    .child(btn("Not now", Variant::Ghost, BtnSize::Md, move || open.set(false)))
-                                    .child(btn("Mark as verified", Variant::Primary, BtnSize::Md, move || {
-                                        s.verify(contact, true);
-                                        open.set(false);
-                                        toast("Verified");
-                                    })),
-                            )
+                    let theirs = number.clone();
+                    let session = crate::camera::use_session(
+                        Purpose::ScanCode,
+                        move || result.get().is_none(),
+                        move |text| {
+                            if let Some(codes::Scanned::Safety(digits)) = codes::parse(&text) {
+                                result.set(Some(codes::safety_matches(&digits, &theirs)));
+                            }
+                        },
+                    );
+                    // mock: the demo camera of a preview build shows their code (app-core
+                    // compares fingerprints).
+                    crate::camera::demo_shows(codes::safety_code(&number));
+                    dynamic(move || {
+                        let r = result.get();
+                        let session = session.clone();
+                        let caption = caption.clone();
+                        let first = first.clone();
+                        untracked(move || match r {
+                            Some(true) => view()
+                                .items_center()
+                                .gap_3()
+                                .py_4()
+                                .child(hero_icon(Icon::ShieldCheck))
+                                .child(
+                                    text("The numbers match")
+                                        .text_size(px(font::TITLE))
+                                        .font_weight(FontWeight::SEMIBOLD),
+                                )
+                                .child(muted("Your chat is end\u{2011}to\u{2011}end encrypted. Mark it as verified?").text_center())
+                                .child(
+                                    view()
+                                        .flex_row()
+                                        .gap_2()
+                                        .child(btn("Not now", Variant::Ghost, BtnSize::Md, move || open.set(false)))
+                                        .child(btn("Mark as verified", Variant::Primary, BtnSize::Md, move || {
+                                            s.verify(contact, true);
+                                            open.set(false);
+                                            toast("Verified");
+                                        })),
+                                )
+                                .into_element(),
+                            Some(false) => view()
+                                .items_center()
+                                .gap_3()
+                                .py_4()
+                                .child(hero_icon(Icon::Alert))
+                                .child(
+                                    text("The numbers don't match")
+                                        .text_size(px(font::TITLE))
+                                        .font_weight(FontWeight::SEMIBOLD),
+                                )
+                                .child(
+                                    muted(format!(
+                                        "This is not {first}'s current code. Make sure you scan the code on their screen now, in person."
+                                    ))
+                                    .text_center(),
+                                )
+                                .child(btn("Scan again", Variant::Secondary, BtnSize::Md, move || result.set(None)))
+                                .into_element(),
+                            None => crate::camera::camera_view(&session, 240.0, caption).into_element(),
+                        })
                     })
-                    .otherwise(move || scanner(240.0, caption.clone()))
                     .into_element()
                 })
             })),
@@ -365,8 +402,11 @@ fn devices_body() -> AnyElement {
         .into_element()
 }
 
-/// Linking: steps, the scanner (mocked), then the new device in the list.
+/// Linking (PROTOCOL §4.6): the steps and the camera; a scanned link code asks for
+/// confirmation before anything is sent. Link codes are read only from the live camera
+/// (D-0110): never from a photo, a pasted text or a link.
 fn link_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
+    let found = signal(None::<String>);
     app_sheet(
         open,
         "Link a device",
@@ -374,54 +414,75 @@ fn link_sheet(s: Store, open: Signal<bool>) -> nsh_base::SheetElement {
             let is_open = open.get();
             untracked(move || {
                 if !is_open {
+                    found.set(None);
                     return view().into_element();
                 }
-                // mock: the camera reads the other device's code (app-core `link_device`; asks for the PIN when it's on).
-                set_timeout(Duration::from_millis(3000), move || {
-                    if open.try_get() == Some(true) {
-                        let name = s.link_scanned_device();
-                        open.set(false);
-                        toast(format!("{name} is linked"));
-                    }
-                });
-                let pin_note = when(
-                    move || s.settings.with(|x| x.two_step_pin),
-                    || muted("Your phone may ask for your two-step PIN.").text_center(),
+                let session = crate::camera::use_session(
+                    Purpose::ScanCode,
+                    move || found.get().is_none(),
+                    move |text| {
+                        if matches!(codes::parse(&text), Some(codes::Scanned::Link { .. })) {
+                            found.set(Some(text));
+                        }
+                    },
                 );
-                if is_desktop() {
-                    // Roles: the new device shows a code and the main phone
-                    // scans it. A computer has no camera to point, so here
-                    // it only explains the steps and waits for the link.
-                    return view()
-                        .gap_5()
-                        .child(
-                            view()
-                                .gap_3()
-                                .child(numbered_step(1, "On the new computer or tablet, open Songbird and choose \"Link to another device\". It shows a code."))
-                                .child(numbered_step(2, "On your phone, go to You → Linked devices → Link a device."))
-                                .child(numbered_step(3, "Point your phone at the code on the new device.")),
-                        )
-                        .child(
-                            view()
-                                .gap_2()
-                                .child(busy_bar("Waiting for the new device"))
-                                .child(muted("Waiting for the new device…").text_center()),
-                        )
-                        .child(pin_note)
-                        .into_element();
-                }
-                view()
-                    .gap_4()
-                    .child(
-                        view()
-                            .gap_3()
-                            .child(numbered_step(1, "Open Songbird on your computer or tablet."))
-                            .child(numbered_step(2, "Choose \"I already have an account\", then \"Link to another device\"."))
-                            .child(numbered_step(3, "Point this phone at the code it shows.")),
+                // mock: the demo camera of a preview build shows a new device's code.
+                crate::camera::demo_shows(codes::link_code(&[0x5B; 16], &[0xC3; 32]));
+                let pin_note = move || {
+                    when(
+                        move || s.settings.with(|x| x.two_step_pin),
+                        || muted("You may be asked for your two-step PIN.").text_center(),
                     )
-                    .child(scanner(220.0, "Looking for a code…"))
-                    .child(pin_note)
-                    .into_element()
+                };
+                dynamic(move || {
+                    let code = found.get();
+                    let session = session.clone();
+                    untracked(move || match code {
+                        Some(_code) => view()
+                            .gap_4()
+                            .items_center()
+                            .child(hero_icon(Icon::Laptop))
+                            .child(
+                                text("Link a new device?")
+                                    .text_size(px(font::TITLE))
+                                    .font_weight(FontWeight::SEMIBOLD),
+                            )
+                            .child(
+                                muted(
+                                    "It will be able to read and send all your messages. Only continue if you are setting up your own device right now, and nobody asked you to scan this code.",
+                                )
+                                .text_center()
+                                .max_w(px(360.0)),
+                            )
+                            .child(pin_note())
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .gap_2()
+                                    .child(btn("Cancel", Variant::Ghost, BtnSize::Md, move || open.set(false)))
+                                    .child(btn("Link device", Variant::Primary, BtnSize::Md, move || {
+                                        // mock: app-core links with the scanned code (Prompt 9's
+                                        // `backend::link::link_from_code`).
+                                        let name = s.link_scanned_device();
+                                        open.set(false);
+                                        toast(format!("{name} is linked"));
+                                    })),
+                            )
+                            .into_element(),
+                        None => view()
+                            .gap_4()
+                            .child(
+                                view()
+                                    .gap_3()
+                                    .child(numbered_step(1, "On the new device, open Songbird."))
+                                    .child(numbered_step(2, "Choose \"I already have an account\", then \"Link to another device\"."))
+                                    .child(numbered_step(3, "Point this device's camera at the code it shows.")),
+                            )
+                            .child(crate::camera::camera_view(&session, 220.0, "Looking for a code…"))
+                            .into_element(),
+                    })
+                })
+                .into_element()
             })
         })),
     )
@@ -502,4 +563,56 @@ fn device_sheet(
             })
         })),
     )
+}
+
+#[cfg(test)]
+mod camera_flow {
+    //! Linking by camera (D-0110, D-0111): only a link code read by the live camera leads to
+    //! the confirmation, the camera stops while it shows, and only "Link device" links.
+
+    use std::sync::{Arc, LazyLock};
+
+    use nsh_engine::{EngineConfig, Root};
+    use nsh_testing::Headless;
+    use songbird_camera::fake::FakeCamera;
+
+    use super::*;
+
+    static CAM: LazyLock<FakeCamera> = LazyLock::new(FakeCamera::new);
+
+    #[component]
+    fn LinkProbe() -> impl IntoElement {
+        let s = Store::new();
+        crate::store::install(s);
+        crate::camera::install(Some(Arc::new(CAM.clone())), false);
+        let open = signal(true);
+        view()
+            .child(text(move || format!("devices: {}", s.devices.with(Vec::len))))
+            .child(link_sheet(s, open))
+    }
+
+    #[test]
+    fn a_link_code_asks_first_and_anything_else_is_ignored() -> Result<(), String> {
+        let mut app = Headless::start(EngineConfig::new(Root::of::<LinkProbe>())).map_err(|e| e.to_string())?;
+        app.wait_for("Looking for a code…")?;
+        let before = app.screen().texts().iter().find(|t| t.starts_with("devices: ")).map(ToString::to_string);
+        // A group invite link and garbage: nothing happens.
+        CAM.show_code("https://songbird.chat/g/0123456789abcdef#k=abc");
+        CAM.show_code("hello");
+        app.settle();
+        assert!(!app.shows("Link a new device?"));
+        assert_eq!(CAM.running(), 1);
+        // A link code: the confirmation, with the camera stopped.
+        CAM.show_code(&codes::link_code(&[0x11; 16], &[0x22; 32]));
+        app.wait_for("Link a new device?")?;
+        app.wait_for("text:/read and send all your messages/")?;
+        assert_eq!(CAM.running(), 0, "{:?}", CAM.log());
+        let after_scan = app.screen().texts().iter().find(|t| t.starts_with("devices: ")).map(ToString::to_string);
+        assert_eq!(before, after_scan, "nothing is linked before the press");
+        app.press("Link device")?;
+        app.wait_for_gone("Link a new device?", std::time::Duration::from_secs(2))?;
+        let after = app.screen().texts().iter().find(|t| t.starts_with("devices: ")).map(ToString::to_string);
+        assert_ne!(before, after, "linked after the press");
+        Ok(())
+    }
 }

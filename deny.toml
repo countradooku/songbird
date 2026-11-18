@@ -38,6 +38,9 @@ exceptions = [
     { allow = ["MPL-2.0"], crate = "hpke-rs" },
     { allow = ["MPL-2.0"], crate = "hpke-rs-crypto" },
     { allow = ["MPL-2.0"], crate = "hpke-rs-rust-crypto" },
+    # D-0117: the camera's pure-Rust JPEG encoder for desktop stills; its acknowledgement is on
+    # the app's licences page.
+    { allow = ["IJG"], crate = "jpeg-encoder" },
 ]
 
 [licenses.private]

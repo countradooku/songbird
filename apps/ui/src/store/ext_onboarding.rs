@@ -278,41 +278,6 @@ pub fn hash(text: &str) -> u64 {
     })
 }
 
-/// The modules of a decorative QR-like code, `n` × `n`, row by row, with
-/// the three finder squares in their corners. Derived from `data` so each
-/// person's or device's code looks its own. Decorative: the real code is
-/// app-core's (a link or a safety number encoded).
-pub fn qr_modules(data: &str, n: usize) -> Vec<bool> {
-    let mut x = hash(data) | 1;
-    let mut out = vec![false; n * n];
-    let finder = |r: usize, c: usize| -> Option<bool> {
-        for (r0, c0) in [(0, 0), (0, n - 7), (n - 7, 0)] {
-            if (r0..r0 + 8).contains(&r) && (c0.saturating_sub(1)..c0 + 8).contains(&c) {
-                let (dr, dc) = (r as i32 - r0 as i32, c as i32 - c0 as i32);
-                if !(0..7).contains(&dr) || !(0..7).contains(&dc) {
-                    return Some(false);
-                }
-                let ring = dr.min(dc).min(6 - dr).min(6 - dc);
-                return Some(ring != 1);
-            }
-        }
-        None
-    };
-    for r in 0..n {
-        for c in 0..n {
-            out[r * n + c] = match finder(r, c) {
-                Some(v) => v,
-                None => {
-                    x ^= x << 13;
-                    x ^= x >> 7;
-                    x ^= x << 17;
-                    x % 5 < 2
-                }
-            };
-        }
-    }
-    out
-}
 
 /// A short numeric code to type when a QR code can't be scanned
 /// ("482 913").
@@ -817,15 +782,6 @@ mod tests {
         assert!(g.iter().all(|x| x.len() == 5));
     }
 
-    #[test]
-    fn qr_is_stable_and_has_finders() {
-        let a = qr_modules("ana", 25);
-        assert_eq!(a, qr_modules("ana", 25));
-        assert_ne!(a, qr_modules("mihai", 25));
-        // Finder corners: outer ring dark, the ring inside it light, the core dark.
-        assert!(a[0] && !a[25 + 1] && a[2 * 25 + 2]);
-        assert!(a[24] && a[24 * 25]);
-    }
 
     #[test]
     fn numbers_and_progress() {

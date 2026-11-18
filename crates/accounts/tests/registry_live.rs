@@ -201,7 +201,14 @@ async fn push_registrations_live_apart_and_old_rows_move_once() {
     }
     // The device behind `newer` registered again since, in the new store.
     p.put(&newer, b"new-b").await.unwrap();
-    assert_eq!(p.move_from_registry(&r).await.unwrap(), 2);
+    // Until moved, a deletion finds and removes rows in the registry too (D-0100).
+    assert_eq!(PushStore::count_legacy(&r, &[old, newer]).await.unwrap(), 2);
+    // Two `api` instances moving at once: both succeed, neither overwrites the newer row.
+    let q = PushStore::connect(Db::connect(p.db().config_clone().unwrap()).await.unwrap())
+        .await
+        .unwrap();
+    let (a, b) = tokio::join!(p.move_from_registry(&r), q.move_from_registry(&r));
+    assert!(a.unwrap() + b.unwrap() >= 2);
     assert_eq!(
         p.get(&old).await.unwrap().as_deref(),
         Some(b"old-a".as_slice())
@@ -218,6 +225,27 @@ async fn push_registrations_live_apart_and_old_rows_move_once() {
         .unwrap();
     assert_eq!(left, songbird_surreal::Value::Int(0));
     assert_eq!(p.move_from_registry(&r).await.unwrap(), 0);
+    assert_eq!(PushStore::count_legacy(&r, &[old, newer]).await.unwrap(), 0);
+    // A legacy row deleted with its device is gone and never moved back.
+    r.db()
+        .query(
+            "UPSERT push_token:[$p] SET sealed = $s, at = time::now() RETURN NONE;",
+            vec![
+                (
+                    "p".into(),
+                    songbird_surreal::Value::Bytes([0x0c; 32].to_vec().into()),
+                ),
+                (
+                    "s".into(),
+                    songbird_surreal::Value::Bytes(b"gone".to_vec().into()),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+    PushStore::delete_legacy(&r, &[[0x0c; 32]]).await.unwrap();
+    assert_eq!(p.move_from_registry(&r).await.unwrap(), 0);
+    assert!(p.get(&[0x0c; 32]).await.unwrap().is_none());
 }
 
 #[tokio::test]

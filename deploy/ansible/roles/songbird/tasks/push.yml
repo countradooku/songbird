@@ -1,23 +1,23 @@
 ---
 # The push service's secrets (D-0036, D-0097). Push provider credentials (the APNs .p8, the FCM
 # service account, the VAPID key) and the push X25519 key exist on this host only as these files,
-# readable by the push container's uid only, and mounted into the push container only. The
+# readable by the push container's own uid only (`push_uid`, no other service's), and mounted into the push container only. The
 # credential-scope check (cargo xtask secret-scope) fails CI if any other file in deploy/
 # names them; verify-push-credentials.yml checks the running containers after every rollout.
 - name: Push secrets directory (push's uid only)
   ansible.builtin.file:
     path: /etc/songbird/secrets/push
     state: directory
-    owner: "65532"
-    group: "65532"
+    owner: "{{ push_uid }}"
+    group: "{{ push_uid }}"
     mode: "0700"
 
 - name: Push secrets (provider credentials only where the provider is on)
   ansible.builtin.copy:
     dest: "/etc/songbird/secrets/push/{{ item.name }}"
     content: "{{ item.value }}"
-    owner: "65532"
-    group: "65532"
+    owner: "{{ push_uid }}"
+    group: "{{ push_uid }}"
     mode: "0400"
   loop: >-
     {{ [

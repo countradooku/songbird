@@ -34,6 +34,17 @@
     mode: "0440"
   notify: Reload Prometheus
 
+# The same configuration with the rule paths as the check container sees them.
+- name: Prometheus configuration for the check
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: /etc/songbird/monitoring/prometheus-check.yml
+    owner: "65534"
+    group: "65534"
+    mode: "0440"
+  vars:
+    prometheus_rules_dir: /m/rules
+
 - name: Alertmanager configuration (the receiver is the owner's choice; none set means alerts show in its UI only)
   ansible.builtin.template:
     src: alertmanager.yml.j2
@@ -43,6 +54,22 @@
     mode: "0440"
   no_log: true
   notify: Reload Alertmanager
+
+# A configuration that does not load fails the run here (invariant 8), before any reload.
+- name: Prometheus configuration and rules are valid
+  ansible.builtin.command:
+    argv: [docker, run, --rm, --network, none,
+           -v, /etc/songbird/monitoring:/m:ro, --entrypoint, promtool, "{{ images.prometheus }}",
+           check, config, /m/prometheus-check.yml]
+  changed_when: false
+
+- name: Alertmanager configuration is valid
+  ansible.builtin.command:
+    argv: [docker, run, --rm, --network, none,
+           -v, /etc/songbird/monitoring:/m:ro, --entrypoint, amtool, "{{ images.alertmanager }}",
+           check-config, /m/alertmanager.yml]
+  changed_when: false
+  no_log: true
 
 - name: Alertmanager
   community.docker.docker_container:
@@ -78,7 +105,6 @@
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=30d
       - --web.listen-address=127.0.0.1:9090
-      - --web.enable-lifecycle
     volumes:
       - /etc/songbird/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - /etc/songbird/monitoring/rules:/etc/prometheus/rules:ro

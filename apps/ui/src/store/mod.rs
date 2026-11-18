@@ -176,7 +176,7 @@ impl Store {
         // emulators and VMs, which don't pass the environment through).
         // Preview builds (`SONGBIRD_PREVIEW_BUILD=1` at compile time, for
         // screenshots on emulators and VMs) honour the marker as well.
-        let preview_build = cfg!(debug_assertions) || option_env!("SONGBIRD_PREVIEW_BUILD").is_some();
+        let preview_build = crate::PREVIEW_BUILD;
         let preview = preview_build
             && (std::env::var_os("SONGBIRD_ONBOARDED").is_some()
                 || data_dir().is_some_and(|d| d.join("songbird-onboarded").exists()));

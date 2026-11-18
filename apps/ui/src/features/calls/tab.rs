@@ -93,7 +93,7 @@ pub fn calls_tab() -> AnyElement {
         .child(footnote("Your call history is end-to-end encrypted and synced across your devices."));
     // Developer and preview builds only (never a release): rows that make
     // the mock ring, to test calls and their notifications on a device.
-    let footer = if cfg!(debug_assertions) || option_env!("SONGBIRD_PREVIEW_BUILD").is_some() {
+    let footer = if crate::PREVIEW_BUILD {
         footer.child(demo(s))
     } else {
         footer

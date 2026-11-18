@@ -341,6 +341,10 @@ impl Worker {
             .collect();
         self.delivery.forget(&devices).await?;
         self.push_store.delete(&index).await.map_err(unavailable)?;
+        // Rows a registry may still hold from before D-0095 (until every `api` moved them).
+        songbird_accounts::PushStore::delete_legacy(&self.registry, &index)
+            .await
+            .map_err(unavailable)?;
         let grants = self
             .registry
             .grants_of(&devices)
@@ -415,7 +419,10 @@ impl Worker {
             .remnants(account, &devices)
             .await
             .map_err(unavailable)?;
-        let tokens = self.push_store.count(&index).await.map_err(unavailable)?;
+        let tokens = self.push_store.count(&index).await.map_err(unavailable)?
+            + songbird_accounts::PushStore::count_legacy(&self.registry, &index)
+                .await
+                .map_err(unavailable)?;
         if !r.is_empty() || tokens != 0 {
             return Err(Left::Rows);
         }
@@ -446,6 +453,10 @@ impl Worker {
             .collect();
         self.delivery.forget(&devices).await?;
         self.push_store.delete(&index).await.map_err(unavailable)?;
+        // Rows a registry may still hold from before D-0095 (until every `api` moved them).
+        songbird_accounts::PushStore::delete_legacy(&self.registry, &index)
+            .await
+            .map_err(unavailable)?;
         let grants = self
             .registry
             .grants_of(&devices)
@@ -486,7 +497,10 @@ impl Worker {
             .device_remnants(&devices)
             .await
             .map_err(unavailable)?;
-        let tokens = self.push_store.count(&index).await.map_err(unavailable)?;
+        let tokens = self.push_store.count(&index).await.map_err(unavailable)?
+            + songbird_accounts::PushStore::count_legacy(&self.registry, &index)
+                .await
+                .map_err(unavailable)?;
         let grants_left = self
             .registry
             .grants_of(&devices)

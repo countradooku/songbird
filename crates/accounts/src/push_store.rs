@@ -125,6 +125,49 @@ impl PushStore {
             .ok_or(RegistryError::Shape)
     }
 
+    /// Deletes push rows a registry may still hold from before D-0095 (with the device or account,
+    /// alongside [`PushStore::delete`]): until every `api` has moved its rows, a deleted device's
+    /// sealed token must not survive in the registry, nor be moved back later (D-0100).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn delete_legacy(
+        registry: &Registry,
+        index: &[[u8; 32]],
+    ) -> Result<(), RegistryError> {
+        let ps: Vec<Value> = index.iter().map(|p| bytes(p)).collect();
+        registry
+            .db()
+            .query(
+                "FOR $p IN $ps { DELETE push_token:[$p] RETURN NONE; };",
+                vec![var("ps", Value::Array(ps))],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// How many of `index` a registry still holds from before D-0095 (verified zero with every
+    /// deletion, as [`PushStore::count`]).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn count_legacy(
+        registry: &Registry,
+        index: &[[u8; 32]],
+    ) -> Result<u64, RegistryError> {
+        let ps: Vec<Value> = index.iter().map(|p| bytes(p)).collect();
+        let v = registry
+            .db()
+            .query1(
+                "RETURN count(SELECT id FROM push_token WHERE meta::id(id)[0] IN $ps);",
+                vec![var("ps", Value::Array(ps))],
+            )
+            .await?;
+        first_int(&v)
+            .and_then(|n| u64::try_from(n).ok())
+            .ok_or(RegistryError::Shape)
+    }
+
     /// Moves the push rows `registry` still holds (written before D-0095) into this store, then
     /// drops them from the registry. Idempotent; a newer row here wins over a moved one. Returns
     /// how many rows moved.
@@ -157,12 +200,12 @@ impl PushStore {
                     return Err(RegistryError::Shape);
                 };
                 let p: [u8; 32] = p.as_ref().try_into().map_err(|_| RegistryError::Shape)?;
-                // Only where this store has nothing newer for the device.
+                // Only where this store has nothing newer for the device: one statement, so two
+                // `api` instances moving at once neither fail nor overwrite each other.
                 self.db
                     .query(
-                        "IF (SELECT VALUE id FROM ONLY push_token:[$p]) = NONE {
-                           CREATE push_token:[$p] SET sealed = $s, at = time::now() RETURN NONE;
-                         };",
+                        "UPSERT push_token:[$p] SET sealed = sealed ?? $s, at = at ?? time::now()
+                           RETURN NONE;",
                         vec![var("p", bytes(&p)), var("s", bytes(sealed))],
                     )
                     .await?;

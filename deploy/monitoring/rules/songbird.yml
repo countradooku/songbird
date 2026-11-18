@@ -9,16 +9,16 @@ groups:
         labels:
           severity: page
         annotations:
-          summary: "{{ $labels.instance }}: jobs went to the dead-letter stream"
+          summary: "{{ $labels.host }}: jobs went to the dead-letter stream"
           runbook: docs/RUNBOOKS/jobs-push-api-worker.md#dead-letters-jdead-growing-any-stream
 
       - alert: PushProviderDown
         # Retries and no successes for 10 minutes: the provider is failing and its breaker is
         # open or opening. Messages are safe in the mailboxes; wake-ups resume on recovery.
         expr: >
-          sum by (instance, provider) (rate(songbird_push_results_total{result="retried"}[5m])) > 0
+          sum by (host, provider) (rate(songbird_push_results_total{result="retried"}[5m])) > 0
           and
-          sum by (instance, provider) (rate(songbird_push_results_total{result="sent"}[5m])) == 0
+          sum by (host, provider) (rate(songbird_push_results_total{result="sent"}[5m])) == 0
         for: 10m
         labels:
           severity: page
@@ -28,7 +28,7 @@ groups:
 
       - alert: PushPermanentFailures
         # Not about tokens: bad credentials, a rejected request. Retrying will not help.
-        expr: sum by (instance, provider) (increase(songbird_push_results_total{result="failed"}[15m])) > 0
+        expr: sum by (host, provider) (increase(songbird_push_results_total{result="failed"}[15m])) > 0
         labels:
           severity: page
         annotations:
@@ -58,7 +58,7 @@ groups:
         labels:
           severity: warn
         annotations:
-          summary: "{{ $labels.instance }}: wake-ups dropped; messages are safe in the mailbox"
+          summary: "{{ $labels.host }}: wake-ups dropped; messages are safe in the mailbox"
           runbook: docs/RUNBOOKS/jobs-push-api-worker.md#push-jobs-dropped-delivery_push_dropped-rising
 
   - name: songbird-services
@@ -68,7 +68,7 @@ groups:
         labels:
           severity: warn
         annotations:
-          summary: "{{ $labels.instance }}: registry write conflicts outlast the retry budget"
+          summary: "{{ $labels.host }}: registry write conflicts outlast the retry budget"
           runbook: docs/RUNBOOKS/jobs-push-api-worker.md#registry-busy-write-conflicts-outlasting-the-retry-budget-d-0093
 
       - alert: ServiceDown
@@ -77,5 +77,5 @@ groups:
         labels:
           severity: page
         annotations:
-          summary: "{{ $labels.instance }} is not answering its metrics endpoint"
+          summary: "{{ $labels.host }} ({{ $labels.service }}) is not answering its metrics endpoint"
           runbook: docs/RUNBOOKS/deploy-and-rollback.md

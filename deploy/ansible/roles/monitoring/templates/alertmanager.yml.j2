@@ -4,10 +4,10 @@
 global:
   resolve_timeout: 5m
 {% if secrets.alert_smtp_smarthost | default('') not in ['', 'CHANGE_ME'] %}
-  smtp_smarthost: "{{ secrets.alert_smtp_smarthost }}"
-  smtp_from: "{{ secrets.alert_smtp_from }}"
-  smtp_auth_username: "{{ secrets.alert_smtp_username }}"
-  smtp_auth_password: "{{ secrets.alert_smtp_password }}"
+  smtp_smarthost: {{ secrets.alert_smtp_smarthost | to_json }}
+  smtp_from: {{ secrets.alert_smtp_from | to_json }}
+  smtp_auth_username: {{ secrets.alert_smtp_username | to_json }}
+  smtp_auth_password: {{ secrets.alert_smtp_password | to_json }}
   smtp_require_tls: true
 {% endif %}
 
@@ -22,11 +22,11 @@ receivers:
   - name: owner
 {% if secrets.alert_email_to | default('') not in ['', 'CHANGE_ME'] %}
     email_configs:
-      - to: "{{ secrets.alert_email_to }}"
+      - to: {{ secrets.alert_email_to | to_json }}
         send_resolved: true
 {% endif %}
 {% if secrets.alert_webhook_url | default('') not in ['', 'CHANGE_ME'] %}
     webhook_configs:
-      - url: "{{ secrets.alert_webhook_url }}"
+      - url: {{ secrets.alert_webhook_url | to_json }}
         send_resolved: true
 {% endif %}

@@ -6,9 +6,13 @@ global:
     environment: "{{ songbird_env }}"
 
 rule_files:
-  - /etc/prometheus/rules/*.yml
+  - {{ prometheus_rules_dir | default('/etc/prometheus/rules') }}/*.yml
 
 alerting:
+  # Alerts leave without the private address (instance); `host` names the machine (D-0100).
+  alert_relabel_configs:
+    - action: labeldrop
+      regex: instance
   alertmanagers:
     - static_configs:
         - targets: ["127.0.0.1:9093"]

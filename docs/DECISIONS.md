@@ -25,9 +25,10 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   projects (APNs token, PushKit with CallKit, FCM, UnifiedPush, ConnectionService), the Apple
   bundle IDs and filtering entitlement, the Firebase Android app, and the real-provider checks
   (APNs sandbox wake-up, VoIP on a physical iPhone, FCM on the emulator).
-- Prompt 8, M1 to M3 (D-0095 to D-0097; reports `P08-M1.md` to `P08-M3.md`): built and tested;
-  **awaiting the owner**: three threat-model §1 rows (`SILENT`; push registrations in their own
-  database; a ring's timing seen by Apple).
+- Prompt 8 gate (`P08-gate.md`, D-0095 to D-0100; PR #65): **awaiting the owner**: M1, M2, M3,
+  M6 and the first part of M4 and M5 with the security review's fixes; four threat-model §1 rows
+  (`SILENT`; push registrations in their own database; call rings on their own job stream; a
+  ring's timing seen by Apple); where alerts go.
 - Prompt 8 plan (`P08-plan.md`, D-0094): **approved by the owner on 2026-11-18** ("Approve
   all"), every recommendation, desktop without a push service included. Still the owner's: where
   alerts go (email, ntfy or Matrix; M3 builds with the receiver left to configure); before M4,
@@ -158,6 +159,52 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0100 — Prompt 8: the security review's fixes
+
+- Date: 2026-11-18
+- Status: accepted; part of the Prompt 8 gate (`P08-gate.md`, "Security review")
+- Decided by: agent, on an independent read-only review of the whole Prompt 8 diff (a separate
+  agent given the code, configuration and documents, not the reports' conclusions).
+- Context: no high findings; two medium, five low, three informational.
+- Decision:
+  1. **The post-rollout check printed other containers' secrets** (medium): it ran `docker
+     inspect` whole, so LiveKit's keys and Valkey passwords on the calls hosts could reach
+     Ansible's output. Now a `--format` template returns each container's name, mount sources
+     and environment variable *names* only (cut at `=`), the task is `no_log`, and the name check
+     accepts Docker's and podman's forms. Checked against a local container: names only.
+  2. **The token move could revive a deleted device's token** (medium): during a rolling deploy a
+     row still in the registry escaped deletion, and the next `api` start moved it back.
+     - The worker now deletes and verifies push rows in both the push database and the registry
+       (`PushStore::delete_legacy`, `count_legacy`) until every environment has moved.
+     - The registry keeps the old table defined, empty once moved, so that works.
+     - The move is one idempotent `UPSERT … SET sealed = sealed ?? $s`, so two `api` instances
+       moving at once neither fail nor overwrite a newer registration.
+     - Test: `push_registrations_live_apart_and_old_rows_move_once` (concurrent moves; a legacy
+       row deleted with its device is never moved back).
+  3. **Parent-folder mounts escaped the check** (low): a mount of `/`, `/etc`, `/etc/songbird`
+     or `/etc/songbird/secrets` now fails it too.
+  4. **The push uid was shared** (low): every Songbird container ran as 65532, so a process
+     escaping another service's container could read the provider keys. Push now runs as its own
+     uid (`push_uid`, 65533), which owns its secrets and TLS files. The xtask scope check stays
+     lexical and advisory; the post-rollout check enforces.
+  5. **Any value of `SONGBIRD_PREVIEW_BUILD` made a preview build** (low): now exactly `1`, in one
+     constant (`PREVIEW_BUILD`, tested).
+  6. **Monitoring could be stopped silently, and alerts carried private addresses** (low):
+     - the lifecycle API is off; reloads go by `SIGHUP` after `promtool check config` and
+       `amtool check-config`, and a bad configuration fails the run;
+     - SMTP and webhook values are JSON-escaped;
+     - alerts leave without the `instance` label (private IP:port), and summaries name the
+       inventory `host`. Rule tests updated and passing.
+  7. **Ring deadlines and clock skew** (low/info): the deadline is set on `api` and checked on
+     `push`. Every host runs `chrony` (common role). The residual risk: a push host more than
+     30 s ahead drops rings, one behind sends them late by the skew. Recorded, not changed.
+  8. **The ring stream's timing in `valkey-jobs`** (info): now a threat-model §1 row.
+  9. **What `SILENT` reveals** (info): the §1 row now says the server learns "a receipt or sync",
+     as with Signal's `urgent=false`.
+  10. **Registry credentials of `api` and `worker`** (info): the separation of the push database
+     holds against the backup user and the push service. `api` and `worker` must also use
+     registry users other than SurrealDB's root before production. Listed in the gate.
 
 ## D-0099 — Prompt 8, milestones 4 and 5 (first part): the iOS notification extension and on-device checks; what waits for the owner
 

@@ -23,6 +23,9 @@ push_providers:
   fcm: true
   webpush: true
 push_bundle_id: chat.songbird.app
+# Push runs as a uid of its own (D-0100): the provider keys on the host are readable by push alone,
+# not by every Songbird container's uid.
+push_uid: 65533
 push_vapid_subject: "mailto:push@{{ songbird_public_domain | default('songbird.chat') }}"
 
 # Which Songbird services run on which role, and their private admin ports.
@@ -81,7 +84,7 @@ tls_owner_uid:
   valkey-livekit: 999
   delivery: 65532
   api: 65532
-  push: 65532
+  push: 65533
   worker: 65532
   calls: 65532
 tls_leaf_days: 30

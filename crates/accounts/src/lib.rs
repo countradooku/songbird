@@ -71,6 +71,12 @@ pub const ATTACHMENT_MAX_AGE: Duration = Duration::from_hours(30 * 24);
 pub const GRANT_MAX_AGE: Duration = Duration::from_hours(24);
 
 const SCHEMA: &str = "
+-- Legacy (D-0095, D-0100): push registrations live in their own database now. The table stays
+-- defined (and empty once moved) so deletions can still clear and verify rows written before the
+-- move; dropped when every environment has moved.
+DEFINE TABLE IF NOT EXISTS push_token SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS sealed ON push_token TYPE bytes;
+DEFINE FIELD IF NOT EXISTS at ON push_token TYPE datetime;
 DEFINE TABLE IF NOT EXISTS account SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS at ON account TYPE datetime;
 DEFINE FIELD IF NOT EXISTS deleting ON account TYPE bool;

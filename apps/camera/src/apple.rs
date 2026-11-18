@@ -14,7 +14,10 @@
 //! the reads of locked pixel buffers, and `Send` for the session handles. Each block says why
 //! it holds.
 
-#![allow(unsafe_code)]
+#![allow(
+    unsafe_code,
+    reason = "D-0110 §5, reviewed in D-0116: AVFoundation, Core Media and Core Video through objc2"
+)]
 
 use std::{
     collections::HashMap,
@@ -65,13 +68,13 @@ pub struct AppleCamera;
 
 fn video() -> &'static NSString {
     // SAFETY: a constant AVFoundation exports.
-    unsafe { AVMediaTypeVideo }.expect("AVMediaTypeVideo")
+    unsafe { AVMediaTypeVideo }.expect("AVMediaTypeVideo") // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
 }
 
 impl Backend for AppleCamera {
     fn access(&self) -> Access {
         // SAFETY: a class method with a valid media type; it never prompts.
-        match unsafe { AVCaptureDevice::authorizationStatusForMediaType(video()) } {
+        match unsafe { AVCaptureDevice::authorizationStatusForMediaType(video()) } { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             AVAuthorizationStatus::Authorized => Access::Granted,
             AVAuthorizationStatus::Denied => Access::Denied,
             AVAuthorizationStatus::Restricted => Access::Restricted,
@@ -92,7 +95,7 @@ impl Backend for AppleCamera {
         });
         // SAFETY: a valid media type; AVFoundation copies the block and calls it once, on any
         // thread, which `done` allows (`Send`).
-        unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(video(), &block) };
+        unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(video(), &block) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     }
 
     fn lenses(&self) -> Vec<Lens> {
@@ -100,7 +103,7 @@ impl Backend for AppleCamera {
             .iter()
             .map(|d| {
                 // SAFETY: plain property reads of a device AVFoundation listed.
-                let (id, name, position) = unsafe {
+                let (id, name, position) = unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
                     (
                         d.uniqueID().to_string(),
                         d.localizedName().to_string(),
@@ -141,7 +144,7 @@ impl Backend for AppleCamera {
 fn devices() -> Vec<Retained<AVCaptureDevice>> {
     // SAFETY: constants AVFoundation exports, on the OS versions NSH supports (macOS 14+ for
     // the external and Continuity types; iOS uses only the built-in type, there since iOS 10).
-    let types: Vec<&AVCaptureDeviceType> = unsafe {
+    let types: Vec<&AVCaptureDeviceType> = unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         #[cfg(target_os = "macos")]
         {
             vec![
@@ -157,7 +160,7 @@ fn devices() -> Vec<Retained<AVCaptureDevice>> {
     };
     let types = NSArray::from_slice(&types);
     // SAFETY: a discovery for video devices at any position; it only lists.
-    let session = unsafe {
+    let session = unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         AVCaptureDeviceDiscoverySession::discoverySessionWithDeviceTypes_mediaType_position(
             &types,
             Some(video()),
@@ -165,13 +168,13 @@ fn devices() -> Vec<Retained<AVCaptureDevice>> {
         )
     };
     // SAFETY: a property read.
-    unsafe { session.devices() }.to_vec()
+    unsafe { session.devices() }.to_vec() // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
 }
 
 #[cfg(target_os = "macos")]
 fn is_builtin(d: &AVCaptureDevice) -> bool {
     // SAFETY: a property read; the constant is AVFoundation's.
-    unsafe { *d.deviceType() == *AVCaptureDeviceTypeBuiltInWideAngleCamera }
+    unsafe { *d.deviceType() == *AVCaptureDeviceTypeBuiltInWideAngleCamera } // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -191,7 +194,7 @@ struct SendSession(Retained<AVCaptureSession>);
 // SAFETY: AVCaptureSession is documented as usable from any thread: configuration and
 // start/stop are serialized internally (Apple runs them on a queue of the app's choosing); the
 // handle is a reference count, which is atomic.
-unsafe impl Send for SendSession {}
+unsafe impl Send for SendSession {} // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
 
 fn sessions<R>(f: impl FnOnce(&mut HashMap<u64, SendSession>) -> R) -> R {
     let mut map = SESSIONS.lock().unwrap_or_else(PoisonError::into_inner);
@@ -219,24 +222,24 @@ struct AppleCapture {
 // SAFETY: every field is an Objective-C object AVFoundation documents as usable from any
 // thread (sessions, devices, inputs, outputs, dispatch queues), or our own delegate, whose
 // ivars are `Send + Sync`. The capture is used from one thread at a time (`&mut self`).
-unsafe impl Send for AppleCapture {}
+unsafe impl Send for AppleCapture {} // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
 
 impl AppleCapture {
     fn open(config: &Config, sink: Sink) -> Result<Self, Unavailable> {
         let id_ns = NSString::from_str(&config.lens);
         // SAFETY: a class method with a valid string.
         let device =
-            unsafe { AVCaptureDevice::deviceWithUniqueID(&id_ns) }.ok_or(Unavailable::NoCamera)?;
+            unsafe { AVCaptureDevice::deviceWithUniqueID(&id_ns) }.ok_or(Unavailable::NoCamera)?; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         // SAFETY: a device AVFoundation returned; errors come back as `Err`.
-        let input = unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(&device) }
+        let input = unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(&device) } // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             .map_err(|e| unavailable_from(&e))?;
         // SAFETY: a new session, configured before it runs.
-        let session = unsafe { AVCaptureSession::new() };
+        let session = unsafe { AVCaptureSession::new() }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let queue = DispatchQueue::new("chat.songbird.camera", None);
         let mut photo = None;
         let mut delegate = None;
         // SAFETY: configuration of a session that is not running, with objects made here.
-        unsafe {
+        unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             session.beginConfiguration();
             let preset = if config.purpose == Purpose::Photo {
                 AVCaptureSessionPresetPhoto
@@ -306,9 +309,9 @@ impl AppleCapture {
         queue.exec_async(move || {
             let s = starting;
             // SAFETY: starting a configured session on its own serial queue.
-            unsafe { s.0.startRunning() };
+            unsafe { s.0.startRunning() }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             // SAFETY: a property read.
-            if unsafe { s.0.isRunning() } {
+            if unsafe { s.0.isRunning() } { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
                 started.running(&lens);
             } else {
                 started.unavailable(Unavailable::InUse);
@@ -334,17 +337,17 @@ impl Capture for AppleCapture {
     fn set_lens(&mut self, lens: &str) {
         let id = NSString::from_str(lens);
         // SAFETY: as in `open`.
-        let Some(device) = (unsafe { AVCaptureDevice::deviceWithUniqueID(&id) }) else {
+        let Some(device) = (unsafe { AVCaptureDevice::deviceWithUniqueID(&id) }) else { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             return;
         };
         // SAFETY: as in `open`.
-        let Ok(input) = (unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(&device) })
+        let Ok(input) = (unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(&device) }) // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         else {
             return;
         };
         // SAFETY: swapping the input of a running session inside a configuration block, which
         // AVFoundation applies atomically.
-        unsafe {
+        unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             self.session.beginConfiguration();
             self.session.removeInput(&self.input);
             if self.session.canAddInput(&input) {
@@ -366,7 +369,7 @@ impl Capture for AppleCapture {
             AVCaptureTorchMode::Off
         };
         // SAFETY: torch changes under the device's configuration lock, as documented.
-        unsafe {
+        unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             if !self.device.hasTorch() || !self.device.isTorchModeSupported(mode) {
                 return false;
             }
@@ -389,7 +392,7 @@ impl Capture for AppleCapture {
         // Asking for a photo with no live video connection (a webcam unplugged, the camera
         // taken by another app) raises an Objective-C exception: check first (D-0116).
         // SAFETY: property reads of the output and its connection.
-        let live = unsafe {
+        let live = unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             photo.connectionWithMediaType(video()).is_some_and(|c| c.isActive() && c.isEnabled())
         };
         if !live {
@@ -399,7 +402,7 @@ impl Capture for AppleCapture {
         let delegate = PhotoDelegate::new(done);
         // SAFETY: JPEG settings and our delegate, which `pending` keeps alive until it is
         // called.
-        unsafe {
+        unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             let settings = AVCapturePhotoSettings::photoSettingsWithFormat(Some(&jpeg_format()));
             photo
                 .capturePhotoWithSettings_delegate(&settings, ProtocolObject::from_ref(&*delegate));
@@ -422,11 +425,11 @@ fn observe(session: &AVCaptureSession, sink: &Sink, lens: &str) -> Vec<Retained<
         let block = RcBlock::new(move |_: std::ptr::NonNull<objc2_foundation::NSNotification>| report());
         // SAFETY: an observer for this session's notifications only, delivered on the posting
         // thread; the block owns what it reports into and is removed with the capture.
-        let token = unsafe { center.addObserverForName_object_queue_usingBlock(Some(name), Some(session), None, &block) };
+        let token = unsafe { center.addObserverForName_object_queue_usingBlock(Some(name), Some(session), None, &block) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         out.push(token);
     };
     // SAFETY: constants AVFoundation exports.
-    let (lost, back, failed) = unsafe {
+    let (lost, back, failed) = unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         (
             objc2_av_foundation::AVCaptureSessionWasInterruptedNotification,
             objc2_av_foundation::AVCaptureSessionInterruptionEndedNotification,
@@ -447,7 +450,7 @@ impl Drop for AppleCapture {
         let center = objc2_foundation::NSNotificationCenter::defaultCenter();
         for token in self.observers.drain(..) {
             // SAFETY: removing an observer this capture added.
-            unsafe { center.removeObserver(token.as_ref()) };
+            unsafe { center.removeObserver(token.as_ref()) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         }
         sessions(|m| m.remove(&self.id));
         let s = SendSession(self.session.clone());
@@ -455,7 +458,7 @@ impl Drop for AppleCapture {
         self.queue.exec_async(move || {
             let s = s;
             // SAFETY: stopping on the session's own queue.
-            unsafe { s.0.stopRunning() };
+            unsafe { s.0.stopRunning() }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         });
     }
 }
@@ -465,13 +468,13 @@ impl Drop for AppleCapture {
 /// # Safety
 ///
 /// `session` is being configured (between `beginConfiguration` and `commitConfiguration`).
-unsafe fn add_frames(
+unsafe fn add_frames( // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     session: &AVCaptureSession,
     delegate: &Delegate,
     queue: &DispatchQueue,
 ) -> Result<(), Unavailable> {
     // SAFETY: the caller's configuration block; objects made here.
-    unsafe {
+    unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let out = AVCaptureVideoDataOutput::new();
         out.setAlwaysDiscardsLateVideoFrames(true);
         out.setVideoSettings(Some(&nv12_settings()));
@@ -499,7 +502,7 @@ fn unavailable_from(e: &NSError) -> Unavailable {
 /// `{kCVPixelBufferPixelFormatTypeKey: NV12 full range}`.
 fn nv12_settings() -> Retained<NSDictionary<NSString, AnyObject>> {
     // SAFETY: a constant Core Video exports; it is toll-free bridged to NSString.
-    let key: &NSString = unsafe {
+    let key: &NSString = unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         &*std::ptr::from_ref(objc2_core_video::kCVPixelBufferPixelFormatTypeKey).cast::<NSString>()
     };
     let value = NSNumber::new_u32(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
@@ -512,7 +515,7 @@ fn nv12_settings() -> Retained<NSDictionary<NSString, AnyObject>> {
 /// `{AVVideoCodecKey: AVVideoCodecTypeJPEG}`.
 fn jpeg_format() -> Retained<NSDictionary<NSString, AnyObject>> {
     // SAFETY: constants AVFoundation exports.
-    let (key, jpeg) = unsafe {
+    let (key, jpeg) = unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         (
             objc2_av_foundation::AVVideoCodecKey.expect("AVVideoCodecKey"),
             objc2_av_foundation::AVVideoCodecTypeJPEG.expect("AVVideoCodecTypeJPEG"),
@@ -539,9 +542,9 @@ define_class!(
     #[ivars = DelegateIvars]
     struct Delegate;
 
-    unsafe impl NSObjectProtocol for Delegate {}
+    unsafe impl NSObjectProtocol for Delegate {} // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
 
-    unsafe impl AVCaptureMetadataOutputObjectsDelegate for Delegate {
+    unsafe impl AVCaptureMetadataOutputObjectsDelegate for Delegate { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         #[unsafe(method(captureOutput:didOutputMetadataObjects:fromConnection:))]
         fn did_output_metadata(
             &self,
@@ -554,14 +557,14 @@ define_class!(
                     continue;
                 };
                 // SAFETY: a property read of an object AVFoundation handed us.
-                if let Some(text) = unsafe { code.stringValue() } {
+                if let Some(text) = unsafe { code.stringValue() } { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
                     self.ivars().sink.code(&text.to_string());
                 }
             }
         }
     }
 
-    unsafe impl AVCaptureVideoDataOutputSampleBufferDelegate for Delegate {
+    unsafe impl AVCaptureVideoDataOutputSampleBufferDelegate for Delegate { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         #[unsafe(method(captureOutput:didOutputSampleBuffer:fromConnection:))]
         fn did_output_sample(
             &self,
@@ -584,7 +587,7 @@ impl Delegate {
         let scanner = scan_frames.then(|| crate::qr::Scanner::start(sink.clone()));
         let this = Self::alloc().set_ivars(DelegateIvars { sink, scanner });
         // SAFETY: NSObject's designated initializer.
-        unsafe { msg_send![super(this), init] }
+        unsafe { msg_send![super(this), init] } // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     }
 }
 
@@ -600,9 +603,9 @@ define_class!(
     #[ivars = PhotoIvars]
     struct PhotoDelegate;
 
-    unsafe impl NSObjectProtocol for PhotoDelegate {}
+    unsafe impl NSObjectProtocol for PhotoDelegate {} // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
 
-    unsafe impl AVCapturePhotoCaptureDelegate for PhotoDelegate {
+    unsafe impl AVCapturePhotoCaptureDelegate for PhotoDelegate { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         #[unsafe(method(captureOutput:didFinishProcessingPhoto:error:))]
         fn did_finish(
             &self,
@@ -626,7 +629,7 @@ define_class!(
                 ))));
             }
             // SAFETY: a method of the photo AVFoundation handed us.
-            let Some(data) = (unsafe { photo.fileDataRepresentation() }) else {
+            let Some(data) = (unsafe { photo.fileDataRepresentation() }) else { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
                 return done(Err(CaptureError::Failed("no photo data".into())));
             };
             done(still_of(&data));
@@ -648,7 +651,7 @@ impl PhotoDelegate {
             done: Mutex::new(Some(done)),
         });
         // SAFETY: NSObject's designated initializer.
-        unsafe { msg_send![super(this), init] }
+        unsafe { msg_send![super(this), init] } // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     }
 }
 
@@ -667,7 +670,7 @@ fn still_of(data: &NSData) -> Result<Still, CaptureError> {
 /// A copy of an NV12 sample's planes, or `None` for anything else.
 fn frame_of(sample: &CMSampleBuffer) -> Option<Frame> {
     // SAFETY: the sample is valid for this call; the image buffer is retained.
-    let image = unsafe { sample.image_buffer() }?;
+    let image = unsafe { sample.image_buffer() }?; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     // SAFETY: a video data output configured for NV12 hands CVPixelBuffers.
     let buffer: &CVPixelBuffer = &image;
     if CVPixelBufferGetPixelFormatType(buffer) != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
@@ -676,7 +679,7 @@ fn frame_of(sample: &CMSampleBuffer) -> Option<Frame> {
         return None;
     }
     // SAFETY: CMTime is plain data.
-    let pts = unsafe { sample.presentation_time_stamp() };
+    let pts = unsafe { sample.presentation_time_stamp() }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let timestamp_us = if pts.timescale > 0 {
         u64::try_from(i128::from(pts.value) * 1_000_000 / i128::from(pts.timescale)).unwrap_or(0)
     } else {
@@ -684,7 +687,7 @@ fn frame_of(sample: &CMSampleBuffer) -> Option<Frame> {
     };
     let lock = CVPixelBufferLockFlags::ReadOnly;
     // SAFETY: locking for reading; unlocked below on every path.
-    if unsafe { CVPixelBufferLockBaseAddress(buffer, lock) } != 0 {
+    if unsafe { CVPixelBufferLockBaseAddress(buffer, lock) } != 0 { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         return None;
     }
     let copy = |plane: usize| -> Option<(Vec<u8>, usize)> {
@@ -698,13 +701,13 @@ fn frame_of(sample: &CMSampleBuffer) -> Option<Frame> {
         // SAFETY: the buffer is locked, and Core Video promises `bytes per row × height`
         // readable bytes at the plane's base address while it is.
         Some((
-            unsafe { std::slice::from_raw_parts(base, len) }.to_vec(),
+            unsafe { std::slice::from_raw_parts(base, len) }.to_vec(), // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             stride,
         ))
     };
     let planes = copy(0).zip(copy(1));
     // SAFETY: the lock taken above.
-    unsafe { CVPixelBufferUnlockBaseAddress(buffer, lock) };
+    unsafe { CVPixelBufferUnlockBaseAddress(buffer, lock) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let ((y, y_stride), (uv, uv_stride)) = planes?;
     let frame = Frame {
         width: u32::try_from(CVPixelBufferGetWidth(buffer)).ok()?,
@@ -759,7 +762,7 @@ mod preview {
             };
             // SAFETY: a preview layer on a session, made and attached on the main thread,
             // where NSH calls components.
-            unsafe {
+            unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
                 let layer = AVCaptureVideoPreviewLayer::layerWithSession(&session);
                 if let Some(fill) = AVLayerVideoGravityResizeAspectFill {
                     layer.setVideoGravity(fill);
@@ -809,7 +812,7 @@ mod preview {
         #[name = "SongbirdCameraPreviewView"]
         struct PreviewView;
 
-        unsafe impl NSObjectProtocol for PreviewView {}
+        unsafe impl NSObjectProtocol for PreviewView {} // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
 
         impl PreviewView {
             #[unsafe(method(layerClass))]
@@ -825,7 +828,7 @@ mod preview {
         fn layer(&self) -> Retained<AVCaptureVideoPreviewLayer> {
             let layer = self.0.layer();
             // SAFETY: `layerClass` makes the view's layer an AVCaptureVideoPreviewLayer.
-            unsafe { Retained::cast_unchecked(layer) }
+            unsafe { Retained::cast_unchecked(layer) } // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         }
     }
 
@@ -841,7 +844,7 @@ mod preview {
             let session = session_for(value);
             // SAFETY: setting the layer's session on the main thread, where NSH calls
             // components.
-            unsafe {
+            unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
                 let layer = self.layer();
                 layer.setSession(session.as_deref());
                 if let Some(fill) = AVLayerVideoGravityResizeAspectFill {
@@ -863,7 +866,7 @@ mod preview {
                 let mtm = MainThreadMarker::new().expect("components are made on the main thread");
                 // SAFETY: UIView's designated initializer.
                 let view: Retained<PreviewView> =
-                    unsafe { msg_send![PreviewView::alloc(mtm), initWithFrame: CGRect::ZERO] };
+                    unsafe { msg_send![PreviewView::alloc(mtm), initWithFrame: CGRect::ZERO] }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
                 Box::new(Preview(view)) as Box<dyn NativeComponent>
             }),
         );

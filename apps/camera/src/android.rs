@@ -9,7 +9,10 @@
 //! byte buffers CameraX hands over, which are valid for the duration of the call (Java closes
 //! the image after it returns). Each block says why it holds.
 
-#![allow(unsafe_code)]
+#![allow(
+    unsafe_code,
+    reason = "D-0110 §5, reviewed in D-0116: JNI entry points and CameraX direct buffers"
+)]
 
 use std::{
     collections::HashMap,
@@ -64,7 +67,7 @@ fn host() -> Option<(JavaVM, GlobalRef)> {
     let (vm, bridge) = with(|s| Some((s.vm.as_ref()?.get_java_vm_pointer(), s.bridge.clone()?)))?;
     // SAFETY: the pointer is of the JavaVM Java handed us in `nativeInit`, which lives as long
     // as the process; `from_raw` makes a handle that does not own it.
-    let vm = unsafe { JavaVM::from_raw(vm) }.ok()?;
+    let vm = unsafe { JavaVM::from_raw(vm) }.ok()?; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     Some((vm, bridge))
 }
 
@@ -295,14 +298,14 @@ fn sink_of(id: u64) -> Option<Sink> {
 /// # Safety
 ///
 /// `buffer` is a direct `ByteBuffer` Java keeps alive and unchanged for the current call.
-unsafe fn direct<'a>(env: &JNIEnv<'_>, buffer: &JByteBuffer<'_>) -> Option<&'a [u8]> {
+unsafe fn direct<'a>(env: &JNIEnv<'_>, buffer: &JByteBuffer<'_>) -> Option<&'a [u8]> { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let ptr = env.get_direct_buffer_address(buffer).ok()?;
     let len = env.get_direct_buffer_capacity(buffer).ok()?;
     if ptr.is_null() {
         return None;
     }
     // SAFETY: the caller's contract; JNI gives the buffer's address and capacity.
-    Some(unsafe { std::slice::from_raw_parts(ptr, len) })
+    Some(unsafe { std::slice::from_raw_parts(ptr, len) }) // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
 }
 
 // ---------------------------------------------------------------- called by Java
@@ -413,7 +416,7 @@ pub extern "system" fn Java_chat_songbird_camera_CameraBridge_nativeFrame(
         return;
     };
     // SAFETY: CameraX's planes, direct buffers Java keeps open until this call returns.
-    let Some(y) = (unsafe { direct(&env, &y) }) else {
+    let Some(y) = (unsafe { direct(&env, &y) }) else { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         return;
     };
     let rotation = match rotation {
@@ -447,7 +450,7 @@ pub extern "system" fn Java_chat_songbird_camera_CameraBridge_nativeFrame(
         return;
     }
     // SAFETY: as above.
-    let (Some(u), Some(v)) = (unsafe { direct(&env, &u) }, unsafe { direct(&env, &v) }) else {
+    let (Some(u), Some(v)) = (unsafe { direct(&env, &u) }, unsafe { direct(&env, &v) }) else { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         return;
     };
     let Some(pixels) = crate::frame::nv12_from_yuv(y, ys, u, v, uvs, uvp, wu, hu) else {

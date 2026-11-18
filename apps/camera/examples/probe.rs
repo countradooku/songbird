@@ -23,7 +23,8 @@ use std::{
 use songbird_camera::{Access, Config, Event, Lens, Purpose, Sink, platform};
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // The probe's mode and duration, typed by the person running it: no security decision.
+    let args: Vec<String> = std::env::args().skip(1).collect(); // nosemgrep: rust.lang.security.args.args
     let what = args.first().map_or("status", String::as_str);
     let secs = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(10);
     let Some(cam) = platform() else {

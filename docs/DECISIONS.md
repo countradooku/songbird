@@ -171,6 +171,23 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0118 — Camera: the `unsafe` exception marked for Semgrep, as D-0033's
+
+- Date: 2026-11-18
+- Status: accepted by the agent, following D-0033's precedent for an approved exception
+- Decided by: agent
+- Context: CI's Semgrep failed PR #68 with 55 blocking findings: `songbird-no-unsafe-allow` on
+  the three platform modules' `#![allow(unsafe_code)]`, the registry's `unsafe-usage` on each
+  `unsafe` block in them, and `args` on the probe's `std::env::args`.
+- Decision: as `crates/alloc-count` does (D-0033), each module's allow carries a `reason` naming
+  the owner's approval (D-0110 §5) and the review (D-0116), and each reviewed `unsafe` line its
+  `// nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage` (62 lines in `apple.rs`,
+  `android.rs`, `windows.rs`, each beside its `SAFETY:` comment). The probe's arguments choose
+  its mode only (`// nosemgrep: rust.lang.security.args.args`). No rule was changed or
+  disabled; any new `unsafe` still fails until it is reviewed and marked.
+- Evidence: Semgrep 1.185.0 (CI's image, by digest) with `p/rust`, `p/secrets` and
+  `.semgrep/` on everything PR #68 touches: 0 findings.
+
 ## D-0117 — The camera gate approved; the IJG licence for `jpeg-encoder` only
 
 - Date: 2026-11-18

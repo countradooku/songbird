@@ -20,6 +20,11 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 12 plan (`P12-plan.md`, D-0135): **waiting for the owner**. Questions 1 to 10: scope;
+  Tamarin and ProVerif; the fuzzing budget (recommended 2 CPU-hours per target with libFuzzer
+  and 1 with AFL++); offline signing roots on a hardware token (which token); supply-chain audits
+  written by the agent for sign-off; per-service store users and sealed sender on; the token key
+  list in the transparency log; the bug-bounty policy and reward table; the external audit firm.
 - Prompt 11 gate (`P11-gate.md`, D-0127 to D-0134): **approved by the owner on 2026-11-19**
   ("Approve all"), with the threat-model rows (§1, §3.27, §3.28, §4, §6). PR #70 waits for the
   owner to merge. Still the owner's: App Store Connect, Google Play and Mollie test accounts
@@ -198,6 +203,46 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0135 — Prompt 12: the plan, and the owner's decisions it needs
+
+- Date: 2026-11-19
+- Status: proposed (waiting for the owner)
+- Decided by: owner, on the agent's plan `docs/reports/P12-plan.md`
+- Context: Prompt 12 asks for evidence that the backend is "virtually unbreakable": a complete
+  threat model, formal models of Songbird's own protocol glue, continuous fuzzing, memory and
+  concurrency checks, constant-time checks, supply-chain audits and an independent rebuild,
+  hardware-backed signing keys, network hardening, and an external audit. What exists: a
+  939-line threat model built prompt by prompt (still headed "skeleton"); 37 libFuzzer targets,
+  35 of them nightly, without persistent corpora or coverage; ASan, TSan and Miri (2 of 26
+  crates) nightly; cargo-deny, cargo-audit and cargo-vet with 411 exemptions and no audit of our
+  own (about 125 exemptions are cryptographic or networking crates); a reproducible release
+  built twice on one runner. Missing: any formal model, Kani harness, loom or shuttle model,
+  timing test, HSM (Hetzner offers none, D-0042) or least-privilege store user (D-0025), and
+  the bounty policy `SECURITY.md` promises.
+- Options considered and evidence: in the plan ("What Prompt 12 starts from", "Findings"):
+  Tamarin against ProVerif (both: Tamarin for state, ProVerif for unlinkability); hax against
+  Kani (Kani; hax as one experiment); ClusterFuzzLite's corpus repository and write token
+  against cache-stored corpora without a secret (D-0045); an offline root on a hardware token
+  with short-lived delegations against SOPS keys only or a YubiHSM 2 in colocation.
+- Decisions asked of the owner (recommendations first):
+  1. the milestones M1 to M8 as written;
+  2. Tamarin for the five stateful protocols, ProVerif for sealed-sender anonymity and token
+     unlinkability, mutants that must fail, hax as an experiment only;
+  3. the fuzzing budget: 2 CPU-hours per target with libFuzzer and 1 with AFL++ per gate and
+     release; corpora in `actions/cache`; PR fuzzing; no write secret in CI;
+  4. offline Ed25519 roots on the owner's hardware token (YubiKey 5 ≥ 5.7 or Nitrokey 3, two of
+     them), 90-day delegations renewed every 60 days, a signed revocation list;
+  5. cargo-vet: imports, bumps, then agent-written `safe-to-deploy` audits labelled as such for
+     the owner's sign-off; `aws-lc-rs` on its FIPS validation;
+  6. SurrealDB, Valkey and Iggy users per service, root only for migrations; sealed sender on by
+     default once the gate is approved;
+  7. the token key list in the key transparency log;
+  8. the bounty policy and safe harbour now (disclose.io core terms), GitHub private reporting,
+     the reward table; an EU platform at the public launch;
+  9. the external audit, commissioned by the owner after Prompts 12 and 13.
+- Agent decisions, unless the owner objects: in the plan's question 10.
+- Consequences: M1 (the threat model completed and checked) is next once the plan is approved.
 
 ## D-0134 — Prompt 11, the security review's fixes
 

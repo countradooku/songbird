@@ -12,7 +12,7 @@
   - [M7](P11-M7.md): the app on real plans (D-0133).
 - The security review's fixes: D-0134.
 - Branch: `claude/p11-plans-abuse-e05ed3`, rebased onto `main` after Prompt 10 merged.
-- Status: **waiting for the owner**. The threat-model rows marked Prompt 11 (THREAT_MODEL §1, §3.27, §3.28, §4 and §6) await approval.
+- Status: **approved by the owner on 2026-11-19** ("Approve all"), with the threat-model rows marked Prompt 11 (THREAT_MODEL §1, §3.27, §3.28, §4 and §6). The PR waits for the owner to merge.
 
 ## The gate, item by item
 
@@ -70,7 +70,7 @@ Run on an Apple M5 Pro with macOS 27.2.1, the compose stores under podman, and n
 
 ## For the owner
 
-1. **Approve the gate and the threat-model rows** (§1, §3.27, §3.28, §4, §6).
+1. ~~Approve the gate and the threat-model rows~~: approved on 2026-11-19.
 2. **Provider accounts:** App Store Connect (sandbox), Play Console (licence testers) and Mollie (test mode). These are needed to run the real sandboxes.
 3. **Counsel:** VAT records, and the legal-request process (`docs/RUNBOOKS/legal-requests.md`), before the first real request.
 4. **Before release:**

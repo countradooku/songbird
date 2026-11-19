@@ -20,12 +20,16 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 11 gate (`P11-gate.md`, D-0127 to D-0134): **approved by the owner on 2026-11-19**
+  ("Approve all"), with the threat-model rows (§1, §3.27, §3.28, §4, §6). PR #70 waits for the
+  owner to merge. Still the owner's: App Store Connect, Google Play and Mollie test accounts
+  (the real sandbox runs); counsel on VAT records and the legal-request process; before release,
+  the shipped token and support keys and the Apple root's hash.
 - Prompt 11 plan (`P11-plan.md`, D-0126): **approved by the owner on 2026-11-19** ("Approve
   all"), every recommendation: a separate `billing` service, anonymous monthly tokens, the plans
   and limits table, Mollie, unlinked Family seats, the vault unlinked from the account, outreach
   limits automatic and suspension by moderators, sealed support tickets, the legal tooling,
-  Teams schema only, the app's M7. Still the owner's: App Store Connect, Google Play and Mollie
-  test accounts; counsel on VAT records and legal requests. M1 is next.
+  Teams schema only, the app's M7.
 - Prompt 10 gate (`P10-gate.md`, D-0120 to D-0125): **waiting for the owner**. M1–M5 and the
   security review's fixes are done; the gate's items pass. For the owner: approve the gate with
   the threat-model rows (§1, §3.27, §6); register the Google, Microsoft and Dropbox OAuth apps.
@@ -198,7 +202,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0134 — Prompt 11, the security review's fixes
 
 - Date: 2026-11-19
-- Status: accepted by the agent; the threat-model rows changed await the owner
+- Status: accepted; the threat-model rows approved by the owner on 2026-11-19
 - Decided by: agent, after an independent read-only review of the whole Prompt 11 diff
 - Context: `docs/reports/P11-gate.md` (the review and what was done about each finding).
 - Decision:
@@ -249,7 +253,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 - Date: 2026-11-19
 - Status: accepted by the agent within D-0126 §9–§12; the threat-model rows (§1, §3.28, §6)
-  await the owner; the legal process awaits counsel
+  approved by the owner on 2026-11-19; the legal process awaits counsel
 - Decided by: agent, within the owner's plan
 - Context: `docs/reports/P11-M6.md`.
 - Decision:
@@ -282,8 +286,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0131 — Prompt 11, milestone 5: abuse controls without content
 
 - Date: 2026-11-19
-- Status: accepted by the agent within D-0126 §7–§8; the threat-model rows (§1, §3.28, §4) await
-  the owner
+- Status: accepted by the agent within D-0126 §7–§8; the threat-model rows (§1, §3.28, §4) approved by the owner on 2026-11-19
 - Decided by: agent, within the owner's plan
 - Context: `docs/reports/P11-M5.md`.
 - Decision:
@@ -307,7 +310,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 - Date: 2026-11-19
 - Status: accepted by the agent within D-0126 §5 and §6 (re-deciding D-0119 §3); the
-  threat-model rows (§1, §3.27, §3.28) await the owner
+  threat-model rows (§1, §3.27, §3.28) approved by the owner on 2026-11-19
 - Decided by: agent, within the owner's plan
 - Context: `docs/reports/P11-M4.md`.
 - Decision:
@@ -332,8 +335,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0129 — Prompt 11, milestone 3: billing, a service of its own
 
 - Date: 2026-11-19
-- Status: accepted by the agent within D-0126 §1–§4; the threat-model rows (§1, §3.28, §6) await
-  the owner; the sandbox runs wait for the owner's accounts (D-0126 §11)
+- Status: accepted by the agent within D-0126 §1–§4; the threat-model rows (§1, §3.28, §6) approved by the owner on 2026-11-19; the sandbox runs wait for the owner's accounts (D-0126 §11)
 - Decided by: agent, within the owner's plan
 - Context: `docs/reports/P11-M3.md`.
 - Decision:
@@ -365,8 +367,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0128 — Prompt 11, milestone 2: anonymous tokens on RFC 9497's POPRF
 
 - Date: 2026-11-19
-- Status: accepted by the agent within D-0126 §2; the threat-model rows (§1, §3.28, §6) await
-  the owner
+- Status: accepted by the agent within D-0126 §2; the threat-model rows (§1, §3.28, §6) approved by the owner on 2026-11-19
 - Decided by: agent, within the owner's plan
 - Context: D-0126 §2 chose anonymous tokens so billing and accounts share no identifier, and
   asked for the evaluation of libsignal's credential library. `docs/reports/P11-M2.md`.
@@ -397,8 +398,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0127 — Prompt 11, milestone 1: entitlements, one snapshot, every limit by plan
 
 - Date: 2026-11-19
-- Status: accepted by the agent within D-0126; the threat-model rows (§1, §3.28, §4) await the
-  owner
+- Status: accepted by the agent within D-0126; the threat-model rows (§1, §3.28, §4) approved by the owner on 2026-11-19
 - Decided by: agent, within the owner's plan
 - Context: `docs/reports/P11-M1.md`.
 - Decision:

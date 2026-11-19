@@ -74,6 +74,7 @@ async fn stack(k: Option<KeySettings>) -> Option<Stack> {
     getrandom::fill(&mut secret).unwrap();
     let keys = k.map(|k| KeyDirectory::new(k, &secret, None, KeyMetrics::default()).unwrap());
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
         calls: None,

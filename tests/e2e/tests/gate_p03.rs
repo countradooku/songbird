@@ -116,6 +116,7 @@ async fn stack() -> Option<Stack> {
     ));
     let (_, push_public) = songbird_accounts::push_token::key_pair(&[0x33; 32]).unwrap();
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
         calls: None,

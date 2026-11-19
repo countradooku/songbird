@@ -112,6 +112,7 @@ async fn stack_with(reg: Option<RegistrationSettings>) -> Option<Stack> {
     let registration =
         reg.map(|r| Registration::new(r, &secret, RegistrationMetrics::default()).unwrap());
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
         calls: None,

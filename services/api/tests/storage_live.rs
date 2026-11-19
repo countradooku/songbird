@@ -110,6 +110,7 @@ async fn stack(max_records: u32) -> Option<Stack> {
     let st = settings(max_records);
     let secret = [0x11u8; 32];
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
         calls: None,

@@ -154,6 +154,7 @@ async fn registered_accounts_connect_and_talk_without_an_operator() {
     )
     .unwrap();
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
         calls: None,

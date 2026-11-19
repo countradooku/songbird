@@ -93,6 +93,7 @@ async fn stack(d: DeviceSettings) -> Option<Stack> {
     )
     .unwrap();
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
         calls: None,
@@ -1688,4 +1689,122 @@ async fn strangers_asking_for_recovery_tokens_block_neither_hand_over_nor_linkin
     assert_eq!(st, 200, "{}", String::from_utf8_lossy(&b));
     // An account that doesn't exist answers as one that does.
     assert_eq!(ask(hex::encode(&rand32()[..16])).await, 200);
+}
+
+async fn link_token(c: &ApiClient) -> (u16, bytes::Bytes) {
+    c.send("POST", "/v1/devices/link-token", None)
+        .await
+        .unwrap()
+}
+
+/// The plan sets the device limit (Prompt 11, D-0127): Free links the primary and 5, Plus the
+/// primary and 10; an expired entitlement reads as Free with no sweep; a downgrade keeps every
+/// device and links no new one until the account is back under the limit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_plan_sets_the_device_limit_and_a_downgrade_keeps_devices() {
+    use songbird_accounts::entitlements::{EntRow, Source};
+    use songbird_entitlements::{Snapshot, today};
+    let Some(s) = stack(DeviceSettings {
+        channels_per_hour: 1_000,
+        channel_burst: 100,
+        links_per_hour: 1_000,
+        link_burst: 100,
+        ..settings()
+    })
+    .await
+    else {
+        return;
+    };
+    let p = primary(&s).await;
+    let plus = |last_day| {
+        Snapshot::from_rows(
+            2,
+            &[EntRow {
+                account: p.account,
+                level: 1,
+                last_day,
+                source: Source::Token,
+            }],
+        )
+    };
+    // Free: the primary and five.
+    let mut linked = Vec::new();
+    for _ in 0..5 {
+        let (st, l) = link_flow(&s, &p, |_| {}).await;
+        assert_eq!(st, 200);
+        linked.push(l.unwrap());
+    }
+    let (st, b) = link_token(&p.client).await;
+    assert_eq!((st, b.as_ref()), (409, br#"{"error":"limit"}"#.as_slice()));
+    // An entitlement that ended yesterday changes nothing.
+    s.app.plans.live.store(plus(today() - 1));
+    assert_eq!(link_token(&p.client).await.0, 409);
+    // Plus: room for more.
+    s.app.plans.live.store(plus(today()));
+    let (st, l) = link_flow(&s, &p, |_| {}).await;
+    assert_eq!(st, 200);
+    linked.push(l.unwrap());
+    let (st, b) = p
+        .client
+        .send("GET", "/v1/entitlements", None)
+        .await
+        .unwrap();
+    assert_eq!(st, 200);
+    let e = json(&b);
+    assert_eq!(e["level"], "plus");
+    assert_eq!(e["limits"]["linked_devices"], 10);
+    // Downgrade: all seven stay and work, nothing new links.
+    s.app.plans.live.store(Snapshot::from_rows(3, &[]));
+    let (st, b) = link_token(&p.client).await;
+    assert_eq!((st, b.as_ref()), (409, br#"{"error":"limit"}"#.as_slice()));
+    assert_eq!(
+        p.client.send("GET", "/v1/devices", None).await.unwrap().0,
+        200
+    );
+    assert_eq!(
+        s.app.registry.devices_of(&p.account).await.unwrap().len(),
+        7
+    );
+    let (st, b) = p
+        .client
+        .send("GET", "/v1/entitlements", None)
+        .await
+        .unwrap();
+    assert_eq!((st, json(&b)["level"].as_str()), (200, Some("free")));
+    // A device not yet in the signed list is told it is pending, like every account read.
+    assert_eq!(
+        linked[0]
+            .client
+            .send("GET", "/v1/entitlements", None)
+            .await
+            .unwrap()
+            .0,
+        403
+    );
+    // One leaves: six, still at the limit; a second leaves: one may link again.
+    for l in linked.drain(..1) {
+        assert_eq!(
+            l.client
+                .send("DELETE", "/v1/devices/self", None)
+                .await
+                .unwrap()
+                .0,
+            204
+        );
+    }
+    assert_eq!(
+        link_token(&p.client).await.0,
+        409,
+        "six: still at the limit"
+    );
+    let l = linked.pop().unwrap();
+    assert_eq!(
+        l.client
+            .send("DELETE", "/v1/devices/self", None)
+            .await
+            .unwrap()
+            .0,
+        204
+    );
+    assert_eq!(link_token(&p.client).await.0, 200);
 }

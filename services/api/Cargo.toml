@@ -18,6 +18,7 @@ path = "src/main.rs"
 songbird-service.workspace = true
 songbird-types.workspace = true
 songbird-accounts.workspace = true
+songbird-entitlements.workspace = true
 songbird-jobs.workspace = true
 songbird-valkey.workspace = true
 songbird-s3.workspace = true

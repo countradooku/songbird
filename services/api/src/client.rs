@@ -37,6 +37,12 @@ impl ApiClient {
         }
     }
 
+    /// The device it signs as.
+    #[must_use]
+    pub const fn device(&self) -> DeviceId {
+        self.device
+    }
+
     /// Sends a request with a signed body (`None`: no body).
     ///
     /// # Errors

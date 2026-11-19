@@ -129,7 +129,37 @@ async fn create(
     let (sizes, total, token) =
         PackRequest::decode(&body).ok_or(status(StatusCode::BAD_REQUEST))?;
     let account = account_of(app, &device).await?;
-    match m.admit_grant(&app.hot, &account, total).await {
+    let level = app.plans.level(&account);
+    let plan = *app.plans.catalog.limits(level);
+    // New packs per 30 days are the plan's (D-0127); the pack forgets its creator once complete,
+    // so the budget is all the server can count.
+    match m
+        .admit_pack(&app.hot, &account, level, plan.packs_per_month)
+        .await
+    {
+        Ok(0) => {}
+        Ok(wait) => {
+            app.metrics.media.throttled.inc();
+            let mut r = json(
+                StatusCode::TOO_MANY_REQUESTS,
+                &serde_json::json!({ "error": "plan", "packs_per_month": plan.packs_per_month }),
+            );
+            if let Ok(v) = HeaderValue::from_str(&wait.div_ceil(1_000_000).max(1).to_string()) {
+                r.headers_mut().insert(hyper::header::RETRY_AFTER, v);
+            }
+            return Ok(r);
+        }
+        Err(()) => return Err(status(StatusCode::SERVICE_UNAVAILABLE)),
+    }
+    match m
+        .admit_grant(
+            &app.hot,
+            &account,
+            total,
+            (level, plan.upload_bytes_per_day),
+        )
+        .await
+    {
         Ok(0) => {}
         Ok(wait) => {
             app.metrics.media.throttled.inc();

@@ -102,6 +102,9 @@ server in plaintext. Adding to this list requires the owner's approval.
 | Keyed throttle records of the vault (`vt:<kind>:<hmac>` in `valkey-hot`: HMAC of the vault key, the account, or the IP range) with the next allowed time | Hold reads per vault, writes per account and misses per range to their budgets | At most the budget's window (an hour) | Prompt 10 (M2), D-0121; keyed forms of what is listed; **awaiting the owner's approval** |
 | Turned-off vaults awaiting deletion (`vault_gone`: the vault key and epoch, nothing else) | Let the worker delete the objects after the rows are gone | Until the next sweep deletes the objects (a minute) | Prompt 10 (M2), D-0121; **awaiting the owner's approval** |
 | **Recovery and hand-over tokens** (Prompt 10, D-0123; `ltoken` with a `kind`): `SHA-256` of the token, the account, the reserved device ID, the expiry; and in memory, the source IP of the recovery request | Let a new device become the primary with the account identity key (and the PIN or a passkey), or with the old primary's consent | Single use, ten minutes; swept with link tokens | Prompt 10 (M4), D-0123; **awaiting the owner's approval** |
+| **Entitlements** (Prompt 11, D-0127; `ent`, `entver`, SurrealDB): per account **not on Free**, its level, the last UTC day it holds it, where it came from (`grant` by an operator or `token` from an anonymous redemption) and when the row was written; in every `api` node's memory, the snapshot of those rows | Enforce each plan's limits (devices, file size, upload bytes, vault space, new packs) | Until the last day, then ignored by every reader and deleted by the worker's sweep; deleted with the account | Prompt 11 (M1), D-0127; **awaiting the owner's approval** |
+| Keyed budget records of new packs per account per level (`m:p:`, `m:p1:` in `valkey-hot`; HMAC of the account under the media key) and of upload bytes per level (`m:b:`, `m:b1:`) | Hold each plan's new packs per 30 days and bytes per day | 30 days (packs), 24 hours (bytes) | Prompt 11 (M1), D-0127; **awaiting the owner's approval** |
+| **Teams tables, reserved and empty** (Prompt 11, D-0126 §12; `org`, `org_admin`, `org_member`, `org_device`): defined so Teams can come without a migration; nothing writes them | — | — | Prompt 11 (M1), D-0127; **awaiting the owner's approval** |
 
 Prompt 1 adds two operational views, neither of which is user data on the server:
 
@@ -621,6 +624,17 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
 | A WebDAV password or signed S3 requests sent in clear (review, D-0125) | I | Someone on the network | `https://` only, except to the device itself | `a_password_never_goes_over_plain_http_to_another_computer`, `plain_http_only_to_this_computer` |
 | A store raising a false rollback or fork alarm with garbage (review, D-0125) | T | Malicious provider | Rollback and fork are judged after the manifest's tag is checked; garbage is damage | `a_store_cannot_roll_back_or_fork…` |
 
+### 3.28 Plans and entitlements (Prompt 11; D-0126 onward) — awaiting the owner's approval
+
+| Threat | STRIDE | Attacker | Mitigation | Test or proof |
+| --- | --- | --- | --- | --- |
+| A client claiming a plan it does not hold | E | Any client | The level comes only from the registry (an operator's grant or a redeemed token); requests carry no plan; every limit is checked in `api` | `the_plan_sets_the_device_limit…`, `the_plan_sets_file_size_daily_bytes_and_packs`, `the_quota_is_the_owners_plan…` |
+| An entitlement outliving its end (stale snapshot, stopped worker, unreachable registry) | E | Fault | Each entry carries its last day and every reader compares with the clock; the sweep only tidies | `a_stale_snapshot_never_extends_an_entitlement`, `an_entry_expires_by_date_at_the_reader`, `limits_follow_the_level_and_expire_by_date` |
+| A downgrade or expiry destroying data (a backup lost when Plus ends) | D | Fault, policy | Over a limit only additions are refused; devices stay, a vault reads and restores and takes deletions | `the_quota_is_the_owners_plan_and_a_downgrade_keeps_the_backup`, the device test |
+| A misconfigured catalogue (Plus allowing less, a security feature behind a flag) | T, D | Operator error | Strict parsing (unknown fields refused), bounds, monotone levels, no security flag exists to set; refused at start-up | `a_catalogue_from_configuration_is_strict`, `validation_accepts_exactly_the_monotone_catalogues` |
+| Budgets inherited across levels (an upgrade that gives nothing until the old budget refills) | D | Fault | A record per level | `the_plan_sets_file_size_daily_bytes_and_packs` |
+| An operator granting plans silently | R | Insider | `plans grant` and `revoke` need `--confirm` and write the audit log with the account, level and day | `songbird-admin` audit tests |
+
 ## 4. Server-enforced settings
 
 | Setting | Who changes it | Enforced where |
@@ -631,7 +645,7 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
 | Discoverable by username (Prompt 9, D-0103) | Hiding: any listed device; showing again: the primary | `POST /v1/username/lookup` (404 as for an unknown username; the account's own links still resolve) |
 | Who may add me to groups: everyone or contacts (Prompt 9, D-0103) | Contacts: any listed device; everyone: the primary | `POST /v1/groups/commit` (403 `access` without the added accounts' combined access key, unless they asked to join) |
 | Inactivity period: 6, 12 or 24 months (Prompt 3, D-0047) | The primary | The worker's sweep (warnings, then deletion) |
-| Plan and entitlements | — (Prompt 11) | Reserved: entitlements arrive with Prompt 11; nothing is stored for them yet |
+| Plan and entitlements (Prompt 11, D-0127): the level and its last day | Never a client: an operator's grant (`songbird-admin plans`, audited), an anonymous token's redemption (M2); expiry by date at every reader | Every limit in `api` (device links, attachment grants, upload bytes, new packs, vault writes); downgrades refuse additions and delete nothing — **awaiting the owner's approval** |
 | Parental supervision of a child account (Prompt 9, D-0105): no message requests, group adds with the parent's approval, not discoverable | The parent's signature by the policy key (the first policy installed by the child's primary); the unlink date | The account row's locks (every write of those settings), `POST /v1/groups/commit` and `/v1/groups/join` (403 `approval`), the worker (the date) |
 
 ## 5. Compliance notes (GDPR, age of digital consent per EU country)

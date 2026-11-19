@@ -212,6 +212,7 @@ async fn stack(limits: RequestLimits) -> Option<Stack> {
     )
     .unwrap();
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans::default(),
         calls: None,
         reports: None,
         requests: Some(songbird_api::requests::Requests::new(

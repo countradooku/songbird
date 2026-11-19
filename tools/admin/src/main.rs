@@ -6,6 +6,8 @@
 //!   a restore or a loss of the mailbox, so clients resend what has no delivery receipt.
 //! - `accounts import`: a static directory file as registry accounts (drills, development).
 //! - `reports`: the moderation key, and the queue of reports sealed to it (Prompt 4, D-0063).
+//! - `plans`: an operator's grant or revocation of a plan level for one account (Prompt 11,
+//!   D-0127), audit-logged with the account.
 //! - `invites create`: a batch of invite codes for early testers (D-0038); `invites grant`: more
 //!   invites for one account. Codes are printed once and stored only as hashes; the audit log
 //!   records how many, never the codes.
@@ -33,6 +35,7 @@
 mod audit;
 mod backup;
 mod ca;
+mod plans;
 mod reports;
 mod store;
 
@@ -72,6 +75,9 @@ enum Cmd {
     /// Reports (Prompt 4, D-0063): the moderation key, and the sealed queue.
     #[command(subcommand)]
     Reports(reports::ReportsCmd),
+    /// Plans (Prompt 11, D-0127): operators' grants of a level.
+    #[command(subcommand)]
+    Plans(plans::PlansCmd),
 }
 
 #[derive(Debug, Subcommand)]
@@ -233,6 +239,7 @@ fn main() -> ExitCode {
         }) => accounts_import(&store, &guard, &directory),
         Cmd::Invites(cmd) => invites_cmd(cmd),
         Cmd::Reports(cmd) => reports::run(cmd),
+        Cmd::Plans(cmd) => plans::run(cmd),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -379,7 +386,7 @@ fn backup_cmd(cmd: BackupCmd) -> anyhow::Result<()> {
 }
 
 /// A destructive command's target, as `--confirm` must repeat it.
-fn target(s: &store::StoreArgs) -> String {
+pub(crate) fn target(s: &store::StoreArgs) -> String {
     format!("{}/{}", s.namespace, s.database)
 }
 

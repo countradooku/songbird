@@ -47,6 +47,7 @@ pub mod kt;
 pub mod media;
 pub mod messages;
 pub mod packs;
+pub mod plans;
 pub mod profiles;
 pub mod registration;
 pub mod reports;
@@ -238,6 +239,9 @@ pub struct App {
     pub reports: Option<reports::Reports>,
     /// Calls (Prompt 7; absent: `/v1/calls…` answers 503).
     pub calls: Option<calls::CallsApi>,
+    /// Plans: the catalogue and the live entitlements snapshot (Prompt 11, D-0127). The default
+    /// is the owner's catalogue with every account on Free.
+    pub plans: plans::Plans,
 }
 
 impl std::fmt::Debug for App {
@@ -370,6 +374,19 @@ impl App {
                     .await
                     .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
                 Ok(empty(StatusCode::NO_CONTENT))
+            }
+            (&Method::GET, "/v1/entitlements") => {
+                let (device, _) = self.authenticate_json(req).await?;
+                let row = self
+                    .registry
+                    .device(&device)
+                    .await
+                    .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?
+                    .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+                if row.pending {
+                    return Ok(pending_refusal());
+                }
+                Ok(json(StatusCode::OK, &self.plans.describe(&row.account)))
             }
             (&Method::DELETE, "/v1/account") => {
                 let (device, _) = self.authenticate_json(req).await?;
@@ -696,8 +713,10 @@ impl App {
                 if let Err(out) = v.write_allowed(&self.hot, &row, &o.row).await {
                     return Ok(profile_outcome(out));
                 }
+                let quota = v.quota(&self.plans, o.row.owner.as_ref());
                 return Ok(profile_outcome(
-                    v.put_manifest(&self.registry, &o, expected, body).await,
+                    v.put_manifest(&self.registry, &o, quota, expected, body)
+                        .await,
                 ));
             }
             (&Method::PUT, p) if p.starts_with("/v1/vault/chunks/") => {
@@ -713,8 +732,9 @@ impl App {
                 if let Err(out) = v.write_allowed(&self.hot, &row, &o.row).await {
                     return Ok(profile_outcome(out));
                 }
+                let quota = v.quota(&self.plans, o.row.owner.as_ref());
                 return Ok(profile_outcome(
-                    v.put_chunk(&self.registry, &o, &name, body).await,
+                    v.put_chunk(&self.registry, &o, quota, &name, body).await,
                 ));
             }
             (&Method::GET, "/v1/vault" | "/v1/vault/manifest" | "/v1/vault/chunks") => None,
@@ -749,7 +769,9 @@ impl App {
             return Ok(profile_outcome(out));
         }
         match path.as_str() {
-            "/v1/vault" => Ok(profile_outcome(v.stats(&o))),
+            "/v1/vault" => Ok(profile_outcome(
+                v.stats(&o, v.quota(&self.plans, o.row.owner.as_ref())),
+            )),
             "/v1/vault/manifest" => match v.manifest_name(&o) {
                 Some(name) => self.serve_from(&v.s3, &name).await,
                 None => Ok(empty(StatusCode::NO_CONTENT)),
@@ -1229,7 +1251,7 @@ impl App {
             (&Method::POST, "/v1/devices/link-token", None) => {
                 let (device, _) = self.authenticate_json(req).await?;
                 let account = account_of(device).await?;
-                d.link_token(&self.registry, &self.hot, &account, &device)
+                d.link_token(&self.registry, &self.hot, &self.plans, &account, &device)
                     .await
             }
             (&Method::POST, "/v1/devices/link", None) => {
@@ -1237,6 +1259,7 @@ impl App {
                 d.link(
                     &self.registry,
                     &self.hot,
+                    &self.plans,
                     self.messages.as_ref(),
                     &self.server_name,
                     peer,

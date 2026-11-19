@@ -2751,3 +2751,77 @@ OpenSSL). For call ID `00 01 … 0f` and `call_secret` `40 41 … 5f`, the sende
 `9abfb1f35fa88b5c072d6410879d17a86fff15a196b82fe917a2bb113e490aeb`. For link root `00 01 … 1f`,
 the link ID is `5f88f381e38c44f13807d6c1ca1268a94fdd7437f745cca65ac91b8a29b5480d` and the server
 stores `19a4a59124d6c69329890a7fe6be812afda73dbf92737d7873f18d4c85af3853`.
+
+## 14. Plans, entitlements and abuse (Prompt 11)
+
+### 14.1 Levels, the catalogue and what is never gated
+
+Plans are levels: `0` Free (the default, never stored) and `1` Plus. Every Family seat is
+Plus: the server cannot tell a seat from a subscription (D-0126 §5). Teams will add a source
+(an organisation), not a new kind of entitlement.
+
+The **catalogue** (`[api.plans]`, `songbird_entitlements::Catalog`) gives each level its limits
+and flags, with a version the apps compare. Defaults (D-0126 §3):
+
+| | Free | Plus |
+| --- | --- | --- |
+| `linked_devices` (besides the primary) | 5 | 10 |
+| `file_bytes` (largest attachment ciphertext) | 2 GiB | 4 GiB |
+| `upload_bytes_per_day` | 10 GiB | 50 GiB |
+| `vault_bytes`, `vault_chunks` | 5 GiB, 100,000 | 50 GiB, 1,000,000 |
+| `packs_per_month` (new packs per 30 days) | 5 | 50 |
+| flags `app_icons`, `chat_themes`, `priority_support` | — | ✓ |
+
+A catalogue is refused at start-up when a higher level allows less than a lower one, or a
+number is outside its bounds. **Never in the catalogue, on any plan:** encryption, safety
+numbers and verification, disappearing messages, app lock, the PIN and passkeys, the proxy,
+backups and restore, every privacy setting, calls, groups, reporting, blocking, export and
+deletion. The flags gate only extras whose settings are end-to-end encrypted, so apps check
+them; the server enforces every limit.
+
+Each `[api…]` number that a plan now sets stays as the **deployment's ceiling**:
+`[api.keys.devices] max_devices` (default 16), `[api.attachments] max_bytes` (4 GiB; it must
+be at least every plan's `file_bytes`), `[api.media.budgets] bytes_per_day` (1 TiB),
+`[api.vault] quota_bytes` and `quota_chunks` (1 TiB, 10,000,000). An account's limit is its
+plan's under that ceiling.
+
+### 14.2 Entitlements and the snapshot
+
+The registry keeps one row per account not on Free: `ent:[account]` with `level`, `last` (the
+last UTC day it holds, days since the Unix epoch, inclusive), `source` (`grant` from an operator,
+`token` from an anonymous redemption, §14.4) and `at`. Every change, and the account's deletion,
+bumps `entver:v`. Nothing about a payment is ever stored here.
+
+Every service that enforces a limit reads a **snapshot** of those rows
+(`songbird_entitlements::Live`, `arc-swap`): only the exceptions, reloaded whole when `entver`
+changes (`api` polls every `entitlements_poll_ms`, 1 s by default). Rules:
+
+- **Expiry is by date, at the reader.** An entry past its last day reads as Free whatever the
+  snapshot says; the worker's sweep deletes such rows only to keep things small. A stale
+  snapshot or a stopped worker can never extend an entitlement.
+- **Downgrades never delete.** Over a limit, what exists stays and keeps working (linked
+  devices, a vault's chunks, which still read and restore); only additions are refused until
+  the account is back under. A signed device list is checked against the deployment's
+  ceiling, so a downgraded account can still sign its list.
+- **Each level has budgets of its own** (upload bytes, new packs), so an upgrade gives the new
+  level's whole budget at once.
+
+`songbird-admin plans grant --account <hex> --level plus --days <n>` sets an account's level
+through a last day; `revoke` puts it back on Free; `show` prints the row. Both writes need
+`--confirm` and are audit-logged with the account.
+
+### 14.3 Requests
+
+| Request | Body | Answer |
+| --- | --- | --- |
+| `GET /v1/entitlements` | signed, a listed device | `{"level": "free" \| "plus", "last_day": <UTC day> \| null, "catalog": <version>, "limits": {...}, "flags": {...}}`; 403 `pending` for a device not yet in the signed list |
+
+Plan refusals name the plan so the app can explain the moment (`docs/design/flows/plans-paywall.md`):
+
+| Where | Answer |
+| --- | --- |
+| `POST /v1/attachments` over the plan's `file_bytes` (under the ceiling) | 413 `{"error": "plan", "file_bytes": n}` (400 still for past the ceiling or a length the format never produces) |
+| `POST /v1/attachments`, `POST /v1/packs` past the daily bytes | 429 with `Retry-After` (unchanged) |
+| `POST /v1/packs` past the plan's new packs | 429 `{"error": "plan", "packs_per_month": n}` with `Retry-After` |
+| `POST /v1/devices/link-token`, `POST /v1/devices/link` at the plan's device limit | 409 `{"error": "limit"}` (unchanged) |
+| Vault writes past the plan's space or chunks | 409 `{"error": "full"}`, as for the quota before (`GET /v1/vault` reports the owner's plan's quota); deletions always pass |

@@ -112,6 +112,7 @@ async fn stack() -> Option<Stack> {
     let mut secret = [0u8; 32];
     aws_lc_rs::rand::fill(&mut secret).unwrap();
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
         calls: None,

@@ -51,6 +51,7 @@ pub mod blocks;
 pub mod call_links;
 pub mod communities;
 pub mod devices;
+pub mod entitlements;
 pub mod gdpr;
 pub mod groups;
 pub mod journal;
@@ -328,6 +329,32 @@ DEFINE FIELD IF NOT EXISTS flags ON superv TYPE int;
 DEFINE FIELD IF NOT EXISTS policy ON superv TYPE bytes;
 DEFINE FIELD IF NOT EXISTS unlink_at ON superv TYPE datetime;
 DEFINE INDEX IF NOT EXISTS superv_unlink ON superv FIELDS unlink_at;
+DEFINE TABLE IF NOT EXISTS ent SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS level ON ent TYPE int;
+DEFINE FIELD IF NOT EXISTS last ON ent TYPE int;
+DEFINE FIELD IF NOT EXISTS source ON ent TYPE string;
+DEFINE FIELD IF NOT EXISTS at ON ent TYPE datetime;
+DEFINE INDEX IF NOT EXISTS ent_last ON ent FIELDS last;
+DEFINE TABLE IF NOT EXISTS entver SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS version ON entver TYPE int;
+UPSERT entver:v SET version = version ?? 1 RETURN NONE;
+-- Teams (Prompt 11, D-0126 §12): reserved and empty. An organisation, its admins, its member
+-- accounts and the devices it manages, so Teams can be added without a migration that changes
+-- what the server knows of anyone else. Nothing writes these tables yet.
+DEFINE TABLE IF NOT EXISTS org SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS at ON org TYPE datetime;
+DEFINE FIELD IF NOT EXISTS policy ON org TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS pv ON org TYPE int;
+DEFINE TABLE IF NOT EXISTS org_admin SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS org ON org_admin TYPE bytes;
+DEFINE FIELD IF NOT EXISTS account ON org_admin TYPE bytes;
+DEFINE TABLE IF NOT EXISTS org_member SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS org ON org_member TYPE bytes;
+DEFINE FIELD IF NOT EXISTS account ON org_member TYPE bytes;
+DEFINE INDEX IF NOT EXISTS org_member_account ON org_member FIELDS account UNIQUE;
+DEFINE TABLE IF NOT EXISTS org_device SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS org ON org_device TYPE bytes;
+DEFINE FIELD IF NOT EXISTS device ON org_device TYPE bytes;
 ";
 
 /// Registry failures. They carry no identifiers.
@@ -690,6 +717,8 @@ pub struct Remnants {
     /// Storage records and storage object records of the account (Prompt 9, D-0102), and
     /// its backup vaults (Prompt 10, D-0121).
     pub storage: u64,
+    /// The account's entitlement row (Prompt 11, D-0127).
+    pub entitlements: u64,
 }
 
 impl Remnants {
@@ -2041,6 +2070,10 @@ impl Registry {
                  DELETE srec WHERE account = $a RETURN NONE;
                  DELETE superv:[$a] RETURN NONE;
                  DELETE sobj WHERE account = $a RETURN NONE;
+                 IF record::exists(ent:[$a]) {
+                   DELETE ent:[$a] RETURN NONE;
+                   UPSERT entver:v SET version = (version ?? 1) + 1 RETURN NONE;
+                 };
                  UPDATE grp_prune SET gone = array::complement(gone, $devs)
                    WHERE gone CONTAINSANY $devs RETURN NONE;
                  DELETE account:[$a] RETURN NONE;
@@ -2086,7 +2119,8 @@ impl Registry {
                  RETURN count(SELECT id FROM srec WHERE account = $a)
                    + count(SELECT id FROM sobj WHERE account = $a)
                    + count(SELECT id FROM superv:[$a])
-                   + count(SELECT id FROM vault_owner WHERE account = $a);",
+                   + count(SELECT id FROM vault_owner WHERE account = $a);
+                 RETURN count(SELECT id FROM ent:[$a]);",
                 vec![
                     var("a", bytes(account.as_bytes())),
                     var("ds", Value::Array(ds)),
@@ -2109,6 +2143,7 @@ impl Registry {
             group_requests: n(6)?,
             group_marks: n(7)?,
             storage: n(8)?,
+            entitlements: n(9)?,
         })
     }
 

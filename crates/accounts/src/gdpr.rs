@@ -33,7 +33,8 @@ fn not_attributable() -> serde_json::Value {
         "Group change logs and invite links: ciphertext only the members can read, and hashes; not linked to your account.",
         "Attachments you received: fetched without naming your account or device (the object ID inside the message is enough); the server sees only the address a download came from, and keeps no record of it.",
         "Packs you made (stickers, scenes, sounds, emoticons): once complete, not linked to your account; your devices keep the token that deletes them, and a pack nobody fetches for a year is deleted. Packs still being uploaded are listed with your devices.",
-        "Upload budgets: two keyed records per account in valkey-hot (counts, no files), expiring within 24 hours.",
+        "Upload budgets: keyed records per account in valkey-hot (counts, no files): grants and bytes expiring within 24 hours, new packs within 30 days.",
+        "Payments: never linked to your account. Your plan comes from an anonymous token your app redeemed; the payment it came from is recorded elsewhere under no identifier of yours.",
         "GIF searches: held in memory for minutes to answer and cache them, never stored or logged, and sent to the GIF provider without anything identifying you.",
     ])
 }
@@ -274,8 +275,21 @@ impl Registry {
             self.export_devices(account, push).await?.into(),
         );
         out.insert("settings_store".into(), self.export_storage(account).await?);
+        out.insert("plan".into(), self.export_plan(account).await?);
         out.insert("not_attributable".into(), not_attributable());
         Ok(serde_json::Value::Object(out))
+    }
+
+    /// The plan (Prompt 11, D-0127): level, last day and source; never a payment.
+    async fn export_plan(&self, account: &AccountId) -> Result<serde_json::Value, RegistryError> {
+        Ok(match self.entitlement_of(account).await? {
+            Some(e) => serde_json::json!({
+                "level": e.level,
+                "last_day_utc": e.last_day,
+                "source": e.source.as_str(),
+            }),
+            None => serde_json::json!({ "level": 0 }),
+        })
     }
 
     /// The record store (Prompt 9, D-0102): its size and version. The records themselves are

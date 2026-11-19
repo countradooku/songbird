@@ -95,6 +95,10 @@ struct Stack {
 }
 
 async fn stack(quota_bytes: u64) -> Option<Stack> {
+    stack_with(quota_bytes, songbird_entitlements::Catalog::default()).await
+}
+
+async fn stack_with(quota_bytes: u64, catalog: songbird_entitlements::Catalog) -> Option<Stack> {
     let surreal = env("SONGBIRD_TEST_SURREALDB")?;
     let hot = env("SONGBIRD_TEST_VALKEY")?;
     let jobs = env("SONGBIRD_TEST_VALKEY_JOBS")?;
@@ -160,6 +164,10 @@ async fn stack(quota_bytes: u64) -> Option<Stack> {
     )
     .unwrap();
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans {
+            catalog,
+            live: Arc::default(),
+        },
         calls: None,
         reports: None,
         requests: None,
@@ -499,6 +507,79 @@ async fn the_quota_holds() {
         ),
         "{r:?}"
     );
+}
+
+/// The vault's quota is its owner's plan (Prompt 11, D-0127): Plus holds more than Free; after
+/// a downgrade the vault keeps everything, reads and restores, refuses additions and takes
+/// deletions until it is back under Free's quota.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_quota_is_the_owners_plan_and_a_downgrade_keeps_the_backup() {
+    use songbird_accounts::entitlements::{EntRow, Source};
+    use songbird_entitlements::{Catalog, Snapshot, today};
+    let mut catalog = Catalog::default();
+    catalog.free.limits.vault_chunks = 100;
+    catalog.plus.limits.vault_chunks = 130;
+    let Some(s) = stack_with(1 << 40, catalog).await else {
+        return;
+    };
+    let owner = account(&s, 0).await;
+    let keys = new_keys();
+    let st = store(&s, &keys, Some(&owner[0]));
+    st.open().await.unwrap();
+    let put = |i: u32| {
+        let st = Arc::clone(&st);
+        let keys = Arc::clone(&keys);
+        async move {
+            let mut p = vec![7u8; 2_000];
+            p[..4].copy_from_slice(&i.to_be_bytes());
+            let n = object::chunk_name(&keys, &p);
+            let o = object::seal_chunk(&keys, &n, &p, &mut OsRng).unwrap();
+            (n, st.put(&n, o).await)
+        }
+    };
+    let quota = || async {
+        VaultStore::new(http(), s.api.clone(), &keys, None)
+            .stats()
+            .await
+            .unwrap()
+    };
+    // Free: 100 chunks (the manifest is not one yet).
+    let mut names = Vec::new();
+    for i in 0..100 {
+        let (n, r) = put(i).await;
+        r.unwrap();
+        names.push(n);
+    }
+    assert!(matches!(put(100).await.1, Err(StoreError::Full)));
+    // Plus: 130.
+    s.app.plans.live.store(Snapshot::from_rows(
+        2,
+        &[EntRow {
+            account: owner[0].account,
+            level: 1,
+            last_day: today(),
+            source: Source::Token,
+        }],
+    ));
+    let (_, _, _, _, q) = quota().await;
+    assert_eq!(q, 130);
+    for i in 100..130 {
+        let (n, r) = put(i).await;
+        r.unwrap();
+        names.push(n);
+    }
+    assert!(matches!(put(130).await.1, Err(StoreError::Full)));
+    // Downgrade: all 130 stay and read back; nothing is added; deletions pass.
+    s.app.plans.live.store(Snapshot::from_rows(3, &[]));
+    let (_, _, chunks, _, q) = quota().await;
+    assert_eq!((chunks, q), (130, 100));
+    assert!(
+        st.get(&names[129]).await.is_ok(),
+        "a downgraded backup still reads"
+    );
+    assert!(matches!(put(131).await.1, Err(StoreError::Full)));
+    st.delete(&names[..40]).await.unwrap();
+    put(131).await.1.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

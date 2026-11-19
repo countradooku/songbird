@@ -200,6 +200,7 @@ async fn stack(people: usize) -> Option<Stack> {
         }),
     };
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
         calls: None,

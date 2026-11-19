@@ -467,6 +467,7 @@ impl Devices {
         &self,
         registry: &Registry,
         hot: &ValkeyConn,
+        plans: &crate::plans::Plans,
         account: &AccountId,
         primary: &DeviceId,
     ) -> Outcome {
@@ -496,7 +497,9 @@ impl Devices {
                     &token_hash(&token),
                     &device,
                     Duration::from_secs(s.link_token_ttl_secs),
-                    s.max_devices,
+                    // The plan's limit (D-0127): a downgraded account over it keeps its devices
+                    // and links no new one until it is back under.
+                    plans.devices(account, s.max_devices),
                 )
                 .await
             {
@@ -519,10 +522,15 @@ impl Devices {
     }
 
     /// `POST /v1/devices/link` by the new device (unsigned: it has no account yet).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the stores, the plans and the request; a struct would only rename them"
+    )]
     pub async fn link(
         &self,
         registry: &Registry,
         hot: &ValkeyConn,
+        plans: &crate::plans::Plans,
         messages: Option<&crate::messages::Messages>,
         server_name: &str,
         peer: IpAddr,
@@ -564,7 +572,7 @@ impl Devices {
                 &r.auth_key,
                 &r.identity_key,
                 &r.confirm,
-                s.max_devices,
+                plans.devices(&owner, s.max_devices),
             )
             .await
         {

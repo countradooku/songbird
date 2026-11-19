@@ -4873,6 +4873,7 @@ dependencies = [
  "serde_json",
  "songbird-accounts",
  "songbird-content",
+ "songbird-entitlements",
  "songbird-jobs",
  "songbird-keys",
  "songbird-proto",
@@ -4934,6 +4935,7 @@ dependencies = [
  "songbird-accounts",
  "songbird-akd",
  "songbird-calls",
+ "songbird-entitlements",
  "songbird-groups",
  "songbird-jobs",
  "songbird-keys",
@@ -5134,6 +5136,7 @@ dependencies = [
  "songbird-client",
  "songbird-content",
  "songbird-delivery",
+ "songbird-entitlements",
  "songbird-groups",
  "songbird-groups-harness",
  "songbird-jobs",
@@ -5159,6 +5162,21 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zeroize",
+]
+
+[[package]]
+name = "songbird-entitlements"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "proptest",
+ "serde",
+ "songbird-accounts",
+ "songbird-types",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -5547,6 +5565,7 @@ dependencies = [
  "serde",
  "songbird-accounts",
  "songbird-akd",
+ "songbird-entitlements",
  "songbird-jobs",
  "songbird-link",
  "songbird-s3",

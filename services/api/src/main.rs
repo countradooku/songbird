@@ -420,7 +420,7 @@ async fn build(
     hex::decode_to_slice(&s.push_public_key, &mut push_public)?;
     let queue = Arc::new(queue);
     let (requests, gate) = requests(s, &registry, &metrics).await?;
-    let (messages, tasks) = match &s.send {
+    let (messages, mut tasks) = match &s.send {
         Some(send) => {
             let (m, t) = build_messages(send, gate, &registry, &queue, &metrics, stop).await?;
             (Some(m), t)
@@ -479,7 +479,21 @@ async fn build(
     let kt = transparency(s).await?;
     let reports = reports(s, &metrics)?;
     let calls = calls(s, &metrics)?;
+    // Plans (D-0127): the snapshot, then its follower.
+    let plans = songbird_api::plans::Plans {
+        catalog: s.plans,
+        live: Arc::new(songbird_entitlements::Live::from(
+            songbird_entitlements::load(&registry).await?,
+        )),
+    };
+    tasks.push(tokio::spawn(songbird_entitlements::follow(
+        Arc::clone(&registry),
+        Arc::clone(&plans.live),
+        Duration::from_millis(s.entitlements_poll_ms),
+        stop.clone(),
+    )));
     let app = Arc::new(App {
+        plans,
         reports,
         requests,
         server_name: s.server_name.clone(),

@@ -234,10 +234,22 @@ impl Vault {
         })
     }
 
-    fn quota(&self) -> VaultQuota {
+    /// A vault's quota: its owner's plan under the deployment's ceiling (D-0127). After a
+    /// downgrade a vault over its quota keeps everything and stays readable; writes that add
+    /// are refused until it is back under (deletions always pass).
+    #[must_use]
+    pub fn quota(
+        &self,
+        plans: &crate::plans::Plans,
+        owner: Option<&songbird_types::AccountId>,
+    ) -> VaultQuota {
+        let l = owner.map_or_else(
+            || *plans.catalog.limits(songbird_entitlements::Level::Free),
+            |a| *plans.limits(a),
+        );
         VaultQuota {
-            bytes: self.settings.quota_bytes,
-            chunks: self.settings.quota_chunks,
+            bytes: self.settings.quota_bytes.min(l.vault_bytes),
+            chunks: self.settings.quota_chunks.min(l.vault_chunks),
         }
     }
 
@@ -405,13 +417,13 @@ impl Vault {
 
     /// `GET /v1/vault`.
     #[must_use]
-    pub fn stats(&self, o: &Opened) -> Outcome {
+    pub fn stats(&self, o: &Opened, quota: VaultQuota) -> Outcome {
         Outcome::Json(serde_json::json!({
             "generation": o.row.generation,
             "bytes": o.row.bytes,
             "chunks": o.row.chunks,
-            "quota_bytes": self.settings.quota_bytes,
-            "quota_chunks": self.settings.quota_chunks,
+            "quota_bytes": quota.bytes,
+            "quota_chunks": quota.chunks,
         }))
     }
 
@@ -438,6 +450,7 @@ impl Vault {
         &self,
         registry: &Registry,
         o: &Opened,
+        quota: VaultQuota,
         expected: u64,
         body: Bytes,
     ) -> Outcome {
@@ -470,7 +483,7 @@ impl Vault {
                 generation,
                 &suffix,
                 size,
-                self.quota(),
+                quota,
             )
             .await
         {
@@ -502,6 +515,7 @@ impl Vault {
         &self,
         registry: &Registry,
         o: &Opened,
+        quota: VaultQuota,
         name: &[u8; 32],
         body: Bytes,
     ) -> Outcome {
@@ -511,7 +525,7 @@ impl Vault {
         let object = chunk_object(&o.vk, &o.row.epoch, name);
         let size = u64::try_from(body.len()).unwrap_or(u64::MAX);
         match registry
-            .vault_reserve_chunk(&o.vk, &o.row.epoch, name, size, self.quota())
+            .vault_reserve_chunk(&o.vk, &o.row.epoch, name, size, quota)
             .await
         {
             Ok(Some(recorded)) if recorded != size => {

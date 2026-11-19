@@ -240,6 +240,7 @@ async fn stack(people: usize) -> Option<Stack> {
     )
     .unwrap();
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
         calls: Some(CallsApi {

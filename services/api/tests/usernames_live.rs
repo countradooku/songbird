@@ -97,6 +97,7 @@ async fn stack(u: Option<UsernameSettings>) -> Option<Stack> {
     getrandom::fill(&mut secret).unwrap();
     let usernames = u.map(|u| Usernames::new(u, &secret, UsernameMetrics::default()).unwrap());
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
         calls: None,

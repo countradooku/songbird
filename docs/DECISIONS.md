@@ -195,6 +195,36 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0127 — Prompt 11, milestone 1: entitlements, one snapshot, every limit by plan
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0126; the threat-model rows (§1, §3.28, §4) await the
+  owner
+- Decided by: agent, within the owner's plan
+- Context: `docs/reports/P11-M1.md`.
+- Decision:
+  - `crates/entitlements`: levels (Free 0, Plus 1; every Family seat is Plus), a catalogue
+    from `[api.plans]` with the owner's numbers by default (D-0126 §3), refused at start-up if
+    a higher level allows less or a number is out of bounds; a snapshot of the accounts not on
+    Free, swapped whole (`arc-swap`) when `entver` changes; expiry by date at every reader.
+  - Registry `ent:[account]` (level, last UTC day, source `grant` or `token`) and `entver`;
+    deleted with the account; in the GDPR export. Teams tables `org`, `org_admin`,
+    `org_member`, `org_device` defined and empty.
+  - `api` enforces every limit from the account's level: device links, the largest file (413
+    `plan`), upload bytes a day, new packs per 30 days (429 `plan`), the vault's space and
+    chunks (its owner's plan). Downgrades refuse additions and delete nothing.
+  - The former configuration numbers stay as the deployment's ceilings, with defaults raised so
+    the plans decide. Budgets of bytes and packs have a record per level.
+  - `GET /v1/entitlements`; `songbird-admin plans grant | revoke | show`, audit-logged with the
+    account (an operator's change to one account must be attributable).
+  - No new external dependency (`arc-swap`, `serde`, `tokio` are in the workspace).
+- Evidence: `crates/entitlements` tests (8, two of them property tests);
+  `crates/accounts/tests/entitlements_live.rs`; `devices_live::the_plan_sets_the_device_limit…`;
+  `media_live::the_plan_sets_file_size_daily_bytes_and_packs`;
+  `gate_p10::the_quota_is_the_owners_plan_and_a_downgrade_keeps_the_backup`.
+- Consequences: M2 redeems anonymous tokens into `ent` (`extend_entitlement`). `delivery`
+  follows the snapshot from M5 (standings). PROTOCOL §14 is appended after §13.
+
 ## D-0126 — Prompt 11: the plan, and the owner's decisions it needs
 
 - Date: 2026-11-19

@@ -373,6 +373,29 @@ impl Media {
         .map_err(|_| ())
     }
 
+    /// Spends one of the account's new packs: `packs_per_month` per 30 days, all of them at once
+    /// if it likes (D-0127). `Ok(0)` when allowed, else the wait in microseconds.
+    ///
+    /// # Errors
+    /// `valkey-hot` is unreachable.
+    pub(crate) async fn admit_pack(
+        &self,
+        hot: &ValkeyConn,
+        account: &AccountId,
+        level: songbird_entitlements::Level,
+        packs_per_month: u32,
+    ) -> Result<u64, ()> {
+        let n = u64::from(packs_per_month.max(1));
+        Self::spend(
+            hot,
+            &self.record(level_kind("p", level), account),
+            30 * 86_400_000_000 / n,
+            n,
+            1,
+        )
+        .await
+    }
+
     /// Spends one grant and `size` bytes of the account's budgets. `Ok(0)` when allowed, else
     /// the wait in microseconds.
     ///
@@ -383,6 +406,7 @@ impl Media {
         hot: &ValkeyConn,
         account: &AccountId,
         size: u64,
+        (level, bytes_per_day): (songbird_entitlements::Level, u64),
     ) -> Result<u64, ()> {
         let s = &self.settings;
         let per_hour = u64::from(s.grants_per_hour.max(1));
@@ -397,15 +421,29 @@ impl Media {
         if wait > 0 {
             return Ok(wait);
         }
-        let units = (s.bytes_per_day / UNIT).max(1);
+        // The lower of the deployment's budget and the plan's (D-0127).
+        let units = (s.bytes_per_day.min(bytes_per_day) / UNIT).max(1);
         Self::spend(
             hot,
-            &self.record("b", account),
+            &self.record(level_kind("b", level), account),
             86_400_000_000 / units,
             units,
             size.div_ceil(UNIT),
         )
         .await
+    }
+}
+
+/// A budget record's kind per level (D-0127): each level has its own record, so an upgrade
+/// gives the new level's whole budget at once instead of inheriting what the old one spent.
+/// Free keeps the names records had before plans.
+fn level_kind(kind: &'static str, level: songbird_entitlements::Level) -> &'static str {
+    use songbird_entitlements::Level;
+    match (kind, level) {
+        ("b", Level::Plus) => "b1",
+        ("p", Level::Free) => "p",
+        ("p", Level::Plus) => "p1",
+        (k, _) => k,
     }
 }
 
@@ -514,9 +552,26 @@ async fn grant(app: &Arc<App>, req: Request<Incoming>) -> Result<Response<Body>,
     let l = &app.limits;
     let g = GrantRequest::decode(&body, l.max_bytes, l.max_fetches)
         .ok_or(status(StatusCode::BAD_REQUEST))?;
+    let account = account_of(app, &device).await?;
+    // The plan's largest file (D-0127): 413 with the limit, so the app can explain it.
+    let level = app.plans.level(&account);
+    let plan = *app.plans.catalog.limits(level);
+    if g.size > plan.file_bytes {
+        return Ok(json(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            &serde_json::json!({ "error": "plan", "file_bytes": plan.file_bytes }),
+        ));
+    }
     if let Some(m) = &app.media {
-        let account = account_of(app, &device).await?;
-        match m.admit_grant(&app.hot, &account, g.size).await {
+        match m
+            .admit_grant(
+                &app.hot,
+                &account,
+                g.size,
+                (level, plan.upload_bytes_per_day),
+            )
+            .await
+        {
             Ok(0) => {}
             Ok(wait) => {
                 app.metrics.media.throttled.inc();

@@ -185,6 +185,17 @@ pub struct ApiSettings {
     /// 503.
     #[serde(default)]
     pub calls: Option<songbird_calls::CallSettings>,
+    /// `[api.plans]` (Prompt 11, D-0127): every level's limits and flags. Absent: the owner's
+    /// catalogue (D-0126 §3).
+    #[serde(default)]
+    pub plans: songbird_entitlements::Catalog,
+    /// How often the entitlements version is polled (the snapshot reloads on a change).
+    #[serde(default = "default_entitlements_poll_ms")]
+    pub entitlements_poll_ms: u64,
+}
+
+const fn default_entitlements_poll_ms() -> u64 {
+    1_000
 }
 
 /// `[api.reports]` (Prompt 4, D-0063).
@@ -298,10 +309,11 @@ pub struct VaultSettings {
     pub secret: SecretRef,
     /// The vaults' bucket (not the attachments').
     pub bucket: String,
-    /// Bytes per vault (chunks and manifest) until Prompt 11's entitlements (D-0119: 5 GiB).
+    /// The deployment's ceiling of bytes per vault (chunks and manifest). Each vault's quota is
+    /// its owner's plan's `vault_bytes` under it (D-0127: 5 GiB on Free, 50 GiB on Plus).
     #[serde(default = "default_vault_bytes")]
     pub quota_bytes: u64,
-    /// Chunks per vault (D-0119: 100,000).
+    /// The deployment's ceiling of chunks per vault (the plan's `vault_chunks` under it).
     #[serde(default = "default_vault_chunks")]
     pub quota_chunks: u64,
     /// Vaults per account: two, so a new recovery key's vault fills before the old one goes.
@@ -338,10 +350,10 @@ pub struct VaultSettings {
 }
 
 const fn default_vault_bytes() -> u64 {
-    5 << 30
+    1 << 40
 }
 const fn default_vault_chunks() -> u64 {
-    100_000
+    10_000_000
 }
 const fn default_vault_count() -> u64 {
     2
@@ -696,6 +708,19 @@ impl Validate for ApiSettings {
         if let Some(c) = &self.calls {
             v.section("calls", c);
         }
+        if let Err(e) = self.plans.validate() {
+            v.check(false, "plans", e.to_string());
+        }
+        v.check(
+            self.attachments.max_bytes >= self.plans.ceiling().file_bytes,
+            "attachments.max_bytes",
+            "must be at least every plan's file_bytes (it is the deployment's ceiling)",
+        );
+        v.check(
+            (100..=60_000).contains(&self.entitlements_poll_ms),
+            "entitlements_poll_ms",
+            "must be in 100..=60000",
+        );
         let mut k = [0u8; 32];
         v.check(
             hex::decode_to_slice(&self.push_public_key, &mut k).is_ok(),
@@ -817,8 +842,9 @@ pub struct AttachmentLimits {
 impl Default for AttachmentLimits {
     fn default() -> Self {
         Self {
-            // D-0079: 2 GiB, for WhatsApp parity, until Prompt 11's plans set it.
-            max_bytes: 2 << 30,
+            // The deployment's ceiling; each account's limit is its plan's `file_bytes`
+            // (D-0127): 2 GiB on Free (D-0079), 4 GiB on Plus.
+            max_bytes: 4 << 30,
             max_fetches: 1024,
             grant_ttl_secs: 3600,
             // D-0081: 16 MiB, measured against 5 and 64.
@@ -1038,7 +1064,7 @@ impl Validate for MediaDownloads {
 }
 
 /// `[api.media.budgets]`: per account, in keyed `valkey-hot` records (no object is ever linked
-/// to an account). Prompt 11's plans will set them per plan.
+/// to an account). The plans set bytes per account under this ceiling (D-0127).
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct MediaBudgets {
@@ -1046,7 +1072,8 @@ pub struct MediaBudgets {
     pub grants_per_hour: u32,
     /// Their burst.
     pub grant_burst: u32,
-    /// Bytes granted per 24 hours (all may be spent at once).
+    /// The deployment's ceiling of bytes granted per account per 24 hours (all may be spent at
+    /// once). Each account's budget is its plan's `upload_bytes_per_day` under it (D-0127).
     pub bytes_per_day: u64,
 }
 
@@ -1056,7 +1083,7 @@ impl Default for MediaBudgets {
         Self {
             grants_per_hour: 300,
             grant_burst: 60,
-            bytes_per_day: 10 << 30,
+            bytes_per_day: 1 << 40,
         }
     }
 }
@@ -1637,8 +1664,8 @@ pub struct KeySettings {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct DeviceSettings {
-    /// Most enabled devices per account, primary included (owner, D-0047: primary + 5, until
-    /// Prompt 11's plans).
+    /// The deployment's ceiling of enabled devices per account, primary included. Each
+    /// account's limit is its plan's (D-0127: primary + 5 on Free, + 10 on Plus) under this.
     pub max_devices: u32,
     /// How long a link token stays valid (seconds).
     pub link_token_ttl_secs: u64,
@@ -1687,7 +1714,7 @@ pub struct DeviceSettings {
 impl Default for DeviceSettings {
     fn default() -> Self {
         Self {
-            max_devices: 6,
+            max_devices: 16,
             link_token_ttl_secs: 600,
             channel_ttl_secs: 600,
             long_poll_secs: 25,

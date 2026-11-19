@@ -1378,6 +1378,51 @@ pub struct RegistrationSettings {
     /// Throttles per IP range and across the deployment.
     #[serde(default)]
     pub throttle: ThrottleSettings,
+    /// How the work rises with recent registrations (Prompt 11, D-0131).
+    #[serde(default)]
+    pub escalation: Escalation,
+}
+
+/// Escalating proof of work (Prompt 11, D-0131): each step adds one zero bit to every solution
+/// (twice the work). A range steps up at each of `range_steps` registrations in the past hour;
+/// the whole deployment at `global_step` and four times that; never more than `max_extra_bits`
+/// above the base.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Escalation {
+    /// Registrations from one range in the past hour at which its work doubles, each.
+    pub range_steps: [u32; 3],
+    /// Registrations across the deployment in the past hour at which everyone's work doubles
+    /// (and again at four times it).
+    pub global_step: u32,
+    /// The most bits added to the base.
+    pub max_extra_bits: u8,
+}
+
+impl Default for Escalation {
+    fn default() -> Self {
+        Self {
+            range_steps: [3, 10, 30],
+            global_step: 300,
+            max_extra_bits: 4,
+        }
+    }
+}
+
+impl Escalation {
+    /// Extra bits for `range` and `global` registrations in the past hour.
+    #[must_use]
+    pub fn extra_bits(&self, range: u32, global: u32) -> u8 {
+        let r = self.range_steps.iter().filter(|s| range >= **s).count();
+        let g = if global >= self.global_step.saturating_mul(4) {
+            2
+        } else {
+            usize::from(global >= self.global_step)
+        };
+        u8::try_from(r + g)
+            .unwrap_or(u8::MAX)
+            .min(self.max_extra_bits)
+    }
 }
 
 const fn default_true() -> bool {
@@ -1413,6 +1458,16 @@ impl Validate for RegistrationSettings {
         );
         v.section("pow", &self.pow);
         v.section("throttle", &self.throttle);
+        let e = &self.escalation;
+        v.check(
+            e.range_steps.is_sorted_by(|a, b| a < b)
+                && e.range_steps.first().is_some_and(|f| *f >= 1)
+                && e.global_step >= 1
+                && e.max_extra_bits <= 8
+                && self.pow.bits.saturating_add(e.max_extra_bits) <= 24,
+            "escalation",
+            "range_steps increasing from 1, global_step at least 1, max_extra_bits at most 8 (and base + extra at most 24)",
+        );
     }
 }
 

@@ -32,6 +32,7 @@
 //! Nothing here logs identifiers or object names (invariant 6).
 #![forbid(unsafe_code)]
 
+pub mod abuse;
 pub mod account;
 pub mod admin;
 pub mod auth;
@@ -578,6 +579,14 @@ impl App {
             (&Method::GET, "/v1/certificate") => {
                 let (device, _) = self.authenticate_json(req).await?;
                 match listed(device).await? {
+                    // A suspended account gets no sender certificate (D-0131): its sealed sends
+                    // stop when the one it holds expires.
+                    (a, true, _)
+                        if self.plans.live.standing(&a)
+                            == songbird_entitlements::Standing::Suspended =>
+                    {
+                        profiles::Outcome::Forbidden("suspended")
+                    }
                     (a, true, _) => p.certificate(&self.registry, &a, &device).await,
                     (_, false, _) => return Ok(pending_refusal()),
                 }
@@ -901,6 +910,14 @@ impl App {
         ))
     }
 
+    /// A device's account's standing (Good when the device is unknown: the request fails later).
+    async fn standing_of_device(&self, device: &DeviceId) -> songbird_entitlements::Standing {
+        match self.registry.device(device).await {
+            Ok(Some(r)) => self.plans.live.standing(&r.account),
+            _ => songbird_entitlements::Standing::Good,
+        }
+    }
+
     /// `/v1/kt/…` ([`kt`]): signed like every device request.
     async fn kt(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
         let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
@@ -1061,6 +1078,12 @@ impl App {
             "/v1/groups/propose" => g.propose(r, m, device, body).await,
             "/v1/groups/meta" => g.meta(r, device, body).await,
             "/v1/groups/log" => g.log(r, m, device, body).await,
+            "/v1/groups/links"
+                if self.standing_of_device(&device).await
+                    != songbird_entitlements::Standing::Good =>
+            {
+                devices::Outcome::Forbidden("standing")
+            }
             "/v1/groups/links" => g.create_link(r, device, body).await,
             "/v1/groups/links/revoke" => g.revoke_link(r, device, body).await,
             "/v1/groups/links/open" => g.open(r, body).await,
@@ -1099,6 +1122,15 @@ impl App {
             .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
         if row.pending {
             return Ok(device_outcome(devices::Outcome::Forbidden("pending")));
+        }
+        // A suspended account starts no call and makes no link (D-0131); it may still answer.
+        if self.plans.live.standing(&row.account) == songbird_entitlements::Standing::Suspended
+            && matches!(
+                path.as_str(),
+                "/v1/calls" | "/v1/calls/group" | "/v1/calls/links"
+            )
+        {
+            return Ok(device_outcome(devices::Outcome::Forbidden("suspended")));
         }
         let caller = calls::Caller {
             device,
@@ -1157,7 +1189,7 @@ impl App {
             .map_err(|_| unavailable())?
             .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
         let out = match (&method, path.as_str()) {
-            (&Method::PUT, "/v1/blocks") => r.block(&self.registry, &row, &body).await,
+            (&Method::PUT, "/v1/blocks") => r.block(&self.registry, &self.hot, &row, &body).await,
             (&Method::DELETE, "/v1/blocks") => r.unblock(&self.registry, &row, &body).await,
             (&Method::GET, "/v1/account/requests") => {
                 requests::Requests::policy(&self.registry, &row).await

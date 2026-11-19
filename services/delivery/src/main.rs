@@ -353,6 +353,13 @@ impl Service for Delivery {
         );
         let (stop_tx, stop_rx) = watch::channel(false);
         let (directory, follow) = load_directory(self.registry, self.directory).await?;
+        // Standings (Prompt 11, D-0131): from the registry's entitlements snapshot, followed.
+        let standings = match &follow {
+            Some((registry, ..)) => Some(Arc::new(songbird_entitlements::Live::from(
+                songbird_entitlements::load(registry).await?,
+            ))),
+            None => None,
+        };
         let franking = franker(self.settings.franking_key.as_ref())?;
         // The channel rate class's per-node part, at the cluster's rates (D-0077).
         let channels = Arc::new(self.settings.requests.as_ref().map_or_else(
@@ -377,13 +384,16 @@ impl Service for Delivery {
                         "the requests secret differs from the other nodes' (registry pin)",
                     ));
                 }
-                let gate: Arc<dyn songbird_send::Gate> =
-                    Arc::new(songbird_send::RegistryGate::new(
-                        Arc::clone(registry),
-                        songbird_valkey::ValkeyConn::connect(r.valkey.client()?).await?,
-                        keys,
-                        r.limits,
-                    ));
+                let mut g = songbird_send::RegistryGate::new(
+                    Arc::clone(registry),
+                    songbird_valkey::ValkeyConn::connect(r.valkey.client()?).await?,
+                    keys,
+                    r.limits,
+                );
+                if let Some(s) = &standings {
+                    g = g.with_standings(Arc::clone(s));
+                }
+                let gate: Arc<dyn songbird_send::Gate> = Arc::new(g);
                 tracing::info!("message requests and broadcasts enabled");
                 Some((gate, r.limits.max_broadcast_accounts))
             }
@@ -414,7 +424,19 @@ impl Service for Delivery {
                 r
             }),
             channels,
+            standings: standings.clone(),
         });
+        let standings_task = match (&follow, standings) {
+            (Some((registry, ..)), Some(live)) => {
+                Some(tokio::spawn(songbird_entitlements::follow(
+                    Arc::clone(registry),
+                    live,
+                    Duration::from_secs(1),
+                    stop_rx.clone(),
+                )))
+            }
+            _ => None,
+        };
         let mut pusher_task = None;
         if let Some(jobs) = self.jobs {
             let (pusher, task) = start_pusher(jobs, &self.metrics, stop_rx.clone()).await?;
@@ -489,7 +511,10 @@ impl Service for Delivery {
         watcher.abort();
         let _ = stop_tx.send(true);
         let panicked = serve.await?;
-        for t in [pusher_task, follower, internal].into_iter().flatten() {
+        for t in [pusher_task, follower, internal, standings_task]
+            .into_iter()
+            .flatten()
+        {
             let _ = t.await;
         }
         // Cluster mode: key stores written and replicated, leases released, so the standbys take

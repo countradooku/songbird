@@ -15,6 +15,7 @@ songbird-mailbox.workspace = true
 songbird-router.workspace = true
 songbird-jobs.workspace = true
 songbird-accounts.workspace = true
+songbird-entitlements.workspace = true
 songbird-service.workspace = true
 songbird-valkey.workspace = true
 redis.workspace = true

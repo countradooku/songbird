@@ -138,6 +138,7 @@ async fn stack(limits: RequestLimits) -> Option<Stack> {
         max_broadcast_accounts: limits.max_broadcast_accounts,
         rosters: None,
         channels: Arc::default(),
+        standings: None,
     };
     let mailbox = Arc::new(test_mailbox().await);
     let router = Arc::new(LocalRouter::new());

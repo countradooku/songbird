@@ -152,6 +152,7 @@ async fn stack(limits: RequestLimits) -> Option<Stack> {
         max_broadcast_accounts: limits.max_broadcast_accounts,
         rosters: None,
         channels: Arc::default(),
+        standings: None,
     };
     let mailbox = Arc::new(test_mailbox().await);
     let router = Arc::new(LocalRouter::new());
@@ -701,9 +702,12 @@ async fn contacts_requests_blocks_and_the_request_policy_end_to_end() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn request_floods_are_held_across_the_cluster_and_a_block_does_not_show() {
+    // Fresh accounts are new (Prompt 11, D-0131): their budget is the one under test here.
     let limits = RequestLimits {
         per_sender_hour: 1,
         per_sender_burst: 3,
+        young_sender_hour: 1,
+        young_sender_burst: 3,
         per_pair_hour: 1,
         per_pair_burst: 2,
         per_recipient_hour: 1,

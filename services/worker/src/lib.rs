@@ -775,6 +775,10 @@ impl Worker {
         if let Err(e) = self.registry.sweep_vault_creations(today).await {
             tracing::warn!(error = %e, "vault creation sweep failed");
         }
+        // Risk signals past their window and standings past their day (D-0131).
+        if let Err(e) = self.registry.sweep_signals(today).await {
+            tracing::warn!(error = %e, "signal sweep failed");
+        }
         // Family mailboxes nobody touched for two months (D-0130).
         if let Err(e) = self
             .registry

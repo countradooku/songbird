@@ -63,7 +63,7 @@ pub(crate) enum ReportsCmd {
     },
 }
 
-fn read_key(path: &Path) -> Result<ProvisioningKey> {
+pub(crate) fn read_key(path: &Path) -> Result<ProvisioningKey> {
     let text = std::fs::read_to_string(path).context("reading the moderation key")?;
     let mut k = [0u8; 32];
     hex::decode_to_slice(text.trim(), &mut k).context("the moderation key is 64 hex characters")?;

@@ -76,6 +76,8 @@ pub struct Policy {
     pub rosters: Option<Arc<dyn Rosters>>,
     /// The channel rate class (D-0072): posts per channel on this node.
     pub channels: Arc<groups::ChannelBudget>,
+    /// Standings (Prompt 11, D-0131): a suspended account's sends are refused.
+    pub standings: Option<Arc<songbird_entitlements::Live>>,
 }
 
 impl Default for Policy {
@@ -86,6 +88,7 @@ impl Default for Policy {
             max_broadcast_accounts: RequestLimits::default().max_broadcast_accounts,
             rosters: None,
             channels: Arc::default(),
+            standings: None,
         }
     }
 }
@@ -98,6 +101,7 @@ impl std::fmt::Debug for Policy {
             .field("max_broadcast_accounts", &self.max_broadcast_accounts)
             .field("rosters", &self.rosters.is_some())
             .field("channels", &self.channels)
+            .field("standings", &self.standings.is_some())
             .finish()
     }
 }
@@ -293,6 +297,13 @@ impl<M: StoreSend, R: Router> SendPath<'_, M, R> {
         scratch: &mut Vec<DeviceId>,
     ) -> Result<StoreOutcome, SendStatus> {
         let m = self.metrics;
+        if let Some(st) = &self.policy.standings
+            && let Some(account) = self.directory.load().account_of(sender)
+            && st.standing(&account) == songbird_entitlements::Standing::Suspended
+        {
+            m.sends_rejected.inc();
+            return Err(reject(RejectReason::Suspended, 0));
+        }
         let lane = if let Some(group) = s.hints.group {
             // A group message (Prompt 5): membership is the authorization and the roster the
             // recipients; the device-list and contact checks do not apply.

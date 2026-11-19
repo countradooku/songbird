@@ -2964,3 +2964,37 @@ seals one into each member's slot, and keeps the spare. Members fetch their slot
 their own account: each is Plus, and the server cannot tell a seat from a subscription.
 **Removal** deletes the slot at once; the member keeps Plus through the month already redeemed
 and its grace. **Leaving** deletes one's own slot.
+
+### 14.7 Abuse controls and standings (D-0126 §7–§8, D-0131)
+
+**Escalating proof of work.** A registration challenge's `bits` is the configured base plus one
+for each of 3, 10 and 30 registrations from the requesting range (IPv4 /24, IPv6 /48) in the
+current hour, plus one at `global_step` (300) registrations across the deployment and another
+at four times that, at most `max_extra_bits` (4) above the base. Challenges carry their
+parameters (§4.1), so clients need no change. The hourly counters are keyed records in
+`valkey-hot`.
+
+**Standings.** `standing:[account]`: `limited` or `suspended`, a last UTC day or none (until
+lifted), a reason category and its source (`auto` or `moderator`). Changes bump `entver`, so
+`api` and every delivery node apply them within a second (the entitlements snapshot, §14.2).
+
+- **New accounts** (created in the last `young_days`, 30): 5 requests an hour per sender,
+  burst 10.
+- **Limited**: 1 request an hour, burst 2; `POST /v1/groups/links` answers 403 `standing`.
+  Contacts are not affected.
+- **Suspended**: every send (WebSocket and `PUT /v1/messages`) is rejected with reason **15
+  `Suspended`** (`SendResult` status 1); `GET /v1/certificate` answers 403 `suspended` (sealed
+  sends stop when the certificate held expires); `POST /v1/calls`, `/v1/calls/group` and
+  `/v1/calls/links` answer 403 `suspended`. Receiving, `GET /v1/account/export`, `DELETE
+  /v1/account` and support (appeals) work.
+
+**Signals** (keyed tags, evaluated on arrival; thresholds in `docs/RUNBOOKS/abuse.md`):
+
+- `rsig`: a verified report of a direct message the server attests (`sender_attested`, not a
+  group's shared body), per keyed tag of the sender and day, 31 days.
+- `bsig`: a new block of an account that sent the blocker a message request in the last week
+  (the gate's keyed pair mark `rp`, seven days), per keyed tag and day; weighed against the
+  account's requests per day (`rq`, keyed, eight days).
+
+Only an automatic `limited` with a reason `reports` or `blocks` is ever set without a moderator;
+it never overrides or shortens a moderator's row.

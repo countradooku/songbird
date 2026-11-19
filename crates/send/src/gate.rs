@@ -66,6 +66,22 @@ pub trait Gate: Send + Sync + 'static {
     fn attention<'a>(&'a self, sender: &'a AccountId, recipient: &'a AccountId) -> GateFuture<'a>;
 }
 
+/// The record marking that `sender` sent `recipient` a message request in the last week.
+#[must_use]
+pub fn request_mark(keys: &GateKeys, sender: &AccountId, recipient: &AccountId) -> String {
+    keys.record("rp", &[sender.as_bytes(), recipient.as_bytes()])
+}
+
+/// The record counting `sender`'s message requests on UTC day `day`.
+#[must_use]
+pub fn request_count(keys: &GateKeys, sender: &AccountId, day: u32) -> String {
+    keys.record("rq", &[sender.as_bytes(), &day.to_be_bytes()])
+}
+
+/// Counts one event in a keyed daily record and (re)sets its expiry: `ARGV[1]` seconds.
+pub const COUNT_DAY: &str = "local n = redis.call('INCR', KEYS[1]) \
+     redis.call('EXPIRE', KEYS[1], ARGV[1]) return n";
+
 /// The budgets (`[…send.requests]`). Defaults: a stranger may start 20 requests an hour (burst
 /// 10) and send one recipient 10 messages an hour before an answer (burst 5); an account takes 100
 /// requests an hour (burst 30); broadcasts reach 1,024 accounts an hour (burst 256), at most 256
@@ -103,6 +119,16 @@ pub struct RequestLimits {
     pub attention_sender_hour: u32,
     /// Burst of the above.
     pub attention_sender_burst: u32,
+    /// Days an account counts as new (Prompt 11, D-0131).
+    pub young_days: u32,
+    /// Requests per hour per sender account while new.
+    pub young_sender_hour: u32,
+    /// Burst of the above: a new user's first conversations go through.
+    pub young_sender_burst: u32,
+    /// Requests per hour per sender account while limited.
+    pub limited_sender_hour: u32,
+    /// Burst of the above.
+    pub limited_sender_burst: u32,
 }
 
 impl Default for RequestLimits {
@@ -123,6 +149,11 @@ impl Default for RequestLimits {
             attention_pair_burst: 3,
             attention_sender_hour: 300,
             attention_sender_burst: 20,
+            young_days: 30,
+            young_sender_hour: 5,
+            young_sender_burst: 10,
+            limited_sender_hour: 1,
+            limited_sender_burst: 2,
         }
     }
 }
@@ -187,6 +218,7 @@ pub struct RegistryGate {
     hot: songbird_valkey::ValkeyConn,
     keys: GateKeys,
     limits: RequestLimits,
+    standings: Option<Arc<songbird_entitlements::Live>>,
 }
 
 impl std::fmt::Debug for RegistryGate {
@@ -211,7 +243,68 @@ impl RegistryGate {
             hot,
             keys,
             limits,
+            standings: None,
         }
+    }
+
+    /// With the standings snapshot (Prompt 11, D-0131): limited accounts get tighter request
+    /// budgets.
+    #[must_use]
+    pub fn with_standings(mut self, live: Arc<songbird_entitlements::Live>) -> Self {
+        self.standings = Some(live);
+        self
+    }
+
+    /// The per-sender request budget for `sender`: limited, new (its first `young_days`), or
+    /// established. The record kinds differ, so moving between them starts a fresh budget.
+    async fn sender_budget(&self, sender: &AccountId) -> Result<(&'static str, u32, u32), ()> {
+        let l = &self.limits;
+        if self
+            .standings
+            .as_ref()
+            .is_some_and(|s| s.standing(sender) != songbird_entitlements::Standing::Good)
+        {
+            return Ok(("sl", l.limited_sender_hour, l.limited_sender_burst));
+        }
+        let created = self
+            .registry
+            .account_created_day(sender)
+            .await
+            .map_err(|_| ())?;
+        let young =
+            created.is_none_or(|d| d.saturating_add(l.young_days) > songbird_entitlements::today());
+        Ok(if young {
+            ("sy", l.young_sender_hour, l.young_sender_burst)
+        } else {
+            ("s", l.per_sender_hour, l.per_sender_burst)
+        })
+    }
+
+    /// Counts a request a sender made today, and marks the (sender, recipient) pair for a week
+    /// (the block-rate signal, D-0131): keyed records in `valkey-hot`.
+    async fn count_request(&self, sender: &AccountId, recipient: &AccountId) {
+        let day = songbird_entitlements::today();
+        let _ = self
+            .hot
+            .query::<String>(
+                redis::cmd("SET")
+                    .arg(request_mark(&self.keys, sender, recipient))
+                    .arg(1)
+                    .arg("EX")
+                    .arg(7 * 86_400),
+            )
+            .await;
+        let record = request_count(&self.keys, sender, day);
+        let _ = self
+            .hot
+            .query::<i64>(
+                redis::cmd("EVAL")
+                    .arg(COUNT_DAY)
+                    .arg(1)
+                    .arg(&record)
+                    .arg(8 * 86_400),
+            )
+            .await;
     }
 
     /// Spends `cost` of an hourly budget; `Ok(0)` when allowed, else the wait in microseconds.
@@ -258,8 +351,11 @@ impl Gate for RegistryGate {
                 sender.as_bytes().as_slice(),
                 recipient.as_bytes().as_slice(),
             );
+            let Ok((skind, shour, sburst)) = self.sender_budget(sender).await else {
+                return Admit::Unavailable;
+            };
             for (kind, subject, per_hour, burst) in [
-                ("s", vec![s], l.per_sender_hour, l.per_sender_burst),
+                (skind, vec![s], shour, sburst),
                 ("p", vec![s, r], l.per_pair_hour, l.per_pair_burst),
                 ("r", vec![r], l.per_recipient_hour, l.per_recipient_burst),
             ] {
@@ -272,6 +368,7 @@ impl Gate for RegistryGate {
                     Err(()) => return Admit::Unavailable,
                 }
             }
+            self.count_request(sender, recipient).await;
             if refused {
                 return Admit::Drop;
             }

@@ -341,11 +341,48 @@ impl Entry {
     }
 }
 
-/// The accounts not on the default plan, at one registry version.
+/// An account's standing (D-0131). Good standing has no row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Standing {
+    /// The default.
+    #[default]
+    Good,
+    /// Automatically limited (metadata signals): tighter budgets for new conversations, no new
+    /// group invite links; lifts by itself after a quiet week.
+    Limited,
+    /// Suspended by a moderator: cannot send or call; can receive, export, delete and appeal.
+    Suspended,
+}
+
+impl Standing {
+    /// From the stored name.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "limited" => Some(Self::Limited),
+            "suspended" => Some(Self::Suspended),
+            _ => None,
+        }
+    }
+
+    /// The stored name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Good => "good",
+            Self::Limited => "limited",
+            Self::Suspended => "suspended",
+        }
+    }
+}
+
+/// The accounts not on the default plan, and those not in good standing, at one registry
+/// version.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     version: i64,
     entries: HashMap<AccountId, Entry>,
+    standings: HashMap<AccountId, (Standing, Option<u32>)>,
 }
 
 impl Snapshot {
@@ -368,7 +405,34 @@ impl Snapshot {
                 })
             })
             .collect();
-        Self { version, entries }
+        Self {
+            version,
+            entries,
+            standings: HashMap::new(),
+        }
+    }
+
+    /// With standings (`(account, kind, last day or none)`); unknown kinds are left out.
+    #[must_use]
+    pub fn with_standings(
+        mut self,
+        rows: impl IntoIterator<Item = (AccountId, Standing, Option<u32>)>,
+    ) -> Self {
+        self.standings = rows
+            .into_iter()
+            .filter(|(_, s, _)| *s != Standing::Good)
+            .map(|(a, s, u)| (a, (s, u)))
+            .collect();
+        self
+    }
+
+    /// The account's standing on `today`.
+    #[must_use]
+    pub fn standing(&self, account: &AccountId, today: u32) -> Standing {
+        self.standings
+            .get(account)
+            .filter(|(_, until)| until.is_none_or(|u| u >= today))
+            .map_or(Standing::Good, |(s, _)| *s)
     }
 
     /// The registry version it was read at.
@@ -441,6 +505,12 @@ impl Live {
     pub fn entry(&self, account: &AccountId) -> Option<Entry> {
         self.current.load().entry(account, today())
     }
+
+    /// The account's standing today.
+    #[must_use]
+    pub fn standing(&self, account: &AccountId) -> Standing {
+        self.current.load().standing(account, today())
+    }
 }
 
 /// Reads the snapshot from the registry (the version first).
@@ -450,7 +520,12 @@ impl Live {
 pub async fn load(registry: &Registry) -> Result<Snapshot, songbird_accounts::RegistryError> {
     let version = registry.entitlements_version().await?;
     let rows = registry.entitlements(today()).await?;
-    Ok(Snapshot::from_rows(version, &rows))
+    let standings = registry.standings(today()).await?;
+    Ok(Snapshot::from_rows(version, &rows).with_standings(
+        standings
+            .into_iter()
+            .filter_map(|r| Standing::parse(&r.kind).map(|s| (r.account, s, r.until))),
+    ))
 }
 
 /// Keeps `live` in step with the registry: polls the version every `every` and reloads on a

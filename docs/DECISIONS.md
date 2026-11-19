@@ -195,6 +195,30 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0131 — Prompt 11, milestone 5: abuse controls without content
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0126 §7–§8; the threat-model rows (§1, §3.28, §4) await
+  the owner
+- Decided by: agent, within the owner's plan
+- Context: `docs/reports/P11-M5.md`.
+- Decision:
+  - Escalating proof of work: +1 bit at 3, 10 and 30 registrations from a range in the hour,
+    +1 at 300 across the deployment and +2 at 1,200, at most +4.
+  - Standings `limited` (automatic, 7 days from the latest signal) and `suspended` (moderators
+    only), in the registry and the entitlements snapshot, followed by `api` and delivery.
+  - New accounts (30 days): 5 requests an hour, burst 10; limited: 1, burst 2, and no new group
+    links; suspended: every send rejected with reason 15 `Suspended`, no sender certificate, no
+    new calls; receiving, export, deletion and appeals always work.
+  - Signals under keyed tags, evaluated on arrival: five distinct reported direct messages in 30
+    days; five blocks in 7 days by people the account sent a request to, at least 20 % of its
+    requests. Group reports never limit automatically.
+  - `songbird-admin moderation decide | lift | show`, audited; a decision deletes its report.
+- Evidence: `tests/e2e/tests/gate_p11.rs` (3), `registration_live::a_registration_flood…`,
+  `crates/entitlements` tests, `tools/admin` tests.
+- Consequences: a new wire reject code (15), read by older clients as unknown. M6 adds appeals
+  through support.
+
 ## D-0130 — Prompt 11, milestone 4: Family seats without a family graph; the vault unlinked
 
 - Date: 2026-11-19

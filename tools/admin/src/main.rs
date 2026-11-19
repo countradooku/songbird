@@ -8,6 +8,8 @@
 //! - `reports`: the moderation key, and the queue of reports sealed to it (Prompt 4, D-0063).
 //! - `plans`: an operator's grant or revocation of a plan level for one account (Prompt 11,
 //!   D-0127), audit-logged with the account.
+//! - `moderation`: a decision on a franked report (dismiss, limit, suspend) and lifting a
+//!   standing (Prompt 11, D-0131), audit-logged.
 //! - `invites create`: a batch of invite codes for early testers (D-0038); `invites grant`: more
 //!   invites for one account. Codes are printed once and stored only as hashes; the audit log
 //!   records how many, never the codes.
@@ -35,6 +37,7 @@
 mod audit;
 mod backup;
 mod ca;
+mod moderation;
 mod plans;
 mod reports;
 mod store;
@@ -78,6 +81,9 @@ enum Cmd {
     /// Plans (Prompt 11, D-0127): operators' grants of a level.
     #[command(subcommand)]
     Plans(plans::PlansCmd),
+    /// Moderation (Prompt 11, D-0131): decisions on reports, lifting a standing.
+    #[command(subcommand)]
+    Moderation(moderation::ModerationCmd),
 }
 
 #[derive(Debug, Subcommand)]
@@ -240,6 +246,7 @@ fn main() -> ExitCode {
         Cmd::Invites(cmd) => invites_cmd(cmd),
         Cmd::Reports(cmd) => reports::run(cmd),
         Cmd::Plans(cmd) => plans::run(cmd),
+        Cmd::Moderation(cmd) => moderation::run(cmd),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

@@ -62,6 +62,7 @@ pub mod profile;
 pub mod recovery;
 pub mod reports;
 pub mod settings;
+pub mod standing;
 pub mod storage;
 pub mod supervision;
 pub mod vault;
@@ -353,6 +354,26 @@ DEFINE FIELD IF NOT EXISTS fam ON fam_slot TYPE bytes;
 DEFINE FIELD IF NOT EXISTS auth ON fam_slot TYPE bytes;
 DEFINE FIELD IF NOT EXISTS sealed ON fam_slot TYPE option<bytes>;
 DEFINE INDEX IF NOT EXISTS fam_slot_fam ON fam_slot FIELDS fam;
+DEFINE TABLE IF NOT EXISTS standing SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS kind ON standing TYPE string;
+DEFINE FIELD IF NOT EXISTS until ON standing TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS reason ON standing TYPE string;
+DEFINE FIELD IF NOT EXISTS source ON standing TYPE string;
+DEFINE FIELD IF NOT EXISTS at ON standing TYPE datetime;
+DEFINE TABLE IF NOT EXISTS rsig SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tag ON rsig TYPE bytes;
+DEFINE FIELD IF NOT EXISTS day ON rsig TYPE int;
+DEFINE FIELD IF NOT EXISTS n ON rsig TYPE int;
+DEFINE FIELD IF NOT EXISTS until ON rsig TYPE int;
+DEFINE INDEX IF NOT EXISTS rsig_until ON rsig FIELDS until;
+DEFINE INDEX IF NOT EXISTS rsig_tag ON rsig FIELDS tag, day;
+DEFINE TABLE IF NOT EXISTS bsig SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tag ON bsig TYPE bytes;
+DEFINE FIELD IF NOT EXISTS day ON bsig TYPE int;
+DEFINE FIELD IF NOT EXISTS n ON bsig TYPE int;
+DEFINE FIELD IF NOT EXISTS until ON bsig TYPE int;
+DEFINE INDEX IF NOT EXISTS bsig_until ON bsig FIELDS until;
+DEFINE INDEX IF NOT EXISTS bsig_tag ON bsig FIELDS tag, day;
 DEFINE TABLE IF NOT EXISTS tnull SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS until ON tnull TYPE int;
 DEFINE INDEX IF NOT EXISTS tnull_until ON tnull FIELDS until;
@@ -2095,8 +2116,9 @@ impl Registry {
                  DELETE srec WHERE account = $a RETURN NONE;
                  DELETE superv:[$a] RETURN NONE;
                  DELETE sobj WHERE account = $a RETURN NONE;
-                 IF record::exists(ent:[$a]) {
+                 IF record::exists(ent:[$a]) OR record::exists(standing:[$a]) {
                    DELETE ent:[$a] RETURN NONE;
+                   DELETE standing:[$a] RETURN NONE;
                    UPSERT entver:v SET version = (version ?? 1) + 1 RETURN NONE;
                  };
                  UPDATE grp_prune SET gone = array::complement(gone, $devs)
@@ -2144,7 +2166,7 @@ impl Registry {
                  RETURN count(SELECT id FROM srec WHERE account = $a)
                    + count(SELECT id FROM sobj WHERE account = $a)
                    + count(SELECT id FROM superv:[$a]);
-                 RETURN count(SELECT id FROM ent:[$a]);",
+                 RETURN count(SELECT id FROM ent:[$a]) + count(SELECT id FROM standing:[$a]);",
                 vec![
                     var("a", bytes(account.as_bytes())),
                     var("ds", Value::Array(ds)),

@@ -170,3 +170,19 @@ proptest! {
         prop_assert_eq!(s.level(&acct(1), today) == Level::Plus, today <= last);
     }
 }
+
+#[test]
+fn standings_hold_through_their_day_and_moderators_have_no_end() {
+    let s = Snapshot::from_rows(1, &[]).with_standings([
+        (acct(1), Standing::Limited, Some(100)),
+        (acct(2), Standing::Suspended, None),
+        (acct(3), Standing::Good, None),
+    ]);
+    assert_eq!(s.standing(&acct(1), 100), Standing::Limited);
+    assert_eq!(s.standing(&acct(1), 101), Standing::Good);
+    assert_eq!(s.standing(&acct(2), u32::MAX), Standing::Suspended);
+    assert_eq!(s.standing(&acct(3), 0), Standing::Good);
+    assert_eq!(s.standing(&acct(4), 0), Standing::Good);
+    assert_eq!(Standing::parse("suspended"), Some(Standing::Suspended));
+    assert_eq!(Standing::parse("good"), None);
+}

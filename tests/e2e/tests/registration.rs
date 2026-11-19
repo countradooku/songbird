@@ -148,6 +148,7 @@ async fn registered_accounts_connect_and_talk_without_an_operator() {
                 solutions: 4,
             },
             throttle: ThrottleSettings::default(),
+            escalation: songbird_api::config::Escalation::default(),
         },
         &secret,
         RegistrationMetrics::default(),

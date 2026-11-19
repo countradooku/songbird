@@ -57,6 +57,18 @@ pub struct Endpoint {
 
 impl Default for Endpoint {
     fn default() -> Self {
+        // A test build may name its server at build time
+        // (`SONGBIRD_SERVER=songbird.chat`): api.<domain> over HTTPS and
+        // ws.<domain>:443 for delivery. Editable under You → Server connection.
+        if let Some(domain) = option_env!("SONGBIRD_SERVER").filter(|d| !d.is_empty()) {
+            return Self {
+                api: format!("https://api.{domain}"),
+                api_name: format!("api.{domain}"),
+                ws_addr: format!("ws.{domain}:443"),
+                ws_name: format!("ws.{domain}"),
+                billing: format!("https://billing.{domain}"),
+            };
+        }
         Self {
             api: "http://127.0.0.1:8443".into(),
             api_name: "api.localhost".into(),
@@ -550,10 +562,16 @@ pub async fn delete_account() -> Result<(), Problem> {
 }
 
 /// Runs `job` and records its failure as the visible problem.
+///
+/// The task has no owner: it is the account's, not the view's. Started from a
+/// button whose own view re-renders (saving the address updates `live`), an
+/// owned task would be cancelled before its first poll and nothing would run.
 pub fn run(job: impl std::future::Future<Output = Result<(), Problem>> + 'static) {
-    spawn(async move {
-        if let Err(p) = job.await {
-            live().update(|l| l.problem = Some(p.0));
-        }
+    Owner::detached().run(|| {
+        spawn(async move {
+            if let Err(p) = job.await {
+                live().update(|l| l.problem = Some(p.0));
+            }
+        })
     });
 }

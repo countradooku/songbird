@@ -36,6 +36,7 @@ pub fn connect() {
         l.link = Link::Connecting;
         l.waiting = 0;
     });
+    let plain = is_loopback(&endpoint.ws_addr);
     let mut cfg = ClientConfig::new(endpoint.ws_addr, endpoint.ws_name);
     // The proxy setting (Prompt 9): TLS to the proxy, the server's own TLS
     // inside it. A proxy only carries TLS, so the endpoint is reached over TLS.
@@ -57,42 +58,70 @@ pub fn connect() {
                 return;
             }
         }
+    } else if !plain {
+        // TLS 1.3 to anything but this machine: the device signs the TLS
+        // exporter (D-0018), so delivery itself must terminate it.
+        match songbird_client::web_tls() {
+            Some(tls) => cfg.tls = Some(tls),
+            None => {
+                live().update(|l| {
+                    l.link = Link::Off;
+                    l.problem = Some("This device can't set up a secure connection.".into());
+                });
+                return;
+            }
+        }
     }
     // Right after registration delivery's device directory may lag a poll.
     cfg.new_device_grace = std::time::Duration::from_secs(10);
-    let task = spawn(async move {
-        // The client spawns on tokio; NSH's `background` runs on its tokio
-        // runtime, and the client's tasks stay there.
-        let Ok((client, mut events)) =
-            background(async move { Client::start(cfg, key, ResumeState::default()) }).await
-        else {
-            live().update(|l| l.link = Link::Off);
-            return;
-        };
-        CLIENT.with_borrow_mut(|c| *c = Some(client));
-        while let Some(event) = events.recv().await {
-            match event {
-                Event::Connected { .. } => live().update(|l| {
-                    l.link = Link::Connected;
-                    l.problem = None;
-                }),
-                // mock: app-core decrypts, stores durably, then `ack`s.
-                Event::Deliver { .. } => live().update(|l| l.waiting += 1),
-                Event::Disconnected { .. } => live().update(|l| l.link = Link::Retrying),
-                Event::Failed { code } => {
-                    live().update(|l| {
-                        l.link = Link::Refused(code);
-                        l.problem = Some(format!(
-                            "The server closed the connection for this device (code {code})."
-                        ));
-                    });
-                    break;
+    // No owner: the connection lives until `disconnect`, not with the view that
+    // started it (the on/off switch re-renders its page).
+    let task = Owner::detached().run(|| {
+        spawn(async move {
+            // The client spawns on tokio; NSH's `background` runs on its tokio
+            // runtime, and the client's tasks stay there.
+            let Ok((client, mut events)) =
+                background(async move { Client::start(cfg, key, ResumeState::default()) }).await
+            else {
+                live().update(|l| l.link = Link::Off);
+                return;
+            };
+            CLIENT.with_borrow_mut(|c| *c = Some(client));
+            while let Some(event) = events.recv().await {
+                match event {
+                    Event::Connected { .. } => live().update(|l| {
+                        l.link = Link::Connected;
+                        l.problem = None;
+                    }),
+                    // mock: app-core decrypts, stores durably, then `ack`s.
+                    Event::Deliver { .. } => live().update(|l| l.waiting += 1),
+                    Event::Disconnected { .. } => live().update(|l| l.link = Link::Retrying),
+                    Event::Failed { code } => {
+                        live().update(|l| {
+                            l.link = Link::Refused(code);
+                            l.problem = Some(format!(
+                                "The server closed the connection for this device (code {code})."
+                            ));
+                        });
+                        break;
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
-        }
+        })
     });
     READER.with_borrow_mut(|r| *r = Some(task));
+}
+
+/// Whether `host:port` names this machine, the only place plain TCP is allowed
+/// (development against `scripts/dev-app-backend.sh`).
+fn is_loopback(addr: &str) -> bool {
+    let host = addr.rsplit_once(':').map_or(addr, |(h, _)| h);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Closes the connection.
@@ -103,5 +132,32 @@ pub fn disconnect() {
     drop(CLIENT.with_borrow_mut(Option::take));
     if live().with_untracked(|l| l.link != Link::Off) {
         live().update(|l| l.link = Link::Off);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_loopback;
+
+    #[test]
+    fn plain_tcp_only_to_this_machine() {
+        for a in [
+            "127.0.0.1:9201",
+            "localhost:9201",
+            "LOCALHOST:1",
+            "[::1]:9201",
+            "127.9.9.9:1",
+        ] {
+            assert!(is_loopback(a), "{a}");
+        }
+        for a in [
+            "ws.songbird.chat:443",
+            "162.55.161.212:443",
+            "[2a01:4f8::1]:443",
+            "10.0.0.1:9201",
+            "localhost.evil.com:443",
+        ] {
+            assert!(!is_loopback(a), "{a}");
+        }
     }
 }

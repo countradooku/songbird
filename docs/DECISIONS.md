@@ -20,6 +20,10 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 10 plan (`P10-plan.md`, D-0119): **waiting for the owner's approval.** Questions:
+  scope with account recovery, the recovery key's format, the vault owned by an account,
+  recovery's factor, the vault quota until Prompt 11, the third-party clouds in the app, WebDAV
+  in CI, and the agent decisions.
 - Prompt 9 gate (`P09-gate.md`, D-0102 to D-0108; PR #67): **approved by the owner on
   2026-11-18** ("Approve the gate"): M1–M6 and the security review's fixes, with the threat-model
   rows (§1, §3.26, §4, §5). Still open: the GDPR Article 8 ages to confirm with counsel before
@@ -179,6 +183,42 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0119 — Prompt 10: the plan, and the owner's decisions it needs
+
+- Date: 2026-11-19
+- Status: proposed (waiting for the owner)
+- Decided by: owner, on the agent's plan `docs/reports/P10-plan.md`
+- Context: Prompt 10 asks for a cloud-agnostic backup format (`crates/backup-format`), storage
+  adapters (`crates/backup-storage`), the Songbird vault in `api` on RustFS, local export and a
+  device-to-device transfer. What exists: an empty PROTOCOL §11, a mocked backup and transfer
+  flow in the app with a 32-character mock key, our own S3 client, RustFS in compose, Padmé
+  padding, the account deletion job. Missing: everything the prompt names, a WebDAV server and
+  provider mocks for tests, and **account recovery**, which PROTOCOL §4.7 assigned to Prompt 10
+  and without which a restore on a brand-new device cannot become a working account.
+  aws-lc-rs has no XChaCha20-Poly1305.
+- Options considered and evidence: in the plan ("What Prompt 10 starts from", "Findings").
+- Decisions asked of the owner (recommendations first):
+  1. the milestones as written, account recovery included;
+  2. a 64-character Crockford base32 recovery key (256-bit secret, 64-bit check), created with
+     the account and kept on the primary;
+  3. the vault owned by an account (size, chunk count and generation known to the server, no
+     times); unlinking re-decided with Prompt 11's anonymous credentials;
+  4. recovery by the identity key's signature plus the PIN or a passkey when set; the transfer
+     by a handover token from the old primary;
+  5. a vault quota of 5 GiB and 100,000 chunks until Prompt 11;
+  6. Google Drive, OneDrive and Dropbox adapters with mock servers now, the app's desktop sign-in
+     once the owner registers the OAuth apps, mobile sign-in with the host projects;
+  7. Apache httpd `mod_dav` as the WebDAV server in CI, one manual Nextcloud run.
+- Agent decisions, unless the owner objects: `chacha20poly1305` 0.10.1 for XChaCha20-Poly1305;
+  a keyed content-defined chunker (1/2/8 MiB), media per file, Padmé padding; chunk names by
+  HMAC; the manifest's generation in the clear with the previous manifest's hash inside;
+  protobuf sections with a minimum reader version; two-phase restore; backups by the primary
+  only; an `Http` trait for adapters, SigV4 from `songbird-s3`; vault chunks streamed through
+  `api` into a dedicated bucket; Noise `NNpsk0` on aws-lc-rs for the transfer; a new recovery
+  key means a new vault; determinism checked on Linux x86_64, Linux i686 and macOS arm64; one
+  branch and one PR.
+- Consequences: M1 (`crates/backup-format`) starts once the owner approves.
 
 ## D-0118 — Camera: the `unsafe` exception marked for Semgrep, as D-0033's
 

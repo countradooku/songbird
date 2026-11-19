@@ -9,7 +9,10 @@
 //! The **old** phone scans it and connects over TCP to each address in turn. The channel is
 //! Noise `NNpsk0_25519_ChaChaPoly_SHA256` (revision 34) on aws-lc-rs, the prologue
 //! `"songbird.v1/transfer\0" || the QR payload`: only a phone that read the code completes the
-//! handshake, and both show a 6-digit code from the handshake hash for the user to compare.
+//! handshake, and both show a 6-digit code from the handshake hash for the user to compare on
+//! **both** phones before anything is sent or applied. Before the handshake the new phone sends
+//! a [`commitment`] to its ephemeral key (`len u16 | 32 bytes`), so nobody who learnt the code
+//! can choose a key to make the two codes match.
 //! Transport messages are Noise's (at most 65,535 bytes, `len u16 | ciphertext`), carrying a
 //! byte stream of application records:
 //!
@@ -48,8 +51,12 @@ const QR_PREFIX: &str = "songbird-transfer:";
 /// Largest Noise message.
 const MAX_MSG: usize = 65_535;
 const TAG: usize = 16;
-/// Largest application record body (a chunk object and its name).
-pub const MAX_RECORD: usize = 9 << 20;
+/// Largest application record body: a chunk object and its name, or a manifest object.
+#[must_use]
+pub fn max_record() -> usize {
+    (songbird_backup_format::object::max_chunk_object() + 32)
+        .max(songbird_backup_format::object::max_manifest_object())
+}
 
 /// What can go wrong in a transfer.
 #[derive(Debug, thiserror::Error)]
@@ -413,12 +420,24 @@ fn code_of(h: &[u8; 32]) -> u32 {
 /// What finishes the initiator's handshake from the responder's reply.
 pub type Finish = Box<dyn FnOnce(&[u8]) -> Result<Session, TransferError> + Send>;
 
-/// The initiator's first message (`psk, e` and an empty payload): 48 bytes.
+/// The responder's commitment to its ephemeral key, sent before it sees the initiator's:
+/// `SHA-256("songbird.v1/transfer-commit\0" || e_pub)`. Without it a man in the middle who
+/// learnt the code could try responder keys until the old phone's six digits matched the ones
+/// it had already made the new phone show (about 2^20 tries); committed first, each attempt is
+/// one connection with a one-in-a-million chance (D-0125).
+#[must_use]
+pub fn commitment(e_pub: &[u8; 32]) -> [u8; 32] {
+    hash(&[b"songbird.v1/transfer-commit\0", e_pub])
+}
+
+/// The initiator's first message (`psk, e` and an empty payload): 48 bytes, sent once the
+/// responder's `commitment` arrived; [`Finish`] refuses a reply whose key doesn't match it.
 ///
 /// # Errors
 /// [`TransferError::Handshake`].
 pub fn initiator_start(
     code: &Code,
+    committed: [u8; 32],
     seed: Option<[u8; 32]>,
 ) -> Result<(Vec<u8>, Finish), TransferError> {
     let mut s = Symmetric::new(&[PROLOGUE, &code.payload()].concat());
@@ -432,6 +451,9 @@ pub fn initiator_start(
         let (re, rest) = reply
             .split_first_chunk::<32>()
             .ok_or(TransferError::Handshake)?;
+        if commitment(re) != committed {
+            return Err(TransferError::Handshake);
+        }
         s.mix_hash(re);
         s.mix_key(re)?;
         s.mix_key(dh(&e, re)?.as_ref())?;
@@ -449,41 +471,62 @@ pub fn initiator_start(
     Ok((msg, finish))
 }
 
-/// The responder: reads the first message, answers (`e, ee` and an empty payload).
-///
-/// # Errors
-/// [`TransferError::Handshake`] for another code's message.
-pub fn respond(
-    code: &Code,
-    first: &[u8],
-    seed: Option<[u8; 32]>,
-) -> Result<(Vec<u8>, Session), TransferError> {
-    let mut s = Symmetric::new(&[PROLOGUE, &code.payload()].concat());
-    s.mix_key_and_hash(code.psk.as_ref())?;
-    let (ie, rest) = first
-        .split_first_chunk::<32>()
-        .ok_or(TransferError::Handshake)?;
-    s.mix_hash(ie);
-    s.mix_key(ie)?;
-    if !s.decrypt_and_hash(rest)?.is_empty() {
-        return Err(TransferError::Handshake);
+/// The responder, its ephemeral key chosen (and committed to) before the first message.
+pub struct Responder {
+    s: Symmetric,
+    e: PrivateKey,
+    e_pub: [u8; 32],
+}
+
+impl std::fmt::Debug for Responder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Responder { .. }")
     }
-    let (e, e_pub) = ephemeral(seed)?;
-    s.mix_hash(&e_pub);
-    s.mix_key(&e_pub)?;
-    s.mix_key(dh(&e, ie)?.as_ref())?;
-    let ct = s.encrypt_and_hash(&[])?;
-    let (i_send, i_recv) = s.split()?;
-    Ok((
-        [&e_pub[..], &ct].concat(),
-        Session {
-            // The responder sends with the initiator's receiving key.
-            send: i_recv,
-            recv: i_send,
-            code: code_of(&s.h),
-            hash: s.h,
-        },
-    ))
+}
+
+impl Responder {
+    /// A responder for `code`, and the [`commitment`] to send first.
+    ///
+    /// # Errors
+    /// [`TransferError::Handshake`].
+    pub fn new(code: &Code, seed: Option<[u8; 32]>) -> Result<(Self, [u8; 32]), TransferError> {
+        let mut s = Symmetric::new(&[PROLOGUE, &code.payload()].concat());
+        s.mix_key_and_hash(code.psk.as_ref())?;
+        let (e, e_pub) = ephemeral(seed)?;
+        let c = commitment(&e_pub);
+        Ok((Self { s, e, e_pub }, c))
+    }
+
+    /// Reads the first message and answers (`e, ee` and an empty payload).
+    ///
+    /// # Errors
+    /// [`TransferError::Handshake`] for another code's message.
+    pub fn respond(self, first: &[u8]) -> Result<(Vec<u8>, Session), TransferError> {
+        let Self { mut s, e, e_pub } = self;
+        let (ie, rest) = first
+            .split_first_chunk::<32>()
+            .ok_or(TransferError::Handshake)?;
+        s.mix_hash(ie);
+        s.mix_key(ie)?;
+        if !s.decrypt_and_hash(rest)?.is_empty() {
+            return Err(TransferError::Handshake);
+        }
+        s.mix_hash(&e_pub);
+        s.mix_key(&e_pub)?;
+        s.mix_key(dh(&e, ie)?.as_ref())?;
+        let ct = s.encrypt_and_hash(&[])?;
+        let (i_send, i_recv) = s.split()?;
+        Ok((
+            [&e_pub[..], &ct].concat(),
+            Session {
+                // The responder sends with the initiator's receiving key.
+                send: i_recv,
+                recv: i_send,
+                code: code_of(&s.h),
+                hash: s.h,
+            },
+        ))
+    }
 }
 
 // ------------------------------------------------------------------------------ framing
@@ -554,7 +597,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Channel<S> {
     /// Sends one record.
     async fn send(&mut self, kind: u8, body: &[u8]) -> Result<(), TransferError> {
         let len = u32::try_from(body.len()).map_err(|_| TransferError::Protocol)?;
-        if body.len() > MAX_RECORD {
+        if body.len() > max_record() {
             return Err(TransferError::Protocol);
         }
         let mut head = vec![kind];
@@ -571,7 +614,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Channel<S> {
         let (&kind, len) = head.split_first().ok_or(TransferError::Protocol)?;
         let len = <[u8; 4]>::try_from(len).map_err(|_| TransferError::Protocol)?;
         let len = usize::try_from(u32::from_be_bytes(len)).map_err(|_| TransferError::Protocol)?;
-        if len > MAX_RECORD {
+        if len > max_record() {
             return Err(TransferError::Protocol);
         }
         Ok((kind, self.read_exact(len).await?))
@@ -620,8 +663,31 @@ pub async fn listen(addrs: Vec<IpAddr>) -> Result<(tokio::net::TcpListener, Code
     Ok((l, Code { psk, port, addrs }))
 }
 
+/// How long a connection has to finish the handshake.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// Handshakes the new phone runs at once; further connections wait in the backlog.
+const MAX_PENDING: usize = 8;
+
+async fn handshake(
+    mut s: tokio::net::TcpStream,
+    code: &Code,
+) -> Result<Channel<tokio::net::TcpStream>, TransferError> {
+    let _ = s.set_nodelay(true);
+    let (responder, c) = Responder::new(code, None)?;
+    write_msg(&mut s, &c).await?;
+    let first = read_msg(&mut s).await?;
+    let (reply, session) = responder.respond(&first)?;
+    write_msg(&mut s, &reply).await?;
+    Ok(Channel {
+        io: s,
+        session,
+        inbox: Zeroizing::new(Vec::new()),
+    })
+}
+
 /// The new phone: accepts the old phone (the first connection whose handshake succeeds; a
-/// connection with another code is dropped), returning the channel. The user compares
+/// connection with another code, or one that stalls past a timeout, is dropped, and several are
+/// handled at once so none can hold the others up), returning the channel. The user compares
 /// [`Channel::code`] on both screens.
 ///
 /// # Errors
@@ -630,21 +696,25 @@ pub async fn accept(
     l: &tokio::net::TcpListener,
     code: &Code,
 ) -> Result<Channel<tokio::net::TcpStream>, TransferError> {
+    let mut pending = tokio::task::JoinSet::new();
     loop {
-        let (mut s, _) = l.accept().await?;
-        let _ = s.set_nodelay(true);
-        let Ok(first) = read_msg(&mut s).await else {
-            continue;
-        };
-        let Ok((reply, session)) = respond(code, &first, None) else {
-            continue;
-        };
-        write_msg(&mut s, &reply).await?;
-        return Ok(Channel {
-            io: s,
-            session,
-            inbox: Zeroizing::new(Vec::new()),
-        });
+        tokio::select! {
+            r = l.accept(), if pending.len() < MAX_PENDING => {
+                let (s, _) = r?;
+                let code = code.clone();
+                pending.spawn(async move {
+                    tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake(s, &code))
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                });
+            }
+            Some(done) = pending.join_next(), if !pending.is_empty() => {
+                if let Ok(Some(ch)) = done {
+                    return Ok(ch);
+                }
+            }
+        }
     }
 }
 
@@ -679,10 +749,17 @@ pub async fn connect_via(
         return Err(TransferError::Unreachable);
     };
     let _ = s.set_nodelay(true);
-    let (first, finish) = initiator_start(code, None)?;
-    write_msg(&mut s, &first).await?;
-    let reply = read_msg(&mut s)
+    let step = async {
+        let committed = <[u8; 32]>::try_from(read_msg(&mut s).await?.as_slice())
+            .map_err(|_| TransferError::Handshake)?;
+        let (first, finish) = initiator_start(code, committed, None)?;
+        write_msg(&mut s, &first).await?;
+        let reply = read_msg(&mut s).await?;
+        Ok::<_, TransferError>((reply, finish))
+    };
+    let (reply, finish) = tokio::time::timeout(HANDSHAKE_TIMEOUT, step)
         .await
+        .map_err(|_| TransferError::Handshake)?
         .map_err(|_| TransferError::Handshake)?;
     let session = finish(&reply)?;
     Ok(Channel {

@@ -122,6 +122,8 @@ def main(path):
     ie, re_ = bytes.fromhex(v["initiator_ephemeral"]), bytes.fromhex(v["responder_ephemeral"])
     base = (9).to_bytes(32, "little")
     ie_pub, re_pub = x25519(ie, base), x25519(re_, base)
+    # The responder commits to its ephemeral key before it sees the initiator's (D-0125).
+    assert hashlib.sha256(b"songbird.v1/transfer-commit\0" + re_pub).hexdigest() == v["commitment"], "commitment"
 
     s = Sym(name, prologue)
     s.mix_key_and_hash(psk)                # psk
@@ -135,7 +137,7 @@ def main(path):
     assert s.h.hex() == v["handshake_hash"], "handshake hash"
     code = int.from_bytes(hashlib.sha256(b"songbird.v1/transfer-code\0" + s.h).digest()[:4], "big") % 1_000_000
     assert code == v["code"], "code"
-    print(f"ok: NNpsk0 messages, handshake hash and the code {code:06d}")
+    print(f"ok: the commitment, NNpsk0 messages, handshake hash and the code {code:06d}")
 
 
 if __name__ == "__main__":

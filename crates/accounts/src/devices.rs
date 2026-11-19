@@ -111,7 +111,8 @@ impl Registry {
              IF record::exists(device:[$d]) OR
                count(SELECT id FROM ltoken WHERE device = $d) > 0 { THROW 'songbird:exists' };
              IF count(SELECT id FROM device WHERE account = $a AND disabled = false)
-               + count(SELECT id FROM ltoken WHERE account = $a AND expires > time::now()) >= $max
+               + count(SELECT id FROM ltoken WHERE account = $a AND expires > time::now()
+                   AND (kind ?? 0) = 0) >= $max
                { THROW 'songbird:limit' };
              CREATE ltoken:[$t] SET account = $a, device = $d,
                expires = time::now() + duration::from_secs($ttl) RETURN NONE;

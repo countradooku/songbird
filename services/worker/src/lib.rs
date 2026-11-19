@@ -224,6 +224,10 @@ pub struct Worker {
     pub metrics: WorkerMetrics,
 }
 
+/// How long a turned-off vault's prefix is listed again by every sweep before it is forgotten:
+/// longer than any request the api serves.
+pub const VAULT_GRACE: Duration = Duration::from_mins(15);
+
 /// The prefix of a vault incarnation's objects (as `api` writes them,
 /// `songbird_api::vault::prefix`).
 fn vault_prefix(vk: &[u8; 32], epoch: &[u8; 16]) -> String {
@@ -738,11 +742,16 @@ impl Worker {
                 return Err(Left::Objects);
             }
         }
-        self.registry
-            .vault_gone_done(epoch)
+        // Forgotten only after a grace longer than any request, so an upload in flight when the
+        // vault was turned off, landing after this listing, is found by a later sweep (D-0125).
+        if self
+            .registry
+            .vault_gone_done(epoch, VAULT_GRACE)
             .await
-            .map_err(|_| Left::Unavailable)?;
-        self.metrics.vaults_deleted.inc();
+            .map_err(|_| Left::Unavailable)?
+        {
+            self.metrics.vaults_deleted.inc();
+        }
         Ok(())
     }
 

@@ -463,7 +463,15 @@ impl Vault {
             return Outcome::Unavailable;
         }
         match registry
-            .vault_swap_manifest(&o.vk, expected, generation, &suffix, size, self.quota())
+            .vault_swap_manifest(
+                &o.vk,
+                &o.row.epoch,
+                expected,
+                generation,
+                &suffix,
+                size,
+                self.quota(),
+            )
             .await
         {
             Ok(old) => {
@@ -484,8 +492,12 @@ impl Vault {
         }
     }
 
-    /// `PUT /v1/vault/chunks/<name>`: recorded first (counted against the quota), then stored.
-    /// A name already recorded is left as it is (same name, same plaintext).
+    /// `PUT /v1/vault/chunks/<name>`: recorded first (counted against the quota), then stored,
+    /// then checked to be still recorded. A name already recorded is left as it is (same name,
+    /// same plaintext) and must come with the size recorded for it, so two uploads racing for
+    /// one name can't count a small object and store a large one. An upload whose chunk was
+    /// forgotten, or whose vault was turned off, while it was in flight deletes its object again
+    /// rather than leave it uncounted (D-0125).
     pub async fn put_chunk(
         &self,
         registry: &Registry,
@@ -496,32 +508,38 @@ impl Vault {
         if !wire::chunk_object_ok(&body) {
             return Outcome::Malformed("chunk");
         }
+        let object = chunk_object(&o.vk, &o.row.epoch, name);
         let size = u64::try_from(body.len()).unwrap_or(u64::MAX);
         match registry
-            .vault_reserve_chunk(&o.vk, name, size, self.quota())
+            .vault_reserve_chunk(&o.vk, &o.row.epoch, name, size, self.quota())
             .await
         {
-            Ok(false) => {
+            Ok(Some(recorded)) if recorded != size => {
+                self.metrics.conflicts.inc();
+                return Outcome::ConflictJson(serde_json::json!({ "error": "size" }));
+            }
+            Ok(Some(_)) => {
                 // Recorded already: stored unless an earlier upload failed after recording.
-                match self
-                    .s3
-                    .head_object(&chunk_object(&o.vk, &o.row.epoch, name))
-                    .await
-                {
+                match self.s3.head_object(&object).await {
                     Ok(Some(_)) => return Outcome::Done,
                     Ok(None) => {}
                     Err(_) => return Outcome::Unavailable,
                 }
             }
-            Ok(true) => self.metrics.chunks.inc(),
+            Ok(None) => self.metrics.chunks.inc(),
             Err(e) => return vault_error(e, &self.metrics),
         }
-        match self
-            .s3
-            .put_object_bytes(&chunk_object(&o.vk, &o.row.epoch, name), body)
-            .await
-        {
-            Ok(()) => Outcome::Done,
+        if self.s3.put_object_bytes(&object, body).await.is_err() {
+            return Outcome::Unavailable;
+        }
+        match registry.vault_chunk_live(&o.vk, &o.row.epoch, name).await {
+            Ok(true) => Outcome::Done,
+            Ok(false) => {
+                // Forgotten (or the vault turned off) meanwhile: what was deleted stays deleted.
+                // A failure here is caught by the vault's deletion, which lists its prefix.
+                let _ = self.s3.delete_object(&object).await;
+                vault_error(VaultError::Gone, &self.metrics)
+            }
             Err(_) => Outcome::Unavailable,
         }
     }

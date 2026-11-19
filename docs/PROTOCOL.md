@@ -842,10 +842,13 @@ uses the same call with the old primary's consent instead of the second factor.
 
 1. A **token**: `POST /v1/account/recover/token` (unsigned, `{"account": hex}`; throttled per
    IP range and per account) for a recovery, or `POST /v1/account/handover` (signed by the
-   enabled primary) for a hand-over. Either answers `{"token", "device", "expires_in"}` like a
-   link token (§4.6): 32 random bytes stored only as their hash, single use, ten minutes,
-   reserving a device ID. The token's kind is stored with it: a link never accepts a
-   recovery or hand-over token, and a recovery never accepts a link token.
+   enabled primary; throttled per primary, apart from strangers' recovery requests) for a
+   hand-over. Either answers `{"token", "device", "expires_in"}` like a link token (§4.6): 32
+   random bytes stored only as their hash, single use, ten minutes, reserving a device ID. The
+   token's kind is stored with it: a link never accepts a recovery or hand-over token, a
+   recovery never accepts a link token, and only link tokens count towards the device limit.
+   For an unknown or deleting account the recovery endpoint answers the same way with a token
+   it never stores, so it tells a stranger nothing (D-0125).
 2. `POST /v1/account/recover` (unsigned):
    `account [16] | account_sig [64] | link request` (§4.6, with the second factor of §4.7 when
    the token is a recovery token). `account_sig` is Ed25519 by the **account identity key** over
@@ -863,8 +866,9 @@ uses the same call with the old primary's consent instead of the second factor.
 5. The new primary signs a device list naming itself (version above the stored one, §4.6), and
    restores its backup. Contacts see a device change and the **same** safety number.
 
-The recovery key is therefore the account unless a PIN or passkey is set; the app asks for a
-PIN when backups are turned on (threat model §3.27).
+The recovery key is therefore the account unless a PIN or passkey is set: whoever holds it alone
+can take the account over and sign out every device. The app asks for a PIN when backups are
+turned on and says so where it shows the key (threat model §3.27).
 
 ## 5. Encrypted content schemas (Prompt 4)
 
@@ -2474,8 +2478,11 @@ object)` (stored only if the current manifest's generation is `expected`, 0 for 
 object's own generation is `expected + 1`; otherwise a conflict with the current generation;
 of racing writers exactly one wins each generation) and `destroy`. Adapters run on the device
 only. A backup run reads the manifest and the chunk list, uploads only chunks the store lacks,
-swaps the manifest after every chunk is stored, then deletes chunks no manifest references; a
-run that stops anywhere leaves the previous backup intact. One conformance suite
+swaps the manifest after every chunk is stored (and every chunk it reused from the listing is
+still there), then deletes chunks no manifest references; a run that stops anywhere leaves the
+previous backup intact. Runs to one kind of store take turns on a device. A restore refuses
+an object larger than a chunk can be before keeping it. WebDAV and S3 take `https://` only,
+except to the device itself. One conformance suite
 (`songbird_backup_storage::conformance`) checks every rule on every adapter.
 
 Local export: a folder (`chunks/<hex>`, `manifest`, a `manifest.lock` held while swapping and
@@ -2499,7 +2506,7 @@ vault ID and the access secret (§11.1), both from the recovery key:
 | `DELETE /v1/vault` | the owner's primary | 204: the vault is gone at once; its objects are deleted by the worker |
 | `GET /v1/vault/manifest` | — | 200 the manifest object; 204 before the first |
 | `PUT /v1/vault/manifest` | the owner's primary | 200 `{"generation"}`; 409 `{"error": "generation", "generation"}`; 409 `full`; 400 `manifest`/`generation` |
-| `PUT /v1/vault/chunks/<name>` | the owner's primary | 204; 409 `full`; 400 `chunk` |
+| `PUT /v1/vault/chunks/<name>` | the owner's primary | 204; 409 `full`; 409 `size`; 400 `chunk` |
 | `GET /v1/vault/chunks/<name>` | — | 200 the object; 404 |
 | `GET /v1/vault/chunks?after=<name>` | — | 200 `n u16 \| name [32] × n \| more u8`, at most 1,000 names in order |
 | `POST /v1/vault/chunks/delete` | the owner's primary | `n u16 (1..=1000) \| name [32] × n` → 204 |
@@ -2520,13 +2527,20 @@ vault ID and the access secret (§11.1), both from the recovery key:
 - The server checks only shapes: a chunk object starts `SBC 01` and its length is a header, a
   Padmé length of at least 1,024 and a tag, at most the largest chunk; a manifest starts
   `SBM 01`, is at most `max_manifest`, and its generation is `expected + 1`. A chunk is recorded
-  (and counted against the quota) before its object is stored; a manifest object is stored under
-  a fresh random name before the compare-and-swap, and the loser's object is deleted.
+  with its size (and counted against the quota) before its object is stored, and checked to be
+  still recorded after: an upload whose chunk was forgotten, or whose vault was turned off,
+  meanwhile deletes its object again. A name already recorded must come with the same size
+  (409 `{"error": "size"}`), so uploads racing for one name can't store more than they count. A
+  manifest object is stored under a fresh random name before the compare-and-swap, and the
+  loser's object is deleted. Every write checks the vault incarnation (epoch) it opened is still
+  the current one (D-0125).
 - Quotas per vault (D-0119): 5 GiB and 100,000 chunks, `max_vaults` = 2 per account, until
   Prompt 11's entitlements. Budgets (GCRA in `valkey-hot` under keyed records): reads per vault,
   writes per account, misses per range.
 - Deleting the account deletes its vaults (the worker: rows, then every object under the
-  prefixes, verified by listing). The GDPR export lists each vault's generation, bytes and chunk
+  prefixes, verified by listing). A vault turned off is listed again by every sweep for 15
+  minutes (longer than any request) before it is forgotten, so an upload in flight when it was
+  turned off is deleted too. The GDPR export lists each vault's generation, bytes and chunk
   count, never its ID.
 
 **Third-party stores** (M3, D-0122), each on the device with the user's own credentials:
@@ -2557,13 +2571,22 @@ connects over TCP and streams a backup straight to it (`crates/backup-storage::t
 
 - **Code**: `songbird-transfer:` and base64url (no padding) of
   `"SBT" | 1 | psk [32] | port u16 | n u8 (1..=8) | n × (family u8 (4 | 6) | address [4 | 16])`.
+- **Commitment**: on each connection the new phone first sends `len u16 | 32 bytes`,
+  `SHA-256("songbird.v1/transfer-commit\0" || its ephemeral public key)`, before it sees the
+  old phone's; the old phone refuses a reply whose key doesn't match. Without it a man in the
+  middle who had seen the code could try keys until both phones showed the same six digits
+  (about 2²⁰ tries, seconds); with it each try is one connection with a one-in-a-million chance
+  (D-0125).
 - **Channel**: Noise `NNpsk0_25519_ChaChaPoly_SHA256` (revision 34) on aws-lc-rs, prologue
   `"songbird.v1/transfer\0" || the code's payload`, the old phone initiating. Only a phone that
-  read the code completes the handshake; a connection with another code is dropped and the new
-  phone keeps listening. Both show a 6-digit code, `u32(SHA-256("songbird.v1/transfer-code\0"
-  || handshake hash)[0..4]) mod 10⁶`, for the user to compare. Transport messages are Noise's
-  (`len u16 | ciphertext`, at most 65,535 bytes), carrying a byte stream of records
-  `kind u8 | len u32 | body` (at most 9 MiB): `1 HELLO` (account, hand-over token, its device ID,
+  read the code completes the handshake; a connection with another code, or one silent for 20
+  seconds, is dropped and the new phone keeps listening (several handshakes at once, so one
+  stalled connection holds up nothing). Both show a 6-digit code,
+  `u32(SHA-256("songbird.v1/transfer-code\0" || handshake hash)[0..4]) mod 10⁶`, and the user
+  confirms it on **both**: the old phone sends nothing before, and the new phone answers `OK`
+  and applies nothing before. Transport messages are Noise's (`len u16 | ciphertext`, at most
+  65,535 bytes), carrying a byte stream of records `kind u8 | len u32 | body` (at most the
+  largest manifest object): `1 HELLO` (account, hand-over token, its device ID,
   a one-time recovery key's secret), `2 CHUNK` (name and object), `3 MANIFEST`, `4 DONE`, and
   `5 OK` from the new phone once **every chunk is verified and the backup restored** (§11.6).
 - The backup is the format of §11 under the one-time key, written by the same run as every

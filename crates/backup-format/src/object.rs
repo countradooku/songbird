@@ -370,14 +370,6 @@ pub fn open_manifest(
     }
     let generation = manifest_generation(object)?;
     let hash = manifest_hash(object);
-    if let Some(s) = seen {
-        if generation < s.generation {
-            return Err(Error::Rollback);
-        }
-        if generation == s.generation && hash != s.hash {
-            return Err(Error::Fork);
-        }
-    }
     let (head, rest) = object
         .split_at_checked(MANIFEST_HEADER)
         .ok_or(Error::Malformed("manifest"))?;
@@ -401,6 +393,16 @@ pub fn open_manifest(
             Tag::from_slice(tag),
         )
         .map_err(|_| Error::Damaged("manifest"))?;
+    // Rollback and fork are judged on an authenticated header only: garbage from a store is
+    // damage, not a tamper alarm (D-0125).
+    if let Some(s) = seen {
+        if generation < s.generation {
+            return Err(Error::Rollback);
+        }
+        if generation == s.generation && hash != s.hash {
+            return Err(Error::Fork);
+        }
+    }
     let plain = unpad(buf, "manifest")?;
     let manifest = decode_manifest(&plain)?;
     if let Some(s) = seen

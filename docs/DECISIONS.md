@@ -20,6 +20,9 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 10 gate (`P10-gate.md`, D-0120 to D-0125): **waiting for the owner**. M1–M5 and the
+  security review's fixes are done; the gate's items pass. For the owner: approve the gate with
+  the threat-model rows (§1, §3.27, §6); register the Google, Microsoft and Dropbox OAuth apps.
 - Prompt 10 plan (`P10-plan.md`, D-0119): **approved by the owner on 2026-11-19** ("Approve
   all"), every recommendation: account recovery in scope, the 64-character recovery key with a
   check, the vault owned by an account (unlinking re-decided in Prompt 11), recovery by the
@@ -185,6 +188,84 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0125 — Prompt 10: the security review's fixes
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0119; the threat-model rows (§3.27, "review") await
+  the owner
+- Decided by: agent, within the owner's plan
+- Context: an independent, read-only review of the whole Prompt 10 diff (by a separate agent
+  given the code, not this session's conclusions) found no critical issue (the format's
+  cryptography, the Noise handshake against revision 34, the vault's authorization and the token
+  kinds held) and these problems, each fixed with a test:
+  1. **Medium–high: the transfer's six digits could be ground.** A man in the middle who knew the
+     code (filmed, or copied with "Copy code") could finish a handshake with the new phone, then
+     try responder keys against the old phone until its digits matched (about 2^20 tries); and the
+     new phone applied what it received without its user's confirmation.
+  2. **Medium: the vault quota could be exceeded** by two uploads racing for one name (one counted
+     small, the other stored large), or by an upload landing after its chunk was forgotten.
+  3. **Medium: objects written after a vault was turned off survived it** (an upload between
+     reservation and store, or after the worker's last listing), and a stale manifest swap could
+     land in a re-created vault.
+  4. **Medium: strangers could block a primary's hand-over and linking** (one shared per-account
+     throttle; recovery tokens counted towards the device limit), and the recovery endpoint told
+     whether an account exists.
+  5. Low: a connection that sent one byte stalled the transfer listener forever.
+  6. Low: a malicious store could make a restore keep huge objects (64 MiB each, or 4 GiB archive
+     entries) before any size check.
+  7. Low: two backup runs on one device could leave a backup naming a chunk the other collected.
+  8. Low: WebDAV took `http://`, sending the app password in clear.
+  9. Info: rollback and fork were judged on the unauthenticated header; the transfer's record
+     limit (9 MiB) was below the largest manifest; the recovery key alone taking over an account
+     without a PIN deserved saying in the app; OAuth `state` is not checked yet (nothing calls
+     the OAuth flow yet: checked when the redirect handler is wired, Prompt 10 follow-up).
+- Options considered (1): a longer code (more digits to compare, still grindable in principle);
+  SAS with a commitment (ZRTP, Bluetooth numeric comparison); removing "Copy code". Chosen: the
+  commitment, the new phone's own confirmation, and keeping "Copy code" (desktops have no
+  camera), now harmless on its own: the code gives one attempt at 10⁻⁶.
+- Options considered (4): cap outstanding recovery tokens per account, replacing older ones.
+  Rejected: a stranger could then cancel a recovery in progress; since recovery tokens no
+  longer count towards the device limit, the per-account throttle (20 an hour) bounds them.
+- Decision:
+  1. The new phone sends `SHA-256("songbird.v1/transfer-commit\0" || e_pub)` before the first
+     message; the old phone refuses a reply with another key. The vector gains the commitment
+     (the Noise messages are unchanged) and `transfer_check.py` re-derives it. The new phone asks
+     "Does your old phone show this code?" and answers `OK`, recovers and applies only after
+     "They match"; "They don't match" ends it with nothing changed.
+  2. A chunk's reservation returns the size recorded for an existing name; another size is 409
+     `size`. After storing, the upload checks its chunk is still recorded in the same epoch, and
+     deletes its object if not.
+  3. Reservation and manifest swap check the vault's epoch inside their transactions (gone
+     otherwise). `vault_gone` rows carry their time; the worker deletes the prefix at every sweep
+     and forgets the row only after `VAULT_GRACE` (15 minutes).
+  4. Hand-overs throttle per primary (`ht`), recovery tokens per account (`rt`); the device limit
+     counts only link tokens; an unknown or deleting account gets a token that is never stored.
+  5. `accept` runs up to eight handshakes at once, each with 20 seconds; the old phone's
+     handshake has the same timeout.
+  6. A restore refuses an object larger than `max_chunk_object()` before staging it; archive
+     index entries are bounded the same way.
+  7. Backup runs to one kind of store take turns in a process; before the swap, every chunk the
+     run reused from the listing is checked to be still there.
+  8. WebDAV and S3 take `http://` only to the device itself (`localhost`, loopback).
+  9. `open_manifest` checks the tag before judging rollback and fork; the transfer's record limit
+     is the largest chunk or manifest object; the app says where it shows the key that it can
+     move the account, and the Settings help says the key without a PIN is a takeover.
+- Evidence: `a_reply_must_carry_the_key_committed_to_before_the_first_message`,
+  `a_connection_that_stalls_does_not_hold_up_the_old_phone`, the vector and `transfer_check.py`;
+  `Screens_backups.test.tsx` (the new phone waits for its own "They match");
+  `a_name_keeps_its_size_and_late_uploads_leave_nothing`, the extended
+  `turning_backups_off_and_deleting_the_account_leave_nothing`;
+  `strangers_asking_for_recovery_tokens_block_neither_hand_over_nor_linking`;
+  `an_oversized_object_is_refused_before_it_is_kept`,
+  `runs_at_once_never_leave_a_backup_naming_missing_chunks`;
+  `a_password_never_goes_over_plain_http_to_another_computer`,
+  `plain_http_only_to_this_computer`; the garbage-manifest case in
+  `a_store_cannot_roll_back_or_fork_a_device_that_has_seen_a_backup`.
+- Consequences: the transfer protocol gains one message (PROTOCOL §11.9); the vault answers 409
+  `size` (§11.8); the hand-over flow on the new phone has one more tap. Still open and stated:
+  the recovery secret and credentials sit in NSH app storage until app-core's keychain (A0);
+  the OAuth `state` check comes with the redirect handler.
 
 ## D-0124 — Prompt 10, milestone 5: the app's backups, restore and transfer
 

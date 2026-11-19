@@ -3,10 +3,11 @@
 //! encrypted copy (Prompt 10; PROTOCOL §11.9).
 //!
 //! The new phone listens and shows a QR code; the old phone scans it (or
-//! pastes it), and both show the same six digits, which the user compares
-//! on the old phone before anything is sent. The new phone verifies the
-//! whole backup before it says yes, then becomes the account's main phone
-//! with the old phone's hand-over.
+//! pastes it), and both show the same six digits, which the user confirms
+//! on both phones: the old one sends nothing before, the new one answers
+//! and applies nothing before (D-0125). The new phone verifies the whole
+//! backup before it says yes, then becomes the account's main phone with
+//! the old phone's hand-over.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -56,6 +57,9 @@ pub(super) fn transfer_body() -> AnyElement {
     let failure = signal(None::<String>);
     let pasted = signal(String::new());
     let sending: Stored<Option<Sending>> = stored(None);
+    // The new phone: the user's answer to "do both phones show this code?".
+    let confirm: Stored<Option<tokio::sync::oneshot::Sender<bool>>> = stored(None);
+    let confirmed = signal(false);
     // Work started from a page's button must outlive that page's view (the
     // screen changes as soon as it starts), but not the transfer page: it
     // runs under the page's own owner.
@@ -91,6 +95,10 @@ pub(super) fn transfer_body() -> AnyElement {
         qr.set(String::new());
         pasted.set(String::new());
         sending.replace(None);
+        if let Some(c) = confirm.replace(None) {
+            let _ = c.send(false);
+        }
+        confirmed.set(false);
         role.set(None);
     };
     // The old phone: connects to the code it read.
@@ -158,12 +166,14 @@ pub(super) fn transfer_body() -> AnyElement {
                 };
                 qr.set(code.to_qr().to_string());
                 let (tx, mut rx) = tokio::sync::mpsc::channel::<u32>(1);
+                let (yes, answer) = tokio::sync::oneshot::channel::<bool>();
+                confirm.replace(Some(yes));
                 spawn(async move {
                     if let Some(c) = rx.recv().await {
                         let _ = digits.try_set(Some(c));
                     }
                 });
-                match bk::transfer_receive(l, code, tx, bk::transfer_folder()).await {
+                match bk::transfer_receive(l, code, tx, answer, bk::transfer_folder()).await {
                     Ok((restored, hello)) => {
                         stage.set(TransferStage::Moving(0.95));
                         if let Err(p) = bk::recover(&restored, bk::handover_of(&hello), None).await
@@ -292,11 +302,26 @@ pub(super) fn transfer_body() -> AnyElement {
                     Screen::Waiting => flow_layout(
                         view()
                             .gap_4()
-                            .child(flow_title("Check the code on your old phone"))
+                            .child(hero_icon(Icon::ShieldCheck))
+                            .child(flow_title("Does your old phone show this code?"))
                             .child(numeric_code(move || digits.get().map(six).unwrap_or_default()))
-                            .child(flow_lead("Your old phone asks whether it shows these six digits too. Everything starts once you say yes there."))
-                            .child(busy_bar("Waiting for your old phone")),
-                        view().child(btn("Cancel", Variant::Ghost, BtnSize::Md, restart).w_full()),
+                            .child(flow_lead("Confirm on both phones. If the digits differ, someone else may be connected: stop, and nothing changes on this phone."))
+                            .child(when(move || confirmed.get(), || busy_bar("Waiting for your old phone"))),
+                        view()
+                            .gap_2()
+                            .child(when(
+                                move || !confirmed.get(),
+                                move || {
+                                    btn("They match", Variant::Primary, BtnSize::Lg, move || {
+                                        if let Some(c) = confirm.replace(None) {
+                                            let _ = c.send(true);
+                                            confirmed.set(true);
+                                        }
+                                    })
+                                    .w_full()
+                                },
+                            ))
+                            .child(btn("They don't match", Variant::Ghost, BtnSize::Md, restart).w_full()),
                     ),
                     Screen::Pairing => flow_layout(
                         view()

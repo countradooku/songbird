@@ -124,12 +124,14 @@ async fn a_store_that_lost_a_seen_backup_is_reported() {
 /// The worst store without an atomic swap: it overwrites blindly. Two primaries backing up at
 /// once (only possible around an account recovery) never lose a backup silently: a device whose
 /// backup was overwritten is told, at once or at its next run, by the hash chain.
-struct Blind(MemoryStore);
+/// Each device's own view of the one shared store (runs on one device take turns; two devices
+/// don't know of each other).
+struct Blind(Arc<MemoryStore>, &'static str);
 
 #[async_trait::async_trait]
 impl BackupStore for Blind {
     fn kind(&self) -> &'static str {
-        "blind"
+        self.1
     }
     fn atomic_swap(&self) -> bool {
         false
@@ -173,7 +175,9 @@ impl BackupStore for Blind {
 async fn a_lost_race_on_a_store_without_an_atomic_swap_is_never_silent() {
     let k = keys(6);
     for round in 0..10u64 {
-        let store: Arc<dyn BackupStore> = Arc::new(Blind(MemoryStore::default()));
+        let shared = Arc::new(MemoryStore::default());
+        let store: Arc<dyn BackupStore> = Arc::new(Blind(Arc::clone(&shared), "blind-a"));
+        let other: Arc<dyn BackupStore> = Arc::new(Blind(shared, "blind-b"));
         let shape = |seed| songbird_backup_format::synth::Shape {
             seed,
             chats: 2,
@@ -190,7 +194,7 @@ async fn a_lost_race_on_a_store_without_an_atomic_swap_is_never_silent() {
             move |w| songbird_backup_format::synth::write(w, &shape(round * 2 + 1), 0).map(|_| ()),
         ));
         let b = tokio::spawn(run::backup(
-            Arc::clone(&store),
+            Arc::clone(&other),
             Arc::clone(&k),
             None,
             Options::default(),
@@ -214,5 +218,77 @@ async fn a_lost_race_on_a_store_without_an_atomic_swap_is_never_silent() {
                 );
             }
         }
+    }
+}
+
+const SMALL: songbird_backup_format::synth::Shape = songbird_backup_format::synth::Shape {
+    seed: 3,
+    chats: 2,
+    messages_per_chat: 50,
+    media_every: 10,
+    media_sizes: &[3_000],
+    contacts: 1,
+};
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_oversized_object_is_refused_before_it_is_kept() {
+    let k = keys(8);
+    let mem = Arc::new(MemoryStore::default());
+    let store: Arc<dyn BackupStore> = mem.clone();
+    run::backup(
+        Arc::clone(&store),
+        Arc::clone(&k),
+        None,
+        Options::default(),
+        move |w| songbird_backup_format::synth::write(w, &SMALL, 0).map(|_| ()),
+    )
+    .await
+    .unwrap();
+    let first = store.list().await.unwrap()[0];
+    let most = songbird_backup_format::object::max_chunk_object();
+    mem.tamper(&first, |o| o.resize(most + 1, 0));
+    let e = run::restore(store, k, None, MemoryStaging::default(), 2)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            e,
+            run::RunError::Format(songbird_backup_format::Error::Malformed("chunk"))
+        ),
+        "{e:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn runs_at_once_never_leave_a_backup_naming_missing_chunks() {
+    // A background run and one the user started, at once, many times over: whatever wins, the
+    // backup in the store restores.
+    let k = keys(9);
+    let store: Arc<dyn BackupStore> = Arc::new(MemoryStore::default());
+    for round in 0..6u32 {
+        let runs: Vec<_> = (0..3u32)
+            .map(|i| {
+                let (s, k) = (Arc::clone(&store), Arc::clone(&k));
+                tokio::spawn(async move {
+                    run::backup(s, k, None, Options::default(), move |w| {
+                        songbird_backup_format::synth::write_edited(w, &SMALL, round * 10 + i, i)
+                            .map(|_| ())
+                    })
+                    .await
+                })
+            })
+            .collect();
+        for r in runs {
+            let _ = r.await.unwrap();
+        }
+        run::restore(
+            Arc::clone(&store),
+            Arc::clone(&k),
+            None,
+            MemoryStaging::default(),
+            2,
+        )
+        .await
+        .unwrap();
     }
 }

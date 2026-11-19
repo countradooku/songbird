@@ -100,14 +100,18 @@ test("two app instances move a history through the transfer screens", async () =
   await oldPhone.press("Connect");
   await pause(2500);
   expect(oldPhone.texts()).toContain("Do both phones show this code?");
-  expect(newPhone.texts()).toContain("Check the code on your old phone");
+  expect(newPhone.texts()).toContain("Does your old phone show this code?");
   // Both show the same six digits.
   const digits = (app: any) => app.texts().find((x: string) => /^\d{3} \d{3}$/.test(x));
   expect(digits(oldPhone)).toBe(digits(newPhone));
   await snap(oldPhone, "shots/backups/transfer-old-compare.png");
-  await snap(newPhone, "shots/backups/transfer-new-waiting.png");
+  await snap(newPhone, "shots/backups/transfer-new-compare.png");
   await oldPhone.press("They match");
-  await pause(15000);
+  await pause(3000);
+  // The new phone answers and applies nothing until its user confirms too.
+  expect(newPhone.texts()).not.toContain("Transfer complete");
+  await newPhone.press("They match");
+  await pause(12000);
   expect(oldPhone.texts()).toContain("Transfer complete");
   expect(newPhone.texts()).toContain("Transfer complete");
   await snap(newPhone, "shots/backups/transfer-new-done.png");

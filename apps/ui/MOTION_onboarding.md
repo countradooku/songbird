@@ -26,6 +26,7 @@ lands at its end at once with reduced motion, or is gated on
 | Backup wizard, restore, transfer | Page changes | Slides 24pt (wizard, transfer) or rises 8pt (restore) and fades, `BASE`, ease-out | Instant |
 | Progress bars (backup now, restore, transfer) | Value grows | Fill scales on x from the left, `BASE`, ease-out (transform, not width) | Jumps |
 | Transfer (Prompt 10) | Compare and Waiting screens, a failure | The same page change as the other transfer pages (slide 24pt and fade, `BASE`); the six digits appear with the page, never animated on their own | Instant |
+| Transfer, new phone (D-0125) | "They match" pressed → waiting for the old phone | The button leaves and the indeterminate bar appears in place, no movement of the page (as the QR's bar) | Instant |
 | Transfer, new phone | Code being prepared → QR shown | The indeterminate bar (as "Creating your account") gives way to the QR in place; no movement of the page | Static bar |
 | Restore, new device | A typo in the key | Status line appears below the field (icon + sentence, Problem tone), no shake, no layout jump of the field | Same |
 | Backups | A problem after a real run | The warning banner and its button appear in the status card in place of the progress bar, colour only | Same |

@@ -206,33 +206,38 @@ impl Registry {
     }
 
     /// Records a chunk **before** its object is uploaded, so an upload that never completes is
-    /// still deleted with the vault. Returns whether it was new (an existing name is left
-    /// alone: same name, same plaintext).
+    /// still deleted with the vault. Returns `None` if it was new, or the size recorded for it
+    /// (an existing name is left alone: same name, same plaintext, so the same size; the caller
+    /// refuses another size, which is what keeps the quota exact, D-0125). `epoch` is the
+    /// incarnation the caller opened: a vault turned off (and perhaps opened again) since
+    /// answers as gone.
     ///
     /// # Errors
     /// [`VaultError::Full`], [`VaultError::Gone`].
     pub async fn vault_reserve_chunk(
         &self,
         key: &[u8; 32],
+        epoch: &[u8; 16],
         name: &[u8; 32],
         size: u64,
         quota: VaultQuota,
-    ) -> Result<bool, VaultError> {
+    ) -> Result<Option<u64>, VaultError> {
         let v = retrying(|| {
             self.db.query(
                 "BEGIN TRANSACTION;
-                 LET $row = (SELECT bytes, chunks FROM ONLY vault:[$k]);
-                 IF $row = NONE { THROW 'songbird:gone' };
-                 LET $new = (SELECT id FROM ONLY vchunk:[$k, $n]) = NONE;
-                 IF $new {
+                 LET $row = (SELECT bytes, chunks, epoch FROM ONLY vault:[$k]);
+                 IF $row = NONE OR $row.epoch != $ep { THROW 'songbird:gone' };
+                 LET $old = (SELECT VALUE size FROM ONLY vchunk:[$k, $n]);
+                 IF $old = NONE {
                    IF $row.bytes + $s > $maxb OR $row.chunks + 1 > $maxc { THROW 'songbird:full' };
                    CREATE vchunk:[$k, $n] SET vault = $k, name = $n, size = $s RETURN NONE;
                    UPDATE vault:[$k] SET bytes += $s, chunks += 1 RETURN NONE;
                  };
-                 RETURN $new;
+                 RETURN $old;
                  COMMIT TRANSACTION;",
                 vec![
                     var("k", bytes(key)),
+                    var("ep", bytes(epoch)),
                     var("n", bytes(name)),
                     var("s", int(size)),
                     var("maxb", int(quota.bytes)),
@@ -241,7 +246,37 @@ impl Registry {
             )
         })
         .await?;
-        Ok(v.iter().rev().any(|x| matches!(x, Value::Bool(true))))
+        Ok(v.iter()
+            .rev()
+            .find_map(first_int)
+            .and_then(|n| u64::try_from(n).ok()))
+    }
+
+    /// Whether a chunk is still recorded in the incarnation `epoch` of a vault: checked after
+    /// an upload, whose object is deleted again if the chunk was forgotten or the vault turned
+    /// off while it was in flight (D-0125).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn vault_chunk_live(
+        &self,
+        key: &[u8; 32],
+        epoch: &[u8; 16],
+        name: &[u8; 32],
+    ) -> Result<bool, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "RETURN (SELECT VALUE epoch FROM ONLY vault:[$k]) = $ep
+                   AND (SELECT id FROM ONLY vchunk:[$k, $n]) != NONE;",
+                vec![
+                    var("k", bytes(key)),
+                    var("ep", bytes(epoch)),
+                    var("n", bytes(name)),
+                ],
+            )
+            .await?;
+        Ok(matches!(v, Value::Bool(true)))
     }
 
     /// Whether a chunk is recorded.
@@ -333,9 +368,14 @@ impl Registry {
     /// # Errors
     /// [`VaultError::Generation`] with the current one, [`VaultError::Full`],
     /// [`VaultError::Gone`].
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the vault, its incarnation, the swap and the quota"
+    )]
     pub async fn vault_swap_manifest(
         &self,
         key: &[u8; 32],
+        epoch: &[u8; 16],
         expected: u64,
         next: u64,
         suffix: &[u8; 16],
@@ -345,8 +385,8 @@ impl Registry {
         let r = retrying(|| {
             self.db.query(
                 "BEGIN TRANSACTION;
-                 LET $row = (SELECT gen, man, mbytes, bytes FROM ONLY vault:[$k]);
-                 IF $row = NONE { THROW 'songbird:gone' };
+                 LET $row = (SELECT gen, man, mbytes, bytes, epoch FROM ONLY vault:[$k]);
+                 IF $row = NONE OR $row.epoch != $ep { THROW 'songbird:gone' };
                  IF $row.gen != $e { THROW 'songbird:generation' };
                  IF $row.bytes - ($row.mbytes ?? 0) + $s > $maxb { THROW 'songbird:full' };
                  UPDATE vault:[$k] SET gen = $next, man = $m, mbytes = $s,
@@ -355,6 +395,7 @@ impl Registry {
                  COMMIT TRANSACTION;",
                 vec![
                     var("k", bytes(key)),
+                    var("ep", bytes(epoch)),
                     var("e", int(expected)),
                     var("next", int(next)),
                     var("m", bytes(suffix)),
@@ -391,7 +432,7 @@ impl Registry {
                 "BEGIN TRANSACTION;
                  LET $ep = (SELECT VALUE epoch FROM ONLY vault:[$k]);
                  IF $ep != NONE {
-                   CREATE vault_gone:[$ep] SET vault = $k RETURN NONE;
+                   CREATE vault_gone:[$ep] SET vault = $k, at = time::now() RETURN NONE;
                    DELETE vchunk WHERE vault = $k RETURN NONE;
                    DELETE vault_owner:[$k] RETURN NONE;
                    DELETE vault:[$k] RETURN NONE;
@@ -440,18 +481,27 @@ impl Registry {
             .collect()
     }
 
-    /// Forgets a turned-off vault once its objects are deleted.
+    /// Forgets a turned-off vault once its objects are deleted, but only once it has been off
+    /// for `grace`: until then every sweep lists its prefix again, so an upload that was in
+    /// flight when it was turned off, and landed after a sweep, is deleted too (D-0125).
+    /// Returns whether it was forgotten.
     ///
     /// # Errors
     /// [`RegistryError`].
-    pub async fn vault_gone_done(&self, epoch: &[u8; 16]) -> Result<(), RegistryError> {
-        self.db
-            .query(
-                "DELETE vault_gone:[$e] RETURN NONE;",
-                vec![var("e", bytes(epoch))],
+    pub async fn vault_gone_done(
+        &self,
+        epoch: &[u8; 16],
+        grace: std::time::Duration,
+    ) -> Result<bool, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "RETURN count(DELETE vault_gone:[$e]
+                   WHERE at < time::now() - duration::from_secs($g) RETURN BEFORE);",
+                vec![var("e", bytes(epoch)), var("g", int(grace.as_secs()))],
             )
             .await?;
-        Ok(())
+        Ok(first_int(&v).is_some_and(|n| n > 0))
     }
 
     /// The vaults an account owns (for its deletion and export).

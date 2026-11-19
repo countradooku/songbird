@@ -113,7 +113,8 @@ impl WebDavStore {
     /// A store in the folder `cfg.url` names.
     ///
     /// # Errors
-    /// [`StoreError::Protocol`] for a URL that is not `http(s)://host/…`.
+    /// [`StoreError::Protocol`] for a URL that is not `https://host/…` (or `http://` to this
+    /// computer).
     pub fn new(http: Arc<dyn Http>, cfg: &WebDavConfig) -> Result<Self, StoreError> {
         let mut url = cfg.url.clone();
         if !url.ends_with('/') {
@@ -131,6 +132,11 @@ impl WebDavStore {
             .and_then(|r| r.find('/'))
             .ok_or(StoreError::Protocol("url"))?
             + scheme;
+        if scheme == 7
+            && !crate::http::plain_http_allowed(url.get(scheme..slash).unwrap_or_default())
+        {
+            return Err(StoreError::Protocol("https"));
+        }
         Ok(Self {
             http,
             base: url.get(..slash).unwrap_or_default().to_owned(),
@@ -360,6 +366,25 @@ impl WebDavStore {
 mod tests {
     #![allow(clippy::unwrap_used, reason = "tests")]
     use super::*;
+
+    #[test]
+    fn a_password_never_goes_over_plain_http_to_another_computer() {
+        let http: Arc<dyn Http> = Arc::new(crate::http::HyperHttp::new(&[]).unwrap());
+        let cfg = |url: &str| WebDavConfig {
+            url: url.into(),
+            user: "u".into(),
+            password: Zeroizing::new("p".into()),
+        };
+        assert!(matches!(
+            WebDavStore::new(
+                Arc::clone(&http),
+                &cfg("http://nas.local/remote.php/dav/files/u/")
+            ),
+            Err(StoreError::Protocol("https"))
+        ));
+        assert!(WebDavStore::new(Arc::clone(&http), &cfg("https://nas.local/dav/")).is_ok());
+        assert!(WebDavStore::new(http, &cfg("http://127.0.0.1:8080/dav/")).is_ok());
+    }
 
     #[test]
     fn hrefs_are_read_whatever_the_prefix() {

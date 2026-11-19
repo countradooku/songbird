@@ -812,12 +812,15 @@ pub async fn transfer_listen() -> Result<(tokio::net::TcpListener, Code), Proble
 /// What the new phone verified: the records and the old phone's `HELLO`.
 type Verified = (Vec<Rec>, Hello);
 
-/// The new phone: waits for the old one; `on_code` gets the 6-digit code to compare; then
-/// receives, verifies and returns the backup and the hand-over.
+/// The new phone: waits for the old one; `codes` gets the 6-digit code to compare; then
+/// receives and verifies the backup, and returns it and the hand-over only once `confirmed`
+/// says the user saw the same digits on this phone too: nothing is answered or applied before
+/// (D-0125).
 pub async fn transfer_receive(
     l: tokio::net::TcpListener,
     code: Code,
     codes: tokio::sync::mpsc::Sender<u32>,
+    confirmed: tokio::sync::oneshot::Receiver<bool>,
     into_dir: PathBuf,
 ) -> Result<(Restored, Hello), Problem> {
     let r = background(async move {
@@ -837,14 +840,18 @@ pub async fn transfer_receive(
             else {
                 return false;
             };
-            let b = Backup::new(&keys, &r.opened.manifest, &r.staging);
-            let Ok(records) = b
+            let Ok(records) = Backup::new(&keys, &r.opened.manifest, &r.staging)
                 .records()
                 .map(|x| x.map(|r| r.body))
                 .collect::<Result<Vec<_>, _>>()
             else {
                 return false;
             };
+            drop(r);
+            // The user compares the digits on this phone too before anything is answered.
+            if confirmed.await != Ok(true) {
+                return false;
+            }
             *v2.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
                 Some((records.into_iter().flatten().collect(), h));
             true
@@ -1167,11 +1174,15 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let into =
             std::env::temp_dir().join(format!("sb-transfer-{}", wire::hex(&wire::random::<6>())));
-        let new_phone = tokio::spawn(async move { transfer_receive(l, code, tx, into).await });
+        let (yes, confirmed) = tokio::sync::oneshot::channel();
+        let new_phone =
+            tokio::spawn(async move { transfer_receive(l, code, tx, confirmed, into).await });
         let sending = transfer_connect(qr).await.unwrap();
         let shown_old = sending.code;
         let shown_new = rx.recv().await.unwrap();
         assert_eq!(shown_old, shown_new);
+        // The new phone's user confirms the digits too.
+        yes.send(true).unwrap();
         transfer_send(sending, snap, Arc::new(AtomicU32::new(0)), None)
             .await
             .unwrap();

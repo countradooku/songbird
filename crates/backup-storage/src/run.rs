@@ -43,6 +43,42 @@ pub enum RunError {
     Join,
 }
 
+/// The lock serializing backup runs to one kind of store in this process.
+fn run_lock(kind: &'static str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::Mutex<
+        std::collections::BTreeMap<&'static str, Arc<tokio::sync::Mutex<()>>>,
+    > = std::sync::Mutex::new(std::collections::BTreeMap::new());
+    let mut m = LOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Arc::clone(m.entry(kind).or_default())
+}
+
+/// Whether every chunk `manifest` names that this run did not upload itself (it reused it from
+/// the store's listing) is still in the store.
+async fn reused_present(
+    store: &dyn BackupStore,
+    manifest: &Manifest,
+    put_names: &HashSet<ChunkName>,
+) -> Result<(), RunError> {
+    // Only what this run reused rather than uploaded needs looking for.
+    let mut reused = HashSet::new();
+    for c in manifest.streams.iter().flat_map(|s| s.chunks.iter()) {
+        let n = ChunkName::from_slice(&c.name)
+            .ok_or(songbird_backup_format::Error::Malformed("manifest"))?;
+        if !put_names.contains(&n) {
+            reused.insert(n);
+        }
+    }
+    if !reused.is_empty() {
+        let present: HashSet<ChunkName> = store.list().await?.into_iter().collect();
+        if !reused.is_subset(&present) {
+            return Err(songbird_backup_format::Error::Missing.into());
+        }
+    }
+    Ok(())
+}
+
 /// What a backup run did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Done {
@@ -111,6 +147,10 @@ where
         + Send
         + 'static,
 {
+    // One run per kind of store at a time in this process: a run's collection of unreferenced
+    // chunks must not delete what another run is about to reference (D-0125).
+    let lock = run_lock(store.kind());
+    let _held = lock.lock().await;
     store.open().await?;
     let prev = current(store.as_ref(), &keys, seen).await?;
     let stored: Vec<ChunkName> = store.list().await?;
@@ -141,12 +181,14 @@ where
         Ok::<_, songbird_backup_format::Error>((obj, manifest, stats))
     });
     // Upload as chunks arrive, `concurrency` at a time; the first failure stops the writer.
+    let mut put_names: HashSet<ChunkName> = HashSet::new();
     let uploads = async {
         let mut inflight = futures_util::stream::FuturesUnordered::new();
         loop {
             tokio::select! {
                 next = rx.recv(), if inflight.len() < opts.concurrency.max(1) => match next {
                     Some((name, obj)) => {
+                        put_names.insert(name);
                         let s = Arc::clone(&store);
                         inflight.push(async move { put_retrying(s.as_ref(), &name, obj).await });
                     }
@@ -164,6 +206,9 @@ where
     let written = writer.await.map_err(|_| RunError::Join)?;
     uploaded?;
     let (obj, manifest, stats) = written?;
+    // Every chunk the new manifest names is in the store before it becomes the backup (a chunk
+    // listed at the start may have gone since, for instance collected by a run elsewhere).
+    reused_present(store.as_ref(), &manifest, &put_names).await?;
     let hash = object::manifest_hash(&obj);
     store.swap_manifest(generation, obj).await?;
     if !store.atomic_swap() {
@@ -342,8 +387,13 @@ where
         }
     }))
     .buffer_unordered(concurrency.max(1));
+    let most = object::max_chunk_object();
     while let Some(r) = downloads.next().await {
         let (n, o) = r?;
+        // Bounded before it is kept: a store can't fill memory or disk with oversized objects.
+        if o.len() > most {
+            return Err(songbird_backup_format::Error::Malformed("chunk").into());
+        }
         staging.put(&n, o)?;
     }
     let k = Arc::clone(&keys);

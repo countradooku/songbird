@@ -449,6 +449,15 @@ fn a_store_cannot_roll_back_or_fork_a_device_that_has_seen_a_backup() {
     let h1 = object::manifest_hash(&o1);
     let (o2, m2, _, _) = backup(&k, &mut store, &SHAPE, 3, Some((&m1, h1, 1)), SMALL);
     let seen2 = object::open_manifest(&k, &o2, None).unwrap().seen();
+    // Garbage with an older or equal generation in its header is damage, not a tamper alarm:
+    // only an authenticated header is judged.
+    let mut junk = o1.clone();
+    let last = junk.len() - 1;
+    junk[last] ^= 1;
+    assert!(matches!(
+        object::open_manifest(&k, &junk, Some(seen2)),
+        Err(Error::Damaged(_))
+    ));
     // An older backup after a newer one: refused.
     assert!(matches!(
         object::open_manifest(&k, &o1, Some(seen2)),

@@ -1085,14 +1085,15 @@ impl Devices {
         {
             return o;
         }
+        // Strangers asking for recovery tokens are throttled per account; the primary's
+        // hand-overs on their own budget, keyed by the primary, so strangers can't use them up
+        // (D-0125).
+        let (kind, subject) = match issuer {
+            None => ("rt", account.as_bytes().as_slice()),
+            Some(p) => ("ht", p.as_bytes().as_slice()),
+        };
         if let Err(o) = self
-            .throttle(
-                hot,
-                "rt",
-                account.as_bytes(),
-                s.tokens_per_hour,
-                s.token_burst,
-            )
+            .throttle(hot, kind, subject, s.tokens_per_hour, s.token_burst)
             .await
         {
             return o;
@@ -1122,6 +1123,15 @@ impl Devices {
                     }));
                 }
                 Err(RegistryError::Exists) => {}
+                // A stranger learns nothing about whether the account exists: a token that is
+                // never stored, refused later as any wrong token is (D-0125).
+                Err(RegistryError::NotFound) if issuer.is_none() => {
+                    return Outcome::Json(serde_json::json!({
+                        "token": hex::encode(token),
+                        "device": device.to_hex_unredacted(),
+                        "expires_in": s.link_token_ttl_secs,
+                    }));
+                }
                 Err(RegistryError::NotFound) => return self.refused(Outcome::NotFound),
                 Err(RegistryError::NotPrimary) => {
                     return self.refused(Outcome::Conflict("primary"));

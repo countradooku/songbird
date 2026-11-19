@@ -269,7 +269,12 @@ impl ArchiveStore {
         }
         let mut at = f.stream_position().await?;
         let mut index = std::collections::BTreeMap::new();
+        let most = songbird_backup_format::object::max_chunk_object();
         for (name, l) in entries {
+            // No entry larger than a chunk object can be (a sparse file costs nothing to make).
+            if usize::try_from(l).map_or(true, |l| l > most) {
+                return Err(StoreError::Protocol("archive"));
+            }
             index.insert(name, (at, l));
             at = at
                 .checked_add(u64::from(l))

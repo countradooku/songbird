@@ -1636,3 +1636,56 @@ async fn after_the_lock_the_right_pin_recovers() {
     let (st, _, _) = recover(&s, &p, &p.account_key, true, Factor::None, |_| {}).await;
     assert_eq!(st, 401);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn strangers_asking_for_recovery_tokens_block_neither_hand_over_nor_linking() {
+    let Some(s) = stack(DeviceSettings {
+        max_devices: 2,
+        tokens_per_hour: 1,
+        token_burst: 3,
+        links_per_hour: 1000,
+        link_burst: 100,
+        ..settings()
+    })
+    .await
+    else {
+        return;
+    };
+    let p = primary(&s).await;
+    let ask = |account: String| async move {
+        let body = format!(r#"{{"account":"{account}"}}"#);
+        unsigned(
+            s.addr,
+            SERVER,
+            "POST",
+            "/v1/account/recover/token",
+            Some(body.as_bytes()),
+        )
+        .await
+        .unwrap()
+        .0
+    };
+    // A stranger uses up the account's recovery budget.
+    let mut codes = vec![];
+    for _ in 0..5 {
+        codes.push(ask(p.account.to_hex_unredacted()).await);
+    }
+    assert_eq!(&codes[..3], &[200, 200, 200]);
+    assert_eq!(codes[4], 429);
+    // The primary still hands over (its own budget), and still links a device: recovery tokens
+    // are not devices on their way in.
+    let (st, _) = p
+        .client
+        .send("POST", "/v1/account/handover", None)
+        .await
+        .unwrap();
+    assert_eq!(st, 200);
+    let (st, b) = p
+        .client
+        .send("POST", "/v1/devices/link-token", None)
+        .await
+        .unwrap();
+    assert_eq!(st, 200, "{}", String::from_utf8_lossy(&b));
+    // An account that doesn't exist answers as one that does.
+    assert_eq!(ask(hex::encode(&rand32()[..16])).await, 200);
+}

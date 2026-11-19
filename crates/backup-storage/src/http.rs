@@ -17,6 +17,22 @@ use tokio::net::TcpStream;
 
 use crate::store::StoreError;
 
+/// Whether `authority` (`host[:port]` or `[v6]:port`) may be reached over plain `http://`: only
+/// this computer. Elsewhere, even on a home network, credentials (WebDAV's password) and signed
+/// requests travel only over TLS (D-0125).
+#[must_use]
+pub fn plain_http_allowed(authority: &str) -> bool {
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split(']').next().unwrap_or_default()
+    } else {
+        authority.rsplit_once(':').map_or(authority, |(h, _)| h)
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 /// One request.
 #[derive(Clone, Default)]
 pub struct Request {
@@ -301,6 +317,28 @@ impl Http for HyperHttp {
 mod tests {
     #![allow(clippy::unwrap_used, reason = "tests")]
     use super::*;
+
+    #[test]
+    fn plain_http_only_to_this_computer() {
+        for ok in [
+            "127.0.0.1:8080",
+            "localhost",
+            "LOCALHOST:1",
+            "[::1]:9000",
+            "127.9.9.9",
+        ] {
+            assert!(plain_http_allowed(ok), "{ok}");
+        }
+        for no in [
+            "nas.local",
+            "192.168.1.5:80",
+            "[fe80::1]:80",
+            "10.0.0.1",
+            "example.com",
+        ] {
+            assert!(!plain_http_allowed(no), "{no}");
+        }
+    }
 
     #[test]
     fn urls_parse_strictly() {

@@ -22,7 +22,7 @@ use songbird_backup_format::{OsRng, RecoveryKey};
 use songbird_backup_storage::BackupStore;
 use songbird_backup_storage::local::LocalStore;
 use songbird_backup_storage::run::{self, Options};
-use songbird_backup_storage::transfer::{self, Code, Hello, PipeStore, TransferError};
+use songbird_backup_storage::transfer::{self, Code, Hello, PipeStore, Responder, TransferError};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use zeroize::Zeroizing;
 
@@ -55,6 +55,18 @@ fn qr_codes_round_trip_and_anything_else_is_refused() {
     assert!(!format!("{c:?}").contains("7, 7"));
 }
 
+/// One handshake in memory: the responder commits, the initiator starts, the responder answers.
+fn shake(
+    initiator: &Code,
+    responder: &Code,
+) -> Result<(transfer::Session, transfer::Session), TransferError> {
+    let (r, committed) = Responder::new(responder, None)?;
+    let (m1, finish) = transfer::initiator_start(initiator, committed, None)?;
+    assert_eq!(m1.len(), 48);
+    let (m2, rs) = r.respond(&m1)?;
+    Ok((finish(&m2)?, rs))
+}
+
 #[test]
 fn both_phones_agree_and_another_code_fails() {
     let code = Code {
@@ -62,29 +74,46 @@ fn both_phones_agree_and_another_code_fails() {
         port: 1,
         addrs: loopback(),
     };
-    let (m1, finish) = transfer::initiator_start(&code, None).unwrap();
-    assert_eq!(m1.len(), 48);
-    let (m2, responder) = transfer::respond(&code, &m1, None).unwrap();
-    let initiator = finish(&m2).unwrap();
+    let (initiator, responder) = shake(&code, &code).unwrap();
     assert_eq!(initiator.code, responder.code);
     assert_eq!(initiator.hash, responder.hash);
     // Another code (one bit of the key, or the port, which the prologue binds): refused.
     let mut other = code.clone();
     other.psk[0] ^= 1;
-    assert!(transfer::respond(&other, &m1, None).is_err());
+    assert!(shake(&code, &other).is_err());
     let mut moved = code.clone();
     moved.port = 2;
-    assert!(transfer::respond(&moved, &m1, None).is_err());
+    assert!(shake(&moved, &code).is_err());
     // A reply from someone with another code: refused by the initiator.
-    let (m1b, finish_b) = transfer::initiator_start(&code, None).unwrap();
-    let (m2_other, _) = transfer::respond(
-        &other,
-        &transfer::initiator_start(&other, None).unwrap().0,
-        None,
-    )
-    .unwrap();
-    let _ = m1b;
-    assert!(finish_b(&m2_other).is_err());
+    let (r, committed) = Responder::new(&code, None).unwrap();
+    let (_, finish) = transfer::initiator_start(&code, committed, None).unwrap();
+    let (r_other, c_other) = Responder::new(&other, None).unwrap();
+    let (m2_other, _) = r_other
+        .respond(&transfer::initiator_start(&other, c_other, None).unwrap().0)
+        .unwrap();
+    drop(r);
+    assert!(finish(&m2_other).is_err());
+}
+
+#[test]
+fn a_reply_must_carry_the_key_committed_to_before_the_first_message() {
+    // A man in the middle who knows the code answers the old phone with a key other than the
+    // one it committed to (as it would, trying keys until the six digits matched): refused.
+    let code = Code {
+        psk: Zeroizing::new([7; 32]),
+        port: 9,
+        addrs: loopback(),
+    };
+    let (_committed_one, committed) = Responder::new(&code, None).unwrap();
+    let (m1, finish) = transfer::initiator_start(&code, committed, None).unwrap();
+    let (ground, _) = Responder::new(&code, None).unwrap();
+    let (m2, _) = ground.respond(&m1).unwrap();
+    assert!(matches!(finish(&m2), Err(TransferError::Handshake)));
+    // The commitment is SHA-256 of a context and the key.
+    let (_, c) = Responder::new(&code, Some([0x22; 32])).unwrap();
+    let mut x = [0u8; 32];
+    x.copy_from_slice(&m2[..32]);
+    assert_ne!(transfer::commitment(&x), c);
 }
 
 #[test]
@@ -94,8 +123,9 @@ fn the_handshake_matches_its_published_vector() {
         port: 50_000,
         addrs: loopback(),
     };
-    let (m1, finish) = transfer::initiator_start(&code, Some([0x11; 32])).unwrap();
-    let (m2, responder) = transfer::respond(&code, &m1, Some([0x22; 32])).unwrap();
+    let (r, committed) = Responder::new(&code, Some([0x22; 32])).unwrap();
+    let (m1, finish) = transfer::initiator_start(&code, committed, Some([0x11; 32])).unwrap();
+    let (m2, responder) = r.respond(&m1).unwrap();
     let i = finish(&m2).unwrap();
     assert_eq!(i.hash, responder.hash);
     let v = json!({
@@ -104,6 +134,7 @@ fn the_handshake_matches_its_published_vector() {
         "psk": hex::encode(*code.psk),
         "initiator_ephemeral": hex::encode([0x11; 32]),
         "responder_ephemeral": hex::encode([0x22; 32]),
+        "commitment": hex::encode(committed),
         "message_1": hex::encode(&m1),
         "message_2": hex::encode(&m2),
         "handshake_hash": hex::encode(i.hash),
@@ -277,4 +308,23 @@ async fn a_relay_with_another_code_and_tampering_in_transit_both_fail() {
     // The handshake went through the relay untouched; the first record arrives flipped.
     let r = new_phone.await.unwrap();
     assert!(matches!(r, Err(TransferError::Tampered)), "{r:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_connection_that_stalls_does_not_hold_up_the_old_phone() {
+    // Something on the network connects first and sends one byte, then nothing.
+    let (listener, code) = transfer::listen(loopback()).await.unwrap();
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], code.port));
+    let mut stalled = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stalled.write_all(&[0]).await.unwrap();
+    let real = code.clone();
+    let accepting =
+        tokio::spawn(async move { transfer::accept(&listener, &real).await.map(|c| c.code()) });
+    // The old phone still gets through at once, not after the stalled one's timeout.
+    let ok = tokio::time::timeout(std::time::Duration::from_secs(5), transfer::connect(&code))
+        .await
+        .expect("not held up")
+        .unwrap();
+    assert_eq!(accepting.await.unwrap().unwrap(), ok.code());
+    drop(stalled);
 }

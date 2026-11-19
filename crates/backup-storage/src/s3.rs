@@ -80,7 +80,8 @@ impl S3Store {
     /// A store in `cfg`'s bucket.
     ///
     /// # Errors
-    /// [`StoreError::Protocol`] for an endpoint that is not `http(s)://host[:port]`.
+    /// [`StoreError::Protocol`] for an endpoint that is not `https://host[:port]` (or `http://`
+    /// to this computer).
     pub fn new(http: Arc<dyn Http>, mut cfg: S3Config) -> Result<Self, StoreError> {
         let host = cfg
             .endpoint
@@ -89,6 +90,9 @@ impl S3Store {
             .filter(|h| !h.is_empty() && !h.contains('/'))
             .ok_or(StoreError::Protocol("endpoint"))?
             .to_owned();
+        if cfg.endpoint.starts_with("http://") && !crate::http::plain_http_allowed(&host) {
+            return Err(StoreError::Protocol("https"));
+        }
         if !cfg.prefix.is_empty() && !cfg.prefix.ends_with('/') {
             cfg.prefix.push('/');
         }

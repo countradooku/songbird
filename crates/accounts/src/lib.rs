@@ -306,6 +306,7 @@ DEFINE FIELD IF NOT EXISTS bytes ON vault TYPE int;
 DEFINE FIELD IF NOT EXISTS chunks ON vault TYPE int;
 DEFINE TABLE IF NOT EXISTS vault_gone SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS vault ON vault_gone TYPE bytes;
+DEFINE FIELD IF NOT EXISTS at ON vault_gone TYPE datetime DEFAULT time::now();
 DEFINE TABLE IF NOT EXISTS vault_owner SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS account ON vault_owner TYPE bytes;
 DEFINE INDEX IF NOT EXISTS vault_owner_account ON vault_owner FIELDS account;

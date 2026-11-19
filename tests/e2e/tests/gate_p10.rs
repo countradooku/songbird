@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair as _};
 use bytes::Bytes;
-use songbird_accounts::{Db, Registry};
+use songbird_accounts::{Db, Registry, VaultError, VaultQuota};
 use songbird_api::client::ApiClient;
 use songbird_api::config::VaultSettings;
 use songbird_api::{ApiMetrics, App};
@@ -501,6 +501,101 @@ async fn the_quota_holds() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_name_keeps_its_size_and_late_uploads_leave_nothing() {
+    let Some(s) = stack(1 << 30).await else {
+        return;
+    };
+    let owner = account(&s, 0).await;
+    let keys = new_keys();
+    let st = store(&s, &keys, Some(&owner[0]));
+    st.open().await.unwrap();
+    let (n, o) = chunk(&keys);
+    st.put(&n, o.clone()).await.unwrap();
+    // The same name with an object of another size: refused, so racing uploads of one name
+    // can't count a small object and store a large one.
+    let big = object::seal_chunk(&keys, &n, &vec![7u8; 50_000], &mut OsRng).unwrap();
+    assert_ne!(big.len(), o.len());
+    assert!(matches!(
+        st.put(&n, big).await,
+        Err(StoreError::Protocol("conflict"))
+    ));
+    // The same size again is fine (an upload retried).
+    st.put(&n, o).await.unwrap();
+    let vault = s.app.vault.as_ref().unwrap();
+    let vk = vault.vault_key(&keys.vault_id);
+    let epoch = s.app.registry.vault(&vk).await.unwrap().unwrap().epoch;
+    assert!(
+        s.app
+            .registry
+            .vault_chunk_live(&vk, &epoch, &n.0)
+            .await
+            .unwrap()
+    );
+    // Forgotten while an upload was in flight: the upload's check finds it gone.
+    s.app
+        .registry
+        .vault_forget_chunks(&vk, &[n.0])
+        .await
+        .unwrap();
+    assert!(
+        !s.app
+            .registry
+            .vault_chunk_live(&vk, &epoch, &n.0)
+            .await
+            .unwrap()
+    );
+    // Turned off and opened again with the same key: the old incarnation's writes are refused.
+    let (n2, o2) = chunk(&keys);
+    st.put(&n2, o2).await.unwrap();
+    st.destroy().await.unwrap();
+    let again = store(&s, &keys, Some(&owner[0]));
+    again.open().await.unwrap();
+    assert!(
+        !s.app
+            .registry
+            .vault_chunk_live(&vk, &epoch, &n2.0)
+            .await
+            .unwrap()
+    );
+    assert!(matches!(
+        s.app
+            .registry
+            .vault_reserve_chunk(
+                &vk,
+                &epoch,
+                &n2.0,
+                2048,
+                VaultQuota {
+                    bytes: 1 << 30,
+                    chunks: 100
+                }
+            )
+            .await,
+        Err(VaultError::Gone)
+    ));
+    assert!(matches!(
+        s.app
+            .registry
+            .vault_swap_manifest(
+                &vk,
+                &epoch,
+                0,
+                1,
+                &[1; 16],
+                2048,
+                VaultQuota {
+                    bytes: 1 << 30,
+                    chunks: 100
+                }
+            )
+            .await,
+        Err(VaultError::Gone)
+    ));
+    again.destroy().await.unwrap();
+    s.worker.sweep().await;
+}
+
 async fn objects(s: &Stack) -> usize {
     s.vault_s3
         .list_objects_v2("", None, 1000)
@@ -546,6 +641,24 @@ async fn turning_backups_off_and_deleting_the_account_leave_nothing() {
         .await
         .unwrap();
     assert!(left.objects.is_empty());
+    // Its prefix is listed again by every sweep for a grace (an upload in flight when it was
+    // turned off may land later), then forgotten.
+    let gone = s.app.registry.vaults_gone(10).await.unwrap();
+    assert_eq!(gone.len(), 1);
+    assert!(
+        !s.app
+            .registry
+            .vault_gone_done(&gone[0].1, songbird_worker::VAULT_GRACE)
+            .await
+            .unwrap()
+    );
+    assert!(
+        s.app
+            .registry
+            .vault_gone_done(&gone[0].1, Duration::ZERO)
+            .await
+            .unwrap()
+    );
     assert!(s.app.registry.vaults_gone(10).await.unwrap().is_empty());
     assert!(objects(&s).await > 0);
     // The same key opens a new, empty vault at once.

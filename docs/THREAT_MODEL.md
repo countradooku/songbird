@@ -601,6 +601,9 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
 | Two devices overwriting each other's backup | T | Concurrency | Compare-and-swap on the generation in one transaction; the loser's manifest object deleted | conformance: eight racing writers, one winner (`the_vault_passes_the_conformance_suite`) |
 | A vault outliving its account, or a turned-off vault's objects left behind | I | Insider, later breach | The worker retires every vault of a deleted account and deletes every object under its prefix, verified by listing; a turned-off vault's rows go at once and its objects at the next sweep | `turning_backups_off_and_deleting_the_account_leave_nothing` |
 | The server learning how much someone chats from the vault's size over time | I | Server, insider | Stated: the owner, byte and chunk counts and the generation are known (no times); unlinking from the account is re-decided with Prompt 11's anonymous credentials (D-0119 §3) | §1; D-0119 |
+| A cloud provider (Google, Microsoft, Dropbox, a `WebDAV` host, an S3 operator, Apple) reading or altering a backup | I, T | The provider, legal compulsion of it | The same encryption as the vault (the provider holds only ciphertext under keyed names); the app folder scopes (`drive.appdata`, `Files.ReadWrite.AppFolder`, an App Folder app) keep the app out of the user's other files and other apps out of the backup; alteration fails the tag, rollback the chain | conformance suite on every adapter; M1's corruption tests |
+| OAuth tokens or cloud passwords leaking to Songbird or to logs | I | Songbird's servers, a log reader | Tokens and app passwords live on the device only (keychain), adapters run there; PKCE, no client secret, a random `state`; `Debug` prints type names only; OneDrive's pre-authenticated URLs never receive the bearer token | `a_revoked_token_is_reported_not_retried_forever`, the OneDrive emulator's check, `debug_hides_headers_and_urls` |
+| Two writers on a store without an atomic swap (`WebDAV`, Google Drive) losing a backup | T | Concurrency (two primaries around an account recovery) | `atomic_swap() == false`: read-back after the swap; the hash chain turns an overwrite into a reported fork | `a_lost_race_on_a_store_without_an_atomic_swap_is_never_silent`; D-0122 |
 
 ## 4. Server-enforced settings
 
@@ -649,6 +652,13 @@ data than of any account, plus the policy row in §1.
 
 ## 6. Open risks
 
+- Backups in third-party clouds (Prompt 10, D-0122): the provider sees that an app folder
+  exists, how many objects it holds, their padded sizes and when they change, and the
+  account's IP addresses. `WebDAV` servers and Google Drive cannot swap the manifest
+  atomically: two primaries backing up at once (around an account recovery) may overwrite one
+  another, reported as a fork at the next run rather than lost silently. A brand-new device
+  cannot tell an older backup from the newest (no generation seen yet). Google Drive, OneDrive
+  and Dropbox are tested against emulators until the owner registers the OAuth apps.
 - The nightly TSan run suppresses one report inside tokio's I/O driver: `ScheduledIo::set_readiness`
   and `ScheduledIo::wake` from `dispatch_event`, touching state that `TcpStream::new` allocated on
   another thread and handed over through epoll (`xtask/tsan-suppressions.txt`). No Songbird frame is involved, but if it is a

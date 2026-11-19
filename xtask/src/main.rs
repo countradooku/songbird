@@ -640,7 +640,19 @@ fn random_hex(bytes: usize) -> Result<String> {
 fn dev_env(force: bool) -> Result {
     let path = Path::new(".env");
     if path.exists() && !force {
-        eprintln!(".env exists; keeping it (use --force to regenerate)");
+        // Secrets added after the file was made (Prompt 10: the WebDAV test server) are appended.
+        let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        if text.lines().any(|l| l.starts_with("WEBDAV_PASSWORD=")) {
+            eprintln!(".env exists; keeping it (use --force to regenerate)");
+        } else {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .map_err(|e| e.to_string())?;
+            f.write_all(format!("WEBDAV_PASSWORD={}\n", random_hex(16)?).as_bytes())
+                .map_err(|e| e.to_string())?;
+            eprintln!(".env exists; added WEBDAV_PASSWORD");
+        }
         return Ok(());
     }
     let text = format!(
@@ -655,7 +667,8 @@ fn dev_env(force: bool) -> Result {
          LIVEKIT_API_KEY=dev{}\n\
          LIVEKIT_API_SECRET={}\n\
          IGGY_ROOT_USERNAME=iggy\n\
-         IGGY_ROOT_PASSWORD={}\n",
+         IGGY_ROOT_PASSWORD={}\n\
+         WEBDAV_PASSWORD={}\n",
         random_hex(16)?,
         random_hex(32)?,
         random_hex(32)?,
@@ -664,6 +677,7 @@ fn dev_env(force: bool) -> Result {
         random_hex(4)?,
         random_hex(32)?,
         random_hex(32)?,
+        random_hex(16)?,
     );
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);

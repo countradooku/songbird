@@ -334,7 +334,7 @@ async fn a_new_device_with_only_the_recovery_key_restores_and_others_cannot_writ
         Arc::clone(&primary),
         Arc::clone(&keys),
         None,
-        &Options::default(),
+        Options::default(),
         |w| synth::write(w, &SHAPE, 0).map(|_| ()),
     )
     .await
@@ -523,7 +523,7 @@ async fn turning_backups_off_and_deleting_the_account_leave_nothing() {
             store(&s, k, Some(&owner[0])),
             Arc::clone(k),
             None,
-            &Options::default(),
+            Options::default(),
             |w| synth::write(w, &SHAPE, 0).map(|_| ()),
         )
         .await

@@ -10,7 +10,10 @@ license.workspace = true
 [dependencies]
 songbird-backup-format.workspace = true
 songbird-proto.workspace = true
+# AWS Signature V4 for the S3 adapter: the server's own implementation (D-0036).
+songbird-s3.workspace = true
 async-trait.workspace = true
+aws-lc-rs.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
@@ -28,6 +31,9 @@ webpki-roots.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# The cloud emulators in tests/clouds.rs are small hyper servers.
+hyper = { workspace = true, features = ["server", "http1"] }
+songbird-types.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", "time", "macros", "fs", "io-util"] }
 

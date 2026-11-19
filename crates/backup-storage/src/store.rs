@@ -68,12 +68,21 @@ pub fn status_error(status: u16) -> StoreError {
 /// - `swap_manifest(expected, object)` stores `object` only if the current manifest's
 ///   generation is `expected` (0: none) and the object's own generation is `expected + 1`;
 ///   otherwise [`StoreError::Conflict`] with the current generation; of racing writers exactly
-///   one wins each generation;
+///   one wins each generation (at least one, and the stored manifest is a winner's, where
+///   [`BackupStore::atomic_swap`] is `false`);
 /// - `destroy` removes everything, after which the store is empty.
 #[async_trait]
 pub trait BackupStore: Send + Sync {
     /// A short, fixed name for logs and the app ("vault", "s3", ...).
     fn kind(&self) -> &'static str;
+
+    /// Whether racing `swap_manifest` calls are guaranteed one winner per generation. Stores
+    /// whose servers cannot promise it (`WebDAV`, Google Drive; D-0122) say `false`: the run then
+    /// reads the manifest back after swapping, and the hash chain turns a lost race into a
+    /// reported fork, never a silent loss.
+    fn atomic_swap(&self) -> bool {
+        true
+    }
 
     /// Prepares the store (creates the vault or the app folder); harmless when it exists.
     async fn open(&self) -> Result<(), StoreError>;

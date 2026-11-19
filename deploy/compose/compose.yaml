@@ -131,6 +131,31 @@ services:
       retries: 30
       start_period: 3s
 
+  # WebDAV for the backup adapter's conformance tests (Prompt 10, D-0122): Apache httpd with
+  # mod_dav (the reference WebDAV server: ETags, If-Match and If-None-Match), basic auth with a
+  # password from .env. Development and CI only.
+  webdav:
+    <<: *defaults
+    image: httpd:2.4.66@sha256:89a0b59e6d7285f00fc8df952a1579c31eb035cbdccb96690051e8bb6432cbea  # Debian: Alpine's has no DBM driver for mod_dav's lock database
+    environment:
+      WEBDAV_PASSWORD: ${WEBDAV_PASSWORD:?run cargo xtask dev-env}
+    volumes: ["./webdav/httpd.conf:/usr/local/apache2/conf/songbird.conf:ro"]
+    command:
+      - sh
+      - -c
+      - >-
+        mkdir -p /usr/local/apache2/dav /usr/local/apache2/var &&
+        chown daemon:daemon /usr/local/apache2/dav /usr/local/apache2/var &&
+        htpasswd -cbB /usr/local/apache2/conf/htpasswd songbird "$$WEBDAV_PASSWORD" &&
+        exec httpd-foreground -f /usr/local/apache2/conf/songbird.conf
+    ports: ["127.0.0.1:${SB_PORT_WEBDAV:-47980}:8080"]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   # Calls SFU. Single node, no TURN in development.
   livekit:
     <<: *defaults

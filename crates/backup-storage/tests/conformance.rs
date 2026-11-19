@@ -47,7 +47,7 @@ async fn an_archive_file_restores_and_refuses_damage() {
         Arc::clone(&folder),
         Arc::clone(&k),
         None,
-        &Options::default(),
+        Options::default(),
         move |w| songbird_backup_format::synth::write(w, &shape, 0).map(|_| ()),
     )
     .await
@@ -109,7 +109,7 @@ async fn a_store_that_lost_a_seen_backup_is_reported() {
         Arc::clone(&store),
         Arc::clone(&k),
         None,
-        &Options::default(),
+        Options::default(),
         move |w| songbird_backup_format::synth::write(w, &shape, 0).map(|_| ()),
     )
     .await
@@ -119,4 +119,100 @@ async fn a_store_that_lost_a_seen_backup_is_reported() {
         .await
         .unwrap_err();
     assert!(matches!(e, run::RunError::Lost), "{e:?}");
+}
+
+/// The worst store without an atomic swap: it overwrites blindly. Two primaries backing up at
+/// once (only possible around an account recovery) never lose a backup silently: a device whose
+/// backup was overwritten is told, at once or at its next run, by the hash chain.
+struct Blind(MemoryStore);
+
+#[async_trait::async_trait]
+impl BackupStore for Blind {
+    fn kind(&self) -> &'static str {
+        "blind"
+    }
+    fn atomic_swap(&self) -> bool {
+        false
+    }
+    async fn open(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
+    async fn put(
+        &self,
+        n: &songbird_backup_format::ChunkName,
+        o: Vec<u8>,
+    ) -> Result<(), StoreError> {
+        self.0.put(n, o).await
+    }
+    async fn get(&self, n: &songbird_backup_format::ChunkName) -> Result<Vec<u8>, StoreError> {
+        self.0.get(n).await
+    }
+    async fn list(&self) -> Result<Vec<songbird_backup_format::ChunkName>, StoreError> {
+        self.0.list().await
+    }
+    async fn delete(&self, n: &[songbird_backup_format::ChunkName]) -> Result<(), StoreError> {
+        // Chunk deletion is left out: a racing writer's garbage collection could otherwise
+        // delete the other's new chunks, which the real adapters avoid by being one device.
+        let _ = n;
+        Ok(())
+    }
+    async fn manifest(&self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.0.manifest().await
+    }
+    async fn swap_manifest(&self, _: u64, object: Vec<u8>) -> Result<(), StoreError> {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        self.0.force_manifest(Some(object));
+        Ok(())
+    }
+    async fn destroy(&self) -> Result<(), StoreError> {
+        self.0.destroy().await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lost_race_on_a_store_without_an_atomic_swap_is_never_silent() {
+    let k = keys(6);
+    for round in 0..10u64 {
+        let store: Arc<dyn BackupStore> = Arc::new(Blind(MemoryStore::default()));
+        let shape = |seed| songbird_backup_format::synth::Shape {
+            seed,
+            chats: 2,
+            messages_per_chat: 20,
+            media_every: 0,
+            media_sizes: &[],
+            contacts: 1,
+        };
+        let a = tokio::spawn(run::backup(
+            Arc::clone(&store),
+            Arc::clone(&k),
+            None,
+            Options::default(),
+            move |w| songbird_backup_format::synth::write(w, &shape(round * 2 + 1), 0).map(|_| ()),
+        ));
+        let b = tokio::spawn(run::backup(
+            Arc::clone(&store),
+            Arc::clone(&k),
+            None,
+            Options::default(),
+            move |w| songbird_backup_format::synth::write(w, &shape(round * 2 + 2), 0).map(|_| ()),
+        ));
+        let (a, b) = (a.await.unwrap(), b.await.unwrap());
+        assert!(a.is_ok() || b.is_ok(), "nobody's backup was kept");
+        let stored = songbird_backup_format::object::manifest_hash(
+            &store.manifest().await.unwrap().unwrap(),
+        );
+        for done in [a, b].into_iter().flatten() {
+            if done.seen.hash != stored {
+                // Overtaken after its read-back: its next run is refused as a fork.
+                let next = run::current(store.as_ref(), &k, Some(done.seen)).await;
+                assert!(
+                    matches!(
+                        next,
+                        Err(run::RunError::Format(songbird_backup_format::Error::Fork))
+                    ),
+                    "an overwritten backup went unnoticed: {next:?}"
+                );
+            }
+        }
+    }
 }

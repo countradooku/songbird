@@ -186,6 +186,30 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0122 — Prompt 10, milestone 3: the third-party stores; `WebDAV` and Drive without an atomic swap
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0119 (§6, §7); the threat-model rows await the owner
+- Decided by: agent, within the owner's plan
+- Context: `docs/reports/P10-M3.md`.
+- Decision:
+  - Adapters for S3, `WebDAV`, Google Drive, OneDrive and Dropbox in `crates/backup-storage`,
+    each on the device, over the `Http` trait; OAuth with PKCE (RFC 8252, RFC 7636), public
+    client IDs, refresh once on a 401; the iCloud interface as `ICloudBridge` with its contract
+    and a reference bridge that passes the suite.
+  - `BackupStore::atomic_swap`: `false` for `WebDAV` (the suite showed Apache `mod_dav`'s
+    `If-Match` and even its exclusive `LOCK` let racers through) and Google Drive (no
+    conditional write); the run reads the manifest back after a swap; overtaken devices see a
+    fork. The owner's alternative, if this is not acceptable: drop `WebDAV` and Drive, or warn
+    in the app when a second primary appears.
+  - Apache `httpd:2.4.66` (Debian, by digest `sha256:89a0b59e…cbea`) with `mod_dav` in compose
+    for CI (Alpine's has no DBM driver); `WEBDAV_PASSWORD` in `.env`.
+  - Emulators for Drive, OneDrive and Dropbox written from the documented APIs; the real
+    providers are checked once the owner registers the OAuth apps.
+- Evidence: `crates/backup-storage/tests/{clouds,adapters_live,conformance}.rs`; a manual run
+  on Nextcloud 31.0.14.
+- Consequences: M4 builds account recovery and the transfer on these stores.
+
 ## D-0121 — Prompt 10, milestone 2: one store interface, a conformance suite, the Songbird vault
 
 - Date: 2026-11-19

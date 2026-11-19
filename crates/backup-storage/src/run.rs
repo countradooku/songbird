@@ -103,7 +103,7 @@ pub async fn backup<F>(
     store: Arc<dyn BackupStore>,
     keys: Arc<BackupKeys>,
     seen: Option<Seen>,
-    opts: &Options,
+    opts: Options,
     content: F,
 ) -> Result<Done, RunError>
 where
@@ -166,6 +166,18 @@ where
     let (obj, manifest, stats) = written?;
     let hash = object::manifest_hash(&obj);
     store.swap_manifest(generation, obj).await?;
+    if !store.atomic_swap() {
+        // A store without an atomic swap (D-0122): the backup counts only if the manifest read
+        // back is this one. Otherwise another writer overtook it; its chunks are collected later.
+        let back = store.manifest().await?;
+        if back.as_deref().map(object::manifest_hash) != Some(hash) {
+            let current = back
+                .as_deref()
+                .and_then(|m| object::manifest_generation(m).ok())
+                .unwrap_or(0);
+            return Err(StoreError::Conflict { current }.into());
+        }
+    }
     // Chunks referenced by no manifest: from replaced backups and failed runs.
     let referenced: HashSet<Vec<u8>> = manifest
         .streams

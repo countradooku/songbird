@@ -2494,6 +2494,27 @@ vault ID and the access secret (§11.1), both from the recovery key:
   prefixes, verified by listing). The GDPR export lists each vault's generation, bytes and chunk
   count, never its ID.
 
+**Third-party stores** (M3, D-0122), each on the device with the user's own credentials:
+
+| Store | Where | Compare-and-swap | Atomic |
+| --- | --- | --- | --- |
+| S3 (any compatible bucket) | `<prefix>chunks/<hex>`, `<prefix>manifest`; SigV4 | `If-None-Match: *`, then `If-Match: <ETag>` (412: lost) | yes, where the provider honours conditional writes (the conformance race checks it; RustFS 1.0.5 does) |
+| `WebDAV` | `chunks/<hex>`, `manifest`, `manifest.lock` | an exclusive `LOCK`, then `If-None-Match: *` / `If-Match` | **no**: Apache `mod_dav` lets racers through both checks |
+| Google Drive | `appDataFolder`, flat: `<prefix>c.<hex>`, `<prefix>m.<generation 20 digits>.<random>` | create the next generation's file, keep the first name of that generation | **no**: Drive v3 has no conditional write |
+| OneDrive | `special/approot`: `<root>/chunks/<hex>`, `<root>/manifest` | `conflictBehavior=fail`, then `If-Match: <eTag>`; upload sessions above 4 MiB; downloads follow the redirect without the token | yes |
+| Dropbox | App Folder: `<root>/chunks/<hex>`, `<root>/manifest` | `files/upload` `mode: add`, then `mode: update(rev)` | yes |
+| iCloud Drive | the native bridge's `chunks/<hex>`, `manifest` | `replace_if` in one coordinated write (the interface the app's native half must meet) | yes, by contract |
+
+Where a swap is not atomic, the run reads the manifest back and reports a conflict if it was
+overtaken; a device overtaken after that sees a fork at its next run (§11.4), never a silent
+loss. Only the primary writes, so such a race needs two primaries (around an account recovery).
+
+**Signing in to the clouds** (OAuth 2.0 for native apps, RFC 8252, with PKCE S256, RFC 7636):
+public client IDs, no secret; a random `state`; the loopback redirect on desktop; refresh
+tokens kept in the app's keychain; a 401 refreshes once. Scopes: Google
+`drive.appdata`, Microsoft `Files.ReadWrite.AppFolder offline_access`, Dropbox an App Folder
+app with `files.content.read files.content.write`.
+
 ## 12. Versioning and compatibility rules
 
 - **Wire frames** (§1.2): one encoding per frame, unknown flag bits refused; new optional blocks

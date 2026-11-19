@@ -257,16 +257,15 @@ pub async fn run(
             Err(e) => return Err(fail("a racer failed otherwise than by conflict", e)),
         }
     }
-    if winners.len() != 1 {
+    if winners.len() != 1 && (s.atomic_swap() || winners.is_empty()) {
         return Err(format!("{} racers won generation 3", winners.len()));
     }
-    if s.manifest()
+    let stored = s
+        .manifest()
         .await
-        .map_err(|e| fail("manifest after race", e))?
-        .as_ref()
-        != winners.first()
-    {
-        return Err("the stored manifest is not the winner's".into());
+        .map_err(|e| fail("manifest after race", e))?;
+    if !stored.as_ref().is_some_and(|m| winners.contains(m)) {
+        return Err("the stored manifest is not a winner's".into());
     }
     rep.checks += 1;
 
@@ -291,7 +290,7 @@ pub async fn run(
             Arc::clone(&store),
             Arc::clone(&keys),
             None,
-            &opts,
+            opts.clone(),
             move |w| synth::write(w, &shape, 0).map(|_| ()),
         )
         .await
@@ -300,7 +299,7 @@ pub async fn run(
             Arc::clone(&store),
             Arc::clone(&keys),
             Some(one.seen),
-            &opts,
+            opts.clone(),
             move |w| synth::write(w, &shape, 5).map(|_| ()),
         )
         .await

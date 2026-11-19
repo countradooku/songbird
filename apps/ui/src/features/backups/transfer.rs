@@ -173,7 +173,10 @@ pub(super) fn transfer_body() -> AnyElement {
                         let _ = digits.try_set(Some(c));
                     }
                 });
-                match bk::transfer_receive(l, code, tx, answer, bk::transfer_folder()).await {
+                let Some(into) = bk::transfer_folder() else {
+                    return fail("This phone has no folder for the transfer.".into());
+                };
+                match bk::transfer_receive(l, code, tx, answer, into).await {
                     Ok((restored, hello)) => {
                         stage.set(TransferStage::Moving(0.95));
                         if let Err(p) = bk::recover(&restored, bk::handover_of(&hello), None).await

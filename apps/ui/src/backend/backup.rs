@@ -128,6 +128,18 @@ thread_local! {
     static TEST_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
+/// The app's own private folder: the platform's app data folder, or, in a debug build run
+/// without one (the headless test runner), a folder in the user's home. Never the shared
+/// temporary directory, whose names others on the machine can predict and take first.
+fn app_dir() -> Option<PathBuf> {
+    data_dir().or_else(|| {
+        cfg!(debug_assertions)
+            .then(|| std::env::var_os("HOME"))
+            .flatten()
+            .map(|h| PathBuf::from(h).join(".songbird-dev"))
+    })
+}
+
 /// Where a folder backup lives on this device.
 fn folder(keys: &BackupKeys) -> Option<PathBuf> {
     #[cfg(test)]
@@ -148,9 +160,7 @@ fn folder(keys: &BackupKeys) -> Option<PathBuf> {
                     | nsh_core::platform::Os::Windows
             )
         });
-    let base = documents
-        .or_else(|| data_dir().map(|d| d.join("backups")))
-        .unwrap_or_else(|| std::env::temp_dir().join("songbird-backups"));
+    let base = documents.or_else(|| app_dir().map(|d| d.join("backups")))?;
     Some(base.join(wire::hex(keys.vault_id.get(..8).unwrap_or_default())))
 }
 
@@ -913,11 +923,19 @@ pub async fn transfer_connect(text: String) -> Result<Sending, Problem> {
     })
 }
 
-/// A folder for what a transfer receives (removed once verified).
-pub fn transfer_folder() -> PathBuf {
-    data_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(format!("transfer-{}", wire::hex(&wire::random::<8>())))
+/// A folder for what a transfer receives (removed once verified), in the app's own folder.
+pub fn transfer_folder() -> Option<PathBuf> {
+    app_dir().map(|d| d.join(format!("transfer-{}", wire::hex(&wire::random::<8>()))))
+}
+
+/// A fresh folder for a test's files, under the crate's own `target` (never the shared
+/// temporary directory).
+#[cfg(test)]
+fn test_folder(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-files")
+        .join(format!("{name}-{}", wire::hex(&wire::random::<6>())))
 }
 
 /// A hand-over for the new phone, when this is the account's main phone on a server:
@@ -1092,10 +1110,7 @@ mod tests {
 
     #[test]
     fn a_new_device_restores_with_only_the_key_and_damage_changes_nothing() -> Result<(), String> {
-        let tmp = std::env::temp_dir().join(format!(
-            "sb-backup-test-{}",
-            wire::hex(&wire::random::<6>())
-        ));
+        let tmp = test_folder("sb-backup-test");
         *DIR.lock().unwrap() = Some(tmp.clone());
         // Device A: a backup to the folder.
         let a = nsh_testing::MemoryStorage::new([]);
@@ -1172,8 +1187,7 @@ mod tests {
         let (l, code) = transfer_listen().await.unwrap();
         let qr = code.to_qr().to_string();
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let into =
-            std::env::temp_dir().join(format!("sb-transfer-{}", wire::hex(&wire::random::<6>())));
+        let into = test_folder("sb-transfer");
         let (yes, confirmed) = tokio::sync::oneshot::channel();
         let new_phone =
             tokio::spawn(async move { transfer_receive(l, code, tx, confirmed, into).await });

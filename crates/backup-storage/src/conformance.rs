@@ -25,7 +25,7 @@ pub struct Plan {
     pub racers: usize,
     /// The largest chunk is put and read back (8 MiB of plaintext).
     pub largest: bool,
-    /// A whole backup and restore through [`run`].
+    /// A whole backup and restore through [`run`](mod@crate::run).
     pub backup: bool,
 }
 

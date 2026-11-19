@@ -124,7 +124,7 @@ pub fn write<S: ChunkSink>(
     write_edited(w, shape, extra, 0)
 }
 
-/// As [`write`], with the oldest `drop_oldest` messages of every chat deleted, as a later backup
+/// As [`write()`], with the oldest `drop_oldest` messages of every chat deleted, as a later backup
 /// after the user cleared old messages.
 ///
 /// # Errors

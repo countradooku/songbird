@@ -342,6 +342,13 @@ impl BackupStore for GoogleDriveStore {
         let current = match &newest {
             Some((_, _, id)) => {
                 let r = self.download(id).await?;
+                if r.status == 404 {
+                    // A rival won a later generation and deleted this one between the listing
+                    // and the download: this writer lost the race.
+                    return Err(StoreError::Conflict {
+                        current: expected.saturating_add(1),
+                    });
+                }
                 if !r.ok() {
                     return Err(error(&r));
                 }

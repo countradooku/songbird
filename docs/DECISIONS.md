@@ -186,6 +186,39 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0120 — Prompt 10, milestone 1: the backup format
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0119 (the owner's plan); the threat-model rows await
+  the owner
+- Decided by: agent, within the owner's plan
+- Context: Prompt 10 asks for a versioned, chunked, encrypted, incremental, verified backup
+  format readable on every platform, with byte-exact vectors and a cross-platform determinism
+  test. `docs/reports/P10-M1.md`.
+- Decision:
+  - `crates/backup-format` (PROTOCOL §11.1–11.7): the 64-character recovery key with a 64-bit
+    check; HKDF-SHA256 keys (vault ID, vault access, manifest, chunk, chunk name, chunker);
+    XChaCha20-Poly1305 chunks and manifests with Padmé padding, the name or the vault ID in the
+    AAD; chunk names by HMAC-SHA256 of the plaintext; the manifest's generation in the clear and
+    authenticated, the previous manifest's hash inside.
+  - Three stream kinds instead of a section per content type: one records stream in a
+    canonical order (so the chunker resynchronises after an edit and small chats share chunks),
+    one small-media stream of blobs under 1 MiB, and one stream per larger media file; each file
+    stored once.
+  - The keyed `FastCDC` chunker at 1/2/8 MiB (3.7 GB/s, 2.35 MiB average on an Apple M5 Pro).
+  - A two-phase reader: verify into memory or an encrypted staging folder, then read with every
+    chunk checked again.
+  - New dependency: `chacha20poly1305` 0.10.1 (already in the lock and cargo-vet exempt; the
+    exemption notes now name this use). `chacha20`, `poly1305` and this crate are optimised in
+    dev builds (tests 41 s → 2 s).
+  - Determinism: vectors in `vectors/v1/`, checked on macOS arm64 locally and on Linux x86_64
+    and i686 in a new CI job, plus `vectors/check.py`, an independent re-derivation with the
+    Python standard library.
+- Evidence: `crates/backup-format/tests/{format,props,vectors,no_service_links_backups}.rs`;
+  fuzz `backup_format` (about 1 million runs, no failure); `tests/bench.rs`.
+- Consequences: M2 builds the stores on `ChunkSink` and `ChunkSource`. The vault's access hash
+  moves to `songbird-proto` so that `api` can use it without linking the format.
+
 ## D-0119 — Prompt 10: the plan, and the owner's decisions it needs
 
 - Date: 2026-11-19

@@ -4957,6 +4957,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "songbird-backup-format"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "chacha20poly1305",
+ "getrandom 0.4.3",
+ "hex",
+ "proptest",
+ "prost",
+ "serde_json",
+ "songbird-proto",
+ "tempfile",
+ "thiserror 2.0.21",
+ "zeroize",
+]
+
+[[package]]
 name = "songbird-calls"
 version = "0.1.0"
 dependencies = [

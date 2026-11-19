@@ -1,0 +1,27 @@
+[package]
+name = "songbird-backup-format"
+description = "Songbird's backup format (Prompt 10, D-0119; PROTOCOL §11): a 64-character recovery key, keys derived from it, a keyed content-defined chunker, XChaCha20-Poly1305 chunks under keyed names, an encrypted versioned manifest, and a two-phase reader that verifies every chunk before anything is restored. Sans-IO; shared by every app and never linked by a service."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+# Padmé (D-0080), shared with attachments and records.
+songbird-proto.workspace = true
+aws-lc-rs.workspace = true
+chacha20poly1305.workspace = true
+getrandom.workspace = true
+prost.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

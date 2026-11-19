@@ -25,7 +25,7 @@ url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/
 [[exemptions.aead]]
 version = "0.5.2"
 criteria = "safe-to-deploy"
-notes = "D-0068: OpenMLS optional backend or test-harness dependency (cargo-vet resolves all features); never built for a server"
+notes = "D-0068: OpenMLS optional backend or test-harness dependency (cargo-vet resolves all features); never built for a server; D-0120: XChaCha20-Poly1305 of the client-side backup format (songbird-backup-format), never linked by a service"
 
 [[exemptions.aead]]
 version = "0.6.1"
@@ -239,12 +239,12 @@ notes = "D-0068: OpenMLS optional backend or test-harness dependency (cargo-vet 
 [[exemptions.chacha20]]
 version = "0.9.1"
 criteria = "safe-to-deploy"
-notes = "D-0068: OpenMLS optional backend or test-harness dependency (cargo-vet resolves all features); never built for a server"
+notes = "D-0068: OpenMLS optional backend or test-harness dependency (cargo-vet resolves all features); never built for a server; D-0120: XChaCha20-Poly1305 of the client-side backup format (songbird-backup-format), never linked by a service"
 
 [[exemptions.chacha20poly1305]]
 version = "0.10.1"
 criteria = "safe-to-deploy"
-notes = "D-0068: OpenMLS optional backend or test-harness dependency (cargo-vet resolves all features); never built for a server"
+notes = "D-0068: OpenMLS optional backend or test-harness dependency (cargo-vet resolves all features); never built for a server; D-0120: XChaCha20-Poly1305 of the client-side backup format (songbird-backup-format), never linked by a service"
 
 [[exemptions.chrono]]
 version = "0.4.45"
@@ -1095,7 +1095,7 @@ notes = "D-0068: OpenMLS optional backend or test-harness dependency (cargo-vet 
 [[exemptions.poly1305]]
 version = "0.8.0"
 criteria = "safe-to-deploy"
-notes = "D-0068: OpenMLS optional backend or test-harness dependency (cargo-vet resolves all features); never built for a server"
+notes = "D-0068: OpenMLS optional backend or test-harness dependency (cargo-vet resolves all features); never built for a server; D-0120: XChaCha20-Poly1305 of the client-side backup format (songbird-backup-format), never linked by a service"
 
 [[exemptions.polyval]]
 version = "0.6.2"
@@ -1607,7 +1607,7 @@ criteria = "safe-to-deploy"
 [[exemptions.universal-hash]]
 version = "0.5.1"
 criteria = "safe-to-deploy"
-notes = "D-0068: OpenMLS optional backend or test-harness dependency (cargo-vet resolves all features); never built for a server"
+notes = "D-0068: OpenMLS optional backend or test-harness dependency (cargo-vet resolves all features); never built for a server; D-0120: XChaCha20-Poly1305 of the client-side backup format (songbird-backup-format), never linked by a service"
 
 [[exemptions.universal-hash]]
 version = "0.6.1"

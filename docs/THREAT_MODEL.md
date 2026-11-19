@@ -580,6 +580,18 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
 | **(M6)** A parent linking a second child losing the first child's key | D | Ordinary use | A link in force is never replaced; the screen says to unlink first (D-0108) | `start_link`; D-0108 (M4) |
 | **(M6)** Presence or nudges sent in the clear before encryption exists | I | Server, network | Nothing is sent until app-core can seal for each device: no batch is built without a sealed payload | `a_batch_addresses_only_sealed_devices_and_combines_their_keys`; `nothing_is_sent_without_known_devices` |
 
+### 3.27 Backups (Prompt 10; D-0119 onward) — awaiting the owner's approval
+
+| Threat | STRIDE | Attacker | Mitigation | Evidence |
+| --- | --- | --- | --- | --- |
+| A storage provider (Songbird included) reading a backup | I | Provider, insider, legal compulsion of the provider | Every chunk and manifest encrypted on the device with XChaCha20-Poly1305 under keys from the recovery key, which never leaves the user's devices; names are HMACs; sizes padded (Padmé) | `a_folder_stages_large_backups_encrypted`; vectors |
+| Guessing the recovery key | S, I | Anyone holding the ciphertext | 256 random bits; HKDF; the 64-bit check only catches typos | `RecoveryKey::generate` (OS randomness) |
+| Learning content from chunk boundaries or names | I | Provider | The chunker's gear table and the name key are derived from the recovery key | `another_key_cuts_elsewhere` |
+| A damaged, truncated, swapped, foreign or missing chunk restored as data | T | Provider, storage fault, an attacker with write access | Name and version in the AAD; exact length check before decryption; HMAC of the plaintext must equal the name; stream lengths and SHA-256; two phases, nothing written until all checked | `damaged_chunks_fail_loudly`, `damaged_manifests_fail_loudly`, `staging_changed_after_verification_fails_on_read` |
+| A provider serving an older backup | T | Malicious provider | The authenticated generation and the previous manifest's hash: a device that has seen a backup refuses older or forked ones; a brand-new device cannot tell (§6) | `a_store_cannot_roll_back_or_fork…` |
+| A crafted manifest or stream crashing or exhausting the app | D | Malicious provider, a writer with the key | Bounds before allocation (manifest 48 MiB, 2^20 streams, 2^21 chunks, records 4 MiB, chunks 8 MiB); fuzzed decoders | fuzz `backup_format` |
+| An older app half-reading a newer backup | T | — | `min_reader_version`: the whole backup is refused with "update Songbird" | `damaged_manifests_fail_loudly` (TooNew) |
+
 ## 4. Server-enforced settings
 
 | Setting | Who changes it | Enforced where |

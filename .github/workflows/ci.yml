@@ -59,6 +59,28 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  backup-determinism:
+    name: backup format determinism (x86_64, i686, independent re-derivation)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # D-0120: the published vectors from the specification alone (Python standard library).
+      - run: python3 crates/backup-format/vectors/check.py crates/backup-format/vectors/v1/vectors.json
+      # The same bytes on a 64-bit and a 32-bit target (macOS arm64 is checked locally, D-0120).
+      - run: cargo test --locked -p songbird-backup-format --test vectors
+      - name: i686 (32-bit usize)
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q gcc-multilib g++-multilib
+          rustup target add i686-unknown-linux-gnu
+          cargo test --locked -p songbird-backup-format --target i686-unknown-linux-gnu --test vectors --test format
+
   compose:
     name: integration environment (docker compose)
     runs-on: ubuntu-24.04

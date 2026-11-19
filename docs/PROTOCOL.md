@@ -2297,6 +2297,140 @@ hours. Only the two devices read it; the child's app enforces it and shows it.
 
 ## 11. Backup format and vault access (Prompt 10)
 
+Decisions D-0119 (the owner's plan) and D-0120 (M1). The library is `crates/backup-format`;
+`proto/backup.proto` specifies the plaintext schemas; `vectors/v1/vectors.json` holds the
+byte-exact vectors and `vectors/check.py` re-derives them with the Python standard library alone.
+A backup is the same on every platform: nothing in it depends on the operating system, the
+locale, the time zone or the width of native integers.
+
+### 11.1 The recovery key and the key schedule
+
+A recovery key is 64 characters of Crockford base32 (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`), most
+significant bit first, encoding 40 bytes: a 32-byte **secret** and an 8-byte **check**,
+`SHA-256("songbird.v1/recovery-key\0" || secret)[0..8]`. It is shown as 16 groups of four
+joined by `-`. A reader ignores case, whitespace and `-`, reads `I` and `L` as `1` and `O` as
+`0`, refuses any other character (`U` included) and anything but 64 symbols, and refuses a key
+whose check does not match before any request (a typo, not a missing backup).
+
+Keys: `PRK = HKDF-Extract(salt = "songbird.v1/backup", secret)`, then
+`HKDF-Expand(PRK, "songbird.v1/backup/" || label, n)`:
+
+| Label | n | Use |
+| --- | --- | --- |
+| `vault-id` | 32 | The vault's ID on every store (§11.8) |
+| `vault-access` | 32 | The Songbird vault's bearer secret; the vault stores `SHA-256("songbird.v1/vault-access\0" \|\| it)` |
+| `manifest` | 32 | XChaCha20-Poly1305 key of manifests |
+| `chunk` | 32 | XChaCha20-Poly1305 key of chunks |
+| `chunk-name` | 32 | HMAC-SHA256 key of chunk names and media references |
+| `chunker` | 2,048 | The gear table: 256 big-endian `u64` |
+
+A new recovery key is a new vault (a full backup, then the old vault is deleted). The transfer to
+a new phone (§11.9) uses a one-time key of the same form.
+
+### 11.2 Chunks
+
+```text
+chunk object = "SBC" | version u8 (1) | nonce [24] | ciphertext | tag [16]
+ciphertext   = XChaCha20-Poly1305(chunk key, nonce, padded, AAD = the 28 header bytes || name [32])
+padded       = length u32 | plaintext | zeros, to Padmé(max(4 + length, 1024)) bytes
+name         = HMAC-SHA256(chunk-name key, plaintext)
+```
+
+Integers are big-endian; Padmé is §7.1's. A chunk's plaintext is at most 8 MiB. A reader opens a
+chunk only against the name and plaintext length the manifest gives: the ciphertext length must
+be exactly the padded length of that plaintext length (a truncated or extended object fails as
+damaged before decryption), the tag must verify, the padding must be zeros, the length field must
+match, and the HMAC of the plaintext must equal the name. A store serving one chunk under
+another's name fails the tag (the name is in the AAD). Names are written as 64 lowercase hex
+characters.
+
+### 11.3 Cutting streams into chunks
+
+Content is written as byte streams (§11.5) and cut with FastCDC (normalized chunking, level 2):
+for each stream, from the start of the unchunked rest,
+
+```text
+if rest <= 1 MiB: the rest is the last chunk (only at the stream's end)
+h = 0; for i from 1 MiB, h = (h << 1) + gear[byte[i]] (wrapping, u64):
+  before 2 MiB: cut after byte i when h & (!0 << 41) == 0   (top 23 bits zero)
+  from 2 MiB:   cut after byte i when h & (!0 << 45) == 0   (top 19 bits zero)
+  at 8 MiB:     cut
+```
+
+The hash at byte `i` depends only on the 64 bytes before it, so a writer may start it 64 bytes
+before 1 MiB. The table is keyed (§11.1): boundaries reveal nothing about content to the store,
+while the same content cuts the same way in every backup of the same key, so new messages change
+only the chunks near them. Measured on an Apple M5 Pro: 3.4 GB/s, chunks of 2.35 MiB on average
+(D-0120). Readers accept any chunk of 1 byte to 8 MiB; only writers follow these sizes.
+
+### 11.4 The manifest
+
+```text
+manifest object = "SBM" | version u8 (1) | generation u64 | nonce [24] | ciphertext | tag [16]
+ciphertext      = XChaCha20-Poly1305(manifest key, nonce, padded protobuf `Manifest`,
+                                     AAD = the 36 header bytes || vault ID [32])
+```
+
+`generation` is the only field in the clear: stores compare-and-swap on it (§11.8). It is
+authenticated, so a store cannot relabel a manifest, and the vault ID in the AAD keeps one vault's
+manifest from opening as another's. The plaintext (`Manifest`, at most 48 MiB) holds the writer's
+format version and the oldest reader version that may read it (`min_reader_version`), the time,
+the app's version and platform (informational only), `previous` (the SHA-256 of the previous
+manifest object, empty for the first) and the streams: each with its kind, its ID (a media
+reference for a media stream), its length, its SHA-256, and its chunks in order (name and
+plaintext length). Bounds a reader checks: at most 2^20 streams and 2^21 chunk references, names
+of 32 bytes, chunk lengths of 1 byte to 8 MiB adding up to the stream's length, exactly one
+records stream and at most one small-media stream.
+
+**Rollback.** A device keeps, per vault, the generation and hash of the newest manifest it has
+read. It refuses an older generation (`Rollback`), the same generation with another hash
+(`Fork`), and the next generation unless its `previous` is the hash it kept (`Fork`). A brand-new
+device has nothing to compare with, so a store can serve it an older backup of the same key (never
+a forged one; threat model §6).
+
+### 11.5 Streams and records
+
+| Stream | Holds |
+| --- | --- |
+| records (exactly one) | Length-delimited `Record`s (a protobuf varint length, then the message), at most 4 MiB each |
+| small media (at most one) | Length-delimited `Blob`s: media files under 1 MiB, each once |
+| media (one per file) | The bytes of one media file of 1 MiB or more, ID = its reference |
+
+The records stream follows a canonical order, so equal content gives equal chunks: the
+`Account`, the `Profile`, the `Setting`s, the `Contact`s, the `Group`s, then each `Chat`
+followed by its `Message`s oldest first, each message's `Media` record just before the first
+message that shows it. A media file is stored once however often it is forwarded: a small one
+under `HMAC-SHA256(chunk-name key, "songbird.v1/backup-media\0" || bytes)`, a streamed one under
+`HMAC-SHA256(chunk-name key, "songbird.v1/backup-media-stream\0" || length u64 || its chunk
+names)`.
+
+**What a backup holds**: the account (account ID, the account identity key's Ed25519 seed, the
+profile key, the record store's storage key, the access key, the username and username key, the
+device list's version, the server name); the profile; settings (the record store's logical keys
+with their values, and device-only settings under `d/`); contacts; groups (ID, name, metadata
+key, members, role: enough to rejoin by re-add or external commit, §6); chats; messages (the
+content protobuf of §5 as sent or received, with media references, status and star); media.
+**Never**: ratchet sessions, prekeys, device identity keys, MLS epoch secrets, KeyPackages. A
+restored device starts fresh sessions.
+
+### 11.6 Restoring
+
+Two phases. **Verify**: fetch every chunk the manifest names, open and check each (§11.2), keep
+the still-encrypted objects in a staging area (memory or a folder), then read every stream
+through, checking its length and SHA-256 and decoding every record and blob. **Apply**: only
+after verify succeeded, read the backup from staging (each chunk opened and checked again) and
+write it to an empty store in one transaction. Any failure stops the restore with a named error
+(`Missing`, `Damaged`, `WrongName`, `StreamMismatch`, `Malformed`, `TooNew`, `Rollback`,
+`Fork`) and the device keeps what it had.
+
+### 11.7 Versions
+
+Readers ignore unknown fields, stream kinds and record bodies. A writer adding something an
+older reader must not skip raises `min_reader_version`; an older reader then refuses the whole
+backup ("update Songbird") instead of restoring part of it. Every published version's vectors
+stay in `vectors/v*/` and are restored by every later reader
+(`this_reader_restores_every_published_version`).
+
 ## 12. Versioning and compatibility rules
 
 - **Wire frames** (§1.2): one encoding per frame, unknown flag bits refused; new optional blocks

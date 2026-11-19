@@ -80,7 +80,8 @@ async fn stack_full(
         pass: std::env::var("SONGBIRD_TEST_SURREALDB_PASS").unwrap(),
         namespace: "test".into(),
         database: format!("media_{}", DeviceId::random().unwrap().to_hex_unredacted()),
-        timeout: Duration::from_secs(5),
+        // The registry defines its whole schema at connect: slow on a loaded CI runner.
+        timeout: Duration::from_secs(30),
         max_message_bytes: 16 << 20,
     })
     .await

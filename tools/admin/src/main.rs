@@ -412,6 +412,12 @@ fn backup_cmd(cmd: BackupCmd) -> anyhow::Result<()> {
 }
 
 /// A destructive command's target, as `--confirm` must repeat it.
+/// An account ID in full, for staff output (a legal export's file, a ticket shown to support
+/// staff on their terminal): never for a log or a metric (invariant 6).
+pub(crate) fn account_hex(a: &songbird_types::AccountId) -> String {
+    hex::encode(a.as_bytes())
+}
+
 pub(crate) fn target(s: &store::StoreArgs) -> String {
     format!("{}/{}", s.namespace, s.database)
 }

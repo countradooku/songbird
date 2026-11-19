@@ -154,7 +154,7 @@ pub(crate) fn run(cmd: SupportCmd) -> Result<()> {
                     serde_json::json!({
                         "ticket": ticket,
                         "kind": kind,
-                        "account": row.account.map(|a| a.to_hex_unredacted()),
+                        "account": row.account.as_ref().map(crate::account_hex),
                     })
                 );
                 for m in msgs {

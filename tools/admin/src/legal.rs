@@ -151,7 +151,7 @@ pub(crate) fn package(
     serde_json::json!({
         "case": case,
         "generated_utc": now,
-        "account": account.to_hex_unredacted(),
+        "account": crate::account_hex(account),
         "scope": [
             "What Songbird's servers hold about this account: the same as the account's own data export.",
             "Messages, calls, attachments and backups are end-to-end encrypted; Songbird holds no key to them and gives none.",

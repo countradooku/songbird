@@ -112,6 +112,7 @@ async fn stack_with(d: DeviceSettings, catalog: songbird_entitlements::Catalog) 
         },
         requests: None,
         reports: None,
+        support: None,
         calls: None,
         server_name: SERVER.into(),
         push_store: Arc::new(

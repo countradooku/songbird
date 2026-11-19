@@ -2998,3 +2998,60 @@ lifted), a reason category and its source (`auto` or `moderator`). Changes bump 
 
 Only an automatic `limited` with a reason `reports` or `blocks` is ever set without a moderator;
 it never overrides or shortens a moderator's row.
+
+### 14.8 Support tickets (D-0126 §11, D-0132)
+
+A ticket is opened by the app, signed or not, and read with a bearer secret. Messages are sealed
+on the device and opened only by staff with the support key, or by the app with the ticket's
+reply key: the server stores ciphertext.
+
+| Request | Auth | Body | Answer |
+| --- | --- | --- | --- |
+| `GET /v1/support/key` | — | — | 200 `{"key"}`: the support key (X25519, hex) |
+| `POST /v1/support/tickets` | optional (signed, §2) | `{"kind","reply_key","sealed"}` | 201 `{"ticket","bearer","priority"}` |
+| `GET /v1/support/tickets/<id>` | `x-songbird-ticket-bearer` | — | 200 `{"kind","messages":[{"from","sealed","day"}]}` |
+| `POST /v1/support/tickets/<id>/messages` | `x-songbird-ticket-bearer` | `{"sealed"}` | 204 |
+| `DELETE /v1/support/tickets/<id>` | `x-songbird-ticket-bearer` | — | 204: the ticket and every message deleted |
+
+- `kind`: `help`, `appeal` or `billing`. **Signed**, the device's account is attached and
+  `priority` is true on Plus or above; **unsigned**, no account. An `appeal` must be signed
+  (401 otherwise); a suspended account may open one.
+- `reply_key`: an X25519 public key the app makes for this ticket alone (hex); staff seal their
+  replies to it.
+- `sealed`: hex of `seal_with(Domain::Support, support key, plaintext)` (the user's) or
+  `seal_with(Domain::SupportReply, reply key, plaintext)` (staff's): version byte, ephemeral
+  X25519 key, ChaCha20-Poly1305 under HKDF (salts `songbird.v1/support`,
+  `songbird.v1/support-reply`). At most 32 KiB sealed.
+- Plaintext (JSON): `{"text"}`, and from the user, only with their consent after a preview,
+  `"logs"` (the device's scrubbed log excerpt) and `"app"` (version and platform).
+- `ticket` (16 bytes) and `bearer` (32 bytes) are random, drawn by the server and returned once
+  (hex). The registry keeps `SHA-256("songbird.v1/ticket-bearer\0" || bearer)`. A wrong or
+  missing bearer and a missing ticket are the same 404.
+- At most 50 messages a ticket (409 `full`). Budgets per keyed IP range (IPv4 /24, IPv6 /48): 6
+  opened an hour (burst 3), 240 other calls an hour (burst 60); 429 with `Retry-After`.
+- A ticket untouched for 90 days is deleted with its messages. Deleting the account unlinks its
+  tickets (they stay with their bearer). The account's export lists the tickets it attached
+  (ID, kind, message count, last day), never their contents.
+
+### 14.9 Legal requests and transparency (D-0126 §9–§10, D-0132)
+
+No wire protocol: operator tooling (`songbird-admin legal`, `transparency`;
+`docs/RUNBOOKS/legal-requests.md`). A legal export of an account is exactly its own data export
+(`GET /v1/account/export`), wrapped with the case reference and a scope statement. The registry
+keeps only counts: `legal:[half, country, kind, outcome]` → `n` (`half` is `YYYY-H1` or
+`YYYY-H2`, UTC).
+
+### 14.10 Invites: links and status (D-0126 §12, D-0132)
+
+**Invite link.** `https://songbird.chat/i#<base64url, unpadded>` of `version (1) || flags (1;
+bit 0: a code follows) || [registration code (15)] || inviter account ID (16) || inviter profile
+key (32) || SHA-256 fingerprint of the inviter's identity key (32)`. Parsing is strict (one
+version, no unknown flag, exact length, canonical encoding, at most 256 characters;
+`crates/proto/src/invite_link.rs`). The fragment never reaches a server. After sign-up the app
+fetches the inviter's profile and keys like any contact's, checks the identity fingerprint, and
+opens the chat.
+
+**Status.** `POST /v1/invites/status` (signed) `{"codes": [hex SHA-256("songbird.v1/invite\0" ||
+code), …]}` (1 to 50) answers `{"live": [bool, …]}` in order: whether each code still has a use
+left and has not expired or been revoked. The inviter's app counts its invites used from the
+codes it made; the server keeps no per-inviter count (D-0038).

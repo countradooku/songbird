@@ -184,6 +184,7 @@ async fn stack_with(quota_bytes: u64, catalog: songbird_entitlements::Catalog) -
         },
         calls: None,
         reports: None,
+        support: None,
         requests: None,
         server_name: SERVER.into(),
         push_store: Arc::new(

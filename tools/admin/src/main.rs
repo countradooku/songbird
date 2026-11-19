@@ -37,10 +37,12 @@
 mod audit;
 mod backup;
 mod ca;
+mod legal;
 mod moderation;
 mod plans;
 mod reports;
 mod store;
+mod support;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -84,6 +86,20 @@ enum Cmd {
     /// Moderation (Prompt 11, D-0131): decisions on reports, lifting a standing.
     #[command(subcommand)]
     Moderation(moderation::ModerationCmd),
+    /// Support (Prompt 11, D-0132): the support key and tickets.
+    #[command(subcommand)]
+    Support(support::SupportCmd),
+    /// Legal requests (Prompt 11, D-0132): exports and counts.
+    #[command(subcommand)]
+    Legal(legal::LegalCmd),
+    /// The transparency report of a half-year, in Markdown (D-0132).
+    Transparency {
+        #[command(flatten)]
+        store: store::StoreArgs,
+        /// `YYYY-H1` or `YYYY-H2` (default: the current one).
+        #[arg(long)]
+        half: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -247,6 +263,9 @@ fn main() -> ExitCode {
         Cmd::Reports(cmd) => reports::run(cmd),
         Cmd::Plans(cmd) => plans::run(cmd),
         Cmd::Moderation(cmd) => moderation::run(cmd),
+        Cmd::Support(cmd) => support::run(cmd),
+        Cmd::Legal(cmd) => legal::run(cmd),
+        Cmd::Transparency { store, half } => legal::transparency(&store, half),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

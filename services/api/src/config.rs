@@ -196,6 +196,31 @@ pub struct ApiSettings {
     /// `POST /v1/entitlements/redeem` and `GET /v1/tokens/keys` answer 503.
     #[serde(default)]
     pub tokens: Option<TokenSettings>,
+    /// `[api.support]` (Prompt 11, M6, D-0132): the support channel. Absent: `/v1/support…`
+    /// answers 503.
+    #[serde(default)]
+    pub support: Option<SupportSettings>,
+}
+
+/// `[api.support]` (Prompt 11, M6, D-0132).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportSettings {
+    /// The support team's public key (X25519, 64 hex characters) tickets are sealed to. Its
+    /// private half stays with staff (`songbird-admin support keygen`).
+    pub key: String,
+}
+
+impl Validate for SupportSettings {
+    fn validate(&self, v: &mut Validator) {
+        let mut k = [0u8; 32];
+        v.check(
+            hex::decode_to_slice(&self.key, &mut k).is_ok()
+                && songbird_keys::xeddsa::x25519_public_key_ok(&k),
+            "key",
+            "must be an X25519 public key (64 hex characters)",
+        );
+    }
 }
 
 /// `[api.tokens]`: the token keys (shared with billing, which issues) and the redemption budget.
@@ -771,6 +796,9 @@ impl Validate for ApiSettings {
         }
         if let Some(c) = &self.calls {
             v.section("calls", c);
+        }
+        if let Some(s) = &self.support {
+            v.section("support", s);
         }
         if let Some(t) = &self.tokens {
             v.section("tokens", t);

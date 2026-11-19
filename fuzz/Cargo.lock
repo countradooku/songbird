@@ -6641,6 +6641,7 @@ dependencies = [
  "redis",
  "serde",
  "songbird-accounts",
+ "songbird-entitlements",
  "songbird-jobs",
  "songbird-mailbox",
  "songbird-proto",

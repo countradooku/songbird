@@ -34,6 +34,10 @@ pub enum Domain {
     Provisioning,
     /// Reports sealed to the offline moderation key (`songbird.v1/report`, Prompt 4).
     Report,
+    /// Support messages sealed to the support team's key (`songbird.v1/support`, Prompt 11).
+    Support,
+    /// Support replies sealed to a ticket's own reply key (`songbird.v1/support-reply`).
+    SupportReply,
 }
 
 impl Domain {
@@ -43,6 +47,8 @@ impl Domain {
         match self {
             Self::Provisioning => hkdf::Salt::new(hkdf::HKDF_SHA256, b"songbird.v1/provisioning"),
             Self::Report => hkdf::Salt::new(hkdf::HKDF_SHA256, b"songbird.v1/report"),
+            Self::Support => hkdf::Salt::new(hkdf::HKDF_SHA256, b"songbird.v1/support"),
+            Self::SupportReply => hkdf::Salt::new(hkdf::HKDF_SHA256, b"songbird.v1/support-reply"),
         }
     }
 }

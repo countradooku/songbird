@@ -243,6 +243,7 @@ async fn stack(people: usize) -> Option<Stack> {
         plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
+        support: None,
         calls: Some(CallsApi {
             calls: Arc::new(calls),
             metrics: metrics.calls.clone(),

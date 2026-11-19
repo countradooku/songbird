@@ -116,6 +116,10 @@ server in plaintext. Adding to this list requires the owner's approval.
 | **Risk signals** (Prompt 11, D-0131): per **keyed tag** of an account (never the ID) and UTC day, how many of its direct messages were reported and verified (`rsig`), and how many blocks it received from people it sent a message request to (`bsig`), in SurrealDB; per keyed tag and day, how many message requests it sent (`rq`), and per keyed pair, that it sent one in the last week (`rp`), in `valkey-hot` | Evaluate the thresholds when a report or a block arrives | 31 days (`rsig`, `bsig`); 8 and 7 days (`rq`, `rp`) | Prompt 11 (M5), D-0131; **awaiting the owner's approval** |
 | Hourly registration counters per keyed IP range and for the deployment (`t:rr:`, `t:rg:` in `valkey-hot`) | Escalate the proof of work | Two hours | Prompt 11 (M5), D-0131; **awaiting the owner's approval** |
 | The **moderation audit log** (on the moderators' machine, `songbird-admin`): each decision's report ID, account, action, reason category and days, who and when; never the reported content | Accountability of moderators; appeals | The operator's log retention (to decide with counsel) | Prompt 11 (M5), D-0131; **awaiting the owner's approval** |
+| **Support tickets** (Prompt 11, D-0132; `ticket`, `ticket_msg`, SurrealDB): a random ticket ID, its kind (`help`, `appeal`, `billing`), `SHA-256` of its bearer, the ticket's reply key (X25519 public), the account **only if the user attached it**, a priority flag, the last UTC day it changed; each message sealed to the support key or to the reply key, who wrote it (`user`, `staff`) and its day | Let a user reach support, anonymously or about their account, and read the replies | Until closed (by the user or staff), at most 90 days untouched; an account's deletion unlinks its tickets | Prompt 11 (M6), D-0132; **awaiting the owner's approval** |
+| Keyed support budgets per IP range (`t:so:`, `t:sc:` in `valkey-hot`) | Bound ticket floods | An hour | Prompt 11 (M6), D-0132; **awaiting the owner's approval** |
+| **Legal request counts** (Prompt 11, D-0132; `legal`, SurrealDB): per half-year, requesting country, kind and outcome, a count; no case, no account | The transparency report | Kept (published every half-year) | Prompt 11 (M6), D-0132; **awaiting the owner's approval** |
+| The **support key's** private half and **legal exports** (on staff's machines, `songbird-admin`): the decrypted tickets staff open; each export file until handed over; the audit log of every export (case, country, account, who, when) | Answer users; answer lawful requests through counsel | Tickets: while open; exports: deleted once delivered; the audit log: the operator's retention (to decide with counsel) | Prompt 11 (M6), D-0132; **awaiting the owner's approval** |
 | **Teams tables, reserved and empty** (Prompt 11, D-0126 §12; `org`, `org_admin`, `org_member`, `org_device`): defined so Teams can come without a migration; nothing writes them | — | — | Prompt 11 (M1), D-0127; **awaiting the owner's approval** |
 
 Prompt 1 adds two operational views, neither of which is user data on the server:
@@ -676,6 +680,13 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
 | Billing's credentials stolen through another service | I, E | Attacker in `api` or elsewhere | A service, database credential and uid of its own; provider keys and the token secret mounted into billing only | Ansible (`billing_uid`), the config |
 | Malformed provider input crashing billing | D | Anyone | Bounded bodies (96 KiB, JWS 64 KiB, responses 1 MiB); strict base64, DER and RFC 3339 decoders; fuzzed | fuzz `billing_inputs` (769,377 runs), unit tests |
 | Floods of unauthenticated token requests (each costs a provider call) | D | Anyone | A per-node budget per IP range | `ranges_have_a_budget` |
+| Support as a data sink (accounts, logs, histories piling up) | I | Insider, attacker, seized database | An account only when the user attaches it; logs only with consent after a preview, scrubbed on the device; everything sealed to staff's offline key; deleted at close, 90 days at most | `a_ticket_is_read_only_with_its_bearer_and_goes_entirely_at_close`, `support_tickets_are_sealed_bearer_bound_and_gone_at_close` |
+| Reading or answering someone else's ticket | I, S | Anyone | A random 16-byte ID and a 32-byte bearer drawn by the server, the bearer stored hashed; a wrong bearer and no ticket give the same 404; replies sealed to a key only the user's app holds | the same tests |
+| A forged appeal, or one for someone else's account | S | Anyone | Appeals must be signed by a device of the account (401 otherwise) | `support_tickets_are_sealed…` |
+| Ticket floods | D | Anyone | Six tickets an hour per IP range (burst 3), 240 other calls; 50 messages and 32 KiB each per ticket | the same test (429), `a_ticket_holds_a_bounded_number_of_messages` |
+| A legal request answered with more than the account's own export | I | Authority, insider | `legal export` is the GDPR export by construction; content, payments and IPs are not held; every export needs `--confirm`, a case reference and is audit-logged and counted | `the_package_is_the_export_and_its_scope`, `the_export_lists_attached_tickets_and_deletion_unlinks_them` |
+| Requests hidden from the public | R | Insider | Counts per half-year, country, kind and outcome in the registry; the report generated from them | `legal_requests_leave_counts_only`, `the_report_shows_counts_only` |
+| An invite link telling the server who invited whom | I | Server, network | Everything in the fragment (never sent); the friend's app fetches the inviter like any contact; the inviter counts its own invites by code hash | `links_round_trip_and_keep_everything_in_the_fragment`, `an_inviter_sees_only_which_of_its_codes_are_live` |
 
 ## 4. Server-enforced settings
 
@@ -724,6 +735,11 @@ own devices), not on consent to processing: the server processes no more of a su
 data than of any account, plus the policy row in §1.
 
 ## 6. Open risks
+
+- Prompt 11, M6 (D-0132): the legal-request process (`docs/RUNBOOKS/legal-requests.md`) awaits
+  counsel's review before the first real request; the support key's rotation keeps old keys
+  until their tickets close (a manual step); a signed ticket shows the server which account
+  wrote to support (by design, only when the user attaches it).
 
 - Plans and payments (Prompt 11, D-0128; awaiting the owner's approval): an operator watching
   both billing and `api` could link a token's issuance to its redemption by **timing and IP

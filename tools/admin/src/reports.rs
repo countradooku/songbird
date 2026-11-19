@@ -64,13 +64,13 @@ pub(crate) enum ReportsCmd {
 }
 
 pub(crate) fn read_key(path: &Path) -> Result<ProvisioningKey> {
-    let text = std::fs::read_to_string(path).context("reading the moderation key")?;
+    let text = std::fs::read_to_string(path).context("reading the private key")?;
     let mut k = [0u8; 32];
-    hex::decode_to_slice(text.trim(), &mut k).context("the moderation key is 64 hex characters")?;
+    hex::decode_to_slice(text.trim(), &mut k).context("the private key is 64 hex characters")?;
     ProvisioningKey::from_private(&k).map_err(|_| anyhow!("not an X25519 private key"))
 }
 
-fn keygen(out: &Path) -> Result<()> {
+pub(crate) fn keygen(out: &Path) -> Result<()> {
     let mut k = [0u8; 32];
     aws_lc_rs::rand::fill(&mut k).map_err(|_| anyhow!("random source failed"))?;
     let key = ProvisioningKey::from_private(&k).map_err(|_| anyhow!("key generation failed"))?;

@@ -237,6 +237,7 @@ async fn account_deletion_is_verified_across_every_store() {
         plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
+        support: None,
         calls: None,
         server_name: API.into(),
         push_store: Arc::new(
@@ -574,6 +575,7 @@ async fn device_removal_is_verified_across_every_store_and_spares_the_rest() {
         plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
+        support: None,
         calls: None,
         server_name: API.into(),
         push_store: Arc::new(
@@ -858,6 +860,7 @@ async fn an_offline_device_receives_a_push_end_to_end() {
         plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
+        support: None,
         calls: None,
         server_name: API.into(),
         push_store: Arc::new(
@@ -1149,6 +1152,7 @@ async fn m5_numbers() {
         plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
+        support: None,
         calls: None,
         server_name: API.into(),
         push_store: Arc::new(

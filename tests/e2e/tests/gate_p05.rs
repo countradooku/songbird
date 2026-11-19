@@ -203,6 +203,7 @@ async fn stack(people: usize) -> Option<Stack> {
         plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
+        support: None,
         calls: None,
         server_name: API.into(),
         push_store: Arc::new(

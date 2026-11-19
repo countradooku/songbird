@@ -55,6 +55,7 @@ pub mod reports;
 pub mod requests;
 pub mod server;
 pub mod storage;
+pub mod support;
 pub mod usernames;
 pub mod vault;
 
@@ -240,6 +241,8 @@ pub struct App {
     pub reports: Option<reports::Reports>,
     /// Calls (Prompt 7; absent: `/v1/calls…` answers 503).
     pub calls: Option<calls::CallsApi>,
+    /// The support channel (Prompt 11, D-0132; absent: `/v1/support…` answers 503).
+    pub support: Option<Box<support::Support>>,
     /// Plans: the catalogue and the live entitlements snapshot (Prompt 11, D-0127). The default
     /// is the owner's catalogue with every account on Free.
     pub plans: plans::Plans,
@@ -366,6 +369,9 @@ impl App {
         if path == "/v1/family" || path.starts_with("/v1/family/") {
             return self.family(req).await;
         }
+        if path.starts_with("/v1/support/") {
+            return self.support(req).await;
+        }
         match (&method, path.as_str()) {
             (&Method::PUT, "/v1/push") => {
                 let (device, body) = self.authenticate_json(req).await?;
@@ -453,6 +459,7 @@ impl App {
                         .await,
                 ))
             }
+            (&Method::POST, "/v1/invites/status") => self.invite_status(req).await,
             (&Method::POST | &Method::GET | &Method::DELETE, "/v1/invites") => {
                 self.invites(req).await
             }
@@ -908,6 +915,126 @@ impl App {
             )
             .await,
         ))
+    }
+
+    /// `/v1/support/…` ([`support`]): signed or not; a ticket is read with its bearer.
+    async fn support(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let s = self.support.as_ref().ok_or_else(unavailable)?;
+        let peer = req
+            .extensions()
+            .get::<registration::Peer>()
+            .ok_or_else(unavailable)?
+            .0;
+        let method = req.method().clone();
+        let path = req.uri().path().to_owned();
+        let bearer = req
+            .headers()
+            .get(support::BEARER_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| {
+                let mut b = [0u8; 32];
+                hex::decode_to_slice(v, &mut b).ok().map(|()| b)
+            });
+        let sr = match (&method, path.as_str()) {
+            (&Method::GET, "/v1/support/key") => support::Request::Key,
+            (&Method::POST, "/v1/support/tickets") => {
+                if req.headers().contains_key(auth::AUTHORIZATION) {
+                    // Signed: the account is attached (an appeal, priority on Plus).
+                    let (device, body) = self.authenticate_body(req, support::MAX_BODY).await?;
+                    let row = self
+                        .registry
+                        .device(&device)
+                        .await
+                        .map_err(|_| unavailable())?
+                        .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+                    if row.pending {
+                        return Ok(pending_refusal());
+                    }
+                    support::Request::Open(body.to_vec(), Some(row.account))
+                } else {
+                    support::Request::Open(
+                        bounded_body(req, support::MAX_BODY).await?.to_vec(),
+                        None,
+                    )
+                }
+            }
+            (m, p) => match (m, support::Request::ticket_path(p)) {
+                (&Method::GET, Some((id, false))) => support::Request::Read(id, bearer),
+                (&Method::DELETE, Some((id, false))) => support::Request::Close(id, bearer),
+                (&Method::POST, Some((id, true))) => support::Request::Post(
+                    id,
+                    bearer,
+                    bounded_body(req, support::MAX_BODY).await?.to_vec(),
+                ),
+                _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
+            },
+        };
+        let opened = matches!(sr, support::Request::Open(..));
+        let range = registration::range_of(peer, 24, 48);
+        let out = s
+            .serve(
+                &self.registry,
+                &self.hot,
+                &range,
+                sr,
+                |a| self.plans.live.level(a),
+                songbird_entitlements::today(),
+            )
+            .await;
+        let mut resp = profile_outcome(out);
+        if opened && resp.status() == StatusCode::OK {
+            *resp.status_mut() = StatusCode::CREATED;
+        }
+        Ok(resp)
+    }
+
+    /// `POST /v1/invites/status`: which of the caller's invite codes are still live (D-0132).
+    /// The body names codes by their hash; the answer says only live or gone, never who used one.
+    async fn invite_status(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct B {
+            codes: Vec<String>,
+        }
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let (device, body) = self.authenticate_json(req).await?;
+        let row = self
+            .registry
+            .device(&device)
+            .await
+            .map_err(|_| unavailable())?
+            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+        if row.pending {
+            return Ok(pending_refusal());
+        }
+        let bad = || {
+            json(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({ "error": "body" }),
+            )
+        };
+        let Ok(b) = serde_json::from_slice::<B>(&body) else {
+            return Ok(bad());
+        };
+        if b.codes.is_empty() || b.codes.len() > 50 {
+            return Ok(bad());
+        }
+        let mut out = Vec::with_capacity(b.codes.len());
+        for c in &b.codes {
+            let mut h = [0u8; 32];
+            if hex::decode_to_slice(c, &mut h).is_err() {
+                return Ok(bad());
+            }
+            let live = self
+                .registry
+                .invite_uses(&h)
+                .await
+                .map_err(|_| unavailable())?
+                .is_some_and(|n| n > 0);
+            out.push(live);
+        }
+        Ok(json(StatusCode::OK, &serde_json::json!({ "live": out })))
     }
 
     /// A device's account's standing (Good when the device is unknown: the request fails later).

@@ -195,6 +195,40 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0132 — Prompt 11, milestone 6: support, legal requests and invites without a data sink
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0126 §9–§12; the threat-model rows (§1, §3.28, §6)
+  await the owner; the legal process awaits counsel
+- Decided by: agent, within the owner's plan
+- Context: `docs/reports/P11-M6.md`.
+- Decision:
+  - **Support tickets** in the registry (`ticket`, `ticket_msg`): opened signed (the account
+    attached; priority on Plus; required for appeals) or unsigned (anonymous); every message
+    sealed on the device to the support key (`Domain::Support`) or by staff to the ticket's own
+    reply key (`Domain::SupportReply`); a random ID and a bearer drawn by the server, the bearer
+    stored hashed; one 404 for a wrong bearer and no ticket; 50 messages of 32 KiB at most;
+    budgets per keyed IP range; deleted at close with every message, 90 days untouched at most;
+    unlinked when the account is deleted; listed (never their contents) in the account's export,
+    as is its standing. `songbird-admin support keygen | list | open | reply | close`.
+  - **Legal requests**: `songbird-admin legal export` is the account's GDPR export wrapped with
+    the case and a scope statement, written to a new 0600 file, audit-logged and counted;
+    `legal record` counts the rest; `transparency` prints a half-year's Markdown report from
+    counts only (`legal` table) and the standings now. `docs/RUNBOOKS/legal-requests.md`.
+  - **Invites**: `POST /v1/invites/status` (signed, up to 50 code hashes, live or not); the
+    invite link (`crates/proto/src/invite_link.rs`): everything in the fragment, versioned,
+    parsed strictly.
+  - The support throttle key is derived (HKDF, `songbird.v1/support-throttle`) from the push
+    index secret every `api` node already shares, rather than a new secret to provision.
+- Options considered: tickets in an external helpdesk (rejected: a third party holding users'
+  accounts and logs); a ticket bearer chosen by the client (rejected: the server cannot vouch for
+  its entropy); a per-inviter "invites used" counter (rejected, D-0038).
+- Evidence: `crates/accounts/tests/support_live.rs` (4), `services/api/tests/plans_live.rs`
+  (`support_tickets_are_sealed…`, `an_inviter_sees_only…`), `crates/proto` `invite_link` tests
+  (RFC 4648 vectors) and fuzz target `invite_link`, `tools/admin` `support` and `legal` tests.
+- Consequences: staff must keep retired support keys until their tickets close; the M7 app adds
+  the Help form (consent and preview of logs), the appeal screen and the invite link.
+
 ## D-0131 — Prompt 11, milestone 5: abuse controls without content
 
 - Date: 2026-11-19

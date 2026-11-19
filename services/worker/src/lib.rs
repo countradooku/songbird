@@ -779,6 +779,14 @@ impl Worker {
         if let Err(e) = self.registry.sweep_signals(today).await {
             tracing::warn!(error = %e, "signal sweep failed");
         }
+        // Support tickets nobody touched for 90 days, with every message (D-0132).
+        if let Err(e) = self
+            .registry
+            .sweep_tickets(today.saturating_sub(songbird_accounts::support::TICKET_DAYS))
+            .await
+        {
+            tracing::warn!(error = %e, "ticket sweep failed");
+        }
         // Family mailboxes nobody touched for two months (D-0130).
         if let Err(e) = self
             .registry

@@ -162,6 +162,10 @@ filter = "info"
 # redeems_per_hour = 30                                           # per account
 # redeem_burst = 10
 #
+# The support channel (Prompt 11, D-0132). Absent: /v1/support… answers 503.
+# [api.support]
+# key = "<64 hex>"                                                # X25519 public; `songbird-admin support keygen`
+#
 # Plans (Prompt 11, D-0126 §3, D-0127). Absent: these defaults. A higher level may never allow
 # less than a lower one; security features are never here.
 # [api.plans]

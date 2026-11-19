@@ -510,7 +510,19 @@ async fn build(
         Duration::from_millis(s.entitlements_poll_ms),
         stop.clone(),
     )));
+    let support = match &s.support {
+        Some(c) => {
+            let mut key = [0u8; 32];
+            hex::decode_to_slice(&c.key, &mut key)?;
+            Some(Box::new(
+                songbird_api::support::Support::new(key, &*s.push_index_secret.resolve_key32()?)
+                    .map_err(|_| BoxError::from("support key derivation failed"))?,
+            ))
+        }
+        None => None,
+    };
     let app = Arc::new(App {
+        support,
         plans,
         reports,
         requests,

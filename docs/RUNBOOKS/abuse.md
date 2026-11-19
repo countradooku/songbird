@@ -53,7 +53,9 @@ songbird-admin moderation decide --key moderation.key --report <id> --action sus
 ## Appeals
 
 A suspended or limited account appeals through Help (a support ticket of kind `appeal` with the
-account attached, Prompt 11 M6). The moderator reviews it with the decision's audit entry, then:
+account attached, Prompt 11 M6; [legal-requests.md](legal-requests.md#support-tickets)). The
+moderator reads it with `songbird-admin support open`, reviews it with the decision's audit entry,
+replies with `support reply`, then:
 
 ```bash
 songbird-admin moderation show --account <hex> --addr <registry> ...

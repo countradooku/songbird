@@ -158,6 +158,7 @@ async fn registered_accounts_connect_and_talk_without_an_operator() {
         plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
+        support: None,
         calls: None,
         server_name: API.into(),
         push_store: Arc::new(

@@ -294,3 +294,10 @@ path = "fuzz_targets/billing_inputs.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "invite_link"
+path = "fuzz_targets/invite_link.rs"
+test = false
+doc = false
+bench = false

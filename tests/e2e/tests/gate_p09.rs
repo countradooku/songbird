@@ -216,6 +216,7 @@ async fn stack(limits: RequestLimits) -> Option<Stack> {
         plans: songbird_api::plans::Plans::default(),
         calls: None,
         reports: None,
+        support: None,
         requests: Some(songbird_api::requests::Requests::new(
             keys.clone(),
             songbird_api::requests::RequestsMetrics::default(),

@@ -27,6 +27,8 @@ use songbird_types::{AccountId, DeviceId, Secret, SecretRef};
 
 const SERVER: &str = "api.test";
 const SECRET: [u8; 32] = [0x5c; 32];
+/// The support team's private key (staff's, offline in production).
+const SUPPORT_PRIVATE: [u8; 32] = [0x42; 32];
 
 fn env(name: &str) -> Option<String> {
     let v = std::env::var(name).ok();
@@ -101,6 +103,15 @@ async fn stack(per_hour: u32, burst: u32) -> Option<Stack> {
         },
         requests: None,
         reports: None,
+        support: Some(Box::new(
+            songbird_api::support::Support::new(
+                songbird_keys::provisioning::ProvisioningKey::from_private(&SUPPORT_PRIVATE)
+                    .unwrap()
+                    .public(),
+                &secret,
+            )
+            .unwrap(),
+        )),
         calls: None,
         server_name: SERVER.into(),
         push_store: Arc::new(
@@ -588,4 +599,260 @@ async fn a_family_shares_plus_without_naming_anyone() {
     .await;
     assert_eq!(st, 204);
     assert_eq!(get(seats[0].clone()).await.0, 404);
+}
+
+/// A raw request with headers; the status and the JSON answer.
+async fn raw(
+    addr: std::net::SocketAddr,
+    method: &str,
+    path: &str,
+    headers: &[(&str, String)],
+    body: Option<Vec<u8>>,
+) -> (u16, serde_json::Value) {
+    let mut b = hyper::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", SERVER);
+    for (k, v) in headers {
+        b = b.header(*k, v.as_str());
+    }
+    let body = body.unwrap_or_default();
+    b = b.header("content-length", body.len());
+    let req = b
+        .body(http_body_util::Full::new(bytes::Bytes::from(body)))
+        .unwrap();
+    let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut send, conn) = hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tcp))
+        .await
+        .unwrap();
+    tokio::spawn(conn);
+    let r = send.send_request(req).await.unwrap();
+    let st = r.status().as_u16();
+    let body = http_body_util::BodyExt::collect(r.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    (
+        st,
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap_or_default(),
+    )
+}
+
+#[tokio::test]
+async fn support_tickets_are_sealed_bearer_bound_and_gone_at_close() {
+    use songbird_keys::provisioning::{Domain, ProvisioningKey, open_with, seal_with};
+    let Some(s) = stack(1_000, 100).await else {
+        return;
+    };
+    // The app fetches the support key and seals to it; only the team's private key opens it.
+    let (st, v) = raw(s.addr, "GET", "/v1/support/key", &[], None).await;
+    assert_eq!(st, 200);
+    let support: [u8; 32] = hex::decode(v["key"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let staff = ProvisioningKey::from_private(&SUPPORT_PRIVATE).unwrap();
+    assert_eq!(support, staff.public());
+    let reply = ProvisioningKey::generate().unwrap();
+    let sealed = seal_with(Domain::Support, &support, b"I cannot sign in").unwrap();
+    assert!(open_with(Domain::Report, &staff, &sealed).is_err());
+    assert!(open_with(Domain::Support, &reply, &sealed).is_err());
+    let body = |kind: &str, sealed: &[u8]| {
+        serde_json::json!({
+            "kind": kind,
+            "reply_key": hex::encode(reply.public()),
+            "sealed": hex::encode(sealed),
+        })
+        .to_string()
+        .into_bytes()
+    };
+
+    // Unsigned: nobody attached, no priority. An unsigned appeal is refused.
+    let (st, v) = raw(
+        s.addr,
+        "POST",
+        "/v1/support/tickets",
+        &[],
+        Some(body("help", &sealed)),
+    )
+    .await;
+    assert_eq!(st, 201);
+    assert_eq!(v["priority"], false);
+    let ticket = v["ticket"].as_str().unwrap().to_owned();
+    let bearer = v["bearer"].as_str().unwrap().to_owned();
+    let (st, _) = raw(
+        s.addr,
+        "POST",
+        "/v1/support/tickets",
+        &[],
+        Some(body("appeal", &sealed)),
+    )
+    .await;
+    assert_eq!(st, 401);
+    for bad in [
+        body("other", &sealed),
+        body("help", &sealed[..20]),
+        b"{}".to_vec(),
+    ] {
+        let (st, _) = raw(s.addr, "POST", "/v1/support/tickets", &[], Some(bad)).await;
+        assert_eq!(st, 400);
+    }
+    let rows = s.app.registry.tickets(10).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].account, None);
+
+    // Signed by a Plus account: attached, answered first.
+    let (account, c) = device(&s).await;
+    let today = songbird_entitlements::today();
+    s.app
+        .registry
+        .set_entitlement(
+            &account,
+            1,
+            today + 30,
+            songbird_accounts::entitlements::Source::Grant,
+        )
+        .await
+        .unwrap();
+    s.app
+        .plans
+        .live
+        .store(songbird_entitlements::load(&s.app.registry).await.unwrap());
+    let appeal = seal_with(Domain::Support, &support, b"please review").unwrap();
+    let (st, b) = c
+        .send(
+            "POST",
+            "/v1/support/tickets",
+            Some(&body("appeal", &appeal)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(st, 201);
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(v["priority"], true);
+    let rows = s.app.registry.tickets(10).await.unwrap();
+    assert_eq!(rows[0].account, Some(account));
+    assert!(rows[0].priority);
+
+    // The bearer reads; staff reply sealed to the reply key; a wrong bearer is a 404.
+    let path = format!("/v1/support/tickets/{ticket}");
+    let with = |b: &str| vec![("x-songbird-ticket-bearer", b.to_owned())];
+    let id: [u8; 16] = hex::decode(&ticket).unwrap().try_into().unwrap();
+    let answer = seal_with(Domain::SupportReply, &reply.public(), b"try this").unwrap();
+    s.app
+        .registry
+        .ticket_post(&id, None, &answer, today)
+        .await
+        .unwrap();
+    let (st, v) = raw(s.addr, "GET", &path, &with(&bearer), None).await;
+    assert_eq!(st, 200);
+    assert_eq!(v["kind"], "help");
+    let msgs = v["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 2);
+    assert_eq!(msgs[1]["from"], "staff");
+    let theirs = hex::decode(msgs[1]["sealed"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        open_with(Domain::SupportReply, &reply, &theirs).unwrap(),
+        b"try this"
+    );
+    assert!(open_with(Domain::Support, &reply, &theirs).is_err());
+    let wrong = hex::encode([0u8; 32]);
+    assert_eq!(raw(s.addr, "GET", &path, &with(&wrong), None).await.0, 404);
+    assert_eq!(raw(s.addr, "GET", &path, &[], None).await.0, 404);
+    assert_eq!(
+        raw(s.addr, "DELETE", &path, &with(&wrong), None).await.0,
+        404
+    );
+    let more = serde_json::json!({ "sealed": hex::encode(&sealed) })
+        .to_string()
+        .into_bytes();
+    let (st, _) = raw(
+        s.addr,
+        "POST",
+        &format!("{path}/messages"),
+        &with(&bearer),
+        Some(more),
+    )
+    .await;
+    assert_eq!(st, 204);
+
+    // Closed: no row, no message, and the same 404 as a ticket that never was.
+    assert_eq!(
+        raw(s.addr, "DELETE", &path, &with(&bearer), None).await.0,
+        204
+    );
+    assert_eq!(raw(s.addr, "GET", &path, &with(&bearer), None).await.0, 404);
+    assert!(matches!(
+        s.app.registry.ticket_read(&id, None).await,
+        Err(songbird_accounts::RegistryError::NotFound)
+    ));
+    assert_eq!(s.app.registry.tickets(10).await.unwrap().len(), 1);
+
+    // Opening has a budget per IP range.
+    let mut throttled = false;
+    for _ in 0..12 {
+        let (st, _) = raw(
+            s.addr,
+            "POST",
+            "/v1/support/tickets",
+            &[],
+            Some(body("help", &sealed)),
+        )
+        .await;
+        if st == 429 {
+            throttled = true;
+            break;
+        }
+        assert_eq!(st, 201);
+    }
+    assert!(throttled);
+}
+
+#[tokio::test]
+async fn an_inviter_sees_only_which_of_its_codes_are_live() {
+    let Some(s) = stack(1_000, 100).await else {
+        return;
+    };
+    let (_, c) = device(&s).await;
+    let codes: Vec<[u8; 15]> = (0..3u8).map(|i| [i + 1; 15]).collect();
+    let hashes: Vec<[u8; 32]> = codes.iter().map(songbird_accounts::invite_hash).collect();
+    s.app
+        .registry
+        .create_invites(&hashes[..2], 1, Duration::from_secs(3600))
+        .await
+        .unwrap();
+    s.app.registry.revoke_invite(&hashes[1]).await.unwrap();
+    let ask = |h: Vec<String>| {
+        let c = &c;
+        async move {
+            let (st, b) = c
+                .send(
+                    "POST",
+                    "/v1/invites/status",
+                    Some(&serde_json::to_vec(&serde_json::json!({ "codes": h })).unwrap()),
+                )
+                .await
+                .unwrap();
+            (
+                st,
+                serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default(),
+            )
+        }
+    };
+    let (st, v) = ask(hashes.iter().map(hex::encode).collect()).await;
+    assert_eq!(st, 200);
+    assert_eq!(v, serde_json::json!({ "live": [true, false, false] }));
+    assert_eq!(ask(vec![]).await.0, 400);
+    assert_eq!(ask(vec![hex::encode(hashes[0]); 51]).await.0, 400);
+    assert_eq!(ask(vec!["zz".into()]).await.0, 400);
+    // Unsigned: refused.
+    let (st, _) = raw(
+        s.addr,
+        "POST",
+        "/v1/invites/status",
+        &[],
+        Some(b"{\"codes\":[]}".to_vec()),
+    )
+    .await;
+    assert_eq!(st, 401);
 }

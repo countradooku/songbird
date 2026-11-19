@@ -113,6 +113,7 @@ async fn stack_full(
         plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
+        support: None,
         calls: None,
         server_name: SERVER.into(),
         push_store: Arc::new(

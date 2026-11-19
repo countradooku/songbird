@@ -627,7 +627,8 @@ impl Backoff {
 
 /// Whether a failure is SurrealDB's "transaction conflict, retry" (as a statement kind or an RPC
 /// error code; which one depends on where the conflict is detected).
-fn is_conflict(e: &DbError) -> bool {
+#[must_use]
+pub fn is_conflict(e: &DbError) -> bool {
     match e {
         DbError::Rpc(songbird_surreal::RpcError::Server { code, .. }) => {
             *code == songbird_surreal::CODE_TRANSACTION_CONFLICT

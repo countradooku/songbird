@@ -31,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [client_hello, proxy_link, config_toml, id_parse, proto_client_frame, proto_server_frame, surreal_cbor, iggy_record, registration_request, pow_challenge, ed25519_key, username, prekeys, keypackages, devices, profile, kt, content, franking, mls_wire, mls_commit, group_records, attachment_decrypt, upload_grant, s3_multipart_xml, media_url, pack_manifest, gif_proxy, call_message, call_records, qr_decode, jpeg_strip, tokens]
+        target: [client_hello, proxy_link, config_toml, id_parse, proto_client_frame, proto_server_frame, surreal_cbor, iggy_record, registration_request, pow_challenge, ed25519_key, username, prekeys, keypackages, devices, profile, kt, content, franking, mls_wire, mls_commit, group_records, attachment_decrypt, upload_grant, s3_multipart_xml, media_url, pack_manifest, gif_proxy, call_message, call_records, qr_decode, jpeg_strip, tokens, billing_inputs]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

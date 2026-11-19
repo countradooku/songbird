@@ -107,6 +107,9 @@ server in plaintext. Adding to this list requires the owner's approval.
 | **Redeemed token nullifiers** (Prompt 11, D-0128; `tnull`): `SHA-256` of a token's key ID, metadata and nonce, and the last day it is kept; **no account, no time**. The account's entitlement row says only `source = token` | Refuse a token redeemed twice | Until the token could no longer be redeemed (its month's end and a day); the worker's sweep | Prompt 11 (M2), D-0128; **awaiting the owner's approval** |
 | Keyed budget records of redemptions per account (`tk:r:` in `valkey-hot`, HMAC of the account under a key derived from the token secret) | Bound redemptions | An hour | Prompt 11 (M2), D-0128; **awaiting the owner's approval** |
 | **The token secret** (`[api.tokens]`, shared by `api` and billing only): derives every token key pair | Issue (billing) and redeem (`api`) tokens | Until rotated (a new key ID) | Prompt 11 (M2), D-0128; **awaiting the owner's approval** |
+| **Billing's database** (Prompt 11, D-0129; its own database and credential, `services/billing`): per subscription, `HMAC(billing secret, provider, ID)`, the provider, plan, last UTC day paid for, revoked, renews and the provider's time of the newest state; for **Mollie only**, its customer ID (a customer with no name or e-mail) and subscription ID; token counts per subscription and month; hashes of handled provider message IDs. **Never an account; never Apple's or Google's identifiers** | Verify purchases, cap tokens, cancel Mollie subscriptions | Subscriptions: until 400 days after the last paid day once they no longer renew (past refund and chargeback windows); counts: the month and a day; message hashes: 45 days | Prompt 11 (M3), D-0129; **awaiting the owner's approval** |
+| In billing's memory for a request: Apple's signed transaction, Google's purchase token or a Mollie subscriber secret, and the request's source IP (a per-node budget per /24 or /48) | Verify the purchase; bound unauthenticated requests | The request | Prompt 11 (M3), D-0129; **awaiting the owner's approval** |
+| **At the providers** (outside Songbird): Apple and Google know which of their accounts subscribes to Songbird; Mollie knows the payer's payment details and country. None of them gets a Songbird identifier | Payment | Theirs | Prompt 11 (M3), D-0129; **awaiting the owner's approval** |
 | **Teams tables, reserved and empty** (Prompt 11, D-0126 §12; `org`, `org_admin`, `org_member`, `org_device`): defined so Teams can come without a migration; nothing writes them | — | — | Prompt 11 (M1), D-0127; **awaiting the owner's approval** |
 
 Prompt 1 adds two operational views, neither of which is user data on the server:
@@ -644,6 +647,16 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
 | Timing and network correlation of an issuance and the redemption after it | I | Server operator watching both | Not prevented: stated (PROTOCOL §14.4). No IP is logged (invariant 6); renewals are redeemed at a random time; first purchases at once (the user is waiting) | — (§6) |
 | A wrong implementation of the PRF or the proof | T, E | — | Written from RFC 9497 and checked against all of Appendix A.1 (OPRF, VOPRF, POPRF, batches); Songbird's vector re-derived by an independent Python implementation (RFC 9496, 9380, 9497) | `tests/rfc9497.rs`, `vectors/check.py` (CI) |
 | Redemption floods | D | Client | A per-account budget before any work; a batch of at most 16 at issuance | `redemptions_have_a_budget` |
+| A forged App Store transaction or notification | S, E | Anyone | `x5c` exactly leaf, intermediate and the pinned root (byte-equal); Apple's marker extensions on leaf and intermediate (a developer certificate from Apple's intermediate is refused); rustls-webpki path validation; `ES256` by the leaf; bundle, environment and type checked; the App Store Server API asked when configured | `apple_purchases_are_verified_capped_and_forgeries_refused` (another root, no leaf marker, no intermediate marker, another app, the other environment, an account token, an unknown product, a consumable, a tampered payload) |
+| A forged Google notification | S | Anyone | Google's OIDC token (signature by a published key, issuer, audience, push account, verified e-mail, expiry); the state is fetched from the Play API, never taken from the notification | `google_purchases_and_notifications` (wrong audience, e-mail, issuer, unverified, expired, a stranger's key, none) |
+| Replayed, duplicated or reordered notifications and webhooks | T, R | Anyone, the providers' retries | Handled message IDs remembered; a state older than the row's is ignored; Mollie's subscription is created once per row; webhooks carry only an ID that is fetched back | `apple_notifications_replayed_or_reordered_change_nothing_twice`, the Google replay, `mollie_checkout_webhooks_and_cancel` |
+| Sandbox or test purchases in production; a purchase tied to an account | E, I | Client | Environment checked for Apple; Google's `testPurchase` refused in production; `appAccountToken` and `obfuscatedExternalAccountId` refused | `production_refuses_test_purchases`, the forgery cases |
+| One subscription minting tokens for many accounts | E | Subscriber | Plus 2 and Family 7 a month, spent atomically | `caps_hold_under_concurrency` (12 at once, exactly 7) |
+| Refunds and chargebacks keeping Plus | E | Subscriber | Revocation stops tokens; Google's voided purchases stay revoked; the account keeps at most its current month and grace | the Apple, Google and Mollie revocation cases |
+| A breach or subpoena of billing naming who pays | I | Attacker, authority | No account anywhere in billing; Apple's and Google's IDs only as keyed hashes; tokens unlinkable to redemptions (§3.28) | `billing_keeps_no_account_and_no_store_identifier` (tables, fields, no store ID in the clear) |
+| Billing's credentials stolen through another service | I, E | Attacker in `api` or elsewhere | A service, database credential and uid of its own; provider keys and the token secret mounted into billing only | Ansible (`billing_uid`), the config |
+| Malformed provider input crashing billing | D | Anyone | Bounded bodies (96 KiB, JWS 64 KiB, responses 1 MiB); strict base64, DER and RFC 3339 decoders; fuzzed | fuzz `billing_inputs` (769,377 runs), unit tests |
+| Floods of unauthenticated token requests (each costs a provider call) | D | Anyone | A per-node budget per IP range | `ranges_have_a_budget` |
 
 ## 4. Server-enforced settings
 
@@ -700,7 +713,12 @@ data than of any account, plus the policy row in §1.
   key list in the key transparency log is proposed for Prompt 12. The **metadata** of a token
   (level, month) is shared by everyone on that plan that month. Apple and Google know which of
   their accounts pays for Songbird (outside Songbird's control; the app never sets
-  `appAccountToken` or `obfuscatedExternalAccountId`).
+  `appAccountToken` or `obfuscatedExternalAccountId`). Billing keeps a lapsed subscription's row
+  (keyed hash, plan, dates) for 400 days after its last paid day; Mollie's customer and
+  subscription IDs sit in billing's database (needed to cancel). The real stores have not been
+  exercised yet: every verifier is tested against emulators until the owner's App Store Connect,
+  Play Console and Mollie test accounts exist, and the pinned Apple root's fingerprint is checked
+  against apple.com before release.
 - Backups in third-party clouds (Prompt 10, D-0122): the provider sees that an app folder
   exists, how many objects it holds, their padded sizes and when they change, and the
   account's IP addresses. `WebDAV` servers and Google Drive cannot swap the manifest

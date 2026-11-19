@@ -29,6 +29,8 @@ songbird-sync = { path = "../crates/sync" }
 songbird-backup-format = { path = "../crates/backup-format" }
 # Anonymous tokens (Prompt 11, D-0128).
 songbird-tokens = { path = "../crates/tokens" }
+songbird-billing = { path = "../services/billing" }
+rustls-pki-types = "1"
 serde_json = "1"
 aws-lc-rs = { version = "1.19.0", default-features = false, features = ["aws-lc-sys"] }
 # The app's camera (D-0110): QR decoding and the still metadata filter.
@@ -282,6 +284,13 @@ bench = false
 [[bin]]
 name = "tokens"
 path = "fuzz_targets/tokens.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "billing_inputs"
+path = "fuzz_targets/billing_inputs.rs"
 test = false
 doc = false
 bench = false

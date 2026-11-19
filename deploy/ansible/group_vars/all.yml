@@ -26,11 +26,14 @@ push_bundle_id: chat.songbird.app
 # Push runs as a uid of its own (D-0100): the provider keys on the host are readable by push alone,
 # not by every Songbird container's uid.
 push_uid: 65533
+# Billing runs as a uid of its own too (D-0129): payment provider keys and the token secret are
+# readable by billing alone.
+billing_uid: 65531
 push_vapid_subject: "mailto:push@{{ songbird_public_domain | default('songbird.chat') }}"
 
 # Which Songbird services run on which role, and their private admin ports.
 songbird_services_by_role:
-  edge: [delivery, api]
+  edge: [delivery, api, billing]
   worker: [push, worker]
   calls: [calls]
 songbird_admin_ports:
@@ -39,13 +42,14 @@ songbird_admin_ports:
   push: 9103
   worker: 9104
   calls: 9105
+  billing: 9106
 
 # Internal (private network only) ports by role, opened in nftables from private_cidr only.
 internal_ports_by_role:
   data: [8000, 8090, 6379, 6380, 9010]
   # LiveKit's tunnel (7880) and Valkey (6381) are opened per source host in nftables (D-0091).
   calls: []
-  edge: [9101, 9102]
+  edge: [9101, 9102, 9106]
   worker: [9103, 9104]
   calls_admin: [9105]
 
@@ -71,7 +75,7 @@ open_files_limit: 1048576
 # (tools/admin, `songbird-admin ca`). Files are owned by the uid the component runs as.
 tls_components_by_role:
   data: [surrealdb, iggy, valkey-hot, valkey-jobs, rustfs]
-  edge: [delivery, api]
+  edge: [delivery, api, billing]
   worker: [push, worker]
   calls: [calls, livekit, valkey-livekit]
 tls_owner_uid:
@@ -87,6 +91,7 @@ tls_owner_uid:
   push: 65533
   worker: 65532
   calls: 65532
+  billing: 65531
 tls_leaf_days: 30
 tls_renew_within_days: 10
 

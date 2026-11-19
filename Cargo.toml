@@ -33,6 +33,7 @@ members = [
     "services/push",
     "services/worker",
     "services/calls",
+    "services/billing",
     "services/proxy",
     "tools/loadgen",
     "tools/admin",

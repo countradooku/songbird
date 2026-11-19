@@ -2873,3 +2873,55 @@ by everyone on that plan that month).
 683 (December 2026), nonce `11…11`, blind and proof scalars from 64 bytes of `22` and `33`
 reduced; every intermediate value is listed. `vectors/check.py` reproduces RFC 9497 A.1.3.1 and
 this vector with the Python standard library alone (ristretto255 from RFC 9496).
+
+### 14.5 Billing (D-0129)
+
+`billing` is a service of its own (`services/billing`): its own SurrealDB database and
+credential, its own uid on the host, no access to the registry, and the only holder of the
+providers' credentials. It never sees an account.
+
+| Request | Who | Body | Answer |
+| --- | --- | --- | --- |
+| `POST /v1/billing/tokens` | the app (no account) | `{"proof": {"apple": <signed transaction>} \| {"google": <purchase token>} \| {"mollie": <64 hex subscriber secret>}, "request": <§14.4 request>}` | 200 the §14.4 answer; 400 `body`, `request`; 402 `not_paid`; 403 `proof`; 409 `period`; 429 `cap` or `budget`; 503 `provider` |
+| `POST /v1/billing/apple` | Apple | App Store Server Notifications V2 (`{"signedPayload"}`) | 200 (also for a replay); 400 not Apple's, not 2.0, another app or environment; 503 retry |
+| `POST /v1/billing/google` | Pub/Sub push, `Authorization: Bearer <Google OIDC>` | real-time developer notification | 200 (also for a replay); 401 the token; 400 another package; 503 retry |
+| `POST /v1/billing/mollie/checkout` | the app | `{"plan": "plus" \| "family", "interval": "month" \| "year", "subscriber": <64 hex>}` | 200 `{"checkout": <Mollie URL>}`; 409 `exists` |
+| `POST /v1/billing/mollie/webhook` | Mollie | `id=tr_…` (form) | 200 (unknown IDs too); 503 retry |
+| `POST /v1/billing/mollie/state`, `/cancel` | the app | `{"subscriber"}` | state `{"plan", "interval", "paid_through", "renews", "revoked"}`; cancel 204; 404 |
+
+**Rows.** `sub` under `HMAC(billing secret, provider ‖ 0 ‖ ID)[..16]`, where the ID is Apple's
+original transaction ID, Google's purchase token, or the app's Mollie subscriber secret: the
+provider, the plan, the last UTC day paid for, revoked, renews, and the provider time of the
+newest state applied. Apple's and Google's IDs are never stored. Mollie's customer and
+subscription IDs are (they are needed to cancel). `subtok` counts tokens per subscription and
+period; `notif` remembers handled message IDs for 45 days.
+
+**Verification.**
+- **Apple:** every JWS's `x5c` must be exactly `[leaf, intermediate, root]` with the root
+  byte-equal to the pinned one (Apple Root CA - G3 in production, checked by its SHA-256 at
+  start), the leaf carrying `1.2.840.113635.100.6.11.1` and the intermediate
+  `1.2.840.113635.100.6.2.1` (Apple's intermediates also sign developer certificates), the chain
+  valid now (rustls-webpki), then `ES256` by the leaf. Bundle ID and environment must match; a
+  transaction must be an auto-renewable subscription without `appAccountToken`. With the App
+  Store Server API configured (ES256 JWT, `aud` `appstoreconnect-v1`), the state comes from Get
+  All Subscription Statuses (5 revoked, 2 expired) every time; else from the signed transaction
+  and renewal info (`expiresDate`, `revocationDate`, `gracePeriodExpiresDate`).
+- **Google:** the state always comes from `purchases.subscriptionsv2.get` under the service
+  account (`RS256` assertion, scope `androidpublisher`): active, in grace or cancelled are paid
+  through `expiryTime`; anything else is not. A test purchase is refused in production; a
+  purchase with `obfuscatedExternalAccountId` is refused. Pending purchases are acknowledged.
+  A notification's OIDC token must be Google's (`RS256`, keys from Google's set, refreshed on an
+  unknown key), issuer `accounts.google.com`, the configured audience and push service account,
+  e-mail verified, not expired. A voided purchase revokes for good.
+- **Mollie:** customers have no name or e-mail; a webhook's payment is fetched back by ID; the
+  first payment's metadata names the row only by its key; a paid first payment starts the
+  subscription (once, even if Mollie calls twice); a paid period moves `paid_through` to the next
+  charge plus 7 days (SEPA Direct Debit takes days); a refund or chargeback revokes.
+
+**Ordering and replays.** A state is applied only if its provider time is not older than the
+row's; an answer from Apple's or Google's API counts as now. Handled message IDs are remembered
+and skipped. Caps are spent in one transaction (retried on write conflicts), so concurrent
+requests cannot pass them together.
+
+**Caps** per subscription per month: Plus 2, Family 7 (§14.4). A token for the current month
+needs the subscription paid today; for the next month, paid on that month's first day.

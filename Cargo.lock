@@ -5005,6 +5005,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "songbird-billing"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "bytes",
+ "getrandom 0.4.3",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "mimalloc",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "serde",
+ "serde_json",
+ "songbird-accounts",
+ "songbird-service",
+ "songbird-surreal",
+ "songbird-tokens",
+ "songbird-types",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "webpki-roots 1.0.12",
+ "zeroize",
+]
+
+[[package]]
 name = "songbird-calls"
 version = "0.1.0"
 dependencies = [

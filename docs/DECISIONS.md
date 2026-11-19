@@ -195,6 +195,39 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0129 — Prompt 11, milestone 3: billing, a service of its own
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0126 §1–§4; the threat-model rows (§1, §3.28, §6) await
+  the owner; the sandbox runs wait for the owner's accounts (D-0126 §11)
+- Decided by: agent, within the owner's plan
+- Context: `docs/reports/P11-M3.md`.
+- Decision:
+  - `services/billing`: its own database and credential, its own uid (`billing_uid`), the only
+    holder of the providers' credentials and, with `api`, of the token secret; no registry
+    access; no account anywhere.
+  - Rows under `HMAC(billing secret, provider ‖ ID)`; Apple's and Google's IDs never stored;
+    Mollie's customer and subscription IDs stored (needed to cancel); lapsed rows deleted 400
+    days after the last paid day.
+  - Apple: `x5c` exactly leaf, intermediate, pinned root (Apple Root CA - G3, its SHA-256 checked
+    at start in production); Apple's marker extensions on leaf and intermediate; rustls-webpki
+    for the path; `ES256`; bundle, environment, type and no `appAccountToken`; the App Store
+    Server API as the source of truth when configured.
+  - Google: the Play API as the only source of state; Google's OIDC token on every notification;
+    test purchases refused in production; `obfuscatedExternalAccountId` refused; voided
+    purchases revoke for good; pending purchases acknowledged.
+  - Mollie: customers with no name or e-mail; webhooks fetched back; one subscription per row;
+    paid through the next charge plus 7 days; refunds and chargebacks revoke.
+  - Replays skipped by message ID; older states ignored; caps spent atomically (retried on write
+    conflicts); a per-node budget per IP range for unauthenticated requests.
+  - **New direct dependency:** `rustls-webpki` 0.103.16 (already in the tree under rustls,
+    vetted), for certificates from the network; `rcgen` (in the workspace) as a dev-dependency
+    for the test PKI.
+- Evidence: `services/billing/tests/billing_live.rs` (7 live tests), unit tests (13), fuzz
+  `billing_inputs`.
+- Consequences: M4 adds Family seats and vault tokens on billing's and `api`'s tokens. The
+  gate's sandbox item needs the owner's App Store Connect, Play Console and Mollie test accounts.
+
 ## D-0128 — Prompt 11, milestone 2: anonymous tokens on RFC 9497's POPRF
 
 - Date: 2026-11-19

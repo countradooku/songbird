@@ -186,6 +186,28 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0124 — Prompt 10, milestone 5: the app's backups, restore and transfer
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0119; the threat-model rows await the owner
+- Decided by: agent, within the owner's plan
+- Context: `docs/reports/P10-M5.md`.
+- Decision:
+  - The recovery key is real (D-0119 §2), made once and kept on the device; the onboarding
+    shows 16 groups; restore checks the key's own check before fetching.
+  - Backups go to the vault, an encrypted folder (the user's Documents in release builds, the
+    app's data folder in debug builds), S3 and Nextcloud; the three OAuth clouds and iCloud say
+    "Coming soon" (D-0119 §6).
+  - Restore tries the chosen place, then the Songbird server, then this device's folder;
+    applies only a fully verified backup; recovers the account when the device has none.
+  - The transfer compares six digits on the old phone before sending; the new phone verifies
+    the whole backup before saying yes and recovers with the hand-over.
+  - Debug builds only: mod+alt+b on the restore screen backs this device up and fills in its
+    key, for review and screenshots.
+- Evidence: `apps/ui/src/backend/backup.rs` tests; `apps/ui/Screens_backups.test.tsx` (9 tests,
+  headless and macOS); the app's 201 tests.
+- Consequences: M6 is the gate.
+
 ## D-0123 — Prompt 10, milestone 4: account recovery, the transfer, and messages by time
 
 - Date: 2026-11-19

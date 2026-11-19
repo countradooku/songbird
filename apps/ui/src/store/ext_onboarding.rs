@@ -246,16 +246,22 @@ pub fn key_last_group_matches(key: &str, typed: &str) -> bool {
         .is_some_and(|g| *g == key_chars(typed))
 }
 
-/// Whether `typed` is a whole recovery key in its format (8 groups of 4),
-/// for the restore screen. The real check is that it decrypts the backup.
+/// Whether `typed` has a whole recovery key's length (64 characters, 16
+/// groups of four), for enabling Restore.
 pub fn key_well_formed(typed: &str) -> bool {
     let chars = key_chars(typed);
-    chars.len() == 32
+    chars.len() == 64
+}
+
+/// Whether `typed` is a recovery key whose built-in check matches (no
+/// typo), before anything is fetched (PROTOCOL §11.1).
+pub fn key_checks_out(typed: &str) -> bool {
+    songbird_backup_format::RecoveryKey::parse(typed).is_ok()
 }
 
 /// Formats a key as it is typed: groups of four joined by dashes.
 pub fn format_key_input(raw: &str) -> String {
-    let chars: Vec<char> = key_chars(raw).chars().take(32).collect();
+    let chars: Vec<char> = key_chars(raw).chars().take(64).collect();
     chars
         .chunks(4)
         .map(|c| c.iter().collect::<String>())
@@ -313,6 +319,8 @@ pub enum BackupProblem {
     StorageFull,
     /// Songbird was signed out of the destination.
     SignedOut,
+    /// Anything else; [`BackupExtra::note`] says what.
+    Other,
 }
 
 /// Backup state the shared `Settings` doesn't hold yet (lead: candidates
@@ -324,11 +332,22 @@ pub struct BackupExtra {
     /// A backup running now: 0.0 to 1.0.
     pub running: Option<f32>,
     pub problem: Option<BackupProblem>,
+    /// What went wrong, in words, for [`BackupProblem::Other`] and a failed restore.
+    pub note: Option<String>,
+    /// What the last backup or restore held (the screens' counts).
+    pub messages: u32,
+    pub chats: u32,
     pub nextcloud_url: String,
     pub nextcloud_user: String,
+    /// An app password (never the account's own password); kept on this device.
+    pub nextcloud_password: String,
     pub s3_endpoint: String,
     pub s3_bucket: String,
+    /// Empty: `us-east-1`, which most S3-compatible services accept.
+    pub s3_region: String,
     pub s3_key: String,
+    /// The secret access key; kept on this device.
+    pub s3_secret: String,
 }
 
 /// Where a restore is.
@@ -345,10 +364,6 @@ pub enum RestoreStage {
     Failed,
 }
 
-/// How many messages the mock backup holds.
-pub const BACKUP_MESSAGES: u32 = 1204;
-pub const BACKUP_CHATS: u32 = 38;
-
 /// "1,204".
 pub fn thousands(n: u32) -> String {
     let s = n.to_string();
@@ -363,13 +378,13 @@ pub fn thousands(n: u32) -> String {
 }
 
 impl RestoreStage {
-    /// Overall progress, 0.0 to 1.0.
-    pub fn fraction(self) -> f32 {
+    /// Overall progress, 0.0 to 1.0, with `total` messages to restore.
+    pub fn fraction(self, total: u32) -> f32 {
         match self {
             RestoreStage::Idle => 0.0,
             RestoreStage::Finding => 0.08,
             RestoreStage::Decrypting => 0.2,
-            RestoreStage::Restoring(n) => 0.2 + 0.8 * n as f32 / BACKUP_MESSAGES as f32,
+            RestoreStage::Restoring(n) => 0.2 + 0.8 * n as f32 / total.max(1) as f32,
             RestoreStage::Done => 1.0,
             RestoreStage::Failed => 0.0,
         }
@@ -586,6 +601,19 @@ impl Store {
     }
 
     pub fn disable_backups(&self) {
+        // The backup at the destination is deleted (the vault: rows at once,
+        // objects by the worker; elsewhere: every object).
+        let dest = self.settings.with_untracked(|s| s.backup_destination);
+        if crate::backend::backup::available(dest) {
+            let target = self.backup_extra().get_untracked();
+            Owner::detached().run(|| {
+                spawn(async move {
+                    if let Err(p) = crate::backend::backup::delete(dest, target).await {
+                        log::warn!("backup not deleted: {p}");
+                    }
+                });
+            });
+        }
         self.settings_update(|s| {
             s.backup_on = false;
             s.backup_last = None;
@@ -597,31 +625,78 @@ impl Store {
         });
     }
 
-    /// Mock: a backup run (app-core `back_up_now`), progress on a timer.
+    /// A backup run (Prompt 10): the store's content, encrypted under the
+    /// recovery key, to the chosen destination; progress from the records
+    /// written. A destination the app can't use yet, or a failure, shows a
+    /// problem in words.
     pub fn back_up_now(&self) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
         let extra = self.backup_extra();
         if extra.with_untracked(|b| b.running.is_some()) {
             return;
         }
         let store = *self;
+        let dest = self.settings.with_untracked(|s| s.backup_destination);
+        if !crate::backend::backup::available(dest) {
+            extra.update(|b| {
+                b.problem = Some(BackupProblem::Other);
+                b.note = Some(crate::backend::backup::unavailable_reason(dest).into());
+            });
+            return;
+        }
+        let snap = crate::backend::backup::snapshot(store);
+        let total = snap.messages.max(1);
+        let records = Arc::new(AtomicU32::new(0));
         extra.update(|b| {
             b.running = Some(0.0);
             b.problem = None;
+            b.note = None;
         });
-        let steps = 20;
-        for i in 1..=steps {
-            later(120 * i, move || {
-                let p = i as f32 / steps as f32;
-                if p >= 1.0 {
-                    extra.update(|b| b.running = None);
-                    store.settings_update(|s| {
-                        s.backup_last = Some(format!("Today at {}", clock(NOW)))
-                    });
-                } else {
-                    extra.update(|b| b.running = Some(p));
+        let counted = records.clone();
+        let poll = Owner::detached().run(|| {
+            set_interval(Duration::from_millis(150), move || {
+                let n = counted.load(Ordering::Relaxed);
+                // Records include the settings and chats; the bar tracks
+                // messages, the bulk, and waits at 95% for the upload.
+                let p = (n as f32 / (total + 200) as f32).min(0.95);
+                extra.update(|b| {
+                    if b.running.is_some() {
+                        b.running = Some(p);
+                    }
+                });
+            })
+        });
+        let messages = snap.messages;
+        let chats = snap.chats;
+        let target = extra.get_untracked();
+        Owner::detached().run(|| {
+            spawn(async move {
+                let r = crate::backend::backup::back_up(dest, target, snap, records).await;
+                poll.cancel();
+                match r {
+                    Ok(_) => {
+                        extra.update(|b| {
+                            b.running = None;
+                            b.messages = messages;
+                            b.chats = chats;
+                        });
+                        store.settings_update(|s| {
+                            s.backup_last = Some(format!("Today at {}", clock(NOW)))
+                        });
+                    }
+                    Err(p) => extra.update(|b| {
+                        b.running = None;
+                        b.problem = Some(if p.0.contains("full") {
+                            BackupProblem::StorageFull
+                        } else {
+                            BackupProblem::Other
+                        });
+                        b.note = Some(p.0);
+                    }),
                 }
             });
-        }
+        });
     }
 
     /// Demo: the last backup failed (to show the error state).
@@ -632,47 +707,105 @@ impl Store {
         });
     }
 
-    /// Mock: a restore (app-core `restore_backup`). `damaged`: the backup
-    /// fails to decrypt half way through, and nothing is kept — app-core
-    /// restores into a staging database and swaps it in only at the end.
+    /// Restores a backup (Prompt 10): finds it (the chosen destination,
+    /// or on a new device the Songbird server, else this device's backup
+    /// folder), verifies every part, then puts it back in one change and
+    /// recovers the account onto this device when it has none. `key`: the
+    /// key a new device's user typed (`None`: this device's own). Nothing
+    /// changes on any failure. `damaged` (debug builds' review shortcut):
+    /// shows the failure without fetching.
     pub fn restore_backup(&self, damaged: bool) {
+        self.restore_backup_with(None, damaged);
+    }
+
+    /// As [`Self::restore_backup`], with a typed key.
+    pub fn restore_backup_with(&self, key: Option<String>, damaged: bool) {
         let stage = self.restore_stage();
+        let extra = self.backup_extra();
         stage.set(RestoreStage::Finding);
-        later(900, move || stage.set(RestoreStage::Decrypting));
         if damaged {
+            later(900, move || stage.set(RestoreStage::Decrypting));
             later(2000, move || stage.set(RestoreStage::Failed));
             return;
         }
-        let steps: u64 = 16;
-        for i in 1..=steps {
-            later(1700 + 140 * i, move || {
-                let n = (BACKUP_MESSAGES as u64 * i / steps) as u32;
-                stage.set(RestoreStage::Restoring(n));
-            });
+        let store = *self;
+        let key = match key {
+            Some(t) => match songbird_backup_format::RecoveryKey::parse(&t) {
+                Ok(k) => k,
+                Err(_) => {
+                    extra.update(|b| {
+                        b.note = Some("That key doesn't check out. Check it for a typo.".into())
+                    });
+                    stage.set(RestoreStage::Failed);
+                    return;
+                }
+            },
+            None => crate::backend::backup::recovery_key(),
+        };
+        let on = self.settings.with_untracked(|s| s.backup_on);
+        let chosen = self.settings.with_untracked(|s| s.backup_destination);
+        let mut places = vec![];
+        if on && crate::backend::backup::available(chosen) {
+            places.push(chosen);
         }
-        later(1700 + 140 * steps + 400, move || {
-            stage.set(RestoreStage::Done)
+        for d in [
+            BackupDestination::SongbirdServers,
+            BackupDestination::EncryptedFile,
+        ] {
+            if !places.contains(&d) {
+                places.push(d);
+            }
+        }
+        let target = extra.get_untracked();
+        Owner::detached().run(|| {
+            spawn(async move {
+                let mut last = None;
+                let mut found = None;
+                for d in places {
+                    match crate::backend::backup::fetch(d, target.clone(), &key).await {
+                        Ok(r) => {
+                            found = Some(r);
+                            break;
+                        }
+                        Err(p) => last = Some(p),
+                    }
+                }
+                let Some(r) = found else {
+                    extra.update(|b| b.note = last.map(|p| p.0));
+                    stage.set(RestoreStage::Failed);
+                    return;
+                };
+                stage.set(RestoreStage::Decrypting);
+                if let Err(p) = crate::backend::backup::recover(&r, None, None).await {
+                    extra.update(|b| b.note = Some(p.0));
+                    stage.set(RestoreStage::Failed);
+                    return;
+                }
+                crate::backend::backup::adopt_recovery_key(&key);
+                store
+                    .session
+                    .update(|s| s.recovery_key = key.display().to_string());
+                crate::backend::backup::apply(store, &r);
+                extra.update(|b| {
+                    b.messages = r.messages;
+                    b.chats = r.chats;
+                    b.note = None;
+                });
+                stage.set(RestoreStage::Restoring(r.messages));
+                later(300, move || stage.set(RestoreStage::Done));
+            });
         });
     }
 
     pub fn reset_restore(&self) {
+        self.backup_extra().update(|b| b.note = None);
         self.restore_stage().set(RestoreStage::Idle);
     }
 
-    /// Mock: a phone-to-phone transfer over the local network (app-core
-    /// `transfer_history`).
-    pub fn start_transfer(&self) {
-        let stage = self.transfer_stage();
-        stage.set(TransferStage::Pairing);
-        let steps = 20;
-        for i in 1..=steps {
-            later(1200 + 150 * i, move || {
-                stage.set(TransferStage::Moving(i as f32 / steps as f32));
-            });
-        }
-        later(1200 + 150 * steps + 300, move || {
-            stage.set(TransferStage::Done)
-        });
+    /// The transfer's stage (the screens drive the real transfer through
+    /// `backend::backup`).
+    pub fn set_transfer(&self, stage: TransferStage) {
+        self.transfer_stage().set(stage);
     }
 
     pub fn reset_transfer(&self) {
@@ -762,13 +895,19 @@ mod tests {
 
     #[test]
     fn recovery_key() {
-        let key = "SB4K-7Q2M-XN8P-3HVA-R9TE-LW6C-JD5F-2KBG";
-        assert_eq!(key_groups(key).len(), 8);
-        assert!(key_tail_matches(key, "2kbg"));
-        assert!(!key_tail_matches(key, "2kb"));
-        assert!(!key_tail_matches(key, "JD5F"));
-        assert!(key_last_group_matches(key, " 2KBG"));
-        assert!(key_well_formed("sb4k7q2mxn8p3hvar9telw6cjd5f2kbg"));
+        let real = songbird_backup_format::RecoveryKey::from_secret([7; 32]);
+        let key = real.display().to_string();
+        assert_eq!(key_groups(&key).len(), 16);
+        let last = key_groups(&key).last().unwrap().clone();
+        assert!(key_tail_matches(&key, &last.to_lowercase()));
+        assert!(!key_tail_matches(&key, &last[..3]));
+        assert!(key_last_group_matches(&key, &format!(" {last}")));
+        assert!(key_well_formed(&key.to_lowercase().replace('-', "")));
+        assert!(key_checks_out(&key.to_lowercase()));
+        let mut typo: Vec<char> = key.chars().collect();
+        typo[5] = if typo[5] == 'A' { 'B' } else { 'A' };
+        let typo: String = typo.into_iter().collect();
+        assert!(key_well_formed(&typo) && !key_checks_out(&typo));
         assert!(!key_well_formed("SB4K-7Q2M"));
         assert_eq!(format_key_input("sb4k7q2mx"), "SB4K-7Q2M-X");
     }
@@ -787,7 +926,7 @@ mod tests {
         assert_eq!(thousands(999), "999");
         assert_eq!(thousands(1_000_000), "1,000,000");
         assert_eq!(pairing_code("x").len(), 7);
-        assert!(RestoreStage::Restoring(BACKUP_MESSAGES).fraction() > 0.99);
-        assert_eq!(RestoreStage::Failed.fraction(), 0.0);
+        assert!(RestoreStage::Restoring(1204).fraction(1204) > 0.99);
+        assert_eq!(RestoreStage::Failed.fraction(10), 0.0);
     }
 }

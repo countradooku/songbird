@@ -9,8 +9,7 @@ use crate::{
     store::{
         Store,
         ext_onboarding::{
-            BACKUP_CHATS, BACKUP_MESSAGES, RestoreStage, format_key_input, key_well_formed,
-            thousands,
+            RestoreStage, format_key_input, key_checks_out, key_well_formed, thousands,
         },
         store,
     },
@@ -73,11 +72,14 @@ pub(crate) fn restore_view(
                             .gap_4()
                             .child(hero_icon(Icon::ShieldCheck))
                             .child(flow_title("Your chats are back"))
-                            .child(flow_lead(format!(
-                                "{} messages in {} chats were restored. Photos and videos download as you open them.",
-                                thousands(BACKUP_MESSAGES),
-                                BACKUP_CHATS
-                            ))),
+                            .child(flow_lead(move || {
+                                let (m, c) = s.backup_extra().with(|b| (b.messages, b.chats));
+                                format!(
+                                    "{} messages in {} chats were restored. Photos and videos download as you open them.",
+                                    thousands(m),
+                                    thousands(c)
+                                )
+                            })),
                         view().child(
                             btn("Continue", Variant::Primary, BtnSize::Lg, move || {
                                 s.reset_restore();
@@ -91,9 +93,12 @@ pub(crate) fn restore_view(
                             .gap_4()
                             .child(hero_icon(Icon::Alert))
                             .child(flow_title("This backup can't be restored"))
-                            .child(flow_lead(
-                                "It looks damaged, so Songbird stopped and restored nothing. This device is exactly as it was before.",
-                            ))
+                            .child(flow_lead(move || {
+                                let why = s.backup_extra().with(|b| b.note.clone()).unwrap_or_else(|| {
+                                    "It looks damaged, so Songbird stopped.".into()
+                                });
+                                format!("{why} Nothing was restored: this device is exactly as it was before.")
+                            }))
                             .child(muted(
                                 "Try again, or choose an older backup. If it keeps happening, the backup may be from another account or changed since it was made.",
                             )),
@@ -116,11 +121,12 @@ pub(crate) fn restore_view(
 }
 
 fn start(s: Store, ask_key: bool, key: Signal<String>) -> View {
-    let ready = move || !ask_key || key.with(|k| key_well_formed(k));
+    let ready = move || !ask_key || key.with(|k| key_checks_out(k));
+    let typo = move || ask_key && key.with(|k| key_well_formed(k) && !key_checks_out(k));
     let go = move || {
         if ready() {
             dismiss_keyboard();
-            s.restore_backup(false);
+            s.restore_backup_with(ask_key.then(|| key.get_untracked()), false);
         }
     };
     // Debug builds only, for review: mod+alt+d restores a damaged backup.
@@ -130,26 +136,48 @@ fn start(s: Store, ask_key: bool, key: Signal<String>) -> View {
         dismiss_keyboard();
         s.restore_backup(true);
     });
+    // Debug builds only, for review: mod+alt+b backs this device up to its
+    // backup folder and fills in its key, so a real restore can be shown.
+    #[cfg(debug_assertions)]
+    on_key("mod+alt+b", move |_| {
+        let snap = crate::backend::backup::snapshot(s);
+        let target = s.backup_extra().get_untracked();
+        spawn(async move {
+            let _ = crate::backend::backup::back_up(
+                crate::store::BackupDestination::EncryptedFile,
+                target,
+                snap,
+                std::sync::Arc::default(),
+            )
+            .await;
+            key.set(format_key_input(&crate::backend::backup::shown_key()));
+        });
+    });
     let content = view().gap_4().child(hero_icon(Icon::Download));
     let content = if ask_key {
         content
             .child(flow_title("Restore from a backup"))
             .child(flow_lead(
-                "Enter your recovery key. It's the 32 characters you saved when you made your account.",
+                "Enter your recovery key. It's the 64 characters, in 16 groups of four, you saved when you made your account.",
             ))
             .child(labelled_field(
                 "Recovery key",
-                field("XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX", key)
+                field("XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-…", key)
                     .on_change(move |t: &str| key.set(format_key_input(t)))
                     .on_submit(move |_: &str| go())
                     .font_family(MONO)
-                    // 39 monospace characters fit a phone's field at this size.
                     .text_size(px(if wide() { font::body() } else { font::SMALL }))
                     .auto_capitalize(AutoCapitalize::Characters)
                     .auto_correct(false)
                     .auto_focus(true),
-                "Spaces and dashes don't matter.",
-                || false,
+                move || -> SharedString {
+                    if typo() {
+                        "That key doesn't check out. Look for a mistyped character.".into()
+                    } else {
+                        "Spaces and dashes don't matter.".into()
+                    }
+                },
+                typo,
             ))
     } else {
         content
@@ -261,7 +289,11 @@ fn running(stage: Signal<RestoreStage>) -> View {
             .child(flow_lead(
                 "Keep Songbird open. This usually takes a minute or two.",
             ))
-            .child(progress_bar("Restoring", move || stage.get().fraction()))
+            .child(progress_bar("Restoring", move || {
+                stage
+                    .get()
+                    .fraction(store().backup_extra().with(|b| b.messages))
+            }))
             .child(
                 card()
                     .gap_1()
@@ -288,17 +320,14 @@ fn running(stage: Signal<RestoreStage>) -> View {
                     ))
                     .child(stage_row(
                         move || match stage.get() {
-                            RestoreStage::Restoring(n) if n < BACKUP_MESSAGES => {
-                                format!(
-                                    "Restoring {} of {} messages",
-                                    thousands(n),
-                                    thousands(BACKUP_MESSAGES)
-                                )
+                            RestoreStage::Restoring(n) => {
+                                format!("Restored {} messages", thousands(n))
                             }
-                            RestoreStage::Done => {
-                                format!("Restored {} messages", thousands(BACKUP_MESSAGES))
-                            }
-                            _ => format!("Restoring {} messages", thousands(BACKUP_MESSAGES)),
+                            RestoreStage::Done => format!(
+                                "Restored {} messages",
+                                thousands(store().backup_extra().with(|b| b.messages))
+                            ),
+                            _ => "Restoring your messages".into(),
                         },
                         mark(2),
                     )),

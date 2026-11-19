@@ -20,6 +20,10 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 11 plan (`P11-plan.md`, D-0126): **waiting for the owner**. Questions 1–14: scope (a
+  separate `billing` service), anonymous tokens for payments, plans and limits, the EU provider
+  (Mollie recommended), unlinked Family seats, unlinking the vault, abuse and suspension rules,
+  support, legal requests, the owner's store and provider accounts, Teams schema only, the app.
 - Prompt 10 gate (`P10-gate.md`, D-0120 to D-0125): **waiting for the owner**. M1–M5 and the
   security review's fixes are done; the gate's items pass. For the owner: approve the gate with
   the threat-model rows (§1, §3.27, §6); register the Google, Microsoft and Dropbox OAuth apps.
@@ -188,6 +192,44 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0126 — Prompt 11: the plan, and the owner's decisions it needs
+
+- Date: 2026-11-19
+- Status: proposed (waiting for the owner)
+- Decided by: owner, on the agent's plan `docs/reports/P11-plan.md`
+- Context: Prompt 11 asks for Free, Plus, Family and (later) Teams plans enforced everywhere,
+  payments verified server-side with minimal linkage to accounts, and abuse controlled without
+  reading content. What exists: limits scattered in configuration (devices, vault, file size,
+  uploads), GCRA budgets almost everywhere, fixed-difficulty proof of work, franked reports
+  sealed to an offline key, `songbird-admin` with its audit log, the GDPR export, mocked plan,
+  help and invite screens. Missing: a catalogue and snapshot, any payment verification, a
+  credential scheme, families, standings, moderation decisions, legal tooling, support. libsignal's
+  `zkcredential` is AGPL-3.0-only and never linked (D-0047).
+- Options considered and evidence: in the plan ("What Prompt 11 starts from", "Findings").
+  The credential evaluation the prompt asks for: `zkcredential` (port, as D-0049 did for
+  usernames) against Privacy Pass on the RFC 9497 VOPRF (key per level and month) against plain
+  linkage in a stricter store. Recommended: the VOPRF, which gives payments the same
+  unlinkability with far less cryptography to own; hidden attributes are not needed.
+- Decisions asked of the owner (recommendations first):
+  1. the milestones as written, with a separate `billing` service and database;
+  2. anonymous monthly tokens between billing and accounts, no shared identifier;
+  3. the plans and limits table (Plus 10 devices, 4 GiB files, 50 GiB uploads a day and backup
+     space, 50 packs a month; prices as the app's mock);
+  4. Mollie as the EU provider (Songbird the merchant of record, VAT through OSS);
+  5. unlinked Family seats through a family mailbox, removal at the month's end;
+  6. the vault unlinked from the account on daily tokens, deleted after 12 months unwritten;
+  7. automatic actions only limit outreach; suspension by moderators; a keyed counter of
+     verified reports per reported account added to THREAT_MODEL §1;
+  8. a suspended account receives, exports, deletes and appeals, but cannot send or call;
+  9. sealed support tickets, the account only when attached, logs only with consent;
+  10. the legal export tool, a counts-only register, a transparency report twice a year;
+  11. the owner's App Store Connect, Google Play and EU provider test accounts for the sandbox
+      item; counsel on VAT records and the legal process;
+  12. Teams as reserved, empty tables;
+  13. the app's M7, StoreKit 2 and Play Billing with the native hosts later.
+- Agent decisions, unless the owner objects: in the plan's question 14.
+- Consequences: M1 (entitlements) starts once the owner approves.
 
 ## D-0125 — Prompt 10: the security review's fixes
 

@@ -52,6 +52,7 @@ pub mod call_links;
 pub mod communities;
 pub mod devices;
 pub mod entitlements;
+pub mod family;
 pub mod gdpr;
 pub mod groups;
 pub mod journal;
@@ -308,9 +309,17 @@ DEFINE FIELD IF NOT EXISTS chunks ON vault TYPE int;
 DEFINE TABLE IF NOT EXISTS vault_gone SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS vault ON vault_gone TYPE bytes;
 DEFINE FIELD IF NOT EXISTS at ON vault_gone TYPE datetime DEFAULT time::now();
-DEFINE TABLE IF NOT EXISTS vault_owner SCHEMAFULL;
-DEFINE FIELD IF NOT EXISTS account ON vault_owner TYPE bytes;
-DEFINE INDEX IF NOT EXISTS vault_owner_account ON vault_owner FIELDS account;
+-- Prompt 11 (D-0130): vaults name no account. Prompt 10's owner table is removed; a vault is
+-- created and written with anonymous tokens and remembers only its latest pass and last use.
+REMOVE TABLE IF EXISTS vault_owner;
+DEFINE FIELD IF NOT EXISTS level ON vault TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS pass ON vault TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS seen ON vault TYPE int DEFAULT 0;
+DEFINE INDEX IF NOT EXISTS vault_seen ON vault FIELDS seen;
+DEFINE TABLE IF NOT EXISTS vcreate SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS n ON vcreate TYPE int;
+DEFINE FIELD IF NOT EXISTS until ON vcreate TYPE int;
+DEFINE INDEX IF NOT EXISTS vcreate_until ON vcreate FIELDS until;
 DEFINE TABLE IF NOT EXISTS vchunk SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS vault ON vchunk TYPE bytes;
 DEFINE FIELD IF NOT EXISTS name ON vchunk TYPE bytes;
@@ -335,6 +344,15 @@ DEFINE FIELD IF NOT EXISTS last ON ent TYPE int;
 DEFINE FIELD IF NOT EXISTS source ON ent TYPE string;
 DEFINE FIELD IF NOT EXISTS at ON ent TYPE datetime;
 DEFINE INDEX IF NOT EXISTS ent_last ON ent FIELDS last;
+DEFINE TABLE IF NOT EXISTS fam SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS mgmt ON fam TYPE bytes;
+DEFINE FIELD IF NOT EXISTS seen ON fam TYPE int;
+DEFINE INDEX IF NOT EXISTS fam_seen ON fam FIELDS seen;
+DEFINE TABLE IF NOT EXISTS fam_slot SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS fam ON fam_slot TYPE bytes;
+DEFINE FIELD IF NOT EXISTS auth ON fam_slot TYPE bytes;
+DEFINE FIELD IF NOT EXISTS sealed ON fam_slot TYPE option<bytes>;
+DEFINE INDEX IF NOT EXISTS fam_slot_fam ON fam_slot FIELDS fam;
 DEFINE TABLE IF NOT EXISTS tnull SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS until ON tnull TYPE int;
 DEFINE INDEX IF NOT EXISTS tnull_until ON tnull FIELDS until;
@@ -721,8 +739,8 @@ pub struct Remnants {
     pub group_requests: u64,
     /// Group prune marks still naming the devices (D-0075).
     pub group_marks: u64,
-    /// Storage records and storage object records of the account (Prompt 9, D-0102), and
-    /// its backup vaults (Prompt 10, D-0121).
+    /// Storage records and storage object records of the account (Prompt 9, D-0102). Backup
+    /// vaults name no account (D-0130).
     pub storage: u64,
     /// The account's entitlement row (Prompt 11, D-0127).
     pub entitlements: u64,
@@ -2125,8 +2143,7 @@ impl Registry {
                  RETURN count(SELECT id FROM grp_prune WHERE gone CONTAINSANY $ds);
                  RETURN count(SELECT id FROM srec WHERE account = $a)
                    + count(SELECT id FROM sobj WHERE account = $a)
-                   + count(SELECT id FROM superv:[$a])
-                   + count(SELECT id FROM vault_owner WHERE account = $a);
+                   + count(SELECT id FROM superv:[$a]);
                  RETURN count(SELECT id FROM ent:[$a]);",
                 vec![
                     var("a", bytes(account.as_bytes())),

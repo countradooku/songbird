@@ -362,6 +362,9 @@ impl App {
         if path.starts_with("/v1/gifs/") {
             return gifs::route(self, req).await;
         }
+        if path == "/v1/family" || path.starts_with("/v1/family/") {
+            return self.family(req).await;
+        }
         match (&method, path.as_str()) {
             (&Method::PUT, "/v1/push") => {
                 let (device, body) = self.authenticate_json(req).await?;
@@ -706,28 +709,79 @@ impl App {
             .get::<registration::Peer>()
             .ok_or_else(unavailable)?
             .0;
-        // Without both credentials there is no vault to name: one 404, as for any miss.
-        let creds =
-            vault::credentials(req.headers()).ok_or(Refusal::Status(StatusCode::NOT_FOUND))?;
         let method = req.method().clone();
         let path = req.uri().path().to_owned();
         let query = req.uri().query().map(str::to_owned);
-        let device_row = |device: DeviceId| async move {
-            self.registry
+        let today = songbird_entitlements::today();
+        // Tokens for the account's primary: signed, and naming no vault (D-0130).
+        if method == Method::POST && path == "/v1/vault/tokens" {
+            let (device, body) = self.authenticate_json(req).await?;
+            let row = self
+                .registry
                 .device(&device)
                 .await
-                .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?
-                .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))
+                .map_err(|_| unavailable())?
+                .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+            return Ok(profile_outcome(
+                self.plans
+                    .issue_vault(&self.registry, &self.hot, &row, &v.settings, &body, today)
+                    .await,
+            ));
+        }
+        // Without both credentials there is no vault to name: one 404, as for any miss.
+        let creds =
+            vault::credentials(req.headers()).ok_or(Refusal::Status(StatusCode::NOT_FOUND))?;
+        let keys = self.plans.redeemer.as_ref().map(|r| r.keys());
+        let open = || async {
+            v.open(&self.registry, &self.hot, peer, &creds)
+                .await
+                .map_err(profile_outcome)
         };
-        // Signed requests: the signature is checked before the vault is looked up.
-        let signed = match (&method, path.as_str()) {
-            (&Method::POST | &Method::DELETE, "/v1/vault") => {
-                Some(self.authenticate_json(req).await?)
+        let writable = |o: vault::Opened| async move {
+            v.write_allowed(&self.hot, &o, today)
+                .await
+                .map(|()| o)
+                .map_err(profile_outcome)
+        };
+        match (&method, path.as_str()) {
+            (&Method::POST, "/v1/vault") => {
+                let body = bounded_body(req, 4_096).await?;
+                return Ok(profile_outcome(
+                    v.create(&self.registry, &self.hot, peer, &creds, keys, &body, today)
+                        .await,
+                ));
             }
-            (&Method::POST, "/v1/vault/chunks/delete") => Some(
-                self.authenticate_body(req, 2 + songbird_proto::vault::MAX_NAMES * 32)
-                    .await?,
-            ),
+            (&Method::POST, "/v1/vault/day") => {
+                let body = bounded_body(req, 4_096).await?;
+                let o = match open().await {
+                    Ok(o) => o,
+                    Err(r) => return Ok(r),
+                };
+                return Ok(profile_outcome(
+                    v.pass(&self.registry, &o, keys, &body, today).await,
+                ));
+            }
+            (&Method::DELETE, "/v1/vault") => {
+                let o = match open().await {
+                    Ok(o) => writable(o).await,
+                    Err(r) => return Ok(r),
+                };
+                return Ok(match o {
+                    Ok(o) => profile_outcome(v.delete(&self.registry, &o).await),
+                    Err(r) => r,
+                });
+            }
+            (&Method::POST, "/v1/vault/chunks/delete") => {
+                let body = bounded_body(req, 2 + songbird_proto::vault::MAX_NAMES * 32).await?;
+                let o = match open().await {
+                    Ok(o) => writable(o).await,
+                    Err(r) => return Ok(r),
+                };
+                return Ok(match o {
+                    Ok(o) => profile_outcome(v.delete_chunks(&self.registry, &o, &body).await),
+                    Err(r) => r,
+                });
+            }
             (&Method::PUT, "/v1/vault/manifest") => {
                 let expected = req
                     .headers()
@@ -735,73 +789,53 @@ impl App {
                     .and_then(|h| h.to_str().ok())
                     .and_then(|h| h.parse::<u64>().ok())
                     .ok_or(Refusal::Status(StatusCode::BAD_REQUEST))?;
-                let (device, body) = self.authenticate_body(req, v.settings.max_manifest).await?;
-                let row = device_row(device).await?;
-                let o = match v.open(&self.registry, &self.hot, peer, &creds).await {
-                    Ok(o) => o,
-                    Err(out) => return Ok(profile_outcome(out)),
+                let body = bounded_body(req, v.settings.max_manifest).await?;
+                let o = match open().await {
+                    Ok(o) => writable(o).await,
+                    Err(r) => return Ok(r),
                 };
-                if let Err(out) = v.write_allowed(&self.hot, &row, &o.row).await {
-                    return Ok(profile_outcome(out));
-                }
-                let quota = v.quota(&self.plans, o.row.owner.as_ref());
-                return Ok(profile_outcome(
-                    v.put_manifest(&self.registry, &o, quota, expected, body)
-                        .await,
-                ));
+                return Ok(match o {
+                    Ok(o) => {
+                        let quota = v.quota(&self.plans, o.row.level);
+                        profile_outcome(
+                            v.put_manifest(&self.registry, &o, quota, expected, body)
+                                .await,
+                        )
+                    }
+                    Err(r) => r,
+                });
             }
             (&Method::PUT, p) if p.starts_with("/v1/vault/chunks/") => {
                 let name = vault::chunk_name(p).ok_or(Refusal::Status(StatusCode::NOT_FOUND))?;
                 let max = usize::try_from(songbird_proto::vault::max_chunk_object())
                     .unwrap_or(usize::MAX);
-                let (device, body) = self.authenticate_body(req, max).await?;
-                let row = device_row(device).await?;
-                let o = match v.open(&self.registry, &self.hot, peer, &creds).await {
-                    Ok(o) => o,
-                    Err(out) => return Ok(profile_outcome(out)),
+                let body = bounded_body(req, max).await?;
+                let o = match open().await {
+                    Ok(o) => writable(o).await,
+                    Err(r) => return Ok(r),
                 };
-                if let Err(out) = v.write_allowed(&self.hot, &row, &o.row).await {
-                    return Ok(profile_outcome(out));
-                }
-                let quota = v.quota(&self.plans, o.row.owner.as_ref());
-                return Ok(profile_outcome(
-                    v.put_chunk(&self.registry, &o, quota, &name, body).await,
-                ));
+                return Ok(match o {
+                    Ok(o) => {
+                        let quota = v.quota(&self.plans, o.row.level);
+                        profile_outcome(v.put_chunk(&self.registry, &o, quota, &name, body).await)
+                    }
+                    Err(r) => r,
+                });
             }
-            (&Method::GET, "/v1/vault" | "/v1/vault/manifest" | "/v1/vault/chunks") => None,
-            (&Method::GET, p) if p.starts_with("/v1/vault/chunks/") => None,
+            (&Method::GET, "/v1/vault" | "/v1/vault/manifest" | "/v1/vault/chunks") => {}
+            (&Method::GET, p) if p.starts_with("/v1/vault/chunks/") => {}
             _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
-        };
-        if let Some((device, _)) = &signed
-            && method == Method::POST
-            && path == "/v1/vault"
-        {
-            let row = device_row(*device).await?;
-            return Ok(profile_outcome(
-                v.create(&self.registry, &self.hot, &row, &creds).await,
-            ));
         }
-        let o = match v.open(&self.registry, &self.hot, peer, &creds).await {
+        let o = match open().await {
             Ok(o) => o,
-            Err(out) => return Ok(profile_outcome(out)),
+            Err(r) => return Ok(r),
         };
-        if let Some((device, body)) = signed {
-            let row = device_row(device).await?;
-            if let Err(out) = v.write_allowed(&self.hot, &row, &o.row).await {
-                return Ok(profile_outcome(out));
-            }
-            let out = match path.as_str() {
-                "/v1/vault" => v.delete(&self.registry, &o).await,
-                _ => v.delete_chunks(&self.registry, &o, &body).await,
-            };
-            return Ok(profile_outcome(out));
-        }
         if let Err(out) = v.read_budget(&self.hot, &o.vk).await {
             return Ok(profile_outcome(out));
         }
         match path.as_str() {
             "/v1/vault" => Ok(profile_outcome(
-                v.stats(&o, v.quota(&self.plans, o.row.owner.as_ref())),
+                v.stats(&o, v.quota(&self.plans, o.row.level)),
             )),
             "/v1/vault/manifest" => match v.manifest_name(&o) {
                 Some(name) => self.serve_from(&v.s3, &name).await,
@@ -819,6 +853,52 @@ impl App {
                 }
             }
         }
+    }
+
+    /// `/v1/family…` (Prompt 11, D-0130): the family mailbox. No account; the IP range only
+    /// for its budget.
+    async fn family(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let r = self
+            .plans
+            .redeemer
+            .clone()
+            .ok_or(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
+        let peer = req
+            .extensions()
+            .get::<registration::Peer>()
+            .ok_or(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?
+            .0;
+        let method = req.method().clone();
+        let path = req.uri().path().to_owned();
+        let header = |n: &str| {
+            req.headers()
+                .get(n)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        let (token, bearer) = (
+            header("x-songbird-family-token"),
+            header("x-songbird-family-bearer"),
+        );
+        let body = if matches!(method, Method::POST | Method::PUT) {
+            bounded_body(req, 16 * 1024).await?.to_vec()
+        } else {
+            Vec::new()
+        };
+        let Some(fr) = plans::FamilyRequest::route(&method, &path, token, bearer, body) else {
+            return Err(Refusal::Status(StatusCode::NOT_FOUND));
+        };
+        let range = registration::range_of(peer, 24, 48);
+        Ok(profile_outcome(
+            r.family(
+                &self.registry,
+                &self.hot,
+                &range,
+                fr,
+                songbird_entitlements::today(),
+            )
+            .await,
+        ))
     }
 
     /// `/v1/kt/…` ([`kt`]): signed like every device request.
@@ -906,19 +986,9 @@ impl App {
             Some(r) => Some(self.registry.block_count(&r.owner(account)).await?),
             None => None,
         };
-        // Backup vaults (Prompt 10): what the server holds of each, never the vault ID.
-        let mut vaults = vec![];
-        for vk in self.registry.vaults_of(account).await? {
-            if let Some(r) = self.registry.vault(&vk).await? {
-                vaults.push(serde_json::json!({
-                    "generation": r.generation,
-                    "bytes": r.bytes,
-                    "chunks": r.chunks,
-                }));
-            }
-        }
+        // Backup vaults name no account (D-0130): nothing of them can be exported here; the
+        // export says so in `not_attributable`.
         if let Some(o) = v.as_object_mut() {
-            o.insert("backup_vaults".into(), serde_json::Value::Array(vaults));
             o.insert(
                 "message_requests".into(),
                 serde_json::json!({

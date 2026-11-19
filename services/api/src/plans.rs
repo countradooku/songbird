@@ -88,12 +88,18 @@ impl Redeemer {
         &self.keys
     }
 
+    fn tag(&self, kind: &str, account: &AccountId) -> [u8; 16] {
+        let mut ctx = hmac::Context::with_key(&self.record_key);
+        ctx.update(kind.as_bytes());
+        ctx.update(&[0]);
+        ctx.update(account.as_bytes());
+        let mut out = [0u8; 16];
+        out.copy_from_slice(ctx.sign().as_ref().get(..16).unwrap_or(&[0; 16]));
+        out
+    }
+
     fn record(&self, account: &AccountId) -> String {
-        let tag = hmac::sign(&self.record_key, account.as_bytes());
-        format!(
-            "tk:r:{}",
-            hex::encode(tag.as_ref().get(..16).unwrap_or_default())
-        )
+        format!("tk:r:{}", hex::encode(self.tag("r", account)))
     }
 
     /// `GET /v1/tokens/keys`.
@@ -172,6 +178,108 @@ impl Redeemer {
 }
 
 impl Plans {
+    /// `POST /v1/vault/tokens` (D-0130): day passes for the next week at the account's level
+    /// (Plus only through its last day), or creation tokens for this 180-day window, issued
+    /// blinded to the account's **primary**. The budgets count the account's requests; nothing
+    /// says which vault the tokens will open.
+    pub async fn issue_vault(
+        &self,
+        registry: &Registry,
+        hot: &ValkeyConn,
+        device: &songbird_accounts::DeviceRow,
+        settings: &crate::config::VaultSettings,
+        body: &[u8],
+        today: u32,
+    ) -> Outcome {
+        if device.pending || !device.primary {
+            return Outcome::Forbidden("primary");
+        }
+        let Some(r) = &self.redeemer else {
+            return Outcome::Unavailable;
+        };
+        let Ok(req) = serde_json::from_slice::<token::IssueRequest>(body) else {
+            return Outcome::Malformed("request");
+        };
+        let Ok(info) = req.info() else {
+            return Outcome::Malformed("request");
+        };
+        let n = u32::try_from(req.blinded.len()).unwrap_or(u32::MAX);
+        let account = device.account;
+        match info.kind {
+            Kind::VaultDay => {
+                if info.period < today || info.period > today + 6 {
+                    return Outcome::Conflict("period");
+                }
+                let Some(level) = Level::from_u8(info.level) else {
+                    return Outcome::Malformed("level");
+                };
+                if level != Level::Free
+                    && !self
+                        .live
+                        .load()
+                        .entry(&account, today)
+                        .is_some_and(|e| e.level >= level && e.last_day >= info.period)
+                {
+                    return Outcome::Forbidden("level");
+                }
+            }
+            Kind::VaultCreate => {
+                if info.level != 0 || info.period != today / crate::vault::CREATION_WINDOW_DAYS {
+                    return Outcome::Conflict("period");
+                }
+            }
+            Kind::Plan => return Outcome::Malformed("kind"),
+        }
+        // Evaluate first (a malformed request spends nothing), then spend the budget.
+        let Ok(resp) = r.keys.issue(&req) else {
+            return Outcome::Malformed("request");
+        };
+        let spent = if info.kind == Kind::VaultDay {
+            {
+                let per_day = u64::from(settings.passes_per_day.max(1));
+                let interval = 86_400_000_000 / per_day;
+                match hot
+                    .query::<i64>(
+                        redis::cmd("EVAL")
+                            .arg(songbird_send::gate::GCRA_COST)
+                            .arg(1)
+                            .arg(format!("tk:d:{}", hex::encode(r.tag("d", &account))))
+                            .arg(interval)
+                            .arg(interval.saturating_mul(per_day))
+                            .arg(u64::from(n)),
+                    )
+                    .await
+                {
+                    Ok(0) => Ok(()),
+                    Ok(w) => Err(Outcome::Throttled(u64::try_from(w).unwrap_or(1))),
+                    Err(_) => Err(Outcome::Unavailable),
+                }
+            }
+        } else {
+            {
+                let window = info.period;
+                match registry
+                    .vault_creation_budget(
+                        &r.tag("c", &account),
+                        window,
+                        n,
+                        settings.creations_per_window,
+                        (window + 2) * crate::vault::CREATION_WINDOW_DAYS,
+                    )
+                    .await
+                {
+                    Ok(()) => Ok(()),
+                    Err(songbird_accounts::VaultError::Exists) => Err(Outcome::Conflict("cap")),
+                    Err(_) => Err(Outcome::Unavailable),
+                }
+            }
+        };
+        match spent {
+            Ok(()) => Outcome::Json(serde_json::json!(resp)),
+            Err(o) => o,
+        }
+    }
+
     /// The account's level today.
     #[must_use]
     pub fn level(&self, account: &AccountId) -> Level {
@@ -216,6 +324,196 @@ impl Plans {
                 "priority_support": f.priority_support,
             },
         })
+    }
+}
+
+/// Requests to the family mailbox per IP range per hour, and their burst (D-0130).
+pub const FAMILY_PER_HOUR: u32 = 600;
+/// Their burst.
+pub const FAMILY_BURST: u32 = 120;
+
+fn hex16(s: &str) -> Option<[u8; 16]> {
+    let mut b = [0u8; 16];
+    hex::decode_to_slice(s, &mut b).ok().map(|()| b)
+}
+
+fn hex32(s: &str) -> Option<[u8; 32]> {
+    let mut b = [0u8; 32];
+    hex::decode_to_slice(s, &mut b).ok().map(|()| b)
+}
+
+/// One family mailbox request (PROTOCOL §14.6), decoded by `lib.rs`.
+#[derive(Debug)]
+pub enum FamilyRequest {
+    /// `POST /v1/family`: `{"manage": <SHA-256 of the management token, hex>}`.
+    Create(Vec<u8>),
+    /// `PUT /v1/family/<f>/slots/<s>`: the management token and `{"auth", "sealed"}`.
+    Put([u8; 16], [u8; 16], Option<String>, Vec<u8>),
+    /// `GET /v1/family/<f>/slots/<s>`: the slot's bearer.
+    Get([u8; 16], [u8; 16], Option<String>),
+    /// `DELETE /v1/family/<f>/slots/<s>`: the management token or the slot's bearer.
+    Remove([u8; 16], [u8; 16], Option<String>, Option<String>),
+    /// `DELETE /v1/family/<f>`: the management token.
+    Delete([u8; 16], Option<String>),
+}
+
+impl FamilyRequest {
+    /// Decodes a path and method; `None` for anything else (404).
+    #[must_use]
+    pub fn route(
+        method: &hyper::Method,
+        path: &str,
+        token: Option<String>,
+        bearer: Option<String>,
+        body: Vec<u8>,
+    ) -> Option<Self> {
+        let rest = path.strip_prefix("/v1/family")?;
+        if rest.is_empty() {
+            return (method == hyper::Method::POST).then_some(Self::Create(body));
+        }
+        let rest = rest.strip_prefix('/')?;
+        let (fam, tail) = rest.split_once('/').unwrap_or((rest, ""));
+        let fam = hex16(fam)?;
+        if tail.is_empty() {
+            return (method == hyper::Method::DELETE).then_some(Self::Delete(fam, token));
+        }
+        let slot = hex16(tail.strip_prefix("slots/")?)?;
+        match *method {
+            hyper::Method::PUT => Some(Self::Put(fam, slot, token, body)),
+            hyper::Method::GET => Some(Self::Get(fam, slot, bearer)),
+            hyper::Method::DELETE => Some(Self::Remove(fam, slot, token, bearer)),
+            _ => None,
+        }
+    }
+}
+
+impl Redeemer {
+    /// The family mailbox (PROTOCOL §14.6; D-0130): no request carries an account, no row names
+    /// one. One budget per IP range; every miss is the same 404.
+    #[allow(
+        clippy::too_many_lines,
+        clippy::many_single_char_names,
+        reason = "one arm per request of the mailbox; f and s are the family and the slot"
+    )]
+    pub async fn family(
+        &self,
+        registry: &Registry,
+        hot: &ValkeyConn,
+        range: &[u8],
+        req: FamilyRequest,
+        today: u32,
+    ) -> Outcome {
+        use songbird_accounts::family::{FamilyError, MAX_BOX};
+        use songbird_tokens::family::{bearer_hash, manage_hash};
+        let record = {
+            let mut ctx = hmac::Context::with_key(&self.record_key);
+            ctx.update(b"f\0");
+            ctx.update(range);
+            format!(
+                "tk:f:{}",
+                hex::encode(ctx.sign().as_ref().get(..16).unwrap_or_default())
+            )
+        };
+        match crate::registration::Registration::gcra(
+            hot,
+            &record,
+            FAMILY_PER_HOUR,
+            FAMILY_BURST,
+            false,
+        )
+        .await
+        {
+            Ok(0) => {}
+            Ok(wait) => return Outcome::Throttled(wait),
+            Err(()) => return Outcome::Unavailable,
+        }
+        let manage = |t: Option<String>| t.as_deref().and_then(hex32).map(|t| manage_hash(&t));
+        let bearer = |b: Option<String>| b.as_deref().and_then(hex32).map(|b| bearer_hash(&b));
+        let miss = |e: FamilyError| match e {
+            FamilyError::NotFound => Outcome::NotFound,
+            FamilyError::Full => Outcome::Conflict("full"),
+            FamilyError::Registry(_) => Outcome::Unavailable,
+        };
+        match req {
+            FamilyRequest::Create(body) => {
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct B {
+                    manage: String,
+                }
+                let Some(m) = serde_json::from_slice::<B>(&body)
+                    .ok()
+                    .and_then(|b| hex32(&b.manage))
+                else {
+                    return Outcome::Malformed("body");
+                };
+                for _ in 0..4 {
+                    let mut id = [0u8; 16];
+                    if getrandom::fill(&mut id).is_err() {
+                        return Outcome::Unavailable;
+                    }
+                    match registry.family_create(&id, &m, today).await {
+                        Ok(()) => {
+                            return Outcome::Json(serde_json::json!({ "family": hex::encode(id) }));
+                        }
+                        Err(RegistryError::Exists) => {}
+                        Err(_) => return Outcome::Unavailable,
+                    }
+                }
+                Outcome::Unavailable
+            }
+            FamilyRequest::Put(f, s, token, body) => {
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct B {
+                    auth: String,
+                    sealed: String,
+                }
+                let Some(m) = manage(token) else {
+                    return Outcome::NotFound;
+                };
+                let Some((auth, sealed)) = serde_json::from_slice::<B>(&body)
+                    .ok()
+                    .and_then(|b| Some((hex32(&b.auth)?, hex::decode(&b.sealed).ok()?)))
+                    .filter(|(_, sealed)| sealed.len() <= MAX_BOX)
+                else {
+                    return Outcome::Malformed("body");
+                };
+                match registry.family_put(&f, &m, &s, &auth, &sealed, today).await {
+                    Ok(()) => Outcome::Done,
+                    Err(e) => miss(e),
+                }
+            }
+            FamilyRequest::Get(f, s, b) => {
+                let Some(h) = bearer(b) else {
+                    return Outcome::NotFound;
+                };
+                match registry.family_get(&f, &s, &h, today).await {
+                    Ok(sealed) => Outcome::Json(serde_json::json!({
+                        "sealed": sealed.map(hex::encode),
+                    })),
+                    Err(e) => miss(e),
+                }
+            }
+            FamilyRequest::Remove(f, s, token, b) => {
+                let Some(h) = manage(token).or_else(|| bearer(b)) else {
+                    return Outcome::NotFound;
+                };
+                match registry.family_remove(&f, &s, &h).await {
+                    Ok(()) => Outcome::Done,
+                    Err(e) => miss(e),
+                }
+            }
+            FamilyRequest::Delete(f, token) => {
+                let Some(m) = manage(token) else {
+                    return Outcome::NotFound;
+                };
+                match registry.family_delete(&f, &m).await {
+                    Ok(()) => Outcome::Done,
+                    Err(e) => miss(e),
+                }
+            }
+        }
     }
 }
 

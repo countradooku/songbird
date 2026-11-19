@@ -195,6 +195,32 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0130 — Prompt 11, milestone 4: Family seats without a family graph; the vault unlinked
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0126 §5 and §6 (re-deciding D-0119 §3); the
+  threat-model rows (§1, §3.27, §3.28) await the owner
+- Decided by: agent, within the owner's plan
+- Context: `docs/reports/P11-M4.md`.
+- Decision:
+  - **Family:** a mailbox in `api` of random families and up to five slots, managed by the hash
+    of the owner's management token, each slot read by the hash of its member's bearer, holding
+    a token sealed (ChaCha20-Poly1305) under a key from the invite link the server never sees.
+    No account anywhere; removal at once (the month redeemed stays); a family 60 days unused
+    goes.
+  - **Vault:** no owner. `POST /v1/vault/tokens` issues day passes (a week ahead, the account's
+    level) and creation tokens (two per 180 days per account) to the primary, blinded; a vault
+    is created with a creation token and written under a day pass presented once a day; its
+    quota is the pass's level; it keeps the day of its latest pass and last use and is retired
+    after 365 days unused. `vault_owner` is removed. Deleting an account does not reach the
+    vault (the app deletes it first).
+  - The vault adapter takes `Passes` instead of a device signer; the app's `AppPasses` pins the
+    token key per process (release builds ship it).
+- Evidence: `services/api/tests/plans_live.rs::a_family_shares_plus_without_naming_anyone`,
+  `crates/tokens/src/family.rs` tests, `tests/e2e/tests/gate_p10.rs` (8 of 8).
+- Consequences: Prompt 10's PROTOCOL §11.8 and threat-model rows change (owner gone, passes
+  added); M7 builds the app's Family screens on the mailbox.
+
 ## D-0129 — Prompt 11, milestone 3: billing, a service of its own
 
 - Date: 2026-11-19

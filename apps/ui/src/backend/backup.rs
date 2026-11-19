@@ -22,12 +22,12 @@ use songbird_backup_format::object::Seen;
 use songbird_backup_format::reader::{Backup, MemoryStaging};
 use songbird_backup_format::schema::{self, Platform, record::Body as Rec};
 use songbird_backup_format::{BackupKeys, OsRng, RecoveryKey};
-use songbird_backup_storage::http::HyperHttp;
+use songbird_backup_storage::http::{Http, HyperHttp, Request};
 use songbird_backup_storage::local::LocalStore;
 use songbird_backup_storage::run::{self, Options, RunError};
 use songbird_backup_storage::s3::{S3Config, S3Store};
 use songbird_backup_storage::transfer::{self, Code, Hello, PipeStore};
-use songbird_backup_storage::vault::{Signer, VaultStore};
+use songbird_backup_storage::vault::{Passes, VaultStore};
 use songbird_backup_storage::webdav::{WebDavConfig, WebDavStore};
 use songbird_backup_storage::{BackupStore, StoreError};
 use zeroize::Zeroizing;
@@ -98,27 +98,133 @@ fn forget_seen(keys: &BackupKeys) {
 
 // ---------------------------------------------------------------- where backups go
 
-/// Signs vault writes as this device (the vault refuses anyone but the account's main phone).
-struct DeviceSigner {
+/// Vault tokens (Prompt 11, D-0130): day passes and creation tokens, asked of `api` as this
+/// device (the account's main phone), **blinded**, so the vault never learns the account. The
+/// token key is pinned the first time this process sees it; release builds ship it (A12).
+struct AppPasses {
+    http: Arc<HyperHttp>,
+    api: String,
     device: [u8; 16],
     seed: Zeroizing<[u8; 32]>,
     server: String,
 }
 
-impl Signer for DeviceSigner {
-    fn sign(&self, method: &str, path: &str, body: Option<&[u8]>) -> (String, Option<String>) {
-        let Some(key) = wire::ed25519(&self.seed) else {
-            return (String::new(), None);
-        };
-        wire::sign_request(
-            &key,
-            &self.device,
-            &self.server,
-            method,
-            path,
-            nsh_core::time::unix_ms() as u64,
-            body,
+/// The token key this process pinned: `(key ID, public key)`.
+static PINNED: std::sync::Mutex<Option<(u8, [u8; 32])>> = std::sync::Mutex::new(None);
+
+impl AppPasses {
+    async fn call(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Vec<u8>>,
+        signed: bool,
+    ) -> Result<(u16, Vec<u8>), StoreError> {
+        let mut r = Request::new(method, format!("{}{path}", self.api));
+        if signed {
+            let key = wire::ed25519(&self.seed).ok_or(StoreError::Unauthorized)?;
+            let (auth, digest) = wire::sign_request(
+                &key,
+                &self.device,
+                &self.server,
+                method,
+                path,
+                nsh_core::time::unix_ms() as u64,
+                body.as_deref(),
+            );
+            r = r.header("authorization", auth);
+            if let Some(d) = digest {
+                r = r.header("x-songbird-content-sha256", d);
+            }
+        }
+        if let Some(b) = body {
+            r = r.header("content-type", "application/json").body(b);
+        }
+        let resp = self.http.send(r).await?;
+        Ok((resp.status, resp.body))
+    }
+
+    /// The current token key, pinned: a server that later shows another key for the same ID
+    /// is refused (it could be trying to tell this device's tokens apart).
+    async fn pinned(&self) -> Result<(u8, [u8; 32]), StoreError> {
+        let (st, body) = self.call("GET", "/v1/tokens/keys", None, false).await?;
+        if st != 200 {
+            return Err(StoreError::Unavailable { status: st });
+        }
+        let v: Value = serde_json::from_slice(&body).map_err(|_| StoreError::Protocol("keys"))?;
+        let id = v
+            .get("current")
+            .and_then(Value::as_u64)
+            .and_then(|n| u8::try_from(n).ok())
+            .ok_or(StoreError::Protocol("keys"))?;
+        let pk: [u8; 32] = v
+            .get("keys")
+            .and_then(Value::as_array)
+            .and_then(|a| a.iter().find(|k| k.get("id").and_then(Value::as_u64) == Some(u64::from(id))))
+            .and_then(|k| k.get("public").and_then(Value::as_str))
+            .and_then(wire::unhex)
+            .and_then(|b| b.try_into().ok())
+            .ok_or(StoreError::Protocol("keys"))?;
+        let mut g = PINNED.lock().map_err(|_| StoreError::Protocol("keys"))?;
+        match *g {
+            Some((pid, ppk)) if pid == id && ppk != pk => Err(StoreError::Protocol("token key changed")),
+            _ => {
+                *g = Some((id, pk));
+                Ok((id, pk))
+            }
+        }
+    }
+
+    /// This account's level today (Free when it can't be read).
+    async fn level(&self) -> u8 {
+        match self.call("GET", "/v1/entitlements", None, true).await {
+            Ok((200, body)) => serde_json::from_slice::<Value>(&body)
+                .ok()
+                .filter(|v| v.get("level").and_then(Value::as_str) == Some("plus"))
+                .map_or(0, |_| 1),
+            _ => 0,
+        }
+    }
+
+    async fn one(&self, kind: songbird_tokens::token::Kind, level: u8, period: u32) -> Result<Value, StoreError> {
+        use songbird_tokens::token::{self, Info, IssueResponse};
+        let (id, pk) = self.pinned().await?;
+        let (pending, req) = token::request(id, Info { kind, level, period }, 1)
+            .map_err(|_| StoreError::Protocol("token"))?;
+        let body = serde_json::to_vec(&req).map_err(|_| StoreError::Protocol("token"))?;
+        let (st, b) = self.call("POST", "/v1/vault/tokens", Some(body), true).await?;
+        if st != 200 {
+            return Err(if st == 429 {
+                StoreError::Throttled { retry_after_ms: 60_000 }
+            } else {
+                StoreError::Unauthorized
+            });
+        }
+        let resp: IssueResponse =
+            serde_json::from_slice(&b).map_err(|_| StoreError::Protocol("token"))?;
+        let t = pending
+            .finish(&pk, &resp)
+            .map_err(|_| StoreError::Protocol("token proof"))?
+            .pop()
+            .ok_or(StoreError::Protocol("token"))?;
+        serde_json::to_value(t).map_err(|_| StoreError::Protocol("token"))
+    }
+}
+
+#[async_trait::async_trait]
+impl Passes for AppPasses {
+    async fn day_pass(&self, day: u32) -> Result<Value, StoreError> {
+        let level = self.level().await;
+        self.one(songbird_tokens::token::Kind::VaultDay, level, day).await
+    }
+
+    async fn creation(&self) -> Result<Value, StoreError> {
+        self.one(
+            songbird_tokens::token::Kind::VaultCreate,
+            0,
+            songbird_backup_storage::vault::today() / 180,
         )
+        .await
     }
 }
 
@@ -182,7 +288,7 @@ pub fn unavailable_reason(d: BackupDestination) -> &'static str {
     }
 }
 
-/// The store for the user's destination, under `keys`. `write`: signs vault writes.
+/// The store for the user's destination, under `keys`. `write`: vault writes get passes.
 fn store_for(
     dest: BackupDestination,
     extra: &BackupExtra,
@@ -201,18 +307,20 @@ fn store_for(
                 ));
             }
             let ep = endpoint();
-            let signer = if write {
+            let passes = if write {
                 let (device, seed) = super::device_key()
                     .ok_or_else(|| problem("Create your account on the server first."))?;
-                Some(Arc::new(DeviceSigner {
+                Some(Arc::new(AppPasses {
+                    http: Arc::clone(&http),
+                    api: ep.api.clone(),
                     device,
                     seed: Zeroizing::new(seed),
                     server: ep.api_name.clone(),
-                }) as Arc<dyn Signer>)
+                }) as Arc<dyn Passes>)
             } else {
                 None
             };
-            Ok(Arc::new(VaultStore::new(http, ep.api, keys, signer)))
+            Ok(Arc::new(VaultStore::new(http, ep.api, keys, passes)))
         }
         BackupDestination::EncryptedFile => Ok(Arc::new(LocalStore::new(
             folder(keys).ok_or_else(|| problem("This device has no folder for backups."))?,

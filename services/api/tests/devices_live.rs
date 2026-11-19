@@ -61,6 +61,19 @@ fn settings() -> DeviceSettings {
 }
 
 async fn stack(d: DeviceSettings) -> Option<Stack> {
+    Box::pin(stack_with(d, songbird_entitlements::Catalog::default())).await
+}
+
+/// Second-factor tests link many devices and leave tokens outstanding: a catalogue where the
+/// plan's limit is not what they test (D-0127 made the plan the limit, under `max_devices`).
+fn generous() -> songbird_entitlements::Catalog {
+    let mut c = songbird_entitlements::Catalog::default();
+    c.free.limits.linked_devices = 15;
+    c.plus.limits.linked_devices = 15;
+    c
+}
+
+async fn stack_with(d: DeviceSettings, catalog: songbird_entitlements::Catalog) -> Option<Stack> {
     let surreal = env("SONGBIRD_TEST_SURREALDB")?;
     let hot = env("SONGBIRD_TEST_VALKEY")?;
     let cfg = songbird_surreal::Config {
@@ -93,7 +106,10 @@ async fn stack(d: DeviceSettings) -> Option<Stack> {
     )
     .unwrap();
     let app = Arc::new(App {
-        plans: songbird_api::plans::Plans::default(),
+        plans: songbird_api::plans::Plans {
+            catalog,
+            ..songbird_api::plans::Plans::default()
+        },
         requests: None,
         reports: None,
         calls: None,
@@ -852,7 +868,7 @@ fn identity_transcript(r: &LinkRequest) -> Vec<u8> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_pin_gates_linking_with_attempt_limits_and_lockout() {
-    let Some(s) = stack(factor_settings()).await else {
+    let Some(s) = Box::pin(stack_with(factor_settings(), generous())).await else {
         return;
     };
     let p = primary(&s).await;
@@ -944,7 +960,7 @@ async fn a_pin_gates_linking_with_attempt_limits_and_lockout() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_passkey_registers_and_approves_a_link_bound_to_its_transcript() {
-    let Some(s) = stack(factor_settings()).await else {
+    let Some(s) = Box::pin(stack_with(factor_settings(), generous())).await else {
         return;
     };
     let p = primary(&s).await;
@@ -1069,7 +1085,7 @@ async fn a_passkey_registers_and_approves_a_link_bound_to_its_transcript() {
 /// device IDs, keys, mailboxes and push registrations); nothing one does reaches the other.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn accounts_sharing_an_installation_stay_apart() {
-    let Some(s) = stack(factor_settings()).await else {
+    let Some(s) = Box::pin(stack_with(factor_settings(), generous())).await else {
         return;
     };
     let (work, home) = (primary(&s).await, primary(&s).await);
@@ -1421,7 +1437,7 @@ async fn recover_with(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_identity_key_recovers_the_account_onto_a_new_primary() {
-    let Some(s) = stack(factor_settings()).await else {
+    let Some(s) = Box::pin(stack_with(factor_settings(), generous())).await else {
         return;
     };
     let p = primary(&s).await;
@@ -1546,7 +1562,7 @@ async fn the_identity_key_recovers_the_account_onto_a_new_primary() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_pin_gates_recovery_and_the_primary_hands_over_without_it() {
-    let Some(s) = stack(factor_settings()).await else {
+    let Some(s) = Box::pin(stack_with(factor_settings(), generous())).await else {
         return;
     };
     let p = primary(&s).await;
@@ -1610,7 +1626,7 @@ async fn a_pin_gates_recovery_and_the_primary_hands_over_without_it() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn after_the_lock_the_right_pin_recovers() {
-    let Some(s) = stack(factor_settings()).await else {
+    let Some(s) = Box::pin(stack_with(factor_settings(), generous())).await else {
         return;
     };
     let p = primary(&s).await;

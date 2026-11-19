@@ -5,8 +5,8 @@
 //!
 //! | Table | Key | Holds |
 //! | --- | --- | --- |
-//! | `vault` | vault key | the access hash, a random epoch (its objects' prefix), the manifest's generation and object suffix, bytes and chunk counts |
-//! | `vault_owner` | vault key | the owning account (a separate table, so Prompt 11 can unlink vaults without a migration of `vault`) |
+//! | `vault` | vault key | the access hash, a random epoch (its objects' prefix), the manifest's generation and object suffix, bytes and chunk counts; the level and UTC day of its latest day pass, and the last day it was used |
+//! | `vcreate` | `[keyed tag of an account, 180-day window]` | how many vault creation tokens the account was issued in the window (Prompt 11) |
 //! | `vchunk` | `[vault key, name]` | the chunk's object size |
 //! | `vault_gone` | epoch | a turned-off vault's key, until the worker has deleted its objects |
 //!
@@ -14,9 +14,13 @@
 //! `vault_gone` row naming its objects' prefix (`<vault key>/<epoch>/`), so the same recovery
 //! key can open a new vault at once without ever mixing objects. No time is stored. Counts move
 //! in the same transaction as the rows they count.
+//!
+//! **No vault names an account** (Prompt 11, M4, D-0130; D-0119 §3 re-decided): a vault is
+//! created with an anonymous creation token and written under an anonymous day pass, both
+//! issued blinded to the account's primary. Their nullifiers are burnt in the transaction that
+//! uses them. A vault nobody uses for a year is retired by the worker.
 
 use songbird_surreal::Value;
-use songbird_types::AccountId;
 
 use crate::db::{self, DbError};
 use crate::{Registry, RegistryError, bytes, first_int, id32, int, rows, var};
@@ -36,8 +40,12 @@ pub struct VaultRow {
     pub chunks: u64,
     /// The random epoch naming this vault's objects (`<vault key>/<epoch>/…`).
     pub epoch: [u8; 16],
-    /// The owning account.
-    pub owner: Option<AccountId>,
+    /// The plan level of its latest day pass (its quota).
+    pub level: u8,
+    /// The UTC day of its latest day pass.
+    pub pass: u32,
+    /// The last UTC day it was used (a pass presented).
+    pub seen: u32,
 }
 
 impl std::fmt::Debug for VaultRow {
@@ -71,9 +79,13 @@ pub enum VaultError {
     /// Another manifest write won: the current generation.
     #[error("generation moved on")]
     Generation(u64),
-    /// The account has as many vaults as allowed, or the ID is another account's.
+    /// The ID is taken with another access secret, or the account has as many creations as
+    /// its window allows.
     #[error("exists")]
     Exists,
+    /// The token was redeemed already.
+    #[error("spent")]
+    Spent,
     /// The registry failed.
     #[error(transparent)]
     Registry(#[from] RegistryError),
@@ -111,6 +123,7 @@ where
                     "Thrown:gone" => VaultError::Gone,
                     "Thrown:full" => VaultError::Full,
                     "Thrown:exists" => VaultError::Exists,
+                    "Thrown:spent" => VaultError::Spent,
                     _ => RegistryError::from(DbError::Statement(k)).into(),
                 });
             }
@@ -122,49 +135,131 @@ where
 }
 
 impl Registry {
-    /// Creates a vault owned by `account`, or returns `Ok(false)` if this account already owns
-    /// it (the same ID and access hash). At most `max_per_account` vaults per account, so a new
-    /// recovery key's vault can be filled before the old one is deleted.
+    /// Creates a vault with a creation token: burns its nullifier (kept through `keep_until`)
+    /// and creates the rows, in one transaction. Returns `Ok(false)` if the vault exists with
+    /// this access hash (nothing is burnt: the token stays the client's).
     ///
     /// # Errors
-    /// [`VaultError::Exists`] (the cap, or the ID taken), [`VaultError::Gone`] for an account
-    /// being deleted.
+    /// [`VaultError::Exists`] (the ID taken with another secret), [`VaultError::Spent`].
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the vault, its secret and epoch, the token's nullifier and life, the day"
+    )]
     pub async fn vault_create(
         &self,
-        account: &AccountId,
         key: &[u8; 32],
         access: &[u8; 32],
         epoch: &[u8; 16],
-        max_per_account: u64,
+        nullifier: &[u8; 32],
+        keep_until: u32,
+        today: u32,
     ) -> Result<bool, VaultError> {
         let v = retrying(|| {
             self.db.query(
                 "BEGIN TRANSACTION;
-                 IF account:[$a].deleting != false { THROW 'songbird:gone' };
                  LET $row = (SELECT access FROM ONLY vault:[$k]);
-                 LET $own = (SELECT VALUE account FROM ONLY vault_owner:[$k]);
-                 IF $row != NONE AND ($own != $a OR $row.access != $h) {
-                   THROW 'songbird:exists' };
-                 IF $row = NONE AND count(SELECT id FROM vault_owner WHERE account = $a) >= $max {
-                   THROW 'songbird:exists' };
+                 IF $row != NONE AND $row.access != $h { THROW 'songbird:exists' };
                  IF $row = NONE {
+                   IF record::exists(tnull:[$n]) { THROW 'songbird:spent' };
+                   CREATE tnull:[$n] SET until = $u RETURN NONE;
                    CREATE vault:[$k] SET access = $h, epoch = $ep, gen = 0, bytes = 0,
-                     chunks = 0 RETURN NONE;
-                   CREATE vault_owner:[$k] SET account = $a RETURN NONE;
+                     chunks = 0, level = 0, pass = 0, seen = $t RETURN NONE;
                  };
                  RETURN $row = NONE;
                  COMMIT TRANSACTION;",
                 vec![
-                    var("a", bytes(account.as_bytes())),
                     var("k", bytes(key)),
                     var("h", bytes(access)),
                     var("ep", bytes(epoch)),
-                    var("max", int(max_per_account)),
+                    var("n", bytes(nullifier)),
+                    var("u", int(u64::from(keep_until))),
+                    var("t", int(u64::from(today))),
                 ],
             )
         })
         .await?;
         Ok(v.iter().rev().any(|x| matches!(x, Value::Bool(true))))
+    }
+
+    /// Presents a day pass for a vault's incarnation `epoch`: burns its nullifier, and moves the
+    /// vault's pass to `day` at `level` (a later day's pass sets the level; an earlier one only
+    /// counts as use), its last use to `today`.
+    ///
+    /// # Errors
+    /// [`VaultError::Gone`], [`VaultError::Spent`].
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the vault and its incarnation, the token's nullifier, life, day and level"
+    )]
+    pub async fn vault_pass(
+        &self,
+        key: &[u8; 32],
+        epoch: &[u8; 16],
+        nullifier: &[u8; 32],
+        keep_until: u32,
+        day: u32,
+        level: u8,
+        today: u32,
+    ) -> Result<(), VaultError> {
+        retrying(|| {
+            self.db.query(
+                "BEGIN TRANSACTION;
+                 IF (SELECT VALUE epoch FROM ONLY vault:[$k]) != $ep { THROW 'songbird:gone' };
+                 IF record::exists(tnull:[$n]) { THROW 'songbird:spent' };
+                 CREATE tnull:[$n] SET until = $u RETURN NONE;
+                 LET $p = (SELECT VALUE pass FROM ONLY vault:[$k]) ?? 0;
+                 IF $d >= $p {
+                   UPDATE vault:[$k] SET pass = $d, level = $l, seen = $t RETURN NONE;
+                 } ELSE {
+                   UPDATE vault:[$k] SET seen = $t RETURN NONE;
+                 };
+                 COMMIT TRANSACTION;",
+                vec![
+                    var("k", bytes(key)),
+                    var("ep", bytes(epoch)),
+                    var("n", bytes(nullifier)),
+                    var("u", int(u64::from(keep_until))),
+                    var("d", int(u64::from(day))),
+                    var("l", int(u64::from(level))),
+                    var("t", int(u64::from(today))),
+                ],
+            )
+        })
+        .await?;
+        Ok(())
+    }
+
+    /// Spends one of an account's vault creations in a window (`tag`: a keyed hash of the
+    /// account, never the account). At most `cap` per window.
+    ///
+    /// # Errors
+    /// [`VaultError::Exists`] at the cap.
+    pub async fn vault_creation_budget(
+        &self,
+        tag: &[u8; 16],
+        window: u32,
+        n: u32,
+        cap: u32,
+        keep_until: u32,
+    ) -> Result<(), VaultError> {
+        retrying(|| {
+            self.db.query(
+                "BEGIN TRANSACTION;
+                 LET $c = (SELECT VALUE n FROM ONLY vcreate:[$g, $w]) ?? 0;
+                 IF $c + $n > $cap { THROW 'songbird:exists' };
+                 UPSERT vcreate:[$g, $w] SET n = $c + $n, until = $u RETURN NONE;
+                 COMMIT TRANSACTION;",
+                vec![
+                    var("g", bytes(tag)),
+                    var("w", int(u64::from(window))),
+                    var("n", int(u64::from(n))),
+                    var("cap", int(u64::from(cap))),
+                    var("u", int(u64::from(keep_until))),
+                ],
+            )
+        })
+        .await?;
+        Ok(())
     }
 
     /// A vault's row, if it exists.
@@ -175,8 +270,7 @@ impl Registry {
         let v = self
             .db
             .query1(
-                "SELECT access, epoch, gen, man, bytes, chunks,
-                   (SELECT VALUE account FROM ONLY vault_owner:[$k]) AS owner
+                "SELECT access, epoch, gen, man, bytes, chunks, level, pass, seen
                  FROM ONLY vault:[$k];",
                 vec![var("k", bytes(key))],
             )
@@ -198,10 +292,9 @@ impl Registry {
                 .and_then(Value::as_bytes)
                 .and_then(|b| b.as_ref().try_into().ok())
                 .ok_or(RegistryError::Shape)?,
-            owner: v
-                .get("owner")
-                .and_then(Value::as_bytes)
-                .and_then(|b| AccountId::from_slice(b).ok()),
+            level: u8::try_from(u(v.get("level"))).unwrap_or(0),
+            pass: u32::try_from(u(v.get("pass"))).unwrap_or(0),
+            seen: u32::try_from(u(v.get("seen"))).unwrap_or(0),
         }))
     }
 
@@ -434,7 +527,6 @@ impl Registry {
                  IF $ep != NONE {
                    CREATE vault_gone:[$ep] SET vault = $k, at = time::now() RETURN NONE;
                    DELETE vchunk WHERE vault = $k RETURN NONE;
-                   DELETE vault_owner:[$k] RETURN NONE;
                    DELETE vault:[$k] RETURN NONE;
                  };
                  RETURN $ep;
@@ -504,21 +596,43 @@ impl Registry {
         Ok(first_int(&v).is_some_and(|n| n > 0))
     }
 
-    /// The vaults an account owns (for its deletion and export).
+    /// Vaults unused since before `before` (a UTC day), at most `limit`: the worker retires them
+    /// (a year without a backup or a restore).
     ///
     /// # Errors
     /// [`RegistryError`].
-    pub async fn vaults_of(&self, account: &AccountId) -> Result<Vec<[u8; 32]>, RegistryError> {
+    pub async fn vaults_unused(
+        &self,
+        before: u32,
+        limit: usize,
+    ) -> Result<Vec<[u8; 32]>, RegistryError> {
         let v = self
             .db
             .query1(
-                "SELECT VALUE meta::id(id)[0] FROM vault_owner WHERE account = $a;",
-                vec![var("a", bytes(account.as_bytes()))],
+                "SELECT VALUE meta::id(id)[0] FROM vault WHERE seen < $b LIMIT $n;",
+                vec![
+                    var("b", int(u64::from(before))),
+                    var("n", int(u64::try_from(limit).unwrap_or(u64::MAX))),
+                ],
             )
             .await?;
         rows(v)
             .iter()
             .map(|x| id32(x).ok_or(RegistryError::Shape))
             .collect()
+    }
+
+    /// Deletes vault creation counts past their window (the worker's sweep).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn sweep_vault_creations(&self, today: u32) -> Result<(), RegistryError> {
+        self.db
+            .query(
+                "DELETE vcreate WHERE until < $t RETURN NONE;",
+                vec![var("t", int(u64::from(today)))],
+            )
+            .await?;
+        Ok(())
     }
 }

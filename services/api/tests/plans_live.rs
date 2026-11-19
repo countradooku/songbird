@@ -363,3 +363,229 @@ async fn redemptions_have_a_budget() {
     assert_eq!(redeem(&c, &issued.tokens[1]).await.0, 200);
     assert_eq!(redeem(&c, &issued.tokens[2]).await.0, 429);
 }
+
+/// A family (PROTOCOL §14.6, D-0130): the owner and five members each reach Plus through
+/// sealed seats; a sixth seat is refused; a removed member gets no further month; a member can
+/// leave; every miss is one 404; and the mailbox names no account.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_family_shares_plus_without_naming_anyone() {
+    use songbird_tokens::family::{Invite, bearer_hash, manage_hash};
+    let Some(s) = stack(1_000, 100).await else {
+        return;
+    };
+    let month = token::month_of(songbird_entitlements::today());
+    let (_, owner) = device(&s).await;
+    let call = |method: &'static str,
+                path: String,
+                headers: Vec<(String, String)>,
+                body: Option<Vec<u8>>| {
+        let addr = s.addr;
+        async move {
+            let mut b = hyper::Request::builder()
+                .method(method)
+                .uri(&path)
+                .header("host", SERVER);
+            for (k, v) in &headers {
+                b = b.header(k.as_str(), v.as_str());
+            }
+            let body = body.unwrap_or_default();
+            b = b.header("content-length", body.len());
+            let req = b
+                .body(http_body_util::Full::new(bytes::Bytes::from(body)))
+                .unwrap();
+            let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let (mut send, conn) =
+                hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tcp))
+                    .await
+                    .unwrap();
+            tokio::spawn(conn);
+            let r = send.send_request(req).await.unwrap();
+            let st = r.status().as_u16();
+            let body = http_body_util::BodyExt::collect(r.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
+            (
+                st,
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap_or_default(),
+            )
+        }
+    };
+    // The owner's app: a management token, a family, five seats.
+    let mut manage = [0u8; 32];
+    aws_lc_rs::rand::fill(&mut manage).unwrap();
+    let (st, v) = call(
+        "POST",
+        "/v1/family".into(),
+        vec![],
+        Some(
+            serde_json::json!({ "manage": hex::encode(manage_hash(&manage)) })
+                .to_string()
+                .into_bytes(),
+        ),
+    )
+    .await;
+    assert_eq!(st, 200);
+    let family: [u8; 16] = hex::decode(v["family"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let token_header = || vec![("x-songbird-family-token".to_owned(), hex::encode(manage))];
+    let seats: Vec<Invite> = (0..5).map(|_| Invite::new(family).unwrap()).collect();
+    // Family tokens for the month: one for the owner and one per seat.
+    let issued = issue(&s, plan(month), 6).await;
+    assert_eq!(redeem(&owner, &issued.tokens[0]).await.0, 200);
+    let put = |seat: &Invite, t: &Redemption| {
+        let sealed = seat.seal(&serde_json::to_vec(t).unwrap()).unwrap();
+        call(
+            "PUT",
+            format!(
+                "/v1/family/{}/slots/{}",
+                hex::encode(family),
+                hex::encode(seat.slot)
+            ),
+            token_header(),
+            Some(
+                serde_json::json!({
+                    "auth": hex::encode(bearer_hash(&seat.bearer())),
+                    "sealed": hex::encode(sealed),
+                })
+                .to_string()
+                .into_bytes(),
+            ),
+        )
+    };
+    for (seat, t) in seats.iter().zip(&issued.tokens[1..]) {
+        assert_eq!(put(seat, t).await.0, 204);
+    }
+    // A sixth seat: refused.
+    let sixth = Invite::new(family).unwrap();
+    assert_eq!(put(&sixth, &issued.tokens[1]).await.1["error"], "full");
+    // Each member opens their link and redeems on their own account.
+    let get = |seat: Invite| {
+        call(
+            "GET",
+            format!(
+                "/v1/family/{}/slots/{}",
+                hex::encode(seat.family),
+                hex::encode(seat.slot)
+            ),
+            vec![(
+                "x-songbird-family-bearer".to_owned(),
+                hex::encode(seat.bearer()),
+            )],
+            None,
+        )
+    };
+    let mut members = Vec::new();
+    for seat in &seats {
+        let joined = Invite::parse(&seat.link()).unwrap();
+        let (st, v) = get(joined.clone()).await;
+        assert_eq!(st, 200);
+        let t: Redemption = serde_json::from_slice(
+            &joined
+                .open(&hex::decode(v["sealed"].as_str().unwrap()).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        let (_, c) = device(&s).await;
+        let (st, v) = redeem(&c, &t).await;
+        assert_eq!((st, v["level"].as_str()), (200, Some("plus")));
+        members.push(c);
+    }
+    // Misses are one 404: an unknown family, an unknown slot, a wrong bearer, no bearer.
+    let mut wrong = seats[0].clone();
+    wrong.family = [9; 16];
+    assert_eq!(get(wrong).await.0, 404);
+    assert_eq!(get(Invite::new(family).unwrap()).await.0, 404);
+    let (st, _) = call(
+        "GET",
+        format!(
+            "/v1/family/{}/slots/{}",
+            hex::encode(family),
+            hex::encode(seats[0].slot)
+        ),
+        vec![(
+            "x-songbird-family-bearer".to_owned(),
+            hex::encode([1u8; 32]),
+        )],
+        None,
+    )
+    .await;
+    assert_eq!(st, 404);
+    // A stranger without the management token can't put or remove.
+    let (st, _) = call(
+        "DELETE",
+        format!(
+            "/v1/family/{}/slots/{}",
+            hex::encode(family),
+            hex::encode(seats[1].slot)
+        ),
+        vec![("x-songbird-family-token".to_owned(), hex::encode([3u8; 32]))],
+        None,
+    )
+    .await;
+    assert_eq!(st, 404);
+    // The owner removes member 2; member 3 leaves.
+    let (st, _) = call(
+        "DELETE",
+        format!(
+            "/v1/family/{}/slots/{}",
+            hex::encode(family),
+            hex::encode(seats[1].slot)
+        ),
+        token_header(),
+        None,
+    )
+    .await;
+    assert_eq!(st, 204);
+    let (st, _) = call(
+        "DELETE",
+        format!(
+            "/v1/family/{}/slots/{}",
+            hex::encode(family),
+            hex::encode(seats[2].slot)
+        ),
+        vec![(
+            "x-songbird-family-bearer".to_owned(),
+            hex::encode(seats[2].bearer()),
+        )],
+        None,
+    )
+    .await;
+    assert_eq!(st, 204);
+    // Next month: the owner seals tokens into the seats that remain; the removed and the
+    // departed find nothing.
+    let next = issue(&s, plan(month + 1), 3).await;
+    for (seat, t) in [&seats[0], &seats[3], &seats[4]]
+        .into_iter()
+        .zip(&next.tokens)
+    {
+        assert_eq!(put(seat, t).await.0, 204);
+    }
+    assert_eq!(get(seats[1].clone()).await.0, 404);
+    assert_eq!(get(seats[2].clone()).await.0, 404);
+    assert_eq!(get(seats[3].clone()).await.0, 200);
+    // Nothing in the mailbox names an account.
+    let dump = s
+        .app
+        .registry
+        .db()
+        .query("SELECT * FROM fam; SELECT * FROM fam_slot;", Vec::new())
+        .await
+        .unwrap();
+    let text = format!("{dump:?}");
+    for f in ["account", "acct", "owner", "member", "device"] {
+        assert!(!text.contains(f), "a field named {f}");
+    }
+    // The owner closes the family.
+    let (st, _) = call(
+        "DELETE",
+        format!("/v1/family/{}", hex::encode(family)),
+        token_header(),
+        None,
+    )
+    .await;
+    assert_eq!(st, 204);
+    assert_eq!(get(seats[0].clone()).await.0, 404);
+}

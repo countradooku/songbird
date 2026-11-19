@@ -10,31 +10,37 @@
 //!   `SHA-256("songbird.v1/vault-access\0" || secret)` and compares in constant time.
 //!
 //! Reads need only those two headers, so a new device holding only the recovery key can find and
-//! restore its backup. Writes also need a signature by the **primary** device of the account
-//! that owns the vault (quota, deletion with the account; D-0119 §3). An unknown vault, a vault
+//! restore its backup. **No vault names an account** (Prompt 11, D-0130, re-deciding D-0119 §3):
+//! a vault is created with an anonymous **creation token** and written under an anonymous **day
+//! pass** (`songbird_tokens`, kinds 3 and 2), both issued blinded to the account's primary by
+//! `POST /v1/vault/tokens`. The pass's level is the vault's quota. An unknown vault, a vault
 //! being deleted and a wrong secret get the same 404 after the same lookup, and count against
 //! the requester's IP range.
 //!
 //! | Request | Who | What |
 //! | --- | --- | --- |
-//! | `POST /v1/vault` | the primary | Creates the vault (or confirms it exists) |
+//! | `POST /v1/vault/tokens` | the account's primary (signed) | Day passes or creation tokens, blinded (`songbird_tokens::token::IssueRequest`) |
+//! | `POST /v1/vault` | the secret and a creation token | Creates the vault (or confirms it exists, spending nothing) |
+//! | `POST /v1/vault/day` | the secret and a day pass | Writes allowed that day and the next at the pass's level |
 //! | `GET /v1/vault` | the secret | `{"generation", "bytes", "chunks", "quota_bytes", "quota_chunks"}` |
-//! | `DELETE /v1/vault` | the owner's primary | Turns it off: rows gone at once, objects deleted by the worker |
+//! | `DELETE /v1/vault` | the secret, a current pass | Turns it off: rows gone at once, objects deleted by the worker |
 //! | `GET /v1/vault/manifest` | the secret | The manifest object, or 204 before the first |
-//! | `PUT /v1/vault/manifest` | the owner's primary | Compare-and-swap on `x-songbird-vault-expected`; 409 `{"generation"}` |
-//! | `PUT /v1/vault/chunks/<name>` | the owner's primary | One chunk object; 409 `full` past the quota |
+//! | `PUT /v1/vault/manifest` | the secret, a current pass | Compare-and-swap on `x-songbird-vault-expected`; 409 `{"generation"}` |
+//! | `PUT /v1/vault/chunks/<name>` | the secret, a current pass | One chunk object; 409 `full` past the quota |
 //! | `GET /v1/vault/chunks/<name>` | the secret | One chunk object |
 //! | `GET /v1/vault/chunks?after=<name>` | the secret | A page of names (`songbird_proto::vault`) |
-//! | `POST /v1/vault/chunks/delete` | the owner's primary | Forgets up to 1,000 chunks and deletes their objects |
+//! | `POST /v1/vault/chunks/delete` | the secret, a current pass | Forgets up to 1,000 chunks and deletes their objects |
 //!
-//! No time is stored and no vault ID, name or account reaches a log.
+//! The server keeps the day of a vault's latest pass and of its last use (to retire a vault
+//! nobody used for a year), never a time; no vault ID, name or account reaches a log.
 
 use std::net::IpAddr;
 
 use aws_lc_rs::{constant_time, digest, hkdf, hmac};
 use bytes::Bytes;
-use songbird_accounts::{DeviceRow, Registry, RegistryError, VaultError, VaultQuota, VaultRow};
+use songbird_accounts::{Registry, RegistryError, VaultError, VaultQuota, VaultRow};
 use songbird_proto::vault as wire;
+use songbird_tokens::token::{Keys, Kind, Redemption};
 use songbird_valkey::ValkeyConn;
 
 use crate::config::VaultSettings;
@@ -100,6 +106,9 @@ impl VaultMetrics {
         Ok(())
     }
 }
+
+/// Days in one window of vault creation tokens (two per window per account, D-0130).
+pub const CREATION_WINDOW_DAYS: u32 = 180;
 
 /// The vault endpoints' state.
 pub struct Vault {
@@ -204,6 +213,7 @@ fn vault_error(e: VaultError, m: &VaultMetrics) -> Outcome {
             Outcome::Conflict("full")
         }
         VaultError::Exists => Outcome::Conflict("exists"),
+        VaultError::Spent => Outcome::Conflict("spent"),
         VaultError::Generation(g) => {
             m.conflicts.inc();
             Outcome::ConflictJson(serde_json::json!({ "error": "generation", "generation": g }))
@@ -234,18 +244,14 @@ impl Vault {
         })
     }
 
-    /// A vault's quota: its owner's plan under the deployment's ceiling (D-0127). After a
-    /// downgrade a vault over its quota keeps everything and stays readable; writes that add
-    /// are refused until it is back under (deletions always pass).
+    /// A vault's quota: the level of its latest day pass under the deployment's ceiling (D-0127,
+    /// D-0130). After a downgrade a vault over its quota keeps everything and stays readable;
+    /// writes that add are refused until it is back under (deletions always pass).
     #[must_use]
-    pub fn quota(
-        &self,
-        plans: &crate::plans::Plans,
-        owner: Option<&songbird_types::AccountId>,
-    ) -> VaultQuota {
-        let l = owner.map_or_else(
-            || *plans.catalog.limits(songbird_entitlements::Level::Free),
-            |a| *plans.limits(a),
+    pub fn quota(&self, plans: &crate::plans::Plans, level: u8) -> VaultQuota {
+        let l = plans.catalog.limits(
+            songbird_entitlements::Level::from_u8(level)
+                .unwrap_or(songbird_entitlements::Level::Free),
         );
         VaultQuota {
             bytes: self.settings.quota_bytes.min(l.vault_bytes),
@@ -341,59 +347,78 @@ impl Vault {
             .await
     }
 
-    /// Checks a write: the signing device is the primary of the account that owns the vault,
-    /// within the account's write budget.
+    /// Checks a write: a day pass for today or yesterday (a session across midnight), within the
+    /// vault's write budget.
     ///
     /// # Errors
-    /// 403 `primary` (a linked or pending device), 403 `owner` (another account), 429, 503.
+    /// 403 `pass`, 429, 503.
     pub async fn write_allowed(
         &self,
         hot: &ValkeyConn,
-        device: &DeviceRow,
-        row: &VaultRow,
+        o: &Opened,
+        today: u32,
     ) -> Result<(), Outcome> {
-        if device.pending || !device.primary {
-            return Err(Outcome::Forbidden("primary"));
-        }
-        if row.owner != Some(device.account) {
-            return Err(Outcome::Forbidden("owner"));
+        if o.row.pass == 0 || o.row.pass.saturating_add(1) < today {
+            return Err(Outcome::Forbidden("pass"));
         }
         let s = &self.settings;
-        self.gcra(
-            hot,
-            "w",
-            device.account.as_bytes(),
-            s.writes_per_hour,
-            s.write_burst,
-            false,
-        )
-        .await
+        self.gcra(hot, "w", &o.vk, s.writes_per_hour, s.write_burst, false)
+            .await
     }
 
-    /// `POST /v1/vault`: creates the vault for the signing primary's account.
+    fn token(
+        keys: Option<&Keys>,
+        body: &[u8],
+        kind: Kind,
+    ) -> Result<(Redemption, [u8; 32]), Outcome> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Body {
+            token: Redemption,
+        }
+        let keys = keys.ok_or(Outcome::Unavailable)?;
+        let b: Body = serde_json::from_slice(body).map_err(|_| Outcome::Malformed("token"))?;
+        if b.token.kind != kind.as_u8() {
+            return Err(Outcome::Malformed("kind"));
+        }
+        match keys.redeem(&b.token) {
+            Ok((_, n)) => Ok((b.token, n)),
+            Err(songbird_tokens::token::TokenError::Invalid) => Err(Outcome::Conflict("invalid")),
+            Err(_) => Err(Outcome::Malformed("token")),
+        }
+    }
+
+    /// `POST /v1/vault`: creates the vault with a creation token (this window's or the last).
+    /// A vault that exists with this secret answers `created: false` and spends nothing.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the stores, the request's origin, credentials and body, the keys and the day"
+    )]
     pub async fn create(
         &self,
         registry: &Registry,
         hot: &ValkeyConn,
-        device: &DeviceRow,
+        peer: IpAddr,
         c: &Credentials,
+        keys: Option<&Keys>,
+        body: &[u8],
+        today: u32,
     ) -> Outcome {
-        if device.pending || !device.primary {
-            return Outcome::Forbidden("primary");
-        }
         let s = &self.settings;
+        let range = range_of(peer, s.ipv4_prefix, s.ipv6_prefix);
         if let Err(o) = self
-            .gcra(
-                hot,
-                "w",
-                device.account.as_bytes(),
-                s.writes_per_hour,
-                s.write_burst,
-                false,
-            )
+            .gcra(hot, "c", &range, s.writes_per_hour, s.write_burst, false)
             .await
         {
             return o;
+        }
+        let (t, nullifier) = match Self::token(keys, body, Kind::VaultCreate) {
+            Ok(x) => x,
+            Err(o) => return o,
+        };
+        let window = today / CREATION_WINDOW_DAYS;
+        if t.period != window && t.period.saturating_add(1) != window {
+            return Outcome::Conflict("period");
         }
         let vk = self.vault_key(&c.id);
         let mut epoch = [0u8; 16];
@@ -402,15 +427,52 @@ impl Vault {
         }
         match registry
             .vault_create(
-                &device.account,
                 &vk,
                 &access_hash(&c.access),
                 &epoch,
-                s.max_vaults,
+                &nullifier,
+                (t.period + 2) * CREATION_WINDOW_DAYS,
+                today,
             )
             .await
         {
             Ok(created) => Outcome::Json(serde_json::json!({ "created": created })),
+            Err(e) => vault_error(e, &self.metrics),
+        }
+    }
+
+    /// `POST /v1/vault/day`: presents a day pass (today's or yesterday's).
+    pub async fn pass(
+        &self,
+        registry: &Registry,
+        o: &Opened,
+        keys: Option<&Keys>,
+        body: &[u8],
+        today: u32,
+    ) -> Outcome {
+        let (t, nullifier) = match Self::token(keys, body, Kind::VaultDay) {
+            Ok(x) => x,
+            Err(o) => return o,
+        };
+        if t.period > today || t.period.saturating_add(1) < today {
+            return Outcome::Conflict("period");
+        }
+        if songbird_entitlements::Level::from_u8(t.level).is_none() {
+            return Outcome::Malformed("level");
+        }
+        match registry
+            .vault_pass(
+                &o.vk,
+                &o.row.epoch,
+                &nullifier,
+                t.period + 2,
+                t.period,
+                t.level,
+                today,
+            )
+            .await
+        {
+            Ok(()) => Outcome::Done,
             Err(e) => vault_error(e, &self.metrics),
         }
     }

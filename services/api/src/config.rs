@@ -367,9 +367,14 @@ pub struct VaultSettings {
     /// The deployment's ceiling of chunks per vault (the plan's `vault_chunks` under it).
     #[serde(default = "default_vault_chunks")]
     pub quota_chunks: u64,
-    /// Vaults per account: two, so a new recovery key's vault fills before the old one goes.
-    #[serde(default = "default_vault_count")]
-    pub max_vaults: u64,
+    /// Vault creation tokens per account per 180 days (D-0130): two, so a new recovery key's
+    /// vault can be made while the old one still holds a backup. They bound how many vaults one
+    /// account keeps alive, since no vault names its account.
+    #[serde(default = "default_vault_creations")]
+    pub creations_per_window: u32,
+    /// Day passes per account per day (all of them for the next week at most, D-0130).
+    #[serde(default = "default_vault_passes")]
+    pub passes_per_day: u32,
     /// Largest manifest object.
     #[serde(default = "default_vault_manifest")]
     pub max_manifest: usize,
@@ -380,7 +385,7 @@ pub struct VaultSettings {
     /// Their burst.
     #[serde(default = "default_vault_read_burst")]
     pub read_burst: u32,
-    /// Writes (chunks, manifests, deletes) per hour per account.
+    /// Writes (chunks, manifests, deletes) per hour per vault; creations per hour per IP range.
     #[serde(default = "default_vault_writes")]
     pub writes_per_hour: u32,
     /// Their burst: a first backup of a full vault.
@@ -406,8 +411,11 @@ const fn default_vault_bytes() -> u64 {
 const fn default_vault_chunks() -> u64 {
     10_000_000
 }
-const fn default_vault_count() -> u64 {
+const fn default_vault_creations() -> u32 {
     2
+}
+const fn default_vault_passes() -> u32 {
+    16
 }
 const fn default_vault_manifest() -> usize {
     16 << 20
@@ -455,9 +463,14 @@ impl Validate for VaultSettings {
             "must be in 100..=10000000",
         );
         v.check(
-            (1..=4).contains(&self.max_vaults),
-            "max_vaults",
+            (1..=4).contains(&self.creations_per_window),
+            "creations_per_window",
             "must be in 1..=4",
+        );
+        v.check(
+            (1..=64).contains(&self.passes_per_day),
+            "passes_per_day",
+            "must be in 1..=64",
         );
         v.check(
             ((1 << 20)..=(48 << 20)).contains(&self.max_manifest),

@@ -5140,6 +5140,7 @@ dependencies = [
 name = "songbird-e2e"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "aws-lc-rs",
  "bytes",
  "futures-core",
@@ -5185,6 +5186,7 @@ dependencies = [
  "songbird-service",
  "songbird-surreal",
  "songbird-telemetry",
+ "songbird-tokens",
  "songbird-types",
  "songbird-valkey",
  "songbird-worker",

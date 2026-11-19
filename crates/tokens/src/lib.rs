@@ -5,5 +5,6 @@
 //!   requested, issued, finalized and redeemed, and its nullifier.
 #![forbid(unsafe_code)]
 
+pub mod family;
 pub mod oprf;
 pub mod token;

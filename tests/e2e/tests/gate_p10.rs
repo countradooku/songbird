@@ -44,9 +44,10 @@ use songbird_backup_format::{BackupKeys, ChunkName, OsRng, RecoveryKey, object};
 use songbird_backup_storage::conformance::{self, Plan};
 use songbird_backup_storage::http::HyperHttp;
 use songbird_backup_storage::run::{self, Options};
-use songbird_backup_storage::vault::{Signer, VaultStore};
+use songbird_backup_storage::vault::{Passes, VaultStore};
 use songbird_backup_storage::{BackupStore, StoreError};
 use songbird_jobs::{Queue, QueueConfig, Stream};
+use songbird_tokens::token::{self as tokens, Info, Kind};
 use songbird_types::{AccountId, DeviceId, Secret, SecretRef};
 use songbird_worker::{DeliveryLink, Worker, WorkerMetrics};
 
@@ -73,7 +74,8 @@ fn settings(quota_bytes: u64) -> VaultSettings {
         bucket: String::new(),
         quota_bytes,
         quota_chunks: 100_000,
-        max_vaults: 2,
+        creations_per_window: 2,
+        passes_per_day: 64,
         max_manifest: 16 << 20,
         reads_per_hour: 3_600_000,
         read_burst: 100_000,
@@ -166,6 +168,18 @@ async fn stack_with(quota_bytes: u64, catalog: songbird_entitlements::Catalog) -
     let app = Arc::new(App {
         plans: songbird_api::plans::Plans {
             catalog,
+            redeemer: Some(Arc::new(
+                songbird_api::plans::Redeemer::new(
+                    songbird_api::config::TokenSettings {
+                        secret: SecretRef::Env("SONGBIRD_UNUSED".into()),
+                        keys: vec![1],
+                        redeems_per_hour: 3_600,
+                        redeem_burst: 1_000,
+                    },
+                    &rand32(),
+                )
+                .unwrap(),
+            )),
             ..songbird_api::plans::Plans::default()
         },
         calls: None,
@@ -249,11 +263,62 @@ struct Device {
     client: Arc<ApiClient>,
 }
 
-struct DeviceSigner(Arc<ApiClient>);
+/// Vault tokens as the app gets them (D-0130): blinded, from `api`, as the account's device,
+/// finished against the pinned key; the vault itself never sees the account.
+struct DevicePasses {
+    client: Arc<ApiClient>,
+    pinned: [u8; 32],
+    level: u8,
+    /// Other accounts' primaries for creation tokens (the conformance suite destroys and
+    /// recreates its vault more often than one account's two per 180 days allow).
+    creators: Vec<Arc<ApiClient>>,
+    next: std::sync::atomic::AtomicUsize,
+}
 
-impl Signer for DeviceSigner {
-    fn sign(&self, method: &str, path: &str, body: Option<&[u8]>) -> (String, Option<String>) {
-        self.0.sign(method, path, body)
+impl DevicePasses {
+    async fn one(&self, info: Info) -> Result<serde_json::Value, StoreError> {
+        let client = if info.kind == Kind::VaultCreate && !self.creators.is_empty() {
+            let i = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Arc::clone(&self.creators[i % self.creators.len()])
+        } else {
+            Arc::clone(&self.client)
+        };
+        let (pending, req) = tokens::request(1, info, 1).unwrap();
+        let (st, b) = client
+            .send(
+                "POST",
+                "/v1/vault/tokens",
+                Some(serde_json::to_string(&req).unwrap().as_bytes()),
+            )
+            .await
+            .map_err(|_| StoreError::Unavailable { status: 0 })?;
+        if st != 200 {
+            return Err(StoreError::Unauthorized);
+        }
+        let resp: tokens::IssueResponse = serde_json::from_slice(&b).unwrap();
+        let t = pending.finish(&self.pinned, &resp).unwrap().remove(0);
+        Ok(serde_json::to_value(t).unwrap())
+    }
+}
+
+#[async_trait::async_trait]
+impl Passes for DevicePasses {
+    async fn day_pass(&self, day: u32) -> Result<serde_json::Value, StoreError> {
+        self.one(Info {
+            kind: Kind::VaultDay,
+            level: self.level,
+            period: day,
+        })
+        .await
+    }
+
+    async fn creation(&self) -> Result<serde_json::Value, StoreError> {
+        self.one(Info {
+            kind: Kind::VaultCreate,
+            level: 0,
+            period: songbird_backup_storage::vault::today() / 180,
+        })
+        .await
     }
 }
 
@@ -291,11 +356,25 @@ fn http() -> Arc<HyperHttp> {
 }
 
 fn store(s: &Stack, keys: &BackupKeys, d: Option<&Device>) -> Arc<dyn BackupStore> {
+    store_at(s, keys, d, 0)
+}
+
+/// A vault store whose day passes are of `level`.
+fn store_at(s: &Stack, keys: &BackupKeys, d: Option<&Device>, level: u8) -> Arc<dyn BackupStore> {
+    let pinned = s.app.plans.redeemer.as_ref().unwrap().keys().public()[0].1;
     Arc::new(VaultStore::new(
         http(),
         s.api.clone(),
         keys,
-        d.map(|d| Arc::new(DeviceSigner(Arc::clone(&d.client))) as Arc<dyn Signer>),
+        d.map(|d| {
+            Arc::new(DevicePasses {
+                client: Arc::clone(&d.client),
+                pinned,
+                level,
+                creators: Vec::new(),
+                next: std::sync::atomic::AtomicUsize::new(0),
+            }) as Arc<dyn Passes>
+        }),
     ))
 }
 
@@ -319,12 +398,24 @@ async fn the_vault_passes_the_conformance_suite() {
     };
     let owner = account(&s, 0).await;
     let keys = new_keys();
-    let r = conformance::run(
-        store(&s, &keys, Some(&owner[0])),
-        Arc::clone(&keys),
-        Plan::default(),
-    )
-    .await;
+    let mut creators = Vec::new();
+    for _ in 0..8 {
+        creators.push(Arc::clone(&account(&s, 0).await[0].client));
+    }
+    let pinned = s.app.plans.redeemer.as_ref().unwrap().keys().public()[0].1;
+    let st: Arc<dyn BackupStore> = Arc::new(VaultStore::new(
+        http(),
+        s.api.clone(),
+        &keys,
+        Some(Arc::new(DevicePasses {
+            client: Arc::clone(&owner[0].client),
+            pinned,
+            level: 0,
+            creators,
+            next: std::sync::atomic::AtomicUsize::new(0),
+        })),
+    ));
+    let r = conformance::run(st, Arc::clone(&keys), Plan::default()).await;
     assert!(r.is_ok(), "{r:?}");
     println!("vault conformance: {:?}", r.unwrap());
 }
@@ -370,38 +461,77 @@ async fn a_new_device_with_only_the_recovery_key_restores_and_others_cannot_writ
         Some(songbird_backup_format::schema::record::Body::Account(_))
     ));
 
-    // Without a signature nothing is written.
+    // Without passes nothing is written; passes go only to a primary (a linked device gets
+    // none, D-0130).
     let (n, o) = chunk(&fresh_keys);
     assert!(matches!(
         fresh.put(&n, o.clone()).await,
         Err(StoreError::Unauthorized)
     ));
-    // A linked device of the owner: 403 primary.
-    let linked = store(&s, &keys, Some(&owner[1]));
-    assert!(matches!(
-        linked.put(&n, o.clone()).await,
-        Err(StoreError::Unauthorized)
-    ));
-    assert!(matches!(
-        linked.destroy().await,
-        Err(StoreError::Unauthorized)
-    ));
-    // Another account's primary holding the secret: 403 owner.
-    let other = account(&s, 0).await;
-    let stranger = store(&s, &keys, Some(&other[0]));
-    assert!(matches!(
-        stranger.put(&n, o).await,
-        Err(StoreError::Unauthorized)
-    ));
-    assert!(matches!(
-        stranger
-            .swap_manifest(
-                done.seen.generation,
-                manifest_of(&keys, done.seen.generation + 1)
-            )
-            .await,
-        Err(StoreError::Unauthorized)
-    ));
+    let (st, _) = owner[1]
+        .client
+        .send(
+            "POST",
+            "/v1/vault/tokens",
+            Some(
+                serde_json::to_string(
+                    &tokens::request(
+                        1,
+                        Info {
+                            kind: Kind::VaultDay,
+                            level: 0,
+                            period: songbird_backup_storage::vault::today(),
+                        },
+                        1,
+                    )
+                    .unwrap()
+                    .1,
+                )
+                .unwrap()
+                .as_bytes(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(st, 403);
+    // A vault without a current pass refuses writes, whoever holds its secret.
+    s.app
+        .registry
+        .db()
+        .exec("UPDATE vault SET pass = 0 RETURN NONE;", Vec::new())
+        .await
+        .unwrap();
+    let raw = songbird_backup_storage::http::Request::new(
+        "PUT",
+        format!("{}/v1/vault/chunks/{}", s.api, n.to_hex()),
+    )
+    .header(
+        songbird_proto::vault::VAULT_HEADER,
+        hex::encode(keys.vault_id),
+    )
+    .header(
+        songbird_proto::vault::ACCESS_HEADER,
+        hex::encode(*keys.vault_access),
+    )
+    .header("content-type", "application/octet-stream")
+    .body(o.clone());
+    let r = songbird_backup_storage::http::Http::send(http().as_ref(), raw.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        (r.status, r.body.as_slice()),
+        (403, br#"{"error":"pass"}"#.as_slice())
+    );
+    // A wrong secret is the one 404.
+    let mut wrong = raw;
+    wrong
+        .headers
+        .retain(|(k, _)| k != songbird_proto::vault::ACCESS_HEADER);
+    let wrong = wrong.header(songbird_proto::vault::ACCESS_HEADER, hex::encode([9u8; 32]));
+    let r = songbird_backup_storage::http::Http::send(http().as_ref(), wrong)
+        .await
+        .unwrap();
+    assert_eq!(r.status, 404);
     // Nothing changed.
     let again = run::current(fresh.as_ref(), &fresh_keys, Some(done.seen))
         .await
@@ -524,10 +654,11 @@ async fn the_quota_is_the_owners_plan_and_a_downgrade_keeps_the_backup() {
     };
     let owner = account(&s, 0).await;
     let keys = new_keys();
-    let st = store(&s, &keys, Some(&owner[0]));
-    st.open().await.unwrap();
+    let free = store(&s, &keys, Some(&owner[0]));
+    free.open().await.unwrap();
+    let current = Arc::new(std::sync::Mutex::new(Arc::clone(&free)));
     let put = |i: u32| {
-        let st = Arc::clone(&st);
+        let st = Arc::clone(&current.lock().unwrap());
         let keys = Arc::clone(&keys);
         async move {
             let mut p = vec![7u8; 2_000];
@@ -551,7 +682,7 @@ async fn the_quota_is_the_owners_plan_and_a_downgrade_keeps_the_backup() {
         names.push(n);
     }
     assert!(matches!(put(100).await.1, Err(StoreError::Full)));
-    // Plus: 130.
+    // Plus: the account's next pass is Plus, and the vault's quota follows the pass.
     s.app.plans.live.store(Snapshot::from_rows(
         2,
         &[EntRow {
@@ -561,6 +692,9 @@ async fn the_quota_is_the_owners_plan_and_a_downgrade_keeps_the_backup() {
             source: Source::Token,
         }],
     ));
+    let plus = store_at(&s, &keys, Some(&owner[0]), 1);
+    plus.open().await.unwrap();
+    *current.lock().unwrap() = Arc::clone(&plus);
     let (_, _, _, _, q) = quota().await;
     assert_eq!(q, 130);
     for i in 100..130 {
@@ -569,16 +703,24 @@ async fn the_quota_is_the_owners_plan_and_a_downgrade_keeps_the_backup() {
         names.push(n);
     }
     assert!(matches!(put(130).await.1, Err(StoreError::Full)));
-    // Downgrade: all 130 stay and read back; nothing is added; deletions pass.
+    // Downgrade: no more Plus passes; the next pass is Free. All 130 stay and read back;
+    // nothing is added; deletions pass.
     s.app.plans.live.store(Snapshot::from_rows(3, &[]));
+    assert!(matches!(
+        store_at(&s, &keys, Some(&owner[0]), 1).open().await,
+        Err(StoreError::Unauthorized)
+    ));
+    let free = store(&s, &keys, Some(&owner[0]));
+    free.open().await.unwrap();
+    *current.lock().unwrap() = Arc::clone(&free);
     let (_, _, chunks, _, q) = quota().await;
     assert_eq!((chunks, q), (130, 100));
     assert!(
-        st.get(&names[129]).await.is_ok(),
+        free.get(&names[129]).await.is_ok(),
         "a downgraded backup still reads"
     );
     assert!(matches!(put(131).await.1, Err(StoreError::Full)));
-    st.delete(&names[..40]).await.unwrap();
+    free.delete(&names[..40]).await.unwrap();
     put(131).await.1.unwrap();
 }
 
@@ -705,9 +847,12 @@ async fn turning_backups_off_and_deleting_the_account_leave_nothing() {
         .await
         .unwrap();
     }
-    // At most two vaults per account.
+    // Two creations per account per 180 days (D-0130: no vault names its account, so this is
+    // what bounds how many one account keeps alive).
     let k3 = new_keys();
     assert!(store(&s, &k3, Some(&owner[0])).open().await.is_err());
+    // Reopening an existing vault spends no creation token.
+    store(&s, &k2, Some(&owner[0])).open().await.unwrap();
     assert!(objects(&s).await > 10);
 
     // Turned off: gone at once for every request; the sweep deletes its objects.
@@ -742,14 +887,17 @@ async fn turning_backups_off_and_deleting_the_account_leave_nothing() {
     );
     assert!(s.app.registry.vaults_gone(10).await.unwrap().is_empty());
     assert!(objects(&s).await > 0);
-    // The same key opens a new, empty vault at once.
-    let again = store(&s, &k1, Some(&owner[0]));
+    // The same key opens a new, empty vault at once (with another account's creation token:
+    // any account's will do).
+    let helper = account(&s, 0).await;
+    let again = store(&s, &k1, Some(&helper[0]));
     again.open().await.unwrap();
     assert!(again.list().await.unwrap().is_empty() && again.manifest().await.unwrap().is_none());
     again.destroy().await.unwrap();
     s.worker.sweep().await;
 
-    // The account is deleted: its other vault goes with it.
+    // The account is deleted: its vault names no account and stays (the app deletes it first,
+    // D-0130); a vault nobody uses for a year is retired with its objects.
     let (st, _) = owner[0]
         .client
         .send("DELETE", "/v1/account", None)
@@ -757,18 +905,36 @@ async fn turning_backups_off_and_deleting_the_account_leave_nothing() {
         .unwrap();
     assert_eq!(st, 202);
     s.worker.delete_account(&owner[0].account).await.unwrap();
-    assert_eq!(objects(&s).await, 0);
+    assert_eq!(probe(&s, k2.vault_id, *k2.vault_access).await.0, 200);
     let vk2 = s.app.vault.as_ref().unwrap().vault_key(&k2.vault_id);
+    let seen = s.app.registry.vault(&vk2).await.unwrap().unwrap().seen;
+    assert!(seen >= songbird_backup_storage::vault::today() - 1);
+    s.app
+        .registry
+        .db()
+        .exec(
+            "UPDATE vault SET seen = $d RETURN NONE;",
+            vec![(
+                "d".into(),
+                songbird_surreal::Value::Int(
+                    i64::from(songbird_backup_storage::vault::today())
+                        - i64::from(songbird_worker::VAULT_UNUSED_DAYS)
+                        - 1,
+                ),
+            )],
+        )
+        .await
+        .unwrap();
+    s.worker.sweep().await;
+    s.worker.sweep().await;
     assert!(s.app.registry.vault(&vk2).await.unwrap().is_none());
-    assert!(
-        s.app
-            .registry
-            .vaults_of(&owner[0].account)
-            .await
-            .unwrap()
-            .is_empty()
-    );
     assert_eq!(probe(&s, k2.vault_id, *k2.vault_access).await.0, 404);
+    let left = s
+        .vault_s3
+        .list_objects_v2(&hex::encode(vk2), None, 10)
+        .await
+        .unwrap();
+    assert!(left.objects.is_empty());
 }
 
 fn pct(v: &mut [f64], p: f64) -> f64 {

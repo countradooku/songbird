@@ -2499,17 +2499,25 @@ vault ID and the access secret (§11.1), both from the recovery key:
 | `x-songbird-vault-access` | the access secret, 64 hex |
 | `x-songbird-vault-expected` | (manifest writes) the generation replaced, decimal |
 
-| Request | Signed by | Answer |
+Prompt 11 (D-0130) re-decided D-0119 §3: **no vault names an account**. Writes need an
+anonymous day pass, creation an anonymous creation token (§14.4, kinds 2 and 3).
+
+| Request | Needs (besides the two headers) | Answer |
 | --- | --- | --- |
-| `POST /v1/vault` | the account's primary | 200 `{"created"}`; 409 `{"error": "exists"}` (the account has `max_vaults`, or the ID is another account's); 403 `primary` |
+| `POST /v1/vault/tokens` | signed by the account's **primary**; no vault headers; a §14.4 request of kind 2 (a day within the next week, the account's level, Plus only through its last day) or 3 (this 180-day window, level 0) | 200 the §14.4 answer; 403 `primary`, `level`; 409 `period`, `cap` (two creations a window); 429 past `passes_per_day` |
+| `POST /v1/vault` | `{"token": <creation token>}` (this window's or the last) | 200 `{"created"}` (`false`: it exists with this secret, nothing spent); 409 `exists` (the ID taken with another secret), `spent`, `period`, `invalid` |
+| `POST /v1/vault/day` | `{"token": <day pass>}` (today's or yesterday's) | 204: writes allowed that day and the next, the quota the pass's level; 409 `spent`, `period`, `invalid` |
 | `GET /v1/vault` | — | 200 `{"generation", "bytes", "chunks", "quota_bytes", "quota_chunks"}` |
-| `DELETE /v1/vault` | the owner's primary | 204: the vault is gone at once; its objects are deleted by the worker |
+| `DELETE /v1/vault` | a current pass | 204: the vault is gone at once; its objects are deleted by the worker |
 | `GET /v1/vault/manifest` | — | 200 the manifest object; 204 before the first |
-| `PUT /v1/vault/manifest` | the owner's primary | 200 `{"generation"}`; 409 `{"error": "generation", "generation"}`; 409 `full`; 400 `manifest`/`generation` |
-| `PUT /v1/vault/chunks/<name>` | the owner's primary | 204; 409 `full`; 409 `size`; 400 `chunk` |
+| `PUT /v1/vault/manifest` | a current pass | 200 `{"generation"}`; 409 `{"error": "generation", "generation"}`; 409 `full`; 400 `manifest`/`generation` |
+| `PUT /v1/vault/chunks/<name>` | a current pass | 204; 409 `full`; 409 `size`; 400 `chunk` |
 | `GET /v1/vault/chunks/<name>` | — | 200 the object; 404 |
 | `GET /v1/vault/chunks?after=<name>` | — | 200 `n u16 \| name [32] × n \| more u8`, at most 1,000 names in order |
-| `POST /v1/vault/chunks/delete` | the owner's primary | `n u16 (1..=1000) \| name [32] × n` → 204 |
+| `POST /v1/vault/chunks/delete` | a current pass | `n u16 (1..=1000) \| name [32] × n` → 204 |
+
+A write without a current pass is 403 `{"error": "pass"}`; the app presents its day pass again
+and retries once.
 
 - The server never stores the vault ID: rows and objects are keyed by `HMAC(server key, vault
   ID)`, objects named `<that>/<epoch>/c/<name>` and `<that>/<epoch>/m/<random>`, where the
@@ -2520,10 +2528,10 @@ vault ID and the access secret (§11.1), both from the recovery key:
   restores its backup before it has an account. An unknown vault and a wrong secret answer the
   same 404 after the same lookup and count against the requester's IP range (`misses_per_hour`,
   /24 and /48); past it, every vault request from the range waits (429).
-- **Writes** also need a signature (§2.4) by the **primary** of the account that owns the vault
-  (403 `primary` for a linked or pending device, 403 `owner` for another account). The owner is
-  in its own table (`vault_owner`), so Prompt 11 can unlink vaults from accounts without
-  changing the format.
+- **Writes** need a current day pass on the vault (Prompt 11, D-0130): passes are issued only to
+  an account's primary, blinded, so the vault never learns which account presented one. Whoever
+  holds the recovery key can write, as whoever holds it can already recover the account
+  (D-0119 §2).
 - The server checks only shapes: a chunk object starts `SBC 01` and its length is a header, a
   Padmé length of at least 1,024 and a tag, at most the largest chunk; a manifest starts
   `SBM 01`, is at most `max_manifest`, and its generation is `expected + 1`. A chunk is recorded
@@ -2534,14 +2542,17 @@ vault ID and the access secret (§11.1), both from the recovery key:
   manifest object is stored under a fresh random name before the compare-and-swap, and the
   loser's object is deleted. Every write checks the vault incarnation (epoch) it opened is still
   the current one (D-0125).
-- Quotas per vault (D-0119): 5 GiB and 100,000 chunks, `max_vaults` = 2 per account, until
-  Prompt 11's entitlements. Budgets (GCRA in `valkey-hot` under keyed records): reads per vault,
-  writes per account, misses per range.
-- Deleting the account deletes its vaults (the worker: rows, then every object under the
-  prefixes, verified by listing). A vault turned off is listed again by every sweep for 15
-  minutes (longer than any request) before it is forgotten, so an upload in flight when it was
-  turned off is deleted too. The GDPR export lists each vault's generation, bytes and chunk
-  count, never its ID.
+- Quotas per vault: the level of its latest day pass (§14.1: 5 GiB and 100,000 chunks on Free,
+  50 GiB and 1,000,000 on Plus) under `[api.vault]`'s ceiling. Two creation tokens per account
+  per 180 days bound how many vaults one account keeps alive. Budgets (GCRA in `valkey-hot`
+  under keyed records): reads and writes per vault, creations and misses per range, passes per
+  account.
+- A vault keeps the day of its latest pass and of its last use, never a time. One nobody uses
+  for **365 days** is retired by the worker (rows, then every object under its prefix). Deleting
+  an account no longer reaches its vault: the app deletes the vault first (it holds the access
+  secret). A vault turned off is listed again by every sweep for 15 minutes (longer than any
+  request) before it is forgotten, so an upload in flight when it was turned off is deleted too.
+  The GDPR export says vaults are not attributable.
 
 **Third-party stores** (M3, D-0122), each on the device with the user's own credentials:
 
@@ -2925,3 +2936,31 @@ requests cannot pass them together.
 
 **Caps** per subscription per month: Plus 2, Family 7 (§14.4). A token for the current month
 needs the subscription paid today; for the next month, paid on that month's first day.
+
+### 14.6 Family seats (D-0126 §5, D-0130)
+
+A Family subscription's owner hands each member a month's plan token through a **family
+mailbox** in `api`. No request carries an account and no row names one.
+
+| Request | Needs | Answer |
+| --- | --- | --- |
+| `POST /v1/family` | `{"manage": <64 hex: SHA-256("songbird.v1/family-manage\0" ‖ management token)>}` | 200 `{"family": <32 hex>}` |
+| `PUT /v1/family/<family>/slots/<slot>` | `x-songbird-family-token: <management token>`; `{"auth": <64 hex: SHA-256("songbird.v1/family-bearer\0" ‖ bearer)>, "sealed": <hex, at most 4,096 bytes>}` | 204 (a new slot, or the box replaced when `auth` matches); 409 `full` (five slots) |
+| `GET /v1/family/<family>/slots/<slot>` | `x-songbird-family-bearer: <bearer>` | 200 `{"sealed": <hex> \| null}` |
+| `DELETE /v1/family/<family>/slots/<slot>` | the management token (removal) or the slot's bearer (leaving) | 204 |
+| `DELETE /v1/family/<family>` | the management token | 204 |
+
+Every miss (no family, no slot, a wrong token or bearer) is the same 404. One budget per IP
+range (600 an hour). A mailbox untouched for 60 days is deleted.
+
+**Seats** (`crates/tokens::family`): a slot ID and a 32-byte secret, shared as
+`https://songbird.chat/family#<family>.<slot>.<secret>` (the fragment never reaches a server).
+`HKDF-SHA256(secret, salt "songbird.v1/family-seat", info label ‖ family ‖ slot)` gives a
+**bearer** (label `bearer`, shown to the server) and a **key** (label `key`, never shown) that
+seals the token with ChaCha20-Poly1305 (`nonce 12 ‖ ciphertext ‖ tag`, AAD `family ‖ slot`).
+
+**Each month** the owner's app fetches seven Family tokens from billing (§14.5), redeems one,
+seals one into each member's slot, and keeps the spare. Members fetch their slot and redeem on
+their own account: each is Plus, and the server cannot tell a seat from a subscription.
+**Removal** deletes the slot at once; the member keeps Plus through the month already redeemed
+and its grace. **Leaving** deletes one's own slot.

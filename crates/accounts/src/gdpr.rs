@@ -34,6 +34,7 @@ fn not_attributable() -> serde_json::Value {
         "Attachments you received: fetched without naming your account or device (the object ID inside the message is enough); the server sees only the address a download came from, and keeps no record of it.",
         "Packs you made (stickers, scenes, sounds, emoticons): once complete, not linked to your account; your devices keep the token that deletes them, and a pack nobody fetches for a year is deleted. Packs still being uploaded are listed with your devices.",
         "Upload budgets: keyed records per account in valkey-hot (counts, no files): grants and bytes expiring within 24 hours, new packs within 30 days.",
+        "Backups in the Songbird vault: not linked to your account. A vault is found and opened by your recovery key alone; the server knows its size, chunk count and generation, the day of its latest day pass and of its last use, and nothing that names you. Delete it from the app (Settings › Backups) before deleting your account; a vault nobody uses for a year is deleted.",
         "Payments: never linked to your account. Your plan comes from an anonymous token your app redeemed; the payment it came from is recorded elsewhere under no identifier of yours.",
         "GIF searches: held in memory for minutes to answer and cache them, never stored or logged, and sent to the GIF provider without anything identifying you.",
     ])

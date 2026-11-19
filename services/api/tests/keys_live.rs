@@ -64,7 +64,8 @@ async fn stack(k: Option<KeySettings>) -> Option<Stack> {
         pass: std::env::var("SONGBIRD_TEST_SURREALDB_PASS").unwrap(),
         namespace: "test".into(),
         database: format!("keys_{}", DeviceId::random().unwrap().to_hex_unredacted()),
-        timeout: Duration::from_secs(5),
+        // The registry defines its whole schema at connect: slow on a loaded CI runner.
+        timeout: Duration::from_secs(30),
         max_message_bytes: 16 << 20,
     })
     .await
@@ -74,8 +75,10 @@ async fn stack(k: Option<KeySettings>) -> Option<Stack> {
     getrandom::fill(&mut secret).unwrap();
     let keys = k.map(|k| KeyDirectory::new(k, &secret, None, KeyMetrics::default()).unwrap());
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
+        support: None,
         calls: None,
         server_name: SERVER.into(),
         push_store: Arc::new(

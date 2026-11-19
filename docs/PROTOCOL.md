@@ -2499,17 +2499,25 @@ vault ID and the access secret (§11.1), both from the recovery key:
 | `x-songbird-vault-access` | the access secret, 64 hex |
 | `x-songbird-vault-expected` | (manifest writes) the generation replaced, decimal |
 
-| Request | Signed by | Answer |
+Prompt 11 (D-0130) re-decided D-0119 §3: **no vault names an account**. Writes need an
+anonymous day pass, creation an anonymous creation token (§14.4, kinds 2 and 3).
+
+| Request | Needs (besides the two headers) | Answer |
 | --- | --- | --- |
-| `POST /v1/vault` | the account's primary | 200 `{"created"}`; 409 `{"error": "exists"}` (the account has `max_vaults`, or the ID is another account's); 403 `primary` |
+| `POST /v1/vault/tokens` | signed by the account's **primary**; no vault headers; a §14.4 request of kind 2 (a day within the next week, the account's level, Plus only through its last day) or 3 (this 180-day window, level 0) | 200 the §14.4 answer; 403 `primary`, `level`; 409 `period`, `cap` (two creations a window); 429 past `passes_per_day` |
+| `POST /v1/vault` | `{"token": <creation token>}` (this window's or the last) | 200 `{"created"}` (`false`: it exists with this secret, nothing spent); 409 `exists` (the ID taken with another secret), `spent`, `period`, `invalid` |
+| `POST /v1/vault/day` | `{"token": <day pass>}` (today's or yesterday's) | 204: writes allowed that day and the next, the quota the pass's level; 409 `spent`, `period`, `invalid` |
 | `GET /v1/vault` | — | 200 `{"generation", "bytes", "chunks", "quota_bytes", "quota_chunks"}` |
-| `DELETE /v1/vault` | the owner's primary | 204: the vault is gone at once; its objects are deleted by the worker |
+| `DELETE /v1/vault` | a current pass | 204: the vault is gone at once; its objects are deleted by the worker |
 | `GET /v1/vault/manifest` | — | 200 the manifest object; 204 before the first |
-| `PUT /v1/vault/manifest` | the owner's primary | 200 `{"generation"}`; 409 `{"error": "generation", "generation"}`; 409 `full`; 400 `manifest`/`generation` |
-| `PUT /v1/vault/chunks/<name>` | the owner's primary | 204; 409 `full`; 409 `size`; 400 `chunk` |
+| `PUT /v1/vault/manifest` | a current pass | 200 `{"generation"}`; 409 `{"error": "generation", "generation"}`; 409 `full`; 400 `manifest`/`generation` |
+| `PUT /v1/vault/chunks/<name>` | a current pass | 204; 409 `full`; 409 `size`; 400 `chunk` |
 | `GET /v1/vault/chunks/<name>` | — | 200 the object; 404 |
 | `GET /v1/vault/chunks?after=<name>` | — | 200 `n u16 \| name [32] × n \| more u8`, at most 1,000 names in order |
-| `POST /v1/vault/chunks/delete` | the owner's primary | `n u16 (1..=1000) \| name [32] × n` → 204 |
+| `POST /v1/vault/chunks/delete` | a current pass | `n u16 (1..=1000) \| name [32] × n` → 204 |
+
+A write without a current pass is 403 `{"error": "pass"}`; the app presents its day pass again
+and retries once.
 
 - The server never stores the vault ID: rows and objects are keyed by `HMAC(server key, vault
   ID)`, objects named `<that>/<epoch>/c/<name>` and `<that>/<epoch>/m/<random>`, where the
@@ -2520,10 +2528,10 @@ vault ID and the access secret (§11.1), both from the recovery key:
   restores its backup before it has an account. An unknown vault and a wrong secret answer the
   same 404 after the same lookup and count against the requester's IP range (`misses_per_hour`,
   /24 and /48); past it, every vault request from the range waits (429).
-- **Writes** also need a signature (§2.4) by the **primary** of the account that owns the vault
-  (403 `primary` for a linked or pending device, 403 `owner` for another account). The owner is
-  in its own table (`vault_owner`), so Prompt 11 can unlink vaults from accounts without
-  changing the format.
+- **Writes** need a current day pass on the vault (Prompt 11, D-0130): passes are issued only to
+  an account's primary, blinded, so the vault never learns which account presented one. Whoever
+  holds the recovery key can write, as whoever holds it can already recover the account
+  (D-0119 §2).
 - The server checks only shapes: a chunk object starts `SBC 01` and its length is a header, a
   Padmé length of at least 1,024 and a tag, at most the largest chunk; a manifest starts
   `SBM 01`, is at most `max_manifest`, and its generation is `expected + 1`. A chunk is recorded
@@ -2534,14 +2542,17 @@ vault ID and the access secret (§11.1), both from the recovery key:
   manifest object is stored under a fresh random name before the compare-and-swap, and the
   loser's object is deleted. Every write checks the vault incarnation (epoch) it opened is still
   the current one (D-0125).
-- Quotas per vault (D-0119): 5 GiB and 100,000 chunks, `max_vaults` = 2 per account, until
-  Prompt 11's entitlements. Budgets (GCRA in `valkey-hot` under keyed records): reads per vault,
-  writes per account, misses per range.
-- Deleting the account deletes its vaults (the worker: rows, then every object under the
-  prefixes, verified by listing). A vault turned off is listed again by every sweep for 15
-  minutes (longer than any request) before it is forgotten, so an upload in flight when it was
-  turned off is deleted too. The GDPR export lists each vault's generation, bytes and chunk
-  count, never its ID.
+- Quotas per vault: the level of its latest day pass (§14.1: 5 GiB and 100,000 chunks on Free,
+  50 GiB and 1,000,000 on Plus) under `[api.vault]`'s ceiling. Two creation tokens per account
+  per 180 days bound how many vaults one account keeps alive. Budgets (GCRA in `valkey-hot`
+  under keyed records): reads and writes per vault, creations and misses per range, passes per
+  account.
+- A vault keeps the day of its latest pass and of its last use, never a time. One nobody uses
+  for **365 days** is retired by the worker (rows, then every object under its prefix). Deleting
+  an account no longer reaches its vault: the app deletes the vault first (it holds the access
+  secret). A vault turned off is listed again by every sweep for 15 minutes (longer than any
+  request) before it is forgotten, so an upload in flight when it was turned off is deleted too.
+  The GDPR export says vaults are not attributable.
 
 **Third-party stores** (M3, D-0122), each on the device with the user's own credentials:
 
@@ -2751,3 +2762,305 @@ OpenSSL). For call ID `00 01 … 0f` and `call_secret` `40 41 … 5f`, the sende
 `9abfb1f35fa88b5c072d6410879d17a86fff15a196b82fe917a2bb113e490aeb`. For link root `00 01 … 1f`,
 the link ID is `5f88f381e38c44f13807d6c1ca1268a94fdd7437f745cca65ac91b8a29b5480d` and the server
 stores `19a4a59124d6c69329890a7fe6be812afda73dbf92737d7873f18d4c85af3853`.
+
+## 14. Plans, entitlements and abuse (Prompt 11)
+
+### 14.1 Levels, the catalogue and what is never gated
+
+Plans are levels: `0` Free (the default, never stored) and `1` Plus. Every Family seat is
+Plus: the server cannot tell a seat from a subscription (D-0126 §5). Teams will add a source
+(an organisation), not a new kind of entitlement.
+
+The **catalogue** (`[api.plans]`, `songbird_entitlements::Catalog`) gives each level its limits
+and flags, with a version the apps compare. Defaults (D-0126 §3):
+
+| | Free | Plus |
+| --- | --- | --- |
+| `linked_devices` (besides the primary) | 5 | 10 |
+| `file_bytes` (largest attachment ciphertext) | 2 GiB | 4 GiB |
+| `upload_bytes_per_day` | 10 GiB | 50 GiB |
+| `vault_bytes`, `vault_chunks` | 5 GiB, 100,000 | 50 GiB, 1,000,000 |
+| `packs_per_month` (new packs per 30 days) | 5 | 50 |
+| flags `app_icons`, `chat_themes`, `priority_support` | — | ✓ |
+
+A catalogue is refused at start-up when a higher level allows less than a lower one, or a
+number is outside its bounds. **Never in the catalogue, on any plan:** encryption, safety
+numbers and verification, disappearing messages, app lock, the PIN and passkeys, the proxy,
+backups and restore, every privacy setting, calls, groups, reporting, blocking, export and
+deletion. The flags gate only extras whose settings are end-to-end encrypted, so apps check
+them; the server enforces every limit.
+
+Each `[api…]` number that a plan now sets stays as the **deployment's ceiling**:
+`[api.keys.devices] max_devices` (default 16), `[api.attachments] max_bytes` (4 GiB; it must
+be at least every plan's `file_bytes`), `[api.media.budgets] bytes_per_day` (1 TiB),
+`[api.vault] quota_bytes` and `quota_chunks` (1 TiB, 10,000,000). An account's limit is its
+plan's under that ceiling.
+
+### 14.2 Entitlements and the snapshot
+
+The registry keeps one row per account not on Free: `ent:[account]` with `level`, `last` (the
+last UTC day it holds, days since the Unix epoch, inclusive), `source` (`grant` from an operator,
+`token` from an anonymous redemption, §14.4) and `at`. Every change, and the account's deletion,
+bumps `entver:v`. Nothing about a payment is ever stored here.
+
+Every service that enforces a limit reads a **snapshot** of those rows
+(`songbird_entitlements::Live`, `arc-swap`): only the exceptions, reloaded whole when `entver`
+changes (`api` polls every `entitlements_poll_ms`, 1 s by default). Rules:
+
+- **Expiry is by date, at the reader.** An entry past its last day reads as Free whatever the
+  snapshot says; the worker's sweep deletes such rows only to keep things small. A stale
+  snapshot or a stopped worker can never extend an entitlement.
+- **Downgrades never delete.** Over a limit, what exists stays and keeps working (linked
+  devices, a vault's chunks, which still read and restore); only additions are refused until
+  the account is back under. A signed device list is checked against the deployment's
+  ceiling, so a downgraded account can still sign its list.
+- **Each level has budgets of its own** (upload bytes, new packs), so an upgrade gives the new
+  level's whole budget at once.
+
+`songbird-admin plans grant --account <hex> --level plus --days <n>` sets an account's level
+through a last day; `revoke` puts it back on Free; `show` prints the row. Both writes need
+`--confirm` and are audit-logged with the account.
+
+### 14.3 Requests
+
+| Request | Body | Answer |
+| --- | --- | --- |
+| `GET /v1/entitlements` | signed, a listed device | `{"level": "free" \| "plus", "last_day": <UTC day> \| null, "standing": "good" \| "limited" \| "suspended", "catalog": <version>, "limits": {...}, "flags": {...}}`; 403 `pending` for a device not yet in the signed list |
+| `POST /v1/entitlements/redeem` | signed, a listed device; a token (§14.4) | 200 `{"level", "last_day"}`; 400 `token`, `level`, `kind`; 409 `period` (not this month or the next), `invalid` (not the PRF of its nonce), `spent`; 429 past 30 an hour (burst 10) per account |
+| `GET /v1/tokens/keys` | none | `{"current": id, "keys": [{"id", "public": <64 hex>}]}`, the keys apps pin |
+
+Plan refusals name the plan so the app can explain the moment (`docs/design/flows/plans-paywall.md`):
+
+| Where | Answer |
+| --- | --- |
+| `POST /v1/attachments` over the plan's `file_bytes` (under the ceiling) | 413 `{"error": "plan", "file_bytes": n}` (400 still for past the ceiling or a length the format never produces) |
+| `POST /v1/attachments`, `POST /v1/packs` past the daily bytes | 429 with `Retry-After` (unchanged) |
+| `POST /v1/packs` past the plan's new packs | 429 `{"error": "plan", "packs_per_month": n}` with `Retry-After` |
+| `POST /v1/devices/link-token`, `POST /v1/devices/link` at the plan's device limit | 409 `{"error": "limit"}` (unchanged) |
+| Vault writes past the plan's space or chunks | 409 `{"error": "full"}`, as for the quota before (`GET /v1/vault` reports the owner's plan's quota); deletions always pass |
+
+### 14.4 Anonymous tokens (D-0126 §2, D-0128)
+
+Payments and accounts share no identifier. Billing (M3) issues **tokens** for what was paid;
+the account redeems them. The primitive is RFC 9497's **POPRF** with `ristretto255-SHA512`
+(`crates/tokens`, written from the RFC and checked against all of its Appendix A.1 vectors):
+
+- **Keys.** One 32-byte secret, shared by `api` and billing only (`[api.tokens] secret`). Key
+  ID `n`'s pair is `DeriveKeyPair(secret, "songbird.v1/token-key\0" || n)` in POPRF mode. The
+  highest listed ID issues; every listed ID redeems. Apps pin the public keys (`GET
+  /v1/tokens/keys` is how they are first published; a build ships them).
+- **Metadata (`info`).** `"songbird.v1/token\0" || kind u8 || level u8 || period u32` (24
+  bytes, big-endian). Kinds: 1 plan (period: months since January 1970, UTC), 2 a vault day
+  (UTC day), 3 a vault creation (180-day window); 2 and 3 are M4's.
+- **Request** (client → issuer): `{"key", "kind", "level", "period", "blinded": [<64 hex>…]}`,
+  1 to 16 blinded elements, each `blind · HashToGroup(nonce)` for a fresh random 32-byte nonce
+  and blind.
+- **Answer** (issuer → client): `{"evaluated": [<64 hex>…], "proof": <128 hex>}`, one batched
+  DLEQ proof. The client checks it against the **pinned** key tweaked by `info` before
+  unblinding: an issuer evaluating under another key (tagging one user) or other metadata is
+  refused.
+- **Token** (client → redeemer): `{"key", "kind", "level", "period", "nonce": <64 hex>,
+  "output": <128 hex>}`. The redeemer recomputes `Evaluate(sk, nonce, info)` and compares in
+  constant time.
+- **Nullifier**: `SHA-256("songbird.v1/token-nullifier\0" || key || info || nonce)`, kept in
+  `tnull` until the token could no longer be redeemed. Burnt in the same transaction as the
+  entitlement it buys.
+
+**Plan tokens.** One per month per level; a month's token is redeemable during that month and
+the one before (renewals are fetched in the last days of a month). It gives the level through
+the month's last day plus **3 days of grace**. A refund or a chargeback stops further tokens,
+so it costs at most the rest of a month. Caps per subscription per month (billing): Plus 2 (one
+and a spare for a reinstall), Family 7 (six seats and a spare).
+
+**Unlinkability.** The issuer sees the metadata and blinded elements; the redeemer sees the
+metadata, the nonce and the output. With the blind uniformly random, the blinded element is
+independent of the nonce, so the two views share no value and cannot be joined, even by one
+operator holding both databases (RFC 9497 §7.1). What remains is **timing and the network
+address** of an issuance followed by a redemption (neither is logged, invariant 6; the app
+redeems renewals at a random time) and the **metadata itself** (a month and a level are shared
+by everyone on that plan that month).
+
+**Vector** (`crates/tokens/vectors/v1.json`): secret `07…07`, key ID 1, a Plus token for month
+683 (December 2026), nonce `11…11`, blind and proof scalars from 64 bytes of `22` and `33`
+reduced; every intermediate value is listed. `vectors/check.py` reproduces RFC 9497 A.1.3.1 and
+this vector with the Python standard library alone (ristretto255 from RFC 9496).
+
+### 14.5 Billing (D-0129)
+
+`billing` is a service of its own (`services/billing`): its own SurrealDB database and
+credential, its own uid on the host, no access to the registry, and the only holder of the
+providers' credentials. It never sees an account.
+
+| Request | Who | Body | Answer |
+| --- | --- | --- | --- |
+| `POST /v1/billing/tokens` | the app (no account) | `{"proof": {"apple": <signed transaction>} \| {"google": <purchase token>} \| {"mollie": <64 hex subscriber secret>}, "request": <§14.4 request>}` | 200 the §14.4 answer; 400 `body`, `request`; 402 `not_paid`; 403 `proof`; 409 `period`; 429 `cap` or `budget`; 503 `provider` |
+| `POST /v1/billing/apple` | Apple | App Store Server Notifications V2 (`{"signedPayload"}`) | 200 (also for a replay); 400 not Apple's, not 2.0, another app or environment; 503 retry |
+| `POST /v1/billing/google` | Pub/Sub push, `Authorization: Bearer <Google OIDC>` | real-time developer notification | 200 (also for a replay); 401 the token; 400 another package; 503 retry |
+| `POST /v1/billing/mollie/checkout` | the app | `{"plan": "plus" \| "family", "interval": "month" \| "year", "subscriber": <64 hex>}` | 200 `{"checkout": <Mollie URL>}`; 409 `exists`; 409 `revoked` (refunded or charged back: the app starts over with a new subscriber secret) |
+| `POST /v1/billing/mollie/webhook` | Mollie | `id=tr_…` (form) | 200 (unknown IDs too); 503 retry |
+| `POST /v1/billing/mollie/state`, `/cancel` | the app | `{"subscriber"}` | state `{"plan", "interval", "paid_through", "renews", "revoked"}`; cancel 204; 404 |
+
+**Rows.** `sub` under `HMAC(billing secret, provider ‖ 0 ‖ ID)[..16]`, where the ID is Apple's
+original transaction ID, Google's purchase token, or the app's Mollie subscriber secret: the
+provider, the plan, the last UTC day paid for, revoked, renews, and the provider time of the
+newest state applied. Apple's and Google's IDs are never stored. Mollie's customer and
+subscription IDs are (they are needed to cancel). The row's `stamp` is the provider's time of
+a pushed message (an answer from Apple's or Google's API keeps the row's stamp; a transaction the
+app presents counts by its day) and `at` is a whole UTC day: nothing records when a token
+request came, so issuance cannot be joined to a redemption (`ent.at` is a day too; D-0134). `subtok` counts tokens per subscription and
+period; `notif` remembers handled message IDs for 45 days.
+
+**Verification.**
+- **Apple:** every JWS's `x5c` must be exactly `[leaf, intermediate, root]` with the root
+  byte-equal to the pinned one (Apple Root CA - G3 in production, checked by its SHA-256 at
+  start), the leaf carrying `1.2.840.113635.100.6.11.1` and the intermediate
+  `1.2.840.113635.100.6.2.1` (Apple's intermediates also sign developer certificates), the chain
+  valid now (rustls-webpki), then `ES256` by the leaf. Bundle ID and environment must match; a
+  transaction must be an auto-renewable subscription without `appAccountToken`. With the App
+  Store Server API configured (ES256 JWT, `aud` `appstoreconnect-v1`), the state comes from Get
+  All Subscription Statuses (5 revoked, 2 expired) every time; else from the signed transaction
+  and renewal info (`expiresDate`, `revocationDate`, `gracePeriodExpiresDate`).
+- **Google:** the state always comes from `purchases.subscriptionsv2.get` under the service
+  account (`RS256` assertion, scope `androidpublisher`): active, in grace or cancelled are paid
+  through `expiryTime`; anything else is not. A test purchase is refused in production; a
+  purchase with `obfuscatedExternalAccountId` is refused. Pending purchases are acknowledged.
+  A notification's OIDC token must be Google's (`RS256`, keys from Google's set, refreshed on an
+  unknown key), issuer `accounts.google.com`, the configured audience and push service account,
+  e-mail verified, not expired. A voided purchase revokes for good.
+- **Mollie:** customers have no name or e-mail; a webhook's payment is fetched back by ID; the
+  first payment's metadata names the row only by its key; a paid first payment starts the
+  subscription (once, even if Mollie calls twice); **each payment counts once** (its ID kept 400
+  days, however often its webhook is replayed) and moves `paid_through` to a period after the day
+  it was paid (`paidAt`, UTC) plus 7 days (SEPA Direct Debit takes days); only the first payment
+  turns renewal on; a refund or chargeback revokes, and a revoked row takes no new checkout
+  (D-0134).
+
+**Ordering and replays.** A state is applied only if its provider time is not older than the
+row's; an answer from Apple's or Google's API counts as now. Handled message IDs are remembered
+and skipped. Caps are spent in one transaction (retried on write conflicts), so concurrent
+requests cannot pass them together.
+
+**Caps** per subscription per month: Plus 2, Family 7 (§14.4). A token for the current month
+needs the subscription paid today; for the next month, paid on that month's first day.
+
+### 14.6 Family seats (D-0126 §5, D-0130)
+
+A Family subscription's owner hands each member a month's plan token through a **family
+mailbox** in `api`. No request carries an account and no row names one.
+
+| Request | Needs | Answer |
+| --- | --- | --- |
+| `POST /v1/family` | `{"manage": <64 hex: SHA-256("songbird.v1/family-manage\0" ‖ management token)>}` | 200 `{"family": <32 hex>}` |
+| `PUT /v1/family/<family>/slots/<slot>` | `x-songbird-family-token: <management token>`; `{"auth": <64 hex: SHA-256("songbird.v1/family-bearer\0" ‖ bearer)>, "sealed": <hex, at most 4,096 bytes>}` | 204 (a new slot, or the box replaced when `auth` matches); 409 `full` (five slots) |
+| `GET /v1/family/<family>/slots/<slot>` | `x-songbird-family-bearer: <bearer>` | 200 `{"sealed": <hex> \| null}` |
+| `DELETE /v1/family/<family>/slots/<slot>` | the management token (removal) or the slot's bearer (leaving) | 204 |
+| `DELETE /v1/family/<family>` | the management token | 204 |
+
+Every miss (no family, no slot, a wrong token or bearer) is the same 404. One budget per IP
+range (600 an hour). A mailbox untouched for 60 days is deleted.
+
+**Seats** (`crates/tokens::family`): a slot ID and a 32-byte secret, shared as
+`https://songbird.chat/family#<family>.<slot>.<secret>` (the fragment never reaches a server).
+`HKDF-SHA256(secret, salt "songbird.v1/family-seat", info label ‖ family ‖ slot)` gives a
+**bearer** (label `bearer`, shown to the server) and a **key** (label `key`, never shown) that
+seals the token with ChaCha20-Poly1305 (`nonce 12 ‖ ciphertext ‖ tag`, AAD `family ‖ slot`).
+
+**Each month** the owner's app fetches seven Family tokens from billing (§14.5), redeems one,
+seals one into each member's slot, and keeps the spare. Members fetch their slot and redeem on
+their own account: each is Plus, and the server cannot tell a seat from a subscription.
+**Removal** deletes the slot at once; the member keeps Plus through the month already redeemed
+and its grace. **Leaving** deletes one's own slot.
+
+### 14.7 Abuse controls and standings (D-0126 §7–§8, D-0131)
+
+**Escalating proof of work.** A registration challenge's `bits` is the configured base plus one
+for each of 3, 10 and 30 registrations from the requesting range (IPv4 /24, IPv6 /48) in the
+current hour, plus one at `global_step` (300) registrations across the deployment and another
+at four times that, at most `max_extra_bits` (4) above the base. Challenges carry their
+parameters (§4.1), so clients need no change. The hourly counters are keyed records in
+`valkey-hot`.
+
+**Standings.** `standing:[account]`: `limited` or `suspended`, a last UTC day or none (until
+lifted), a reason category and its source (`auto` or `moderator`). Changes bump `entver`, so
+`api` and every delivery node apply them within a second (the entitlements snapshot, §14.2).
+
+- **New accounts** (created in the last `young_days`, 30): 5 requests an hour per sender,
+  burst 10.
+- **Limited**: 1 request an hour, burst 2; `POST /v1/groups/links` answers 403 `standing`.
+  Contacts are not affected.
+- **Suspended**: every send (WebSocket and `PUT /v1/messages`) is rejected with reason **15
+  `Suspended`** (`SendResult` status 1); `GET /v1/certificate` answers 403 `suspended` (sealed
+  sends stop when the certificate held expires); `POST /v1/calls`, `/v1/calls/group` and
+  `/v1/calls/links` answer 403 `suspended`. Receiving, `GET /v1/account/export`, `DELETE
+  /v1/account` and support (appeals) work.
+
+**Signals** (keyed tags, evaluated on arrival; thresholds in `docs/RUNBOOKS/abuse.md`):
+
+- `rsig`: a verified report of a direct message the server attests (`sender_attested`, not a
+  group's shared body), per keyed tag of the sender and day, 31 days; each reporter counts once
+  per sender in that time (a keyed pair mark, `ab:r:`), so a limit needs five people (D-0134).
+- `bsig`: a new block of an account that sent the blocker a message request in the last week
+  (the gate's keyed pair mark `rp`, seven days, **consumed** by the block it counts: unblocking
+  and blocking again counts nothing), per keyed tag and day; weighed against the account's
+  requests per day (`rq`, keyed, eight days).
+
+Only an automatic `limited` with a reason `reports` or `blocks` is ever set without a moderator;
+it never overrides or shortens a moderator's row.
+
+### 14.8 Support tickets (D-0126 §11, D-0132)
+
+A ticket is opened by the app, signed or not, and read with a bearer secret. Messages are sealed
+on the device and opened only by staff with the support key, or by the app with the ticket's
+reply key: the server stores ciphertext.
+
+| Request | Auth | Body | Answer |
+| --- | --- | --- | --- |
+| `GET /v1/support/key` | — | — | 200 `{"key"}`: the support key (X25519, hex) |
+| `POST /v1/support/tickets` | optional (signed, §2) | `{"kind","reply_key","sealed"}` | 201 `{"ticket","bearer","priority"}` |
+| `GET /v1/support/tickets/<id>` | `x-songbird-ticket-bearer` | — | 200 `{"kind","messages":[{"from","sealed","day"}]}` |
+| `POST /v1/support/tickets/<id>/messages` | `x-songbird-ticket-bearer` | `{"sealed"}` | 204 |
+| `DELETE /v1/support/tickets/<id>` | `x-songbird-ticket-bearer` | — | 204: the ticket and every message deleted |
+
+- `kind`: `help`, `appeal` or `billing`. **Signed**, the device's account is attached and
+  `priority` is true on Plus or above; **unsigned**, no account. An `appeal` must be signed
+  (401 otherwise); a suspended account may open one.
+- `reply_key`: an X25519 public key the app makes for this ticket alone (hex); staff seal their
+  replies to it.
+- `sealed`: hex of `seal_with(Domain::Support, support key, plaintext)` (the user's) or
+  `seal_with(Domain::SupportReply, reply key, plaintext)` (staff's): version byte, ephemeral
+  X25519 key, ChaCha20-Poly1305 under HKDF (salts `songbird.v1/support`,
+  `songbird.v1/support-reply`). At most 32 KiB sealed.
+- Plaintext (JSON): `{"text"}`, and from the user, only with their consent after a preview,
+  `"logs"` (the device's scrubbed log excerpt) and `"app"` (version and platform).
+- `ticket` (16 bytes) and `bearer` (32 bytes) are random, drawn by the server and returned once
+  (hex). The registry keeps `SHA-256("songbird.v1/ticket-bearer\0" || bearer)`. A wrong or
+  missing bearer and a missing ticket are the same 404.
+- At most 50 messages a ticket (409 `full`). Budgets per keyed IP range (IPv4 /24, IPv6 /48): 6
+  opened an hour (burst 3), 240 other calls an hour (burst 60); 429 with `Retry-After`.
+- A ticket untouched for 90 days is deleted with its messages. Deleting the account unlinks its
+  tickets (they stay with their bearer). The account's export lists the tickets it attached
+  (ID, kind, message count, last day), never their contents.
+
+### 14.9 Legal requests and transparency (D-0126 §9–§10, D-0132)
+
+No wire protocol: operator tooling (`songbird-admin legal`, `transparency`;
+`docs/RUNBOOKS/legal-requests.md`). A legal export of an account is exactly its own data export
+(`GET /v1/account/export`), wrapped with the case reference and a scope statement. The registry
+keeps only counts: `legal:[half, country, kind, outcome]` → `n` (`half` is `YYYY-H1` or
+`YYYY-H2`, UTC).
+
+### 14.10 Invites: links and status (D-0126 §12, D-0132)
+
+**Invite link.** `https://songbird.chat/i#<base64url, unpadded>` of `version (1) || flags (1;
+bit 0: a code follows) || [registration code (15)] || inviter account ID (16) || inviter profile
+key (32) || SHA-256 fingerprint of the inviter's identity key (32)`. Parsing is strict (one
+version, no unknown flag, exact length, canonical encoding, at most 256 characters;
+`crates/proto/src/invite_link.rs`). The fragment never reaches a server. After sign-up the app
+fetches the inviter's profile and keys like any contact's, checks the identity fingerprint, and
+opens the chat.
+
+**Status.** `POST /v1/invites/status` (signed) `{"codes": [hex SHA-256("songbird.v1/invite\0" ||
+code), …]}` (1 to 50) answers `{"live": [bool, …]}` in order: whether each code still has a use
+left and has not expired or been revoked; 60 asks an hour per account (burst 20, keyed). The
+inviter's app counts its invites used from the codes it made; the server keeps no per-inviter
+count (D-0038).

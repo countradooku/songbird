@@ -80,8 +80,15 @@ impl Requests {
         Self { keys, metrics }
     }
 
-    /// `PUT /v1/blocks`: a listed device blocks an account.
-    pub async fn block(&self, registry: &Registry, row: &DeviceRow, body: &[u8]) -> Outcome {
+    /// `PUT /v1/blocks`: a listed device blocks an account. A new block of someone who sent
+    /// this account a request this week is a signal (D-0131, [`crate::abuse::on_block`]).
+    pub async fn block(
+        &self,
+        registry: &Registry,
+        hot: &songbird_valkey::ValkeyConn,
+        row: &DeviceRow,
+        body: &[u8],
+    ) -> Outcome {
         if row.pending {
             return Outcome::Forbidden("pending");
         }
@@ -93,8 +100,19 @@ impl Requests {
             .add_block(&owner, &self.keys.pair(&row.account, &blocked))
             .await
         {
-            Ok(()) => {
+            Ok(new) => {
                 self.metrics.blocks.inc();
+                if new {
+                    crate::abuse::on_block(
+                        registry,
+                        hot,
+                        &self.keys,
+                        &row.account,
+                        &blocked,
+                        songbird_entitlements::today(),
+                    )
+                    .await;
+                }
                 Outcome::Done
             }
             Err(RegistryError::Full) => Outcome::Conflict("limit"),

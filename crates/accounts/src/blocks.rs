@@ -45,19 +45,27 @@ impl Registry {
     /// counter row in its transaction, so concurrent adds conflict instead of passing the limit
     /// together.
     ///
+    /// Returns whether the block is new.
+    ///
     /// # Errors
     /// [`RegistryError::Full`] at the limit; a transaction conflict as a database error (retry).
-    pub async fn add_block(&self, owner: &[u8; 16], pair: &[u8; 16]) -> Result<(), RegistryError> {
+    pub async fn add_block(
+        &self,
+        owner: &[u8; 16],
+        pair: &[u8; 16],
+    ) -> Result<bool, RegistryError> {
         let r = self
             .db
             .query(
                 "BEGIN TRANSACTION;
-                 IF !record::exists(block:[$p]) {
+                 LET $new = !record::exists(block:[$p]);
+                 IF $new {
                    LET $n = (SELECT VALUE n FROM ONLY blockctr:[$o]) ?? 0;
                    IF $n >= $max { THROW 'songbird:full' };
                    UPSERT blockctr:[$o] SET n = $n + 1 RETURN NONE;
                    CREATE block:[$p] SET owner = $o, at = time::now() RETURN NONE;
                  };
+                 RETURN $new;
                  COMMIT TRANSACTION;",
                 vec![
                     var("p", bytes(pair)),
@@ -67,7 +75,7 @@ impl Registry {
             )
             .await;
         match r {
-            Ok(_) => Ok(()),
+            Ok(v) => Ok(v.iter().rev().any(|x| matches!(x, Value::Bool(true)))),
             Err(DbError::Statement(k)) if k == "Thrown:full" => Err(RegistryError::Full),
             Err(e) => Err(e.into()),
         }

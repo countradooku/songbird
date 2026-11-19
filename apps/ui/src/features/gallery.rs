@@ -1152,7 +1152,7 @@ pub fn ExtrasPreview() -> impl IntoElement {
     theming::follow_settings(s);
     features::desktop::install_shortcuts();
     s.finish_onboarding();
-    let entries: [(&'static str, fn()); 15] = [
+    let entries: [(&'static str, fn()); 18] = [
         ("open-plans", plans::subscription),
         ("open-paywall", || plans::paywall("Chat themes")),
         ("open-invites", plans::invites),
@@ -1168,6 +1168,17 @@ pub fn ExtrasPreview() -> impl IntoElement {
         ("open-shortcuts", features::desktop::shortcuts_sheet),
         ("open-desktop", features::desktop::desktop_settings),
         ("open-gallery", ui_gallery),
+        // Prompt 11: an account's standing as the server would report it.
+        ("standing-limited", || {
+            crate::store::extras().update(|e| e.standing = crate::store::Standing::Limited);
+        }),
+        ("standing-suspended", || {
+            crate::store::extras().update(|e| e.standing = crate::store::Standing::Suspended);
+            plans::standing();
+        }),
+        ("standing-good", || {
+            crate::store::extras().update(|e| e.standing = crate::store::Standing::Good);
+        }),
         ("pop", nav::pop),
         ("pop-root", nav::pop_to_root),
     ];

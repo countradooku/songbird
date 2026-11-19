@@ -83,7 +83,7 @@ async fn blocks_are_keyed_pairs_bounded_per_owner_and_deleted_with_it() {
     let mut full = 0;
     for t in tasks {
         match t.await.unwrap() {
-            Ok(()) => {}
+            Ok(_) => {}
             Err(RegistryError::Full | RegistryError::Db(_)) => full += 1,
             Err(e) => panic!("{e}"),
         }

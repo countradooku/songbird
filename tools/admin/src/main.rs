@@ -6,6 +6,10 @@
 //!   a restore or a loss of the mailbox, so clients resend what has no delivery receipt.
 //! - `accounts import`: a static directory file as registry accounts (drills, development).
 //! - `reports`: the moderation key, and the queue of reports sealed to it (Prompt 4, D-0063).
+//! - `plans`: an operator's grant or revocation of a plan level for one account (Prompt 11,
+//!   D-0127), audit-logged with the account.
+//! - `moderation`: a decision on a franked report (dismiss, limit, suspend) and lifting a
+//!   standing (Prompt 11, D-0131), audit-logged.
 //! - `invites create`: a batch of invite codes for early testers (D-0038); `invites grant`: more
 //!   invites for one account. Codes are printed once and stored only as hashes; the audit log
 //!   records how many, never the codes.
@@ -33,8 +37,12 @@
 mod audit;
 mod backup;
 mod ca;
+mod legal;
+mod moderation;
+mod plans;
 mod reports;
 mod store;
+mod support;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -72,6 +80,26 @@ enum Cmd {
     /// Reports (Prompt 4, D-0063): the moderation key, and the sealed queue.
     #[command(subcommand)]
     Reports(reports::ReportsCmd),
+    /// Plans (Prompt 11, D-0127): operators' grants of a level.
+    #[command(subcommand)]
+    Plans(plans::PlansCmd),
+    /// Moderation (Prompt 11, D-0131): decisions on reports, lifting a standing.
+    #[command(subcommand)]
+    Moderation(moderation::ModerationCmd),
+    /// Support (Prompt 11, D-0132): the support key and tickets.
+    #[command(subcommand)]
+    Support(support::SupportCmd),
+    /// Legal requests (Prompt 11, D-0132): exports and counts.
+    #[command(subcommand)]
+    Legal(legal::LegalCmd),
+    /// The transparency report of a half-year, in Markdown (D-0132).
+    Transparency {
+        #[command(flatten)]
+        store: store::StoreArgs,
+        /// `YYYY-H1` or `YYYY-H2` (default: the current one).
+        #[arg(long)]
+        half: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -233,6 +261,11 @@ fn main() -> ExitCode {
         }) => accounts_import(&store, &guard, &directory),
         Cmd::Invites(cmd) => invites_cmd(cmd),
         Cmd::Reports(cmd) => reports::run(cmd),
+        Cmd::Plans(cmd) => plans::run(cmd),
+        Cmd::Moderation(cmd) => moderation::run(cmd),
+        Cmd::Support(cmd) => support::run(cmd),
+        Cmd::Legal(cmd) => legal::run(cmd),
+        Cmd::Transparency { store, half } => legal::transparency(&store, half),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -379,7 +412,13 @@ fn backup_cmd(cmd: BackupCmd) -> anyhow::Result<()> {
 }
 
 /// A destructive command's target, as `--confirm` must repeat it.
-fn target(s: &store::StoreArgs) -> String {
+/// An account ID in full, for staff output (a legal export's file, a ticket shown to support
+/// staff on their terminal): never for a log or a metric (invariant 6).
+pub(crate) fn account_hex(a: &songbird_types::AccountId) -> String {
+    hex::encode(a.as_bytes())
+}
+
+pub(crate) fn target(s: &store::StoreArgs) -> String {
     format!("{}/{}", s.namespace, s.database)
 }
 

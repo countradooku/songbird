@@ -1,0 +1,24 @@
+[package]
+name = "songbird-entitlements"
+description = "Plans and entitlements (Prompt 11, D-0127): the plan catalogue, the per-account snapshot of exceptions every service reads lock-free, and its follower."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+songbird-types.workspace = true
+songbird-accounts.workspace = true
+arc-swap.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "macros"] }
+
+[dev-dependencies]
+proptest.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true

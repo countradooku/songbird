@@ -98,13 +98,14 @@ filter = "info"
 # [api.vault]
 # secret = { file = "/path/to/vault-secret.hex" }                # 64 hex; same on every api node
 # bucket = "songbird-vault"                                       # also the worker's vault_bucket
-# quota_bytes = 5368709120                                        # 5 GiB per vault until Prompt 11
-# quota_chunks = 100000
-# max_vaults = 2                                                  # a new recovery key's vault + the old one
+# quota_bytes = 1099511627776                                     # ceiling; each vault's quota is its owner's plan (D-0127)
+# quota_chunks = 10000000
+# creations_per_window = 2                                        # vault creation tokens per account per 180 days (D-0130)
+# passes_per_day = 16                                             # day passes per account per day
 # max_manifest = 16777216
 # reads_per_hour = 20000                                          # per vault (a restore reads every chunk)
 # read_burst = 6000
-# writes_per_hour = 20000                                         # per account
+# writes_per_hour = 20000                                         # per vault (creations: per IP range)
 # write_burst = 6000
 # misses_per_hour = 60                                            # unknown vault or wrong secret, per IP range
 # miss_burst = 20
@@ -116,20 +117,20 @@ filter = "info"
 # vrf_key = { file = "/path/to/kt-vrf-seed.hex" }                 # the worker's kt_vrf_key (akd, D-0057)
 #
 # [api.keys.devices]                                             # device linking (Prompt 3, M4, D-0052); defaults
-# max_devices = 6                                                 # primary + 5 (D-0047)
+# max_devices = 16                                                # ceiling; each account's is its plan's (D-0127)
 # link_token_ttl_secs = 600
 # channel_ttl_secs = 600
 # long_poll_secs = 25
 #
 # [api.attachments]                                              # defaults (D-0079, D-0081)
-# max_bytes = 2147483648                                          # 2 GiB, a length the format produces
+# max_bytes = 4294967296                                          # ceiling; each account's is its plan's file_bytes (D-0127)
 # part_size = 16777216                                            # resumable parts of 16 MiB
 # [api.media]                                                     # Prompt 6; absent: no upload budgets (development only)
 # secret = { file = "/path/to/media-secret.hex" }                 # 64 hex; same on every api node
 # [api.media.budgets]                                             # per account; defaults
 # grants_per_hour = 300
 # grant_burst = 60
-# bytes_per_day = 10737418240                                     # 10 GiB
+# bytes_per_day = 1099511627776                                   # ceiling; each account's is its plan's (D-0127)
 # [api.media.downloads]                                           # Prompt 6, M3; defaults
 # url_ttl_secs = 600                                              # signed media URLs
 # per_hour = 6000                                                 # redirects and confirmations per IP range
@@ -152,3 +153,38 @@ filter = "info"
 # video_participants = 32
 # audio_participants = 128
 # token_ttl_secs = 120
+#
+# Anonymous plan tokens (Prompt 11, D-0128). Absent: POST /v1/entitlements/redeem and
+# GET /v1/tokens/keys answer 503.
+# [api.tokens]
+# secret = { file = "/path/to/token-secret.hex" }                 # 64 hex; the same on every api and billing node
+# keys = [1]                                                      # key IDs redeemed; the highest issues
+# redeems_per_hour = 30                                           # per account
+# redeem_burst = 10
+#
+# The support channel (Prompt 11, D-0132). Absent: /v1/support… answers 503.
+# [api.support]
+# key = "<64 hex>"                                                # X25519 public; `songbird-admin support keygen`
+#
+# Plans (Prompt 11, D-0126 §3, D-0127). Absent: these defaults. A higher level may never allow
+# less than a lower one; security features are never here.
+# [api.plans]
+# version = 1                                                     # bump when a number changes
+# [api.plans.free.limits]
+# linked_devices = 5
+# file_bytes = 2147483648
+# upload_bytes_per_day = 10737418240
+# vault_bytes = 5368709120
+# vault_chunks = 100000
+# packs_per_month = 5
+# [api.plans.plus.limits]
+# linked_devices = 10
+# file_bytes = 4294967296
+# upload_bytes_per_day = 53687091200
+# vault_bytes = 53687091200
+# vault_chunks = 1000000
+# packs_per_month = 50
+# [api.plans.plus.flags]
+# app_icons = true
+# chat_themes = true
+# priority_support = true

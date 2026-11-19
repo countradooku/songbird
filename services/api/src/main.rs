@@ -81,6 +81,7 @@ fn send_policy(
     s: &SendSettings,
     gate: Option<(Arc<dyn songbird_send::Gate>, songbird_send::RequestLimits)>,
     registry: &Arc<songbird_accounts::Registry>,
+    standings: &Arc<songbird_entitlements::Live>,
 ) -> Result<songbird_send::Policy, BoxError> {
     let limits = gate
         .as_ref()
@@ -106,6 +107,7 @@ fn send_policy(
             Arc::clone(registry),
             songbird_send::groups::ROSTER_TTL,
         ))),
+        standings: Some(Arc::clone(standings)),
     })
 }
 
@@ -113,6 +115,7 @@ async fn build_messages(
     s: &SendSettings,
     gate: Option<(Arc<dyn songbird_send::Gate>, songbird_send::RequestLimits)>,
     registry: &Arc<songbird_accounts::Registry>,
+    standings: &Arc<songbird_entitlements::Live>,
     queue: &Arc<songbird_jobs::Queue>,
     metrics: &ApiMetrics,
     stop: &watch::Receiver<bool>,
@@ -174,7 +177,7 @@ async fn build_messages(
             router,
             push,
             metrics: metrics.send.clone(),
-            policy: send_policy(s, gate, registry)?,
+            policy: send_policy(s, gate, registry, standings)?,
         }),
         limits: s.limits.limits(),
         sends_per_sec: s.sends_per_sec,
@@ -320,6 +323,7 @@ async fn requests(
     s: &ApiSettings,
     registry: &Arc<songbird_accounts::Registry>,
     metrics: &ApiMetrics,
+    standings: &Arc<songbird_entitlements::Live>,
 ) -> Result<
     (
         Option<songbird_api::requests::Requests>,
@@ -342,12 +346,15 @@ async fn requests(
             "the requests secret differs from the one every other node uses (registry pin)",
         ));
     }
-    let gate: Arc<dyn songbird_send::Gate> = Arc::new(songbird_send::RegistryGate::new(
-        Arc::clone(registry),
-        songbird_valkey::ValkeyConn::connect(s.valkey_hot.client()?).await?,
-        keys.clone(),
-        r.limits,
-    ));
+    let gate: Arc<dyn songbird_send::Gate> = Arc::new(
+        songbird_send::RegistryGate::new(
+            Arc::clone(registry),
+            songbird_valkey::ValkeyConn::connect(s.valkey_hot.client()?).await?,
+            keys.clone(),
+            r.limits,
+        )
+        .with_standings(Arc::clone(standings)),
+    );
     Ok((
         Some(songbird_api::requests::Requests::new(
             keys,
@@ -419,10 +426,15 @@ async fn build(
     let mut push_public = [0u8; 32];
     hex::decode_to_slice(&s.push_public_key, &mut push_public)?;
     let queue = Arc::new(queue);
-    let (requests, gate) = requests(s, &registry, &metrics).await?;
-    let (messages, tasks) = match &s.send {
+    // Plans and standings (D-0127, D-0131): one snapshot for every limit and the send path.
+    let live = Arc::new(songbird_entitlements::Live::from(
+        songbird_entitlements::load(&registry).await?,
+    ));
+    let (requests, gate) = requests(s, &registry, &metrics, &live).await?;
+    let (messages, mut tasks) = match &s.send {
         Some(send) => {
-            let (m, t) = build_messages(send, gate, &registry, &queue, &metrics, stop).await?;
+            let (m, t) =
+                build_messages(send, gate, &registry, &live, &queue, &metrics, stop).await?;
             (Some(m), t)
         }
         None => (None, Vec::new()),
@@ -479,7 +491,39 @@ async fn build(
     let kt = transparency(s).await?;
     let reports = reports(s, &metrics)?;
     let calls = calls(s, &metrics)?;
+    // Plans (D-0127): the snapshot, then its follower.
+    let redeemer = match &s.tokens {
+        Some(t) => Some(Arc::new(songbird_api::plans::Redeemer::new(
+            t.clone(),
+            &*t.secret.resolve_key32()?,
+        )?)),
+        None => None,
+    };
+    let plans = songbird_api::plans::Plans {
+        redeemer,
+        catalog: s.plans,
+        live,
+    };
+    tasks.push(tokio::spawn(songbird_entitlements::follow(
+        Arc::clone(&registry),
+        Arc::clone(&plans.live),
+        Duration::from_millis(s.entitlements_poll_ms),
+        stop.clone(),
+    )));
+    let support = match &s.support {
+        Some(c) => {
+            let mut key = [0u8; 32];
+            hex::decode_to_slice(&c.key, &mut key)?;
+            Some(Box::new(
+                songbird_api::support::Support::new(key, &*s.push_index_secret.resolve_key32()?)
+                    .map_err(|_| BoxError::from("support key derivation failed"))?,
+            ))
+        }
+        None => None,
+    };
     let app = Arc::new(App {
+        support,
+        plans,
         reports,
         requests,
         server_name: s.server_name.clone(),

@@ -32,6 +32,7 @@
 //! Nothing here logs identifiers or object names (invariant 6).
 #![forbid(unsafe_code)]
 
+pub mod abuse;
 pub mod account;
 pub mod admin;
 pub mod auth;
@@ -47,12 +48,14 @@ pub mod kt;
 pub mod media;
 pub mod messages;
 pub mod packs;
+pub mod plans;
 pub mod profiles;
 pub mod registration;
 pub mod reports;
 pub mod requests;
 pub mod server;
 pub mod storage;
+pub mod support;
 pub mod usernames;
 pub mod vault;
 
@@ -238,6 +241,11 @@ pub struct App {
     pub reports: Option<reports::Reports>,
     /// Calls (Prompt 7; absent: `/v1/calls…` answers 503).
     pub calls: Option<calls::CallsApi>,
+    /// The support channel (Prompt 11, D-0132; absent: `/v1/support…` answers 503).
+    pub support: Option<Box<support::Support>>,
+    /// Plans: the catalogue and the live entitlements snapshot (Prompt 11, D-0127). The default
+    /// is the owner's catalogue with every account on Free.
+    pub plans: plans::Plans,
 }
 
 impl std::fmt::Debug for App {
@@ -358,6 +366,12 @@ impl App {
         if path.starts_with("/v1/gifs/") {
             return gifs::route(self, req).await;
         }
+        if path == "/v1/family" || path.starts_with("/v1/family/") {
+            return self.family(req).await;
+        }
+        if path.starts_with("/v1/support/") {
+            return self.support(req).await;
+        }
         match (&method, path.as_str()) {
             (&Method::PUT, "/v1/push") => {
                 let (device, body) = self.authenticate_json(req).await?;
@@ -371,6 +385,50 @@ impl App {
                     .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
                 Ok(empty(StatusCode::NO_CONTENT))
             }
+            (&Method::GET, "/v1/entitlements") => {
+                let (device, _) = self.authenticate_json(req).await?;
+                let row = self
+                    .registry
+                    .device(&device)
+                    .await
+                    .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?
+                    .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+                if row.pending {
+                    return Ok(pending_refusal());
+                }
+                Ok(json(StatusCode::OK, &self.plans.describe(&row.account)))
+            }
+            (&Method::POST, "/v1/entitlements/redeem") => {
+                let r = self
+                    .plans
+                    .redeemer
+                    .clone()
+                    .ok_or(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
+                let (device, body) = self.authenticate_json(req).await?;
+                let row = self
+                    .registry
+                    .device(&device)
+                    .await
+                    .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?
+                    .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+                if row.pending {
+                    return Ok(pending_refusal());
+                }
+                Ok(profile_outcome(
+                    r.redeem(
+                        &self.registry,
+                        &self.hot,
+                        &row.account,
+                        &body,
+                        songbird_entitlements::today(),
+                    )
+                    .await,
+                ))
+            }
+            (&Method::GET, "/v1/tokens/keys") => match &self.plans.redeemer {
+                Some(r) => Ok(json(StatusCode::OK, &r.public_keys())),
+                None => Ok(empty(StatusCode::SERVICE_UNAVAILABLE)),
+            },
             (&Method::DELETE, "/v1/account") => {
                 let (device, _) = self.authenticate_json(req).await?;
                 self.delete_account(device).await
@@ -401,6 +459,7 @@ impl App {
                         .await,
                 ))
             }
+            (&Method::POST, "/v1/invites/status") => self.invite_status(req).await,
             (&Method::POST | &Method::GET | &Method::DELETE, "/v1/invites") => {
                 self.invites(req).await
             }
@@ -527,6 +586,14 @@ impl App {
             (&Method::GET, "/v1/certificate") => {
                 let (device, _) = self.authenticate_json(req).await?;
                 match listed(device).await? {
+                    // A suspended account gets no sender certificate (D-0131): its sealed sends
+                    // stop when the one it holds expires.
+                    (a, true, _)
+                        if self.plans.live.standing(&a)
+                            == songbird_entitlements::Standing::Suspended =>
+                    {
+                        profiles::Outcome::Forbidden("suspended")
+                    }
                     (a, true, _) => p.certificate(&self.registry, &a, &device).await,
                     (_, false, _) => return Ok(pending_refusal()),
                 }
@@ -658,28 +725,79 @@ impl App {
             .get::<registration::Peer>()
             .ok_or_else(unavailable)?
             .0;
-        // Without both credentials there is no vault to name: one 404, as for any miss.
-        let creds =
-            vault::credentials(req.headers()).ok_or(Refusal::Status(StatusCode::NOT_FOUND))?;
         let method = req.method().clone();
         let path = req.uri().path().to_owned();
         let query = req.uri().query().map(str::to_owned);
-        let device_row = |device: DeviceId| async move {
-            self.registry
+        let today = songbird_entitlements::today();
+        // Tokens for the account's primary: signed, and naming no vault (D-0130).
+        if method == Method::POST && path == "/v1/vault/tokens" {
+            let (device, body) = self.authenticate_json(req).await?;
+            let row = self
+                .registry
                 .device(&device)
                 .await
-                .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?
-                .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))
+                .map_err(|_| unavailable())?
+                .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+            return Ok(profile_outcome(
+                self.plans
+                    .issue_vault(&self.registry, &self.hot, &row, &v.settings, &body, today)
+                    .await,
+            ));
+        }
+        // Without both credentials there is no vault to name: one 404, as for any miss.
+        let creds =
+            vault::credentials(req.headers()).ok_or(Refusal::Status(StatusCode::NOT_FOUND))?;
+        let keys = self.plans.redeemer.as_ref().map(|r| r.keys());
+        let open = || async {
+            v.open(&self.registry, &self.hot, peer, &creds)
+                .await
+                .map_err(profile_outcome)
         };
-        // Signed requests: the signature is checked before the vault is looked up.
-        let signed = match (&method, path.as_str()) {
-            (&Method::POST | &Method::DELETE, "/v1/vault") => {
-                Some(self.authenticate_json(req).await?)
+        let writable = |o: vault::Opened| async move {
+            v.write_allowed(&self.hot, &o, today)
+                .await
+                .map(|()| o)
+                .map_err(profile_outcome)
+        };
+        match (&method, path.as_str()) {
+            (&Method::POST, "/v1/vault") => {
+                let body = bounded_body(req, 4_096).await?;
+                return Ok(profile_outcome(
+                    v.create(&self.registry, &self.hot, peer, &creds, keys, &body, today)
+                        .await,
+                ));
             }
-            (&Method::POST, "/v1/vault/chunks/delete") => Some(
-                self.authenticate_body(req, 2 + songbird_proto::vault::MAX_NAMES * 32)
-                    .await?,
-            ),
+            (&Method::POST, "/v1/vault/day") => {
+                let body = bounded_body(req, 4_096).await?;
+                let o = match open().await {
+                    Ok(o) => o,
+                    Err(r) => return Ok(r),
+                };
+                return Ok(profile_outcome(
+                    v.pass(&self.registry, &o, keys, &body, today).await,
+                ));
+            }
+            (&Method::DELETE, "/v1/vault") => {
+                let o = match open().await {
+                    Ok(o) => writable(o).await,
+                    Err(r) => return Ok(r),
+                };
+                return Ok(match o {
+                    Ok(o) => profile_outcome(v.delete(&self.registry, &o).await),
+                    Err(r) => r,
+                });
+            }
+            (&Method::POST, "/v1/vault/chunks/delete") => {
+                let body = bounded_body(req, 2 + songbird_proto::vault::MAX_NAMES * 32).await?;
+                let o = match open().await {
+                    Ok(o) => writable(o).await,
+                    Err(r) => return Ok(r),
+                };
+                return Ok(match o {
+                    Ok(o) => profile_outcome(v.delete_chunks(&self.registry, &o, &body).await),
+                    Err(r) => r,
+                });
+            }
             (&Method::PUT, "/v1/vault/manifest") => {
                 let expected = req
                     .headers()
@@ -687,69 +805,54 @@ impl App {
                     .and_then(|h| h.to_str().ok())
                     .and_then(|h| h.parse::<u64>().ok())
                     .ok_or(Refusal::Status(StatusCode::BAD_REQUEST))?;
-                let (device, body) = self.authenticate_body(req, v.settings.max_manifest).await?;
-                let row = device_row(device).await?;
-                let o = match v.open(&self.registry, &self.hot, peer, &creds).await {
-                    Ok(o) => o,
-                    Err(out) => return Ok(profile_outcome(out)),
+                let body = bounded_body(req, v.settings.max_manifest).await?;
+                let o = match open().await {
+                    Ok(o) => writable(o).await,
+                    Err(r) => return Ok(r),
                 };
-                if let Err(out) = v.write_allowed(&self.hot, &row, &o.row).await {
-                    return Ok(profile_outcome(out));
-                }
-                return Ok(profile_outcome(
-                    v.put_manifest(&self.registry, &o, expected, body).await,
-                ));
+                return Ok(match o {
+                    Ok(o) => {
+                        let quota = v.quota(&self.plans, o.row.level);
+                        profile_outcome(
+                            v.put_manifest(&self.registry, &o, quota, expected, body)
+                                .await,
+                        )
+                    }
+                    Err(r) => r,
+                });
             }
             (&Method::PUT, p) if p.starts_with("/v1/vault/chunks/") => {
                 let name = vault::chunk_name(p).ok_or(Refusal::Status(StatusCode::NOT_FOUND))?;
                 let max = usize::try_from(songbird_proto::vault::max_chunk_object())
                     .unwrap_or(usize::MAX);
-                let (device, body) = self.authenticate_body(req, max).await?;
-                let row = device_row(device).await?;
-                let o = match v.open(&self.registry, &self.hot, peer, &creds).await {
-                    Ok(o) => o,
-                    Err(out) => return Ok(profile_outcome(out)),
+                let body = bounded_body(req, max).await?;
+                let o = match open().await {
+                    Ok(o) => writable(o).await,
+                    Err(r) => return Ok(r),
                 };
-                if let Err(out) = v.write_allowed(&self.hot, &row, &o.row).await {
-                    return Ok(profile_outcome(out));
-                }
-                return Ok(profile_outcome(
-                    v.put_chunk(&self.registry, &o, &name, body).await,
-                ));
+                return Ok(match o {
+                    Ok(o) => {
+                        let quota = v.quota(&self.plans, o.row.level);
+                        profile_outcome(v.put_chunk(&self.registry, &o, quota, &name, body).await)
+                    }
+                    Err(r) => r,
+                });
             }
-            (&Method::GET, "/v1/vault" | "/v1/vault/manifest" | "/v1/vault/chunks") => None,
-            (&Method::GET, p) if p.starts_with("/v1/vault/chunks/") => None,
+            (&Method::GET, "/v1/vault" | "/v1/vault/manifest" | "/v1/vault/chunks") => {}
+            (&Method::GET, p) if p.starts_with("/v1/vault/chunks/") => {}
             _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
-        };
-        if let Some((device, _)) = &signed
-            && method == Method::POST
-            && path == "/v1/vault"
-        {
-            let row = device_row(*device).await?;
-            return Ok(profile_outcome(
-                v.create(&self.registry, &self.hot, &row, &creds).await,
-            ));
         }
-        let o = match v.open(&self.registry, &self.hot, peer, &creds).await {
+        let o = match open().await {
             Ok(o) => o,
-            Err(out) => return Ok(profile_outcome(out)),
+            Err(r) => return Ok(r),
         };
-        if let Some((device, body)) = signed {
-            let row = device_row(device).await?;
-            if let Err(out) = v.write_allowed(&self.hot, &row, &o.row).await {
-                return Ok(profile_outcome(out));
-            }
-            let out = match path.as_str() {
-                "/v1/vault" => v.delete(&self.registry, &o).await,
-                _ => v.delete_chunks(&self.registry, &o, &body).await,
-            };
-            return Ok(profile_outcome(out));
-        }
         if let Err(out) = v.read_budget(&self.hot, &o.vk).await {
             return Ok(profile_outcome(out));
         }
         match path.as_str() {
-            "/v1/vault" => Ok(profile_outcome(v.stats(&o))),
+            "/v1/vault" => Ok(profile_outcome(
+                v.stats(&o, v.quota(&self.plans, o.row.level)),
+            )),
             "/v1/vault/manifest" => match v.manifest_name(&o) {
                 Some(name) => self.serve_from(&v.s3, &name).await,
                 None => Ok(empty(StatusCode::NO_CONTENT)),
@@ -765,6 +868,197 @@ impl App {
                     Err(out) => Ok(profile_outcome(out)),
                 }
             }
+        }
+    }
+
+    /// `/v1/family…` (Prompt 11, D-0130): the family mailbox. No account; the IP range only
+    /// for its budget.
+    async fn family(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let r = self
+            .plans
+            .redeemer
+            .clone()
+            .ok_or(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
+        let peer = req
+            .extensions()
+            .get::<registration::Peer>()
+            .ok_or(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?
+            .0;
+        let method = req.method().clone();
+        let path = req.uri().path().to_owned();
+        let header = |n: &str| {
+            req.headers()
+                .get(n)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        let (token, bearer) = (
+            header("x-songbird-family-token"),
+            header("x-songbird-family-bearer"),
+        );
+        let body = if matches!(method, Method::POST | Method::PUT) {
+            bounded_body(req, 16 * 1024).await?.to_vec()
+        } else {
+            Vec::new()
+        };
+        let Some(fr) = plans::FamilyRequest::route(&method, &path, token, bearer, body) else {
+            return Err(Refusal::Status(StatusCode::NOT_FOUND));
+        };
+        let range = registration::range_of(peer, 24, 48);
+        Ok(profile_outcome(
+            r.family(
+                &self.registry,
+                &self.hot,
+                &range,
+                fr,
+                songbird_entitlements::today(),
+            )
+            .await,
+        ))
+    }
+
+    /// `/v1/support/…` ([`support`]): signed or not; a ticket is read with its bearer.
+    async fn support(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let s = self.support.as_ref().ok_or_else(unavailable)?;
+        let peer = req
+            .extensions()
+            .get::<registration::Peer>()
+            .ok_or_else(unavailable)?
+            .0;
+        let method = req.method().clone();
+        let path = req.uri().path().to_owned();
+        let bearer = req
+            .headers()
+            .get(support::BEARER_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| {
+                let mut b = [0u8; 32];
+                hex::decode_to_slice(v, &mut b).ok().map(|()| b)
+            });
+        let sr = match (&method, path.as_str()) {
+            (&Method::GET, "/v1/support/key") => support::Request::Key,
+            (&Method::POST, "/v1/support/tickets") => {
+                if req.headers().contains_key(auth::AUTHORIZATION) {
+                    // Signed: the account is attached (an appeal, priority on Plus).
+                    let (device, body) = self.authenticate_body(req, support::MAX_BODY).await?;
+                    let row = self
+                        .registry
+                        .device(&device)
+                        .await
+                        .map_err(|_| unavailable())?
+                        .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+                    if row.pending {
+                        return Ok(pending_refusal());
+                    }
+                    support::Request::Open(body.to_vec(), Some(row.account))
+                } else {
+                    support::Request::Open(
+                        bounded_body(req, support::MAX_BODY).await?.to_vec(),
+                        None,
+                    )
+                }
+            }
+            (m, p) => match (m, support::Request::ticket_path(p)) {
+                (&Method::GET, Some((id, false))) => support::Request::Read(id, bearer),
+                (&Method::DELETE, Some((id, false))) => support::Request::Close(id, bearer),
+                (&Method::POST, Some((id, true))) => support::Request::Post(
+                    id,
+                    bearer,
+                    bounded_body(req, support::MAX_BODY).await?.to_vec(),
+                ),
+                _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
+            },
+        };
+        let opened = matches!(sr, support::Request::Open(..));
+        let range = registration::range_of(peer, 24, 48);
+        let out = s
+            .serve(
+                &self.registry,
+                &self.hot,
+                &range,
+                sr,
+                |a| self.plans.live.level(a),
+                songbird_entitlements::today(),
+            )
+            .await;
+        let mut resp = profile_outcome(out);
+        if opened && resp.status() == StatusCode::OK {
+            *resp.status_mut() = StatusCode::CREATED;
+        }
+        Ok(resp)
+    }
+
+    /// `POST /v1/invites/status`: which of the caller's invite codes are still live (D-0132).
+    /// The body names codes by their hash; the answer says only live or gone, never who used one.
+    async fn invite_status(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct B {
+            codes: Vec<String>,
+        }
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let (device, body) = self.authenticate_json(req).await?;
+        let row = self
+            .registry
+            .device(&device)
+            .await
+            .map_err(|_| unavailable())?
+            .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+        if row.pending {
+            return Ok(pending_refusal());
+        }
+        // A budget per account (keyed, never the ID): 60 asks an hour, burst 20 (D-0134).
+        let record = {
+            let k =
+                aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, &self.push_index_secret);
+            let mut ctx = aws_lc_rs::hmac::Context::with_key(&k);
+            ctx.update(b"songbird.v1/invite-status\0");
+            ctx.update(row.account.as_bytes());
+            format!(
+                "t:is:{}",
+                hex::encode(ctx.sign().as_ref().get(..16).unwrap_or_default())
+            )
+        };
+        match registration::Registration::gcra(&self.hot, &record, 60, 20, false).await {
+            Ok(0) => {}
+            Ok(wait) => return Ok(profile_outcome(profiles::Outcome::Throttled(wait))),
+            Err(()) => return Err(unavailable()),
+        }
+        let bad = || {
+            json(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({ "error": "body" }),
+            )
+        };
+        let Ok(b) = serde_json::from_slice::<B>(&body) else {
+            return Ok(bad());
+        };
+        if b.codes.is_empty() || b.codes.len() > 50 {
+            return Ok(bad());
+        }
+        let mut out = Vec::with_capacity(b.codes.len());
+        for c in &b.codes {
+            let mut h = [0u8; 32];
+            if hex::decode_to_slice(c, &mut h).is_err() {
+                return Ok(bad());
+            }
+            let live = self
+                .registry
+                .invite_uses(&h)
+                .await
+                .map_err(|_| unavailable())?
+                .is_some_and(|n| n > 0);
+            out.push(live);
+        }
+        Ok(json(StatusCode::OK, &serde_json::json!({ "live": out })))
+    }
+
+    /// A device's account's standing (Good when the device is unknown: the request fails later).
+    async fn standing_of_device(&self, device: &DeviceId) -> songbird_entitlements::Standing {
+        match self.registry.device(device).await {
+            Ok(Some(r)) => self.plans.live.standing(&r.account),
+            _ => songbird_entitlements::Standing::Good,
         }
     }
 
@@ -853,19 +1147,9 @@ impl App {
             Some(r) => Some(self.registry.block_count(&r.owner(account)).await?),
             None => None,
         };
-        // Backup vaults (Prompt 10): what the server holds of each, never the vault ID.
-        let mut vaults = vec![];
-        for vk in self.registry.vaults_of(account).await? {
-            if let Some(r) = self.registry.vault(&vk).await? {
-                vaults.push(serde_json::json!({
-                    "generation": r.generation,
-                    "bytes": r.bytes,
-                    "chunks": r.chunks,
-                }));
-            }
-        }
+        // Backup vaults name no account (D-0130): nothing of them can be exported here; the
+        // export says so in `not_attributable`.
         if let Some(o) = v.as_object_mut() {
-            o.insert("backup_vaults".into(), serde_json::Value::Array(vaults));
             o.insert(
                 "message_requests".into(),
                 serde_json::json!({
@@ -938,6 +1222,12 @@ impl App {
             "/v1/groups/propose" => g.propose(r, m, device, body).await,
             "/v1/groups/meta" => g.meta(r, device, body).await,
             "/v1/groups/log" => g.log(r, m, device, body).await,
+            "/v1/groups/links"
+                if self.standing_of_device(&device).await
+                    != songbird_entitlements::Standing::Good =>
+            {
+                devices::Outcome::Forbidden("standing")
+            }
             "/v1/groups/links" => g.create_link(r, device, body).await,
             "/v1/groups/links/revoke" => g.revoke_link(r, device, body).await,
             "/v1/groups/links/open" => g.open(r, body).await,
@@ -976,6 +1266,15 @@ impl App {
             .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
         if row.pending {
             return Ok(device_outcome(devices::Outcome::Forbidden("pending")));
+        }
+        // A suspended account starts no call and makes no link (D-0131); it may still answer.
+        if self.plans.live.standing(&row.account) == songbird_entitlements::Standing::Suspended
+            && matches!(
+                path.as_str(),
+                "/v1/calls" | "/v1/calls/group" | "/v1/calls/links"
+            )
+        {
+            return Ok(device_outcome(devices::Outcome::Forbidden("suspended")));
         }
         let caller = calls::Caller {
             device,
@@ -1034,7 +1333,7 @@ impl App {
             .map_err(|_| unavailable())?
             .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
         let out = match (&method, path.as_str()) {
-            (&Method::PUT, "/v1/blocks") => r.block(&self.registry, &row, &body).await,
+            (&Method::PUT, "/v1/blocks") => r.block(&self.registry, &self.hot, &row, &body).await,
             (&Method::DELETE, "/v1/blocks") => r.unblock(&self.registry, &row, &body).await,
             (&Method::GET, "/v1/account/requests") => {
                 requests::Requests::policy(&self.registry, &row).await
@@ -1229,7 +1528,7 @@ impl App {
             (&Method::POST, "/v1/devices/link-token", None) => {
                 let (device, _) = self.authenticate_json(req).await?;
                 let account = account_of(device).await?;
-                d.link_token(&self.registry, &self.hot, &account, &device)
+                d.link_token(&self.registry, &self.hot, &self.plans, &account, &device)
                     .await
             }
             (&Method::POST, "/v1/devices/link", None) => {
@@ -1237,6 +1536,7 @@ impl App {
                 d.link(
                     &self.registry,
                     &self.hot,
+                    &self.plans,
                     self.messages.as_ref(),
                     &self.server_name,
                     peer,

@@ -31,6 +31,7 @@ songbird-link.workspace = true
 songbird-types.workspace = true
 songbird-accounts.workspace = true
 songbird-send.workspace = true
+songbird-entitlements.workspace = true
 songbird-jobs.workspace = true
 songbird-valkey.workspace = true
 redis.workspace = true

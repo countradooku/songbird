@@ -6289,6 +6289,7 @@ dependencies = [
  "songbird-accounts",
  "songbird-akd",
  "songbird-calls",
+ "songbird-entitlements",
  "songbird-groups",
  "songbird-jobs",
  "songbird-keys",
@@ -6300,6 +6301,7 @@ dependencies = [
  "songbird-s3",
  "songbird-send",
  "songbird-service",
+ "songbird-tokens",
  "songbird-types",
  "songbird-valkey",
  "tokio",
@@ -6319,6 +6321,36 @@ dependencies = [
  "prost",
  "songbird-proto",
  "thiserror 2.0.21",
+ "zeroize",
+]
+
+[[package]]
+name = "songbird-billing"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "bytes",
+ "getrandom 0.4.3",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "mimalloc",
+ "rustls",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "serde",
+ "serde_json",
+ "songbird-accounts",
+ "songbird-service",
+ "songbird-surreal",
+ "songbird-tokens",
+ "songbird-types",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "webpki-roots 1.0.12",
  "zeroize",
 ]
 
@@ -6391,6 +6423,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "songbird-entitlements"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "serde",
+ "songbird-accounts",
+ "songbird-types",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "songbird-fuzz"
 version = "0.0.0"
 dependencies = [
@@ -6399,10 +6444,13 @@ dependencies = [
  "bytes",
  "libfuzzer-sys",
  "prost",
+ "rustls-pki-types",
  "serde",
+ "serde_json",
  "songbird-akd",
  "songbird-api",
  "songbird-backup-format",
+ "songbird-billing",
  "songbird-calls",
  "songbird-camera",
  "songbird-content",
@@ -6417,6 +6465,7 @@ dependencies = [
  "songbird-send",
  "songbird-surreal",
  "songbird-sync",
+ "songbird-tokens",
  "songbird-types",
 ]
 
@@ -6592,6 +6641,7 @@ dependencies = [
  "redis",
  "serde",
  "songbird-accounts",
+ "songbird-entitlements",
  "songbird-jobs",
  "songbird-mailbox",
  "songbird-proto",
@@ -6661,6 +6711,18 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "songbird-tokens"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "curve25519-dalek 5.0.0",
+ "getrandom 0.4.3",
+ "hex",
+ "serde",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

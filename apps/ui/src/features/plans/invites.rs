@@ -17,6 +17,7 @@ pub fn invites() {
 
 fn invites_page() -> Screen {
     let s = store();
+    s.refresh_invites();
     let share_open = signal(false);
     let shared = signal(String::new());
     let left = move || s.session.with(|x| x.invites_left);
@@ -129,7 +130,10 @@ pub fn invite_friend() {
 fn invite_link_page() -> Screen {
     let s = store();
     let me = s.me.get_untracked();
-    let link_url = personal_link(&me.username);
+    // The real backend: the inviter's card in the link's fragment, which no server sees.
+    let link_url = crate::backend::plans::my_invite_link()
+        .filter(|_| crate::backend::is_live())
+        .unwrap_or_else(|| personal_link(&me.username));
     let share_open = signal(false);
     let shared = signal(format!(
         "Let's talk on Songbird, a private messenger: {link_url}"

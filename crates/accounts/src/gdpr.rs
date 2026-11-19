@@ -33,7 +33,9 @@ fn not_attributable() -> serde_json::Value {
         "Group change logs and invite links: ciphertext only the members can read, and hashes; not linked to your account.",
         "Attachments you received: fetched without naming your account or device (the object ID inside the message is enough); the server sees only the address a download came from, and keeps no record of it.",
         "Packs you made (stickers, scenes, sounds, emoticons): once complete, not linked to your account; your devices keep the token that deletes them, and a pack nobody fetches for a year is deleted. Packs still being uploaded are listed with your devices.",
-        "Upload budgets: two keyed records per account in valkey-hot (counts, no files), expiring within 24 hours.",
+        "Upload budgets: keyed records per account in valkey-hot (counts, no files): grants and bytes expiring within 24 hours, new packs within 30 days.",
+        "Backups in the Songbird vault: not linked to your account. A vault is found and opened by your recovery key alone; the server knows its size, chunk count and generation, the day of its latest day pass and of its last use, and nothing that names you. Delete it from the app (Settings › Backups) before deleting your account; a vault nobody uses for a year is deleted.",
+        "Payments: never linked to your account. Your plan comes from an anonymous token your app redeemed; the payment it came from is recorded elsewhere under no identifier of yours.",
         "GIF searches: held in memory for minutes to answer and cache them, never stored or logged, and sent to the GIF provider without anything identifying you.",
     ])
 }
@@ -274,8 +276,74 @@ impl Registry {
             self.export_devices(account, push).await?.into(),
         );
         out.insert("settings_store".into(), self.export_storage(account).await?);
+        self.export_plans(account, &mut out).await?;
         out.insert("not_attributable".into(), not_attributable());
         Ok(serde_json::Value::Object(out))
+    }
+
+    /// Prompt 11: the plan, the standing and the support tickets attached.
+    async fn export_plans(
+        &self,
+        account: &AccountId,
+        out: &mut serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), RegistryError> {
+        out.insert("plan".into(), self.export_plan(account).await?);
+        out.insert("standing".into(), self.export_standing(account).await?);
+        out.insert(
+            "support_tickets".into(),
+            self.export_tickets(account).await?,
+        );
+        Ok(())
+    }
+
+    /// The support tickets the account attached itself to (Prompt 11, D-0132): never their
+    /// contents, bearer or reply key.
+    async fn export_tickets(
+        &self,
+        account: &AccountId,
+    ) -> Result<serde_json::Value, RegistryError> {
+        Ok(self
+            .tickets_of(account)
+            .await?
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "id": hex::encode(t.id),
+                    "kind": t.kind,
+                    "messages": t.messages,
+                    "last_changed_day_utc": t.touched,
+                })
+            })
+            .collect::<Vec<_>>()
+            .into())
+    }
+
+    /// The standing (Prompt 11, D-0131): good, or limited or suspended with its reason.
+    async fn export_standing(
+        &self,
+        account: &AccountId,
+    ) -> Result<serde_json::Value, RegistryError> {
+        Ok(match self.standing_of(account).await? {
+            Some(s) => serde_json::json!({
+                "kind": s.kind,
+                "until_day_utc": s.until,
+                "reason": s.reason,
+                "source": s.source,
+            }),
+            None => serde_json::json!({ "kind": "good" }),
+        })
+    }
+
+    /// The plan (Prompt 11, D-0127): level, last day and source; never a payment.
+    async fn export_plan(&self, account: &AccountId) -> Result<serde_json::Value, RegistryError> {
+        Ok(match self.entitlement_of(account).await? {
+            Some(e) => serde_json::json!({
+                "level": e.level,
+                "last_day_utc": e.last_day,
+                "source": e.source.as_str(),
+            }),
+            None => serde_json::json!({ "level": 0 }),
+        })
     }
 
     /// The record store (Prompt 9, D-0102): its size and version. The records themselves are

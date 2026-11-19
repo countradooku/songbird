@@ -1,0 +1,57 @@
+# Development configuration for the billing service (Prompt 11, D-0129). No secrets here, ever:
+# secrets are referenced as { file = "..." } or { env = "..." } (see crates/types/src/secret.rs).
+[common]
+environment = "dev"
+admin_listen = "127.0.0.1:9106"
+shutdown_grace_secs = 5
+
+[common.log]
+format = "pretty"
+filter = "info"
+
+# Without [billing] the service idles. Billing has a database of its own with a credential for
+# it alone, and never the registry's:
+#
+# [billing]
+# listen = "127.0.0.1:8445"
+# environment = "sandbox"                                         # or "production"
+# secret = { file = "/path/to/billing-secret.hex" }                # 64 hex: keys the subscription rows
+# [billing.surrealdb]
+# addr = "127.0.0.1:47800"
+# host = "localhost"
+# user = "billing"
+# pass = { env = "BILLING_DB_PASS" }
+# namespace = "songbird"
+# database = "billing"
+# [billing.tokens]
+# secret = { file = "/path/to/token-secret.hex" }                  # the same as api's [api.tokens]
+# keys = [1]
+# [[billing.products]]
+# id = "chat.songbird.plus.monthly"
+# plan = "plus"
+# [[billing.products]]
+# id = "chat.songbird.family.monthly"
+# plan = "family"
+# [billing.apple]
+# bundle_id = "chat.songbird.app"
+# root_ca = "/path/to/AppleRootCA-G3.cer"                          # DER, from apple.com/certificateauthority
+# [billing.apple.api]
+# base_url = "https://api.storekit-sandbox.itunes.apple.com"
+# issuer_id = "<App Store Connect issuer ID>"
+# key_id = "<In-App Purchase key ID>"
+# key = { file = "/path/to/SubscriptionKey.p8" }
+# [billing.google]
+# package = "chat.songbird.app"
+# service_account = { file = "/path/to/play-service-account.json" }
+# push_audience = "https://billing.songbird.chat/v1/billing/google"
+# push_email = "<the Pub/Sub push subscription's service account>"
+# [billing.mollie]
+# api_key = { env = "MOLLIE_API_KEY" }                             # test_… in sandbox
+# webhook_url = "https://billing.songbird.chat/v1/billing/mollie/webhook"
+# redirect_url = "https://songbird.chat/thanks"
+# [billing.mollie.prices]
+# currency = "EUR"
+# plus_month = "2.99"
+# plus_year = "29.99"
+# family_month = "4.99"
+# family_year = "49.99"

@@ -185,6 +185,93 @@ pub struct ApiSettings {
     /// 503.
     #[serde(default)]
     pub calls: Option<songbird_calls::CallSettings>,
+    /// `[api.plans]` (Prompt 11, D-0127): every level's limits and flags. Absent: the owner's
+    /// catalogue (D-0126 §3).
+    #[serde(default)]
+    pub plans: songbird_entitlements::Catalog,
+    /// How often the entitlements version is polled (the snapshot reloads on a change).
+    #[serde(default = "default_entitlements_poll_ms")]
+    pub entitlements_poll_ms: u64,
+    /// `[api.tokens]` (Prompt 11, M2, D-0128): redeeming anonymous plan tokens. Absent:
+    /// `POST /v1/entitlements/redeem` and `GET /v1/tokens/keys` answer 503.
+    #[serde(default)]
+    pub tokens: Option<TokenSettings>,
+    /// `[api.support]` (Prompt 11, M6, D-0132): the support channel. Absent: `/v1/support…`
+    /// answers 503.
+    #[serde(default)]
+    pub support: Option<SupportSettings>,
+}
+
+/// `[api.support]` (Prompt 11, M6, D-0132).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportSettings {
+    /// The support team's public key (X25519, 64 hex characters) tickets are sealed to. Its
+    /// private half stays with staff (`songbird-admin support keygen`).
+    pub key: String,
+}
+
+impl Validate for SupportSettings {
+    fn validate(&self, v: &mut Validator) {
+        let mut k = [0u8; 32];
+        v.check(
+            hex::decode_to_slice(&self.key, &mut k).is_ok()
+                && songbird_keys::xeddsa::x25519_public_key_ok(&k),
+            "key",
+            "must be an X25519 public key (64 hex characters)",
+        );
+    }
+}
+
+/// `[api.tokens]`: the token keys (shared with billing, which issues) and the redemption budget.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TokenSettings {
+    /// 32 bytes (64 hex characters), the same on every `api` and `billing` node: every token
+    /// key pair is derived from it.
+    pub secret: SecretRef,
+    /// Key IDs redeemed; the highest is the one billing issues under (and apps pin).
+    #[serde(default = "default_token_keys")]
+    pub keys: Vec<u8>,
+    /// Redemptions per account per hour.
+    #[serde(default = "default_redeems_per_hour")]
+    pub redeems_per_hour: u32,
+    /// Their burst.
+    #[serde(default = "default_redeem_burst")]
+    pub redeem_burst: u32,
+}
+
+fn default_token_keys() -> Vec<u8> {
+    vec![1]
+}
+const fn default_redeems_per_hour() -> u32 {
+    30
+}
+const fn default_redeem_burst() -> u32 {
+    10
+}
+
+impl Validate for TokenSettings {
+    fn validate(&self, v: &mut Validator) {
+        let mut ids = self.keys.clone();
+        ids.sort_unstable();
+        ids.dedup();
+        v.check(
+            !ids.is_empty() && ids.len() == self.keys.len() && ids.len() <= 8,
+            "keys",
+            "must list 1 to 8 distinct key IDs",
+        );
+        v.check(
+            (1..=3_600).contains(&self.redeems_per_hour)
+                && (1..=1_000).contains(&self.redeem_burst),
+            "redeems_per_hour",
+            "must be in 1..=3600 (burst 1..=1000)",
+        );
+    }
+}
+
+const fn default_entitlements_poll_ms() -> u64 {
+    1_000
 }
 
 /// `[api.reports]` (Prompt 4, D-0063).
@@ -298,15 +385,21 @@ pub struct VaultSettings {
     pub secret: SecretRef,
     /// The vaults' bucket (not the attachments').
     pub bucket: String,
-    /// Bytes per vault (chunks and manifest) until Prompt 11's entitlements (D-0119: 5 GiB).
+    /// The deployment's ceiling of bytes per vault (chunks and manifest). Each vault's quota is
+    /// its owner's plan's `vault_bytes` under it (D-0127: 5 GiB on Free, 50 GiB on Plus).
     #[serde(default = "default_vault_bytes")]
     pub quota_bytes: u64,
-    /// Chunks per vault (D-0119: 100,000).
+    /// The deployment's ceiling of chunks per vault (the plan's `vault_chunks` under it).
     #[serde(default = "default_vault_chunks")]
     pub quota_chunks: u64,
-    /// Vaults per account: two, so a new recovery key's vault fills before the old one goes.
-    #[serde(default = "default_vault_count")]
-    pub max_vaults: u64,
+    /// Vault creation tokens per account per 180 days (D-0130): two, so a new recovery key's
+    /// vault can be made while the old one still holds a backup. They bound how many vaults one
+    /// account keeps alive, since no vault names its account.
+    #[serde(default = "default_vault_creations")]
+    pub creations_per_window: u32,
+    /// Day passes per account per day (all of them for the next week at most, D-0130).
+    #[serde(default = "default_vault_passes")]
+    pub passes_per_day: u32,
     /// Largest manifest object.
     #[serde(default = "default_vault_manifest")]
     pub max_manifest: usize,
@@ -317,7 +410,7 @@ pub struct VaultSettings {
     /// Their burst.
     #[serde(default = "default_vault_read_burst")]
     pub read_burst: u32,
-    /// Writes (chunks, manifests, deletes) per hour per account.
+    /// Writes (chunks, manifests, deletes) per hour per vault; creations per hour per IP range.
     #[serde(default = "default_vault_writes")]
     pub writes_per_hour: u32,
     /// Their burst: a first backup of a full vault.
@@ -338,13 +431,16 @@ pub struct VaultSettings {
 }
 
 const fn default_vault_bytes() -> u64 {
-    5 << 30
+    1 << 40
 }
 const fn default_vault_chunks() -> u64 {
-    100_000
+    10_000_000
 }
-const fn default_vault_count() -> u64 {
+const fn default_vault_creations() -> u32 {
     2
+}
+const fn default_vault_passes() -> u32 {
+    16
 }
 const fn default_vault_manifest() -> usize {
     16 << 20
@@ -392,9 +488,14 @@ impl Validate for VaultSettings {
             "must be in 100..=10000000",
         );
         v.check(
-            (1..=4).contains(&self.max_vaults),
-            "max_vaults",
+            (1..=4).contains(&self.creations_per_window),
+            "creations_per_window",
             "must be in 1..=4",
+        );
+        v.check(
+            (1..=64).contains(&self.passes_per_day),
+            "passes_per_day",
+            "must be in 1..=64",
         );
         v.check(
             ((1 << 20)..=(48 << 20)).contains(&self.max_manifest),
@@ -696,6 +797,25 @@ impl Validate for ApiSettings {
         if let Some(c) = &self.calls {
             v.section("calls", c);
         }
+        if let Some(s) = &self.support {
+            v.section("support", s);
+        }
+        if let Some(t) = &self.tokens {
+            v.section("tokens", t);
+        }
+        if let Err(e) = self.plans.validate() {
+            v.check(false, "plans", e.to_string());
+        }
+        v.check(
+            self.attachments.max_bytes >= self.plans.ceiling().file_bytes,
+            "attachments.max_bytes",
+            "must be at least every plan's file_bytes (it is the deployment's ceiling)",
+        );
+        v.check(
+            (100..=60_000).contains(&self.entitlements_poll_ms),
+            "entitlements_poll_ms",
+            "must be in 100..=60000",
+        );
         let mut k = [0u8; 32];
         v.check(
             hex::decode_to_slice(&self.push_public_key, &mut k).is_ok(),
@@ -817,8 +937,9 @@ pub struct AttachmentLimits {
 impl Default for AttachmentLimits {
     fn default() -> Self {
         Self {
-            // D-0079: 2 GiB, for WhatsApp parity, until Prompt 11's plans set it.
-            max_bytes: 2 << 30,
+            // The deployment's ceiling; each account's limit is its plan's `file_bytes`
+            // (D-0127): 2 GiB on Free (D-0079), 4 GiB on Plus.
+            max_bytes: 4 << 30,
             max_fetches: 1024,
             grant_ttl_secs: 3600,
             // D-0081: 16 MiB, measured against 5 and 64.
@@ -1038,7 +1159,7 @@ impl Validate for MediaDownloads {
 }
 
 /// `[api.media.budgets]`: per account, in keyed `valkey-hot` records (no object is ever linked
-/// to an account). Prompt 11's plans will set them per plan.
+/// to an account). The plans set bytes per account under this ceiling (D-0127).
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct MediaBudgets {
@@ -1046,7 +1167,8 @@ pub struct MediaBudgets {
     pub grants_per_hour: u32,
     /// Their burst.
     pub grant_burst: u32,
-    /// Bytes granted per 24 hours (all may be spent at once).
+    /// The deployment's ceiling of bytes granted per account per 24 hours (all may be spent at
+    /// once). Each account's budget is its plan's `upload_bytes_per_day` under it (D-0127).
     pub bytes_per_day: u64,
 }
 
@@ -1056,7 +1178,7 @@ impl Default for MediaBudgets {
         Self {
             grants_per_hour: 300,
             grant_burst: 60,
-            bytes_per_day: 10 << 30,
+            bytes_per_day: 1 << 40,
         }
     }
 }
@@ -1284,6 +1406,51 @@ pub struct RegistrationSettings {
     /// Throttles per IP range and across the deployment.
     #[serde(default)]
     pub throttle: ThrottleSettings,
+    /// How the work rises with recent registrations (Prompt 11, D-0131).
+    #[serde(default)]
+    pub escalation: Escalation,
+}
+
+/// Escalating proof of work (Prompt 11, D-0131): each step adds one zero bit to every solution
+/// (twice the work). A range steps up at each of `range_steps` registrations in the past hour;
+/// the whole deployment at `global_step` and four times that; never more than `max_extra_bits`
+/// above the base.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Escalation {
+    /// Registrations from one range in the past hour at which its work doubles, each.
+    pub range_steps: [u32; 3],
+    /// Registrations across the deployment in the past hour at which everyone's work doubles
+    /// (and again at four times it).
+    pub global_step: u32,
+    /// The most bits added to the base.
+    pub max_extra_bits: u8,
+}
+
+impl Default for Escalation {
+    fn default() -> Self {
+        Self {
+            range_steps: [3, 10, 30],
+            global_step: 300,
+            max_extra_bits: 4,
+        }
+    }
+}
+
+impl Escalation {
+    /// Extra bits for `range` and `global` registrations in the past hour.
+    #[must_use]
+    pub fn extra_bits(&self, range: u32, global: u32) -> u8 {
+        let r = self.range_steps.iter().filter(|s| range >= **s).count();
+        let g = if global >= self.global_step.saturating_mul(4) {
+            2
+        } else {
+            usize::from(global >= self.global_step)
+        };
+        u8::try_from(r + g)
+            .unwrap_or(u8::MAX)
+            .min(self.max_extra_bits)
+    }
 }
 
 const fn default_true() -> bool {
@@ -1319,6 +1486,16 @@ impl Validate for RegistrationSettings {
         );
         v.section("pow", &self.pow);
         v.section("throttle", &self.throttle);
+        let e = &self.escalation;
+        v.check(
+            e.range_steps.is_sorted_by(|a, b| a < b)
+                && e.range_steps.first().is_some_and(|f| *f >= 1)
+                && e.global_step >= 1
+                && e.max_extra_bits <= 8
+                && self.pow.bits.saturating_add(e.max_extra_bits) <= 24,
+            "escalation",
+            "range_steps increasing from 1, global_step at least 1, max_extra_bits at most 8 (and base + extra at most 24)",
+        );
     }
 }
 
@@ -1637,8 +1814,8 @@ pub struct KeySettings {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct DeviceSettings {
-    /// Most enabled devices per account, primary included (owner, D-0047: primary + 5, until
-    /// Prompt 11's plans).
+    /// The deployment's ceiling of enabled devices per account, primary included. Each
+    /// account's limit is its plan's (D-0127: primary + 5 on Free, + 10 on Plus) under this.
     pub max_devices: u32,
     /// How long a link token stays valid (seconds).
     pub link_token_ttl_secs: u64,
@@ -1687,7 +1864,7 @@ pub struct DeviceSettings {
 impl Default for DeviceSettings {
     fn default() -> Self {
         Self {
-            max_devices: 6,
+            max_devices: 16,
             link_token_ttl_secs: 600,
             channel_ttl_secs: 600,
             long_poll_secs: 25,

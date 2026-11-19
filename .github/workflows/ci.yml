@@ -74,6 +74,8 @@ jobs:
       # D-0120: the published vectors from the specification alone (Python standard library).
       - run: python3 crates/backup-format/vectors/check.py crates/backup-format/vectors/v1/vectors.json
       - run: python3 crates/backup-storage/vectors/transfer_check.py crates/backup-storage/vectors/transfer.json
+      # D-0128: anonymous tokens, RFC 9497 and Songbird's vector from the specifications alone.
+      - run: python3 -I crates/tokens/vectors/check.py crates/tokens/vectors/v1.json
       # The same bytes on a 64-bit and a 32-bit target (macOS arm64 is checked locally, D-0120).
       - run: cargo test --locked -p songbird-backup-format --test vectors
       - name: i686 (32-bit usize)
@@ -138,7 +140,7 @@ jobs:
           export SONGBIRD_REQUIRE_STACK=1
           # Backups (M6): restore against tampering on RustFS and SurrealDB with the age tool.
           export SONGBIRD_TEST_AGE="$RUNNER_TEMP/age"
-          cargo nextest run --locked --profile ci -p songbird-surreal -p songbird-mailbox -p songbird-router -p songbird-s3 -p songbird-e2e -p songbird-accounts -p songbird-admin -p songbird-akd -p songbird-backup-storage
+          cargo nextest run --locked --profile ci -p songbird-surreal -p songbird-mailbox -p songbird-router -p songbird-s3 -p songbird-e2e -p songbird-accounts -p songbird-admin -p songbird-akd -p songbird-backup-storage -p songbird-billing
           # These share the job streams (one consumer group; some wipe them): one crate at a
           # time, one test at a time.
           cargo nextest run --locked --profile ci -p songbird-api -j 1

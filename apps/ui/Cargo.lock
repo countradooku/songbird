@@ -2558,6 +2558,7 @@ dependencies = [
 name = "nsh-app-songbird"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "aws-lc-rs",
  "env_logger",
  "log",
@@ -2570,6 +2571,7 @@ dependencies = [
  "nsh-platform-windows",
  "nsh-testing",
  "qrcode",
+ "serde",
  "serde_json",
  "songbird-backup-format",
  "songbird-backup-storage",
@@ -2580,6 +2582,7 @@ dependencies = [
  "songbird-pow",
  "songbird-proto",
  "songbird-sync",
+ "songbird-tokens",
  "songbird-types",
  "tokio",
  "zeroize",
@@ -4468,6 +4471,18 @@ dependencies = [
  "songbird-proto",
  "thiserror 2.0.21",
  "zeroize",
+]
+
+[[package]]
+name = "songbird-tokens"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "curve25519-dalek 5.0.0",
+ "getrandom 0.4.3",
+ "hex",
+ "serde",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

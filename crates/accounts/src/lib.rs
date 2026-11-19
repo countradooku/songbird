@@ -51,6 +51,8 @@ pub mod blocks;
 pub mod call_links;
 pub mod communities;
 pub mod devices;
+pub mod entitlements;
+pub mod family;
 pub mod gdpr;
 pub mod groups;
 pub mod journal;
@@ -60,8 +62,10 @@ pub mod profile;
 pub mod recovery;
 pub mod reports;
 pub mod settings;
+pub mod standing;
 pub mod storage;
 pub mod supervision;
+pub mod support;
 pub mod vault;
 pub use db::{Db, DbError, SurrealSettings};
 pub use push_store::PushStore;
@@ -307,9 +311,17 @@ DEFINE FIELD IF NOT EXISTS chunks ON vault TYPE int;
 DEFINE TABLE IF NOT EXISTS vault_gone SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS vault ON vault_gone TYPE bytes;
 DEFINE FIELD IF NOT EXISTS at ON vault_gone TYPE datetime DEFAULT time::now();
-DEFINE TABLE IF NOT EXISTS vault_owner SCHEMAFULL;
-DEFINE FIELD IF NOT EXISTS account ON vault_owner TYPE bytes;
-DEFINE INDEX IF NOT EXISTS vault_owner_account ON vault_owner FIELDS account;
+-- Prompt 11 (D-0130): vaults name no account. Prompt 10's owner table is removed; a vault is
+-- created and written with anonymous tokens and remembers only its latest pass and last use.
+REMOVE TABLE IF EXISTS vault_owner;
+DEFINE FIELD IF NOT EXISTS level ON vault TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS pass ON vault TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS seen ON vault TYPE int DEFAULT 0;
+DEFINE INDEX IF NOT EXISTS vault_seen ON vault FIELDS seen;
+DEFINE TABLE IF NOT EXISTS vcreate SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS n ON vcreate TYPE int;
+DEFINE FIELD IF NOT EXISTS until ON vcreate TYPE int;
+DEFINE INDEX IF NOT EXISTS vcreate_until ON vcreate FIELDS until;
 DEFINE TABLE IF NOT EXISTS vchunk SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS vault ON vchunk TYPE bytes;
 DEFINE FIELD IF NOT EXISTS name ON vchunk TYPE bytes;
@@ -328,6 +340,82 @@ DEFINE FIELD IF NOT EXISTS flags ON superv TYPE int;
 DEFINE FIELD IF NOT EXISTS policy ON superv TYPE bytes;
 DEFINE FIELD IF NOT EXISTS unlink_at ON superv TYPE datetime;
 DEFINE INDEX IF NOT EXISTS superv_unlink ON superv FIELDS unlink_at;
+DEFINE TABLE IF NOT EXISTS ent SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS level ON ent TYPE int;
+DEFINE FIELD IF NOT EXISTS last ON ent TYPE int;
+DEFINE FIELD IF NOT EXISTS source ON ent TYPE string;
+DEFINE FIELD IF NOT EXISTS at ON ent TYPE datetime;
+DEFINE INDEX IF NOT EXISTS ent_last ON ent FIELDS last;
+DEFINE TABLE IF NOT EXISTS fam SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS mgmt ON fam TYPE bytes;
+DEFINE FIELD IF NOT EXISTS seen ON fam TYPE int;
+DEFINE INDEX IF NOT EXISTS fam_seen ON fam FIELDS seen;
+DEFINE TABLE IF NOT EXISTS fam_slot SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS fam ON fam_slot TYPE bytes;
+DEFINE FIELD IF NOT EXISTS auth ON fam_slot TYPE bytes;
+DEFINE FIELD IF NOT EXISTS sealed ON fam_slot TYPE option<bytes>;
+DEFINE INDEX IF NOT EXISTS fam_slot_fam ON fam_slot FIELDS fam;
+DEFINE TABLE IF NOT EXISTS standing SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS kind ON standing TYPE string;
+DEFINE FIELD IF NOT EXISTS until ON standing TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS reason ON standing TYPE string;
+DEFINE FIELD IF NOT EXISTS source ON standing TYPE string;
+DEFINE FIELD IF NOT EXISTS at ON standing TYPE datetime;
+DEFINE TABLE IF NOT EXISTS rsig SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tag ON rsig TYPE bytes;
+DEFINE FIELD IF NOT EXISTS day ON rsig TYPE int;
+DEFINE FIELD IF NOT EXISTS n ON rsig TYPE int;
+DEFINE FIELD IF NOT EXISTS until ON rsig TYPE int;
+DEFINE INDEX IF NOT EXISTS rsig_until ON rsig FIELDS until;
+DEFINE INDEX IF NOT EXISTS rsig_tag ON rsig FIELDS tag, day;
+DEFINE TABLE IF NOT EXISTS bsig SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tag ON bsig TYPE bytes;
+DEFINE FIELD IF NOT EXISTS day ON bsig TYPE int;
+DEFINE FIELD IF NOT EXISTS n ON bsig TYPE int;
+DEFINE FIELD IF NOT EXISTS until ON bsig TYPE int;
+DEFINE INDEX IF NOT EXISTS bsig_until ON bsig FIELDS until;
+DEFINE INDEX IF NOT EXISTS bsig_tag ON bsig FIELDS tag, day;
+DEFINE TABLE IF NOT EXISTS ticket SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS kind ON ticket TYPE string;
+DEFINE FIELD IF NOT EXISTS bearer ON ticket TYPE bytes;
+DEFINE FIELD IF NOT EXISTS reply ON ticket TYPE bytes;
+DEFINE FIELD IF NOT EXISTS account ON ticket TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS priority ON ticket TYPE bool;
+DEFINE FIELD IF NOT EXISTS touched ON ticket TYPE int;
+DEFINE FIELD IF NOT EXISTS msgs ON ticket TYPE int;
+DEFINE INDEX IF NOT EXISTS ticket_touched ON ticket FIELDS touched;
+DEFINE INDEX IF NOT EXISTS ticket_account ON ticket FIELDS account;
+DEFINE TABLE IF NOT EXISTS ticket_msg SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS ticket ON ticket_msg TYPE bytes;
+DEFINE FIELD IF NOT EXISTS from ON ticket_msg TYPE string;
+DEFINE FIELD IF NOT EXISTS sealed ON ticket_msg TYPE bytes;
+DEFINE FIELD IF NOT EXISTS day ON ticket_msg TYPE int;
+DEFINE INDEX IF NOT EXISTS ticket_msg_ticket ON ticket_msg FIELDS ticket;
+DEFINE TABLE IF NOT EXISTS legal SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS n ON legal TYPE int;
+DEFINE TABLE IF NOT EXISTS tnull SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS until ON tnull TYPE int;
+DEFINE INDEX IF NOT EXISTS tnull_until ON tnull FIELDS until;
+DEFINE TABLE IF NOT EXISTS entver SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS version ON entver TYPE int;
+UPSERT entver:v SET version = version ?? 1 RETURN NONE;
+-- Teams (Prompt 11, D-0126 §12): reserved and empty. An organisation, its admins, its member
+-- accounts and the devices it manages, so Teams can be added without a migration that changes
+-- what the server knows of anyone else. Nothing writes these tables yet.
+DEFINE TABLE IF NOT EXISTS org SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS at ON org TYPE datetime;
+DEFINE FIELD IF NOT EXISTS policy ON org TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS pv ON org TYPE int;
+DEFINE TABLE IF NOT EXISTS org_admin SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS org ON org_admin TYPE bytes;
+DEFINE FIELD IF NOT EXISTS account ON org_admin TYPE bytes;
+DEFINE TABLE IF NOT EXISTS org_member SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS org ON org_member TYPE bytes;
+DEFINE FIELD IF NOT EXISTS account ON org_member TYPE bytes;
+DEFINE INDEX IF NOT EXISTS org_member_account ON org_member FIELDS account UNIQUE;
+DEFINE TABLE IF NOT EXISTS org_device SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS org ON org_device TYPE bytes;
+DEFINE FIELD IF NOT EXISTS device ON org_device TYPE bytes;
 ";
 
 /// Registry failures. They carry no identifiers.
@@ -369,6 +457,9 @@ pub enum RegistryError {
     /// Only the primary device may do this.
     #[error("not the primary device")]
     NotPrimary,
+    /// An anonymous token already redeemed (its nullifier is held).
+    #[error("token already redeemed")]
+    Spent,
     /// The account has as many devices (and outstanding link tokens) as allowed.
     #[error("device limit reached")]
     DeviceLimit,
@@ -594,7 +685,8 @@ impl Backoff {
 
 /// Whether a failure is SurrealDB's "transaction conflict, retry" (as a statement kind or an RPC
 /// error code; which one depends on where the conflict is detected).
-fn is_conflict(e: &DbError) -> bool {
+#[must_use]
+pub fn is_conflict(e: &DbError) -> bool {
     match e {
         DbError::Rpc(songbird_surreal::RpcError::Server { code, .. }) => {
             *code == songbird_surreal::CODE_TRANSACTION_CONFLICT
@@ -687,9 +779,11 @@ pub struct Remnants {
     pub group_requests: u64,
     /// Group prune marks still naming the devices (D-0075).
     pub group_marks: u64,
-    /// Storage records and storage object records of the account (Prompt 9, D-0102), and
-    /// its backup vaults (Prompt 10, D-0121).
+    /// Storage records and storage object records of the account (Prompt 9, D-0102). Backup
+    /// vaults name no account (D-0130).
     pub storage: u64,
+    /// The account's entitlement row (Prompt 11, D-0127).
+    pub entitlements: u64,
 }
 
 impl Remnants {
@@ -2041,6 +2135,12 @@ impl Registry {
                  DELETE srec WHERE account = $a RETURN NONE;
                  DELETE superv:[$a] RETURN NONE;
                  DELETE sobj WHERE account = $a RETURN NONE;
+                 UPDATE ticket SET account = NONE WHERE account = $a RETURN NONE;
+                 IF record::exists(ent:[$a]) OR record::exists(standing:[$a]) {
+                   DELETE ent:[$a] RETURN NONE;
+                   DELETE standing:[$a] RETURN NONE;
+                   UPSERT entver:v SET version = (version ?? 1) + 1 RETURN NONE;
+                 };
                  UPDATE grp_prune SET gone = array::complement(gone, $devs)
                    WHERE gone CONTAINSANY $devs RETURN NONE;
                  DELETE account:[$a] RETURN NONE;
@@ -2085,8 +2185,8 @@ impl Registry {
                  RETURN count(SELECT id FROM grp_prune WHERE gone CONTAINSANY $ds);
                  RETURN count(SELECT id FROM srec WHERE account = $a)
                    + count(SELECT id FROM sobj WHERE account = $a)
-                   + count(SELECT id FROM superv:[$a])
-                   + count(SELECT id FROM vault_owner WHERE account = $a);",
+                   + count(SELECT id FROM superv:[$a]);
+                 RETURN count(SELECT id FROM ent:[$a]) + count(SELECT id FROM standing:[$a]);",
                 vec![
                     var("a", bytes(account.as_bytes())),
                     var("ds", Value::Array(ds)),
@@ -2109,6 +2209,7 @@ impl Registry {
             group_requests: n(6)?,
             group_marks: n(7)?,
             storage: n(8)?,
+            entitlements: n(9)?,
         })
     }
 

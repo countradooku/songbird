@@ -20,6 +20,16 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 11 gate (`P11-gate.md`, D-0127 to D-0134): **approved by the owner on 2026-11-19**
+  ("Approve all"), with the threat-model rows (§1, §3.27, §3.28, §4, §6). PR #70 waits for the
+  owner to merge. Still the owner's: App Store Connect, Google Play and Mollie test accounts
+  (the real sandbox runs); counsel on VAT records and the legal-request process; before release,
+  the shipped token and support keys and the Apple root's hash.
+- Prompt 11 plan (`P11-plan.md`, D-0126): **approved by the owner on 2026-11-19** ("Approve
+  all"), every recommendation: a separate `billing` service, anonymous monthly tokens, the plans
+  and limits table, Mollie, unlinked Family seats, the vault unlinked from the account, outreach
+  limits automatic and suspension by moderators, sealed support tickets, the legal tooling,
+  Teams schema only, the app's M7.
 - Prompt 10 gate (`P10-gate.md`, D-0120 to D-0125): **waiting for the owner**. M1–M5 and the
   security review's fixes are done; the gate's items pass. For the owner: approve the gate with
   the threat-model rows (§1, §3.27, §6); register the Google, Microsoft and Dropbox OAuth apps.
@@ -188,6 +198,269 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0134 — Prompt 11, the security review's fixes
+
+- Date: 2026-11-19
+- Status: accepted; the threat-model rows approved by the owner on 2026-11-19
+- Decided by: agent, after an independent read-only review of the whole Prompt 11 diff
+- Context: `docs/reports/P11-gate.md` (the review and what was done about each finding).
+- Decision:
+  - **Mollie**: each payment counts once (its ID remembered 400 days); the period runs from its
+    `paidAt`; only the first payment turns renewal on; a revoked row takes no new checkout
+    (409 `revoked`; the app starts over with a new secret).
+  - **No clock linkage**: billing's `at` and the registry's `ent.at` are whole days; a provider
+    API answer keeps the row's stamp; a transaction presented by the app counts by its day.
+    Kept tokens are redeemed at a random moment of their month's first two days; vault day
+    passes are fetched up to a week ahead at start-up, never by a backup run.
+  - **Trust in keys**: the app trusts only token keys and a support key shipped with the build;
+    a development build without them pins the first seen and refuses any other ID; a release
+    build without them refuses plans and support. Backups use the same pin.
+  - **Abuse signals**: a reporter counts once per sender (keyed pair mark, 31 days); a block
+    consumes the request mark it counts.
+  - **Budgets**: `/v1/invites/status` 60 an hour per account; Google's keys refetched for an
+    unknown key at most once a minute; billing's range budget keys IPv6 on the whole /48 and
+    evicts only idle ranges (new ranges wait when the table is full of busy ones).
+  - **Staff**: `support open` and `reply` need `--confirm` and are audit-logged; tickets are
+    looked up by ID. The app treats only 409 `spent` as already redeemed.
+- Consequences: a release must ship the deployment's token and support public keys in the app
+  (a gate item for Prompt 13's release). Not changed: the app's secrets in plain app storage
+  (the development stand-in for the Keychain / Keystore, like the identity seed); a first
+  purchase's tokens are redeemed at once (the user is waiting), seen only by an observer of both
+  services' live traffic.
+
+## D-0133 — Prompt 11, milestone 7: the app on real plans
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0126 (M7)
+- Decided by: agent, within the owner's plan
+- Context: `docs/reports/P11-M7.md`.
+- Decision:
+  - The app pins the token key on first sight (per key ID, kept in app storage) and refuses a
+    different key under the same ID; tokens that fail their proof are refused.
+  - Desktop purchases go through Mollie in the browser with a subscriber secret kept on the
+    device; the app polls billing (5 s, at most 15 minutes) and then redeems this month's token;
+    next month's is kept and redeemed in its month.
+  - A support ticket names the account only when the user turns on "About my account" (and for
+    appeals); logs only with consent, exactly the previewed scrubbed text.
+  - Limited and suspended accounts see a banner and a status page with the appeal; the
+    entitlement answer carries the standing.
+  - Family seats' links are shared by the owner by hand (copy), never sent by Songbird.
+- Consequences: StoreKit 2 and Play Billing wait for the native hosts; the live purchase run waits
+  for a Mollie test account or a locally served emulator.
+
+## D-0132 — Prompt 11, milestone 6: support, legal requests and invites without a data sink
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0126 §9–§12; the threat-model rows (§1, §3.28, §6)
+  approved by the owner on 2026-11-19; the legal process awaits counsel
+- Decided by: agent, within the owner's plan
+- Context: `docs/reports/P11-M6.md`.
+- Decision:
+  - **Support tickets** in the registry (`ticket`, `ticket_msg`): opened signed (the account
+    attached; priority on Plus; required for appeals) or unsigned (anonymous); every message
+    sealed on the device to the support key (`Domain::Support`) or by staff to the ticket's own
+    reply key (`Domain::SupportReply`); a random ID and a bearer drawn by the server, the bearer
+    stored hashed; one 404 for a wrong bearer and no ticket; 50 messages of 32 KiB at most;
+    budgets per keyed IP range; deleted at close with every message, 90 days untouched at most;
+    unlinked when the account is deleted; listed (never their contents) in the account's export,
+    as is its standing. `songbird-admin support keygen | list | open | reply | close`.
+  - **Legal requests**: `songbird-admin legal export` is the account's GDPR export wrapped with
+    the case and a scope statement, written to a new 0600 file, audit-logged and counted;
+    `legal record` counts the rest; `transparency` prints a half-year's Markdown report from
+    counts only (`legal` table) and the standings now. `docs/RUNBOOKS/legal-requests.md`.
+  - **Invites**: `POST /v1/invites/status` (signed, up to 50 code hashes, live or not); the
+    invite link (`crates/proto/src/invite_link.rs`): everything in the fragment, versioned,
+    parsed strictly.
+  - The support throttle key is derived (HKDF, `songbird.v1/support-throttle`) from the push
+    index secret every `api` node already shares, rather than a new secret to provision.
+- Options considered: tickets in an external helpdesk (rejected: a third party holding users'
+  accounts and logs); a ticket bearer chosen by the client (rejected: the server cannot vouch for
+  its entropy); a per-inviter "invites used" counter (rejected, D-0038).
+- Evidence: `crates/accounts/tests/support_live.rs` (4), `services/api/tests/plans_live.rs`
+  (`support_tickets_are_sealed…`, `an_inviter_sees_only…`), `crates/proto` `invite_link` tests
+  (RFC 4648 vectors) and fuzz target `invite_link`, `tools/admin` `support` and `legal` tests.
+- Consequences: staff must keep retired support keys until their tickets close; the M7 app adds
+  the Help form (consent and preview of logs), the appeal screen and the invite link.
+
+## D-0131 — Prompt 11, milestone 5: abuse controls without content
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0126 §7–§8; the threat-model rows (§1, §3.28, §4) approved by the owner on 2026-11-19
+- Decided by: agent, within the owner's plan
+- Context: `docs/reports/P11-M5.md`.
+- Decision:
+  - Escalating proof of work: +1 bit at 3, 10 and 30 registrations from a range in the hour,
+    +1 at 300 across the deployment and +2 at 1,200, at most +4.
+  - Standings `limited` (automatic, 7 days from the latest signal) and `suspended` (moderators
+    only), in the registry and the entitlements snapshot, followed by `api` and delivery.
+  - New accounts (30 days): 5 requests an hour, burst 10; limited: 1, burst 2, and no new group
+    links; suspended: every send rejected with reason 15 `Suspended`, no sender certificate, no
+    new calls; receiving, export, deletion and appeals always work.
+  - Signals under keyed tags, evaluated on arrival: five distinct reported direct messages in 30
+    days; five blocks in 7 days by people the account sent a request to, at least 20 % of its
+    requests. Group reports never limit automatically.
+  - `songbird-admin moderation decide | lift | show`, audited; a decision deletes its report.
+- Evidence: `tests/e2e/tests/gate_p11.rs` (3), `registration_live::a_registration_flood…`,
+  `crates/entitlements` tests, `tools/admin` tests.
+- Consequences: a new wire reject code (15), read by older clients as unknown. M6 adds appeals
+  through support.
+
+## D-0130 — Prompt 11, milestone 4: Family seats without a family graph; the vault unlinked
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0126 §5 and §6 (re-deciding D-0119 §3); the
+  threat-model rows (§1, §3.27, §3.28) approved by the owner on 2026-11-19
+- Decided by: agent, within the owner's plan
+- Context: `docs/reports/P11-M4.md`.
+- Decision:
+  - **Family:** a mailbox in `api` of random families and up to five slots, managed by the hash
+    of the owner's management token, each slot read by the hash of its member's bearer, holding
+    a token sealed (ChaCha20-Poly1305) under a key from the invite link the server never sees.
+    No account anywhere; removal at once (the month redeemed stays); a family 60 days unused
+    goes.
+  - **Vault:** no owner. `POST /v1/vault/tokens` issues day passes (a week ahead, the account's
+    level) and creation tokens (two per 180 days per account) to the primary, blinded; a vault
+    is created with a creation token and written under a day pass presented once a day; its
+    quota is the pass's level; it keeps the day of its latest pass and last use and is retired
+    after 365 days unused. `vault_owner` is removed. Deleting an account does not reach the
+    vault (the app deletes it first).
+  - The vault adapter takes `Passes` instead of a device signer; the app's `AppPasses` pins the
+    token key per process (release builds ship it).
+- Evidence: `services/api/tests/plans_live.rs::a_family_shares_plus_without_naming_anyone`,
+  `crates/tokens/src/family.rs` tests, `tests/e2e/tests/gate_p10.rs` (8 of 8).
+- Consequences: Prompt 10's PROTOCOL §11.8 and threat-model rows change (owner gone, passes
+  added); M7 builds the app's Family screens on the mailbox.
+
+## D-0129 — Prompt 11, milestone 3: billing, a service of its own
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0126 §1–§4; the threat-model rows (§1, §3.28, §6) approved by the owner on 2026-11-19; the sandbox runs wait for the owner's accounts (D-0126 §11)
+- Decided by: agent, within the owner's plan
+- Context: `docs/reports/P11-M3.md`.
+- Decision:
+  - `services/billing`: its own database and credential, its own uid (`billing_uid`), the only
+    holder of the providers' credentials and, with `api`, of the token secret; no registry
+    access; no account anywhere.
+  - Rows under `HMAC(billing secret, provider ‖ ID)`; Apple's and Google's IDs never stored;
+    Mollie's customer and subscription IDs stored (needed to cancel); lapsed rows deleted 400
+    days after the last paid day.
+  - Apple: `x5c` exactly leaf, intermediate, pinned root (Apple Root CA - G3, its SHA-256 checked
+    at start in production); Apple's marker extensions on leaf and intermediate; rustls-webpki
+    for the path; `ES256`; bundle, environment, type and no `appAccountToken`; the App Store
+    Server API as the source of truth when configured.
+  - Google: the Play API as the only source of state; Google's OIDC token on every notification;
+    test purchases refused in production; `obfuscatedExternalAccountId` refused; voided
+    purchases revoke for good; pending purchases acknowledged.
+  - Mollie: customers with no name or e-mail; webhooks fetched back; one subscription per row;
+    paid through the next charge plus 7 days; refunds and chargebacks revoke.
+  - Replays skipped by message ID; older states ignored; caps spent atomically (retried on write
+    conflicts); a per-node budget per IP range for unauthenticated requests.
+  - **New direct dependency:** `rustls-webpki` 0.103.16 (already in the tree under rustls,
+    vetted), for certificates from the network; `rcgen` (in the workspace) as a dev-dependency
+    for the test PKI.
+- Evidence: `services/billing/tests/billing_live.rs` (7 live tests), unit tests (13), fuzz
+  `billing_inputs`.
+- Consequences: M4 adds Family seats and vault tokens on billing's and `api`'s tokens. The
+  gate's sandbox item needs the owner's App Store Connect, Play Console and Mollie test accounts.
+
+## D-0128 — Prompt 11, milestone 2: anonymous tokens on RFC 9497's POPRF
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0126 §2; the threat-model rows (§1, §3.28, §6) approved by the owner on 2026-11-19
+- Decided by: agent, within the owner's plan
+- Context: D-0126 §2 chose anonymous tokens so billing and accounts share no identifier, and
+  asked for the evaluation of libsignal's credential library. `docs/reports/P11-M2.md`.
+- Options considered: libsignal `zkcredential` (AGPL, a port; hidden attributes not needed for
+  payments); a VOPRF key per level and month (the plan's first idea: many keys to publish and
+  pin, each a chance to tag a user); RFC 9497's POPRF with the metadata as public input; plain
+  linkage in a stricter store (refused by the owner's plan).
+- Decision:
+  - `crates/tokens`: RFC 9497 `ristretto255-SHA512`, all three modes, written from the RFC on
+    `curve25519-dalek` 5 and aws-lc-rs, checked against all of Appendix A.1. No new external
+    dependency.
+  - Tokens on the POPRF: metadata `"songbird.v1/token\0" || kind || level || period`; key ID
+    `n` = `DeriveKeyPair(secret, "songbird.v1/token-key\0" || n)`; the highest ID issues,
+    every listed ID redeems; apps pin the public keys; the client checks the batched DLEQ proof
+    against the pinned key before unblinding; nullifier `SHA-256(context || key || info ||
+    nonce)`.
+  - Plan tokens: one a month per level, redeemable in their month and the one before, Plus
+    through the month's end plus 3 days; nullifier and entitlement in one transaction.
+  - `[api.tokens]` (the secret shared with billing only), `POST /v1/entitlements/redeem`
+    (30 an hour per account), `GET /v1/tokens/keys`.
+  - Songbird's vector re-derived in CI by `vectors/check.py` (Python standard library,
+    ristretto255 from RFC 9496).
+- Evidence: `crates/tokens/tests/rfc9497.rs`; `src/token/tests.rs` (9); `vectors/check.py`;
+  `services/api/tests/plans_live.rs` (3); fuzz `tokens` (6.6 million runs); `tests/bench.rs`.
+- Consequences: M3's billing issues plan tokens under its caps; M4 adds vault tokens (kinds 2
+  and 3). Key transparency for the token keys is proposed for Prompt 12.
+
+## D-0127 — Prompt 11, milestone 1: entitlements, one snapshot, every limit by plan
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0126; the threat-model rows (§1, §3.28, §4) approved by the owner on 2026-11-19
+- Decided by: agent, within the owner's plan
+- Context: `docs/reports/P11-M1.md`.
+- Decision:
+  - `crates/entitlements`: levels (Free 0, Plus 1; every Family seat is Plus), a catalogue
+    from `[api.plans]` with the owner's numbers by default (D-0126 §3), refused at start-up if
+    a higher level allows less or a number is out of bounds; a snapshot of the accounts not on
+    Free, swapped whole (`arc-swap`) when `entver` changes; expiry by date at every reader.
+  - Registry `ent:[account]` (level, last UTC day, source `grant` or `token`) and `entver`;
+    deleted with the account; in the GDPR export. Teams tables `org`, `org_admin`,
+    `org_member`, `org_device` defined and empty.
+  - `api` enforces every limit from the account's level: device links, the largest file (413
+    `plan`), upload bytes a day, new packs per 30 days (429 `plan`), the vault's space and
+    chunks (its owner's plan). Downgrades refuse additions and delete nothing.
+  - The former configuration numbers stay as the deployment's ceilings, with defaults raised so
+    the plans decide. Budgets of bytes and packs have a record per level.
+  - `GET /v1/entitlements`; `songbird-admin plans grant | revoke | show`, audit-logged with the
+    account (an operator's change to one account must be attributable).
+  - No new external dependency (`arc-swap`, `serde`, `tokio` are in the workspace).
+- Evidence: `crates/entitlements` tests (8, two of them property tests);
+  `crates/accounts/tests/entitlements_live.rs`; `devices_live::the_plan_sets_the_device_limit…`;
+  `media_live::the_plan_sets_file_size_daily_bytes_and_packs`;
+  `gate_p10::the_quota_is_the_owners_plan_and_a_downgrade_keeps_the_backup`.
+- Consequences: M2 redeems anonymous tokens into `ent` (`extend_entitlement`). `delivery`
+  follows the snapshot from M5 (standings). PROTOCOL §14 is appended after §13.
+
+## D-0126 — Prompt 11: the plan, and the owner's decisions it needs
+
+- Date: 2026-11-19
+- Status: accepted (owner, 2026-11-19, "Approve all": every recommendation)
+- Decided by: owner, on the agent's plan `docs/reports/P11-plan.md`
+- Context: Prompt 11 asks for Free, Plus, Family and (later) Teams plans enforced everywhere,
+  payments verified server-side with minimal linkage to accounts, and abuse controlled without
+  reading content. What exists: limits scattered in configuration (devices, vault, file size,
+  uploads), GCRA budgets almost everywhere, fixed-difficulty proof of work, franked reports
+  sealed to an offline key, `songbird-admin` with its audit log, the GDPR export, mocked plan,
+  help and invite screens. Missing: a catalogue and snapshot, any payment verification, a
+  credential scheme, families, standings, moderation decisions, legal tooling, support. libsignal's
+  `zkcredential` is AGPL-3.0-only and never linked (D-0047).
+- Options considered and evidence: in the plan ("What Prompt 11 starts from", "Findings").
+  The credential evaluation the prompt asks for: `zkcredential` (port, as D-0049 did for
+  usernames) against Privacy Pass on the RFC 9497 VOPRF (key per level and month) against plain
+  linkage in a stricter store. Recommended: the VOPRF, which gives payments the same
+  unlinkability with far less cryptography to own; hidden attributes are not needed.
+- Decisions asked of the owner (recommendations first):
+  1. the milestones as written, with a separate `billing` service and database;
+  2. anonymous monthly tokens between billing and accounts, no shared identifier;
+  3. the plans and limits table (Plus 10 devices, 4 GiB files, 50 GiB uploads a day and backup
+     space, 50 packs a month; prices as the app's mock);
+  4. Mollie as the EU provider (Songbird the merchant of record, VAT through OSS);
+  5. unlinked Family seats through a family mailbox, removal at the month's end;
+  6. the vault unlinked from the account on daily tokens, deleted after 12 months unwritten;
+  7. automatic actions only limit outreach; suspension by moderators; a keyed counter of
+     verified reports per reported account added to THREAT_MODEL §1;
+  8. a suspended account receives, exports, deletes and appeals, but cannot send or call;
+  9. sealed support tickets, the account only when attached, logs only with consent;
+  10. the legal export tool, a counts-only register, a transparency report twice a year;
+  11. the owner's App Store Connect, Google Play and EU provider test accounts for the sandbox
+      item; counsel on VAT records and the legal process;
+  12. Teams as reserved, empty tables;
+  13. the app's M7, StoreKit 2 and Play Billing with the native hosts later.
+- Agent decisions, unless the owner objects: in the plan's question 14.
+- Consequences: M1 (entitlements) is next.
 
 ## D-0125 — Prompt 10: the security review's fixes
 

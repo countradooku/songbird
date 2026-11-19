@@ -56,6 +56,7 @@ const SERVICES: &[(&str, u16)] = &[
     ("push", 9103),
     ("worker", 9104),
     ("calls", 9105),
+    ("billing", 9106),
 ];
 const RELEASE_BINS: &[&str] = &[
     "songbird-delivery",
@@ -63,6 +64,7 @@ const RELEASE_BINS: &[&str] = &[
     "songbird-push",
     "songbird-worker",
     "songbird-calls",
+    "songbird-billing",
     "songbird-proxy",
     "songbird-admin",
 ];

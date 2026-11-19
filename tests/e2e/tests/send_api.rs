@@ -182,8 +182,10 @@ async fn stack(limits: Limits, sends_per_sec: u32, send_burst: u32) -> Option<St
         groups: None,
     };
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
+        support: None,
         calls: None,
         server_name: API.into(),
         push_store: Arc::new(

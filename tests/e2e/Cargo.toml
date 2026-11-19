@@ -30,6 +30,10 @@ songbird-jobs.workspace = true
 songbird-s3.workspace = true
 songbird-valkey.workspace = true
 songbird-api = { path = "../../services/api" }
+# Prompt 11: plans in every gate that builds an `App`.
+songbird-entitlements.workspace = true
+songbird-tokens.workspace = true
+async-trait.workspace = true
 # Prompt 7's gate: calls through `api` against a real LiveKit.
 songbird-calls.workspace = true
 livekit-api = { version = "=0.10.2", default-features = false, features = ["access-token"] }

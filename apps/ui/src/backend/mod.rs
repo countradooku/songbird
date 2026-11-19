@@ -27,6 +27,7 @@ pub mod backup;
 pub mod link;
 pub mod lock;
 pub mod nudge;
+pub mod plans;
 pub mod presence;
 pub mod profile;
 pub mod records;
@@ -50,6 +51,8 @@ pub struct Endpoint {
     pub ws_addr: String,
     /// Delivery's configured `server_name`.
     pub ws_name: String,
+    /// Billing's base URL (Prompt 11): a service of its own, never told the account.
+    pub billing: String,
 }
 
 impl Default for Endpoint {
@@ -59,6 +62,7 @@ impl Default for Endpoint {
             api_name: "api.localhost".into(),
             ws_addr: "127.0.0.1:9201".into(),
             ws_name: "localhost".into(),
+            billing: "http://127.0.0.1:8445".into(),
         }
     }
 }
@@ -126,6 +130,9 @@ pub fn restore() {
                 api_name: v["api_name"].as_str()?.into(),
                 ws_addr: v["ws_addr"].as_str()?.into(),
                 ws_name: v["ws_name"].as_str()?.into(),
+                billing: v["billing"]
+                    .as_str()
+                    .map_or_else(|| Endpoint::default().billing, Into::into),
             })
         })
         .unwrap_or_default();
@@ -169,6 +176,7 @@ pub fn set_endpoint(endpoint: Endpoint) {
     let json = serde_json::json!({
         "api": endpoint.api, "api_name": endpoint.api_name,
         "ws_addr": endpoint.ws_addr, "ws_name": endpoint.ws_name,
+        "billing": endpoint.billing,
     });
     put(K_ENDPOINT, &json.to_string());
     live().update(|l| l.endpoint = endpoint);
@@ -234,7 +242,19 @@ fn explain(status: u16, body: &[u8]) -> Problem {
         (403, "pending") => "This device is still waiting to be approved by your phone.",
         (403, "primary") => "Only your main phone can do that.",
         (423, _) => "Too many wrong PINs. Wait a while, or set a new PIN on your main phone.",
+        (429, "plan") => {
+            "You've added all the sticker packs your plan allows this month. Plus allows more."
+        }
         (429, _) => "Too many tries. Wait a moment and try again.",
+        // Prompt 11: a plan's limit. Nothing already there is ever removed (D-0127).
+        (409, "limit") => {
+            "You've reached your plan's device limit. Plus allows more, and no device is removed."
+        }
+        (413, "plan") => "This file is larger than your plan allows. Plus raises the limit.",
+        (403, "suspended") => {
+            "Your account is suspended, so it can't do this. You can still read, export and appeal."
+        }
+        (403, "standing") => "Your account is limited for a while, so it can't do this yet.",
         (503, _) => "The server isn't offering this yet.",
         _ => {
             return Problem(format!(
@@ -457,10 +477,19 @@ pub async fn invite_allowance() -> Result<(u64, bool), Problem> {
 pub async fn create_invite() -> Result<String, Problem> {
     let (status, body) = signed("POST", "/v1/invites", Some(b"{}".to_vec()), true).await?;
     let v = ok_json(status, &body)?;
-    v["code"]
+    let code = v["code"]
         .as_str()
         .map(str::to_owned)
-        .ok_or_else(|| problem("The server's answer was incomplete."))
+        .ok_or_else(|| problem("The server's answer was incomplete."))?;
+    // Kept on this device: the only place that knows which codes are this account's (the
+    // server keeps no per-inviter list, D-0038).
+    let mut mine = plans::my_invites();
+    mine.push(code.clone());
+    put(
+        plans::K_MY_INVITES,
+        &serde_json::to_string(&mine).unwrap_or_default(),
+    );
+    Ok(code)
 }
 
 /// A GIF from the privacy proxy (`/v1/gifs/media/<token>` URLs: the GIF

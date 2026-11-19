@@ -64,6 +64,7 @@ fn settings(invite_only: bool, allowance: u32, throttle: ThrottleSettings) -> Re
         max_concurrent_verifications: 2,
         pow: CHEAP,
         throttle,
+        escalation: songbird_api::config::Escalation::default(),
     }
 }
 
@@ -82,7 +83,8 @@ async fn stack_with(reg: Option<RegistrationSettings>) -> Option<Stack> {
         pass: std::env::var("SONGBIRD_TEST_SURREALDB_PASS").unwrap(),
         namespace: "test".into(),
         database: format!("reg_{}", DeviceId::random().unwrap().to_hex_unredacted()),
-        timeout: Duration::from_secs(5),
+        // The registry defines its whole schema at connect: slow on a loaded CI runner.
+        timeout: Duration::from_secs(30),
         max_message_bytes: 16 << 20,
     })
     .await
@@ -112,8 +114,10 @@ async fn stack_with(reg: Option<RegistrationSettings>) -> Option<Stack> {
     let registration =
         reg.map(|r| Registration::new(r, &secret, RegistrationMetrics::default()).unwrap());
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
+        support: None,
         calls: None,
         server_name: SERVER.into(),
         push_store: Arc::new(
@@ -533,4 +537,65 @@ async fn without_registration_settings_the_endpoints_are_unavailable() {
         client.send("GET", "/v1/invites", None).await.unwrap().0,
         503
     );
+}
+
+/// A registration flood (Prompt 11, D-0131): one range registering again and again faces work
+/// that doubles at 3, 10 and 30 registrations an hour; a person in another range keeps the base
+/// work until the whole deployment is busy, and then pays one step at most.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_registration_flood_raises_the_work_for_its_range_and_barely_for_others() {
+    let mut reg = settings(
+        false,
+        0,
+        ThrottleSettings {
+            challenges_per_hour: 100_000,
+            challenge_burst: 1_000,
+            registrations_per_hour: 100_000,
+            registration_burst: 1_000,
+            global_registrations_per_hour: 100_000,
+            ..ThrottleSettings::default()
+        },
+    );
+    reg.escalation.global_step = 20;
+    let Some(s) = stack(reg).await else {
+        return;
+    };
+    // A fresh deployment secret per run keys the counters apart from other runs.
+    let r = registrar(&s);
+    let bits = || async {
+        let (st, body) = r.challenge().await.unwrap();
+        assert_eq!(st, 200);
+        songbird_pow::decode(&body).unwrap().params.bits
+    };
+    let other = || async {
+        match s
+            .app
+            .registration
+            .as_ref()
+            .unwrap()
+            .challenge(&s.app.hot, "203.0.113.9".parse().unwrap())
+            .await
+        {
+            songbird_api::registration::Outcome::Challenge(b) => {
+                songbird_pow::decode(&b).unwrap().params.bits
+            }
+            o => panic!("{o:?}"),
+        }
+    };
+    let base = CHEAP.bits;
+    assert_eq!((bits().await, other().await), (base, base));
+    let mut seen = Vec::new();
+    for _ in 0..31 {
+        seen.push(bits().await);
+        assert!(matches!(register(&s, None).await, Registered::Ok { .. }));
+    }
+    // 0-2 registrations: base; 3-9: +1; 10-19: +2 (+3 once the deployment passed 20); 30: +4.
+    assert_eq!(seen[0], base);
+    assert_eq!(seen[3], base + 1);
+    assert_eq!(seen[10], base + 2);
+    assert_eq!(seen[25], base + 3, "the range's step and the deployment's");
+    assert_eq!(bits().await, base + 4, "the cap: four bits above the base");
+    assert!(seen.windows(2).all(|w| w[0] <= w[1]));
+    // Another range: only the deployment's step.
+    assert_eq!(other().await, base + 1);
 }

@@ -138,6 +138,7 @@ async fn stack(limits: RequestLimits) -> Option<Stack> {
         max_broadcast_accounts: limits.max_broadcast_accounts,
         rosters: None,
         channels: Arc::default(),
+        standings: None,
     };
     let mailbox = Arc::new(test_mailbox().await);
     let router = Arc::new(LocalRouter::new());
@@ -212,8 +213,10 @@ async fn stack(limits: RequestLimits) -> Option<Stack> {
     )
     .unwrap();
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans::default(),
         calls: None,
         reports: None,
+        support: None,
         requests: Some(songbird_api::requests::Requests::new(
             keys.clone(),
             songbird_api::requests::RequestsMetrics::default(),

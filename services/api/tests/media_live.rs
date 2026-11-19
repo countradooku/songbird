@@ -80,7 +80,8 @@ async fn stack_full(
         pass: std::env::var("SONGBIRD_TEST_SURREALDB_PASS").unwrap(),
         namespace: "test".into(),
         database: format!("media_{}", DeviceId::random().unwrap().to_hex_unredacted()),
-        timeout: Duration::from_secs(5),
+        // The registry defines its whole schema at connect: slow on a loaded CI runner.
+        timeout: Duration::from_secs(30),
         max_message_bytes: 16 << 20,
     })
     .await
@@ -110,8 +111,10 @@ async fn stack_full(
     let mut secret = [0u8; 32];
     aws_lc_rs::rand::fill(&mut secret).unwrap();
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
+        support: None,
         calls: None,
         server_name: SERVER.into(),
         push_store: Arc::new(
@@ -1013,4 +1016,137 @@ async fn parts_can_be_retried_but_not_rewritten_forever() {
     );
     assert!(download(&s, &id).await == body);
     let _ = s.stop.send(true);
+}
+
+/// The plan sets the largest file, the daily upload bytes and new packs per 30 days (Prompt
+/// 11, D-0127): Free 2 GiB, 10 GiB a day and 5 packs; Plus 4 GiB, 50 GiB and 50, each level on a
+/// budget of its own so an upgrade applies at once; an expired entitlement reads as Free.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_plan_sets_file_size_daily_bytes_and_packs() {
+    use songbird_accounts::entitlements::{EntRow, Source};
+    use songbird_entitlements::{Snapshot, today};
+    let Some(s) = stack(MediaBudgets {
+        grants_per_hour: 10_000,
+        grant_burst: 1_000,
+        ..MediaBudgets::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let c = device(&s).await;
+    let account = s
+        .app
+        .registry
+        .device(&c.device())
+        .await
+        .unwrap()
+        .unwrap()
+        .account;
+    let set = |last_day: Option<u32>| {
+        s.app.plans.live.store(Snapshot::from_rows(
+            i64::from(last_day.unwrap_or(0)),
+            &last_day
+                .map(|d| EntRow {
+                    account,
+                    level: 1,
+                    last_day: d,
+                    source: Source::Token,
+                })
+                .into_iter()
+                .collect::<Vec<_>>(),
+        ));
+    };
+    // Largest file: 3 GiB is over Free's 2 and under Plus's 4.
+    let three = ciphertext_len(3 << 30).unwrap();
+    let (st, b) = c
+        .send(
+            "POST",
+            "/v1/attachments",
+            Some(format!(r#"{{"size":{three},"fetches":1}}"#).as_bytes()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(st, 413);
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(
+        (v["error"].as_str(), v["file_bytes"].as_u64()),
+        (Some("plan"), Some(2 << 30))
+    );
+    set(Some(today() - 1));
+    assert_eq!(grant(&c, three, 1).await.0, 413, "expired yesterday: Free");
+    set(Some(today()));
+    assert_eq!(grant(&c, three, 1).await.0, 201);
+    // Past 4 GiB nobody may (the ceiling).
+    assert_eq!(grant(&c, ciphertext_len(5 << 30).unwrap(), 1).await.0, 400);
+
+    // Daily bytes: Free's 10 GiB run out in 1 GiB grants...
+    set(None);
+    let one = ciphertext_len(1 << 30).unwrap();
+    let mut ok = 0;
+    while grant(&c, one, 1).await.0 == 201 {
+        ok += 1;
+        assert!(ok <= 10, "Free's 10 GiB a day must run out");
+    }
+    assert_eq!(ok, 9, "nine grants of a little over 1 GiB fit in 10 GiB");
+    // ... and Plus has a budget of its own at once.
+    set(Some(today()));
+    assert_eq!(grant(&c, one, 1).await.0, 201);
+    set(None);
+    assert_eq!(
+        grant(&c, one, 1).await.0,
+        429,
+        "back on Free, Free's budget is still spent"
+    );
+
+    // New packs: five on Free, then the plan's answer with a wait.
+    let small = ciphertext_len(1_000).unwrap();
+    let pack = || {
+        let mut t = [0u8; 32];
+        aws_lc_rs::rand::fill(&mut t).unwrap();
+        format!(
+            r#"{{"sizes":[{small},{small}],"token":"{}"}}"#,
+            hex::encode(t)
+        )
+    };
+    let p = device(&s).await;
+    for _ in 0..5 {
+        let (st, _) = p
+            .send("POST", "/v1/packs", Some(pack().as_bytes()))
+            .await
+            .unwrap();
+        assert_eq!(st, 201);
+    }
+    let (st, b) = p
+        .send("POST", "/v1/packs", Some(pack().as_bytes()))
+        .await
+        .unwrap();
+    assert_eq!(st, 429);
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(
+        (v["error"].as_str(), v["packs_per_month"].as_u64()),
+        (Some("plan"), Some(5))
+    );
+    let pa = s
+        .app
+        .registry
+        .device(&p.device())
+        .await
+        .unwrap()
+        .unwrap()
+        .account;
+    s.app.plans.live.store(Snapshot::from_rows(
+        9,
+        &[EntRow {
+            account: pa,
+            level: 1,
+            last_day: today(),
+            source: Source::Grant,
+        }],
+    ));
+    let (st, _) = p
+        .send("POST", "/v1/packs", Some(pack().as_bytes()))
+        .await
+        .unwrap();
+    assert_eq!(st, 201, "Plus: a budget of its own");
 }

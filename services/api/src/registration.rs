@@ -307,15 +307,60 @@ impl Registration {
             }
             Err(()) => return Outcome::Unavailable,
         }
-        match self
-            .challenge_key
-            .issue(self.settings.pow.params(), now_ms())
-        {
+        // Escalation (D-0131): the work rises with this range's and the deployment's
+        // registrations in the past hour; a challenge carries its own parameters.
+        let extra = self.pressure(hot, &range).await;
+        let mut params = self.settings.pow.params();
+        params.bits = params.bits.saturating_add(extra).min(24);
+        match self.challenge_key.issue(params, now_ms()) {
             Ok(c) => {
                 self.metrics.challenges.inc();
                 Outcome::Challenge(Bytes::copy_from_slice(&c.bytes))
             }
             Err(_) => Outcome::Unavailable,
+        }
+    }
+
+    fn hour() -> u64 {
+        now_ms() / 3_600_000
+    }
+
+    /// The hourly registration counters: this range's and the deployment's.
+    fn counters(&self, range: &[u8; 17]) -> (String, String) {
+        let h = Self::hour();
+        (
+            format!("{}:{h}", self.record("rr", range)),
+            format!("{}:{h}", self.record("rg", &[0; 17])),
+        )
+    }
+
+    /// Extra zero bits for a challenge from `range` (D-0131). A store failure adds none: the
+    /// other budgets still hold.
+    async fn pressure(&self, hot: &ValkeyConn, range: &[u8; 17]) -> u8 {
+        let (r, g) = self.counters(range);
+        let get = |k: String| async move {
+            hot.query::<Option<u32>>(redis::cmd("GET").arg(k))
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(0)
+        };
+        let (rn, gn) = (get(r).await, get(g).await);
+        self.settings.escalation.extra_bits(rn, gn)
+    }
+
+    async fn count_registration(&self, hot: &ValkeyConn, range: &[u8; 17]) {
+        let (r, g) = self.counters(range);
+        for k in [r, g] {
+            let _ = hot
+                .query::<i64>(
+                    redis::cmd("EVAL")
+                        .arg(songbird_send::gate::COUNT_DAY)
+                        .arg(1)
+                        .arg(k)
+                        .arg(7_200),
+                )
+                .await;
         }
     }
 
@@ -332,7 +377,12 @@ impl Registration {
             .register_inner(registry, hot, server_name, peer, body)
             .await;
         match &out {
-            Outcome::Registered { .. } => self.metrics.registered.inc(),
+            Outcome::Registered { .. } => {
+                self.metrics.registered.inc();
+                let t = self.settings.throttle;
+                self.count_registration(hot, &range_of(peer, t.ipv4_prefix, t.ipv6_prefix))
+                    .await;
+            }
             Outcome::Throttled(_) => self.metrics.throttled.inc(),
             Outcome::Invite403 => {
                 self.metrics.refused.inc();
@@ -665,6 +715,7 @@ mod tests {
                 max_concurrent_verifications: 1,
                 pow: crate::config::PowSettings::default(),
                 throttle: ThrottleSettings::default(),
+                escalation: crate::config::Escalation::default(),
             },
             &[3; 32],
             RegistrationMetrics::default(),

@@ -33,8 +33,8 @@
     network_mode: host
     restart_policy: unless-stopped
     command: [--config, /etc/songbird/config.toml]
-    # Push has a uid of its own (D-0100); the other services share 65532.
-    user: "{{ (push_uid if item == 'push' else 65532) }}:{{ (push_uid if item == 'push' else 65532) }}"
+    # Push (D-0100) and billing (D-0129) have uids of their own; the other services share 65532.
+    user: "{{ {'push': push_uid, 'billing': billing_uid}[item] | default(65532) }}:{{ {'push': push_uid, 'billing': billing_uid}[item] | default(65532) }}"
     read_only: true
     cap_drop: [ALL]
     security_opts: [no-new-privileges]

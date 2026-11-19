@@ -35,6 +35,12 @@ use songbird_types::{AccountId, DeviceId};
 
 /// How long one delivery request may take.
 const LINK_TIMEOUT: Duration = Duration::from_secs(10);
+/// Days a vault may go unused before it is retired (D-0130): the account inactivity default.
+pub const VAULT_UNUSED_DAYS: u32 = 365;
+
+/// Days a family mailbox may go untouched before it is deleted (D-0130): two months.
+pub const FAMILY_UNUSED_DAYS: u32 = 60;
+
 /// Items handled per sweep pass.
 const SWEEP_BATCH: usize = 500;
 
@@ -424,18 +430,8 @@ impl Worker {
         self.delete_packs_of(&devices).await?;
         // Encrypted avatars (Prompt 3, M5) and storage objects (Prompt 9, M1).
         let uploaded = self.delete_owned_objects(account).await?;
-        // Backup vaults (Prompt 10, M2): retired (rows gone), then every object. A retry finds
-        // what an earlier attempt retired in `vault_gone` and finishes it in the sweep.
-        for vk in self
-            .registry
-            .vaults_of(account)
-            .await
-            .map_err(unavailable)?
-        {
-            if let Some(epoch) = self.registry.vault_retire(&vk).await.map_err(unavailable)? {
-                self.delete_vault_objects(&vk, &epoch).await?;
-            }
-        }
+        // Backup vaults name no account (D-0130): the app deletes its vault before deleting the
+        // account; one nobody uses goes after a year (`sweep_plans`).
         // Every delivery node has dropped the devices: forget again what a racing send stored.
         tokio::time::sleep(self.propagation).await;
         self.delivery.forget(&devices).await?;
@@ -755,6 +751,68 @@ impl Worker {
         Ok(())
     }
 
+    /// Entitlements past their last day (Prompt 11, D-0127): readers already treat them as
+    /// Free; this keeps the table and every snapshot small. Nullifiers of tokens that could no
+    /// longer be redeemed (D-0128).
+    async fn sweep_plans(&self) {
+        let today = songbird_entitlements::today();
+        // Vaults nobody used for a year (D-0130): retired, their objects deleted by the next
+        // vault sweep (`vault_gone`).
+        match self
+            .registry
+            .vaults_unused(today.saturating_sub(VAULT_UNUSED_DAYS), SWEEP_BATCH)
+            .await
+        {
+            Ok(vks) => {
+                for vk in vks {
+                    if let Err(e) = self.registry.vault_retire(&vk).await {
+                        tracing::warn!(error = %e, "unused vault retirement failed");
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "unused vault sweep failed"),
+        }
+        if let Err(e) = self.registry.sweep_vault_creations(today).await {
+            tracing::warn!(error = %e, "vault creation sweep failed");
+        }
+        // Risk signals past their window and standings past their day (D-0131).
+        if let Err(e) = self.registry.sweep_signals(today).await {
+            tracing::warn!(error = %e, "signal sweep failed");
+        }
+        // Support tickets nobody touched for 90 days, with every message (D-0132).
+        if let Err(e) = self
+            .registry
+            .sweep_tickets(today.saturating_sub(songbird_accounts::support::TICKET_DAYS))
+            .await
+        {
+            tracing::warn!(error = %e, "ticket sweep failed");
+        }
+        // Family mailboxes nobody touched for two months (D-0130).
+        if let Err(e) = self
+            .registry
+            .sweep_families(today.saturating_sub(FAMILY_UNUSED_DAYS))
+            .await
+        {
+            tracing::warn!(error = %e, "family sweep failed");
+        }
+        match self
+            .registry
+            .sweep_entitlements(songbird_entitlements::today())
+            .await
+        {
+            Ok(n) if n > 0 => tracing::info!(n, "lapsed entitlements deleted"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "entitlement sweep failed"),
+        }
+        if let Err(e) = self
+            .registry
+            .sweep_nullifiers(songbird_entitlements::today())
+            .await
+        {
+            tracing::warn!(error = %e, "nullifier sweep failed");
+        }
+    }
+
     /// One sweep:attachments past 30 days or fully fetched, expired grants, expired invite
     /// codes, expired KeyPackages, expired link tokens, released usernames whose hold ended, the outbox.
     pub async fn sweep(&self) {
@@ -764,6 +822,7 @@ impl Worker {
         {
             tracing::info!(n, "expired reports deleted");
         }
+        self.sweep_plans().await;
         match self.registry.expired_attachments(SWEEP_BATCH).await {
             Ok(objects) => {
                 for o in objects {

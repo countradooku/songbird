@@ -28,6 +28,7 @@ use songbird_keys::provisioning::Domain;
 use songbird_proto::report::Report;
 use songbird_send::{Frankers, GateKeys};
 use songbird_service::telemetry::sharded::ShardedCounter as Counter;
+use songbird_types::AccountId;
 use songbird_valkey::ValkeyConn;
 
 use crate::config::ReportSettings;
@@ -277,6 +278,19 @@ impl Reports {
         {
             Ok(()) => {
                 self.metrics.queued.inc();
+                // A direct message the server attests: a signal (D-0131). Group messages go to
+                // moderators only.
+                if verdict.sender_attested && !verdict.group {
+                    crate::abuse::on_report(
+                        registry,
+                        hot,
+                        &self.keys,
+                        &AccountId::from_bytes(reporter),
+                        &AccountId::from_bytes(report.sender),
+                        songbird_entitlements::today(),
+                    )
+                    .await;
+                }
                 Outcome::Done
             }
             Err(RegistryError::Duplicate) => {

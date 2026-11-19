@@ -72,7 +72,8 @@ async fn registry(e: &Env) -> Arc<Registry> {
         pass: std::env::var("SONGBIRD_TEST_SURREALDB_PASS").unwrap(),
         namespace: "test".into(),
         database: format!("gate_{}", DeviceId::random().unwrap().to_hex_unredacted()),
-        timeout: Duration::from_secs(5),
+        // The registry defines its whole schema at connect: slow on a loaded CI runner.
+        timeout: Duration::from_secs(30),
         max_message_bytes: 16 << 20,
     })
     .await
@@ -234,8 +235,10 @@ async fn account_deletion_is_verified_across_every_store() {
     // api.
     let (_, push_public) = songbird_accounts::push_token::key_pair(&[0x23; 32]).unwrap();
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
+        support: None,
         calls: None,
         server_name: API.into(),
         push_store: Arc::new(
@@ -570,8 +573,10 @@ async fn device_removal_is_verified_across_every_store_and_spares_the_rest() {
     ));
     let (_, push_public) = songbird_accounts::push_token::key_pair(&[0x23; 32]).unwrap();
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
+        support: None,
         calls: None,
         server_name: API.into(),
         push_store: Arc::new(
@@ -853,8 +858,10 @@ async fn an_offline_device_receives_a_push_end_to_end() {
     let push_key = [0x24; 32];
     let (_, push_public) = songbird_accounts::push_token::key_pair(&push_key).unwrap();
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
+        support: None,
         calls: None,
         server_name: API.into(),
         push_store: Arc::new(
@@ -1143,8 +1150,10 @@ async fn m5_numbers() {
         .unwrap();
     let (_, push_public) = songbird_accounts::push_token::key_pair(&[0x24; 32]).unwrap();
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
+        support: None,
         calls: None,
         server_name: API.into(),
         push_store: Arc::new(

@@ -148,14 +148,17 @@ async fn registered_accounts_connect_and_talk_without_an_operator() {
                 solutions: 4,
             },
             throttle: ThrottleSettings::default(),
+            escalation: songbird_api::config::Escalation::default(),
         },
         &secret,
         RegistrationMetrics::default(),
     )
     .unwrap();
     let app = Arc::new(App {
+        plans: songbird_api::plans::Plans::default(),
         requests: None,
         reports: None,
+        support: None,
         calls: None,
         server_name: API.into(),
         push_store: Arc::new(

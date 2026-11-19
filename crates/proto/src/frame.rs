@@ -408,6 +408,9 @@ pub enum RejectReason {
     /// A group message from a member whose role may not send ("only admins can send", a
     /// channel's subscribers; Prompt 5, D-0070).
     NotAllowed,
+    /// The sending account is suspended by a moderator (Prompt 11, D-0131): it may receive,
+    /// export, delete and appeal, not send.
+    Suspended,
     /// A code this version does not know (forward compatibility).
     Other(u16),
 }
@@ -431,6 +434,7 @@ impl RejectReason {
             Self::NotMember => 12,
             Self::InvalidGroupMessage => 13,
             Self::NotAllowed => 14,
+            Self::Suspended => 15,
             Self::Other(c) => c,
         }
     }
@@ -453,6 +457,7 @@ impl RejectReason {
             12 => Self::NotMember,
             13 => Self::InvalidGroupMessage,
             14 => Self::NotAllowed,
+            15 => Self::Suspended,
             c => Self::Other(c),
         }
     }

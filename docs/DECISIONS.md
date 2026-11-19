@@ -199,6 +199,61 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0135 — A phone test environment on one Coolify server; TLS to delivery in the app
+
+- Date: 2026-11-19
+- Status: proposed (waiting for the owner)
+- Decided by: agent (owner's request: "deploy the whole app including the needed services on my
+  VPS to test the app on my iPhone", LiveKit included)
+- Context: the owner's existing Hetzner server (x86, 8 cores, 15 GB) already runs Coolify, whose
+  Traefik owns 80/443, and other services. `deploy/bin/env-up` builds new servers with OpenTofu and
+  needs SOPS secrets that do not exist yet, so it does not fit. The app had never reached a running
+  server (D-0092) and only spoke plain TCP to delivery.
+- Options considered: the `beta` pipeline on new servers; a Coolify-managed compose resource built
+  from GitHub (needs Coolify's GitHub app, builds Rust on the server through Coolify); a compose stack
+  deployed over SSH and routed by Coolify's Traefik through its file provider (chosen). For
+  delivery: TLS terminated by Traefik (breaks D-0018: the device signs the TLS exporter, which would
+  be Traefik's) versus SNI passthrough with delivery's own certificate (chosen). For the app's TLS:
+  a second setup with the operating system's verifier (tried first, then dropped) versus
+  `songbird_client::web_tls()`, which the proxy route (Prompt 9) already uses (chosen: one TLS setup,
+  no new dependency).
+- Evidence (2026-11-19, from outside the server):
+  - `api.songbird.chat` 200 over HTTP/1.1 and HTTP/2; `livekit.` 200; TURN/TLS on 5349 and LiveKit
+    TCP 7881 reachable; Let's Encrypt certificates valid.
+  - `ws.songbird.chat:443`: `101 Switching Protocols`, `songbird.v1`, served by delivery (TLS 1.3,
+    ALPN `http/1.1`). Before the fix below Traefik answered `418` from `noop@internal`.
+  - The owner's iPhone registered (`songbird_api_registrations_total 1`, `handles_claimed_total 1`)
+    and authenticated to delivery over TLS (`songbird_delivery_auth_ok_total 1`, no failures).
+  - With `web_tls()` on `main` (Prompts 8–11 merged): a second device (the iOS simulator) registered
+    and connected ("Connected. Signed in with this device's key"; `registrations_total 2`).
+  - App: `cargo test --lib` 206 passed, including `plain_tcp_only_to_this_machine`.
+- Decision:
+  1. `deploy/dev-vps/`: compose project `songbird` (SurrealDB, valkey-hot, valkey-jobs, RustFS, api,
+     delivery, calls, LiveKit), images built on the server from the checkout, `environment = "dev"`,
+     services as 65532 with read-only roots and no capabilities. Secrets are generated on the server
+     into `/opt/songbird/secrets` (0640 root:65532) and never leave it. The stores publish no ports.
+  2. Traefik routes in `/data/coolify/proxy/dynamic/songbird.yaml`: api and LiveKit terminated by
+     Traefik; `ws.` passed through by SNI to delivery. No HTTP router may match `ws.`: one did (to
+     obtain the certificate) and Traefik served it instead of the passthrough. Certificates for `ws.`
+     and `turn.` come from a router on `turn.` with a `domains` list, and `certs.py` exports them
+     daily (restarting delivery or LiveKit on change). Songbird's routers keep no access log
+     (invariant 6).
+  3. LiveKit single node without its Valkey; TURN/TLS on 5349 (443 belongs to Traefik); the deny set
+     of D-0091 kept. Hetzner firewall: TCP 7881, UDP 7882, TCP 5349, UDP 3478 added.
+  4. App: TLS 1.3 (`songbird_client::web_tls()`: aws-lc-rs, Mozilla's roots) to any delivery address
+     that is not loopback; plain TCP only to loopback; the proxy route keeps its own. No new
+     dependency. `SONGBIRD_SERVER=<domain>` at build time sets the default addresses (billing at
+     `billing.<domain>`, not deployed here).
+  5. App fix: `backend::run` and the delivery task now run under a detached owner. Register first
+     saves the address, which re-renders its view and disposed the owner the task was made under; NSH
+     cancels such a task before its first poll, so registration silently never ran.
+- Consequences: not `beta`: no mTLS, no worker (account deletion is queued, not carried out), the
+  mailbox in memory, push off, IP throttles see Traefik's address. iOS builds need
+  `IPHONEOS_DEPLOYMENT_TARGET=17.0` (Rust's default iOS 10 lacks `___chkstk_darwin`, which aws-lc
+  needs); to be set in the app's build. Revisit: replace with `beta` once secrets exist; the shared
+  host also runs unrelated services and exposes Postgres (5432) and Coolify (8000–8080) to the
+  internet, which the owner should restrict.
+
 ## D-0134 — Prompt 11, the security review's fixes
 
 - Date: 2026-11-19

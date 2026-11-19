@@ -254,9 +254,12 @@ pub fn nullifier(key: u8, info: &Info, nonce: &[u8; NONCE_LEN]) -> [u8; 32] {
 }
 
 fn hex_array<const N: usize>(s: &str) -> Result<[u8; N], TokenError> {
-    let mut b = [0u8; N];
-    hex::decode_to_slice(s, &mut b).map_err(|_| TokenError::Malformed)?;
-    Ok(b)
+    // Decoded to a vector, not into a zeroed array: what comes out is exactly the input's bytes
+    // (CodeQL reads a zero-initialised buffer as a hard-coded nonce).
+    hex::decode(s)
+        .ok()
+        .and_then(|v| <[u8; N]>::try_from(v).ok())
+        .ok_or(TokenError::Malformed)
 }
 
 fn element_hex(s: &str) -> Result<RistrettoPoint, TokenError> {

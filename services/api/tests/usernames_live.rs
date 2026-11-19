@@ -120,6 +120,7 @@ async fn stack(u: Option<UsernameSettings>) -> Option<Stack> {
         usernames,
         keys: None,
         storage: None,
+        vault: None,
         kt: None,
         profiles: None,
         devices: None,

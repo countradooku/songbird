@@ -2431,6 +2431,69 @@ backup ("update Songbird") instead of restoring part of it. Every published vers
 stay in `vectors/v*/` and are restored by every later reader
 (`this_reader_restores_every_published_version`).
 
+### 11.8 Stores and the Songbird vault (M2, D-0121)
+
+A backup lives in any **store** (`crates/backup-storage`): one interface, `BackupStore`, with
+`open`, `put`/`get`/`list`/`delete` of chunk objects by name, `manifest`, `swap_manifest(expected,
+object)` (stored only if the current manifest's generation is `expected`, 0 for none, and the
+object's own generation is `expected + 1`; otherwise a conflict with the current generation;
+of racing writers exactly one wins each generation) and `destroy`. Adapters run on the device
+only. A backup run reads the manifest and the chunk list, uploads only chunks the store lacks,
+swaps the manifest after every chunk is stored, then deletes chunks no manifest references; a
+run that stops anywhere leaves the previous backup intact. One conformance suite
+(`songbird_backup_storage::conformance`) checks every rule on every adapter.
+
+Local export: a folder (`chunks/<hex>`, `manifest`, a `manifest.lock` held while swapping and
+broken after five minutes), and a single `.songbird-backup` file:
+`"SBX" | 1 | manifest_len u32 | manifest | n u32 | n × (name [32] | len u32) | objects`; a file
+whose length does not match its index is refused before anything is read.
+
+**The Songbird vault** (`api`, objects in their own RustFS bucket). Every request carries the
+vault ID and the access secret (§11.1), both from the recovery key:
+
+| Header | Value |
+| --- | --- |
+| `x-songbird-vault` | the vault ID, 64 hex |
+| `x-songbird-vault-access` | the access secret, 64 hex |
+| `x-songbird-vault-expected` | (manifest writes) the generation replaced, decimal |
+
+| Request | Signed by | Answer |
+| --- | --- | --- |
+| `POST /v1/vault` | the account's primary | 200 `{"created"}`; 409 `{"error": "exists"}` (the account has `max_vaults`, or the ID is another account's); 403 `primary` |
+| `GET /v1/vault` | — | 200 `{"generation", "bytes", "chunks", "quota_bytes", "quota_chunks"}` |
+| `DELETE /v1/vault` | the owner's primary | 204: the vault is gone at once; its objects are deleted by the worker |
+| `GET /v1/vault/manifest` | — | 200 the manifest object; 204 before the first |
+| `PUT /v1/vault/manifest` | the owner's primary | 200 `{"generation"}`; 409 `{"error": "generation", "generation"}`; 409 `full`; 400 `manifest`/`generation` |
+| `PUT /v1/vault/chunks/<name>` | the owner's primary | 204; 409 `full`; 400 `chunk` |
+| `GET /v1/vault/chunks/<name>` | — | 200 the object; 404 |
+| `GET /v1/vault/chunks?after=<name>` | — | 200 `n u16 \| name [32] × n \| more u8`, at most 1,000 names in order |
+| `POST /v1/vault/chunks/delete` | the owner's primary | `n u16 (1..=1000) \| name [32] × n` → 204 |
+
+- The server never stores the vault ID: rows and objects are keyed by `HMAC(server key, vault
+  ID)`, objects named `<that>/<epoch>/c/<name>` and `<that>/<epoch>/m/<random>`, where the
+  epoch is random per vault incarnation (a vault turned off and opened again with the same key
+  never shares objects with the old one). It stores `SHA-256("songbird.v1/vault-access\0" ||
+  secret)` and compares in constant time. No time is stored.
+- **Reads need only the two headers**, so a new device with only the recovery key finds and
+  restores its backup before it has an account. An unknown vault and a wrong secret answer the
+  same 404 after the same lookup and count against the requester's IP range (`misses_per_hour`,
+  /24 and /48); past it, every vault request from the range waits (429).
+- **Writes** also need a signature (§2.4) by the **primary** of the account that owns the vault
+  (403 `primary` for a linked or pending device, 403 `owner` for another account). The owner is
+  in its own table (`vault_owner`), so Prompt 11 can unlink vaults from accounts without
+  changing the format.
+- The server checks only shapes: a chunk object starts `SBC 01` and its length is a header, a
+  Padmé length of at least 1,024 and a tag, at most the largest chunk; a manifest starts
+  `SBM 01`, is at most `max_manifest`, and its generation is `expected + 1`. A chunk is recorded
+  (and counted against the quota) before its object is stored; a manifest object is stored under
+  a fresh random name before the compare-and-swap, and the loser's object is deleted.
+- Quotas per vault (D-0119): 5 GiB and 100,000 chunks, `max_vaults` = 2 per account, until
+  Prompt 11's entitlements. Budgets (GCRA in `valkey-hot` under keyed records): reads per vault,
+  writes per account, misses per range.
+- Deleting the account deletes its vaults (the worker: rows, then every object under the
+  prefixes, verified by listing). The GDPR export lists each vault's generation, bytes and chunk
+  count, never its ID.
+
 ## 12. Versioning and compatibility rules
 
 - **Wire frames** (§1.2): one encoding per frame, unknown flag bits refused; new optional blocks

@@ -104,6 +104,10 @@ struct WorkerSettings {
     /// characters). Absent: nothing is published (development).
     #[serde(default)]
     kt_vrf_key: Option<SecretRef>,
+    /// The backup vaults' bucket on `s3`'s endpoint (`[api.vault] bucket`, Prompt 10). Absent:
+    /// vault rows are deleted but no objects (development without vaults).
+    #[serde(default)]
+    vault_bucket: Option<String>,
     /// `[api.requests] secret` (Prompt 4, D-0062): finds a deleted account's block rows.
     /// Required in staging and production.
     #[serde(default)]
@@ -330,6 +334,10 @@ impl Service for WorkerService {
         })
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the worker's wiring: one store or task per block"
+    )]
     async fn run(self, mut ctx: Ctx) -> Result<(), BoxError> {
         let Some(s) = &self.settings else {
             tracing::info!("no [worker] section: idle (development)");
@@ -390,6 +398,14 @@ impl Service for WorkerService {
             propagation: Duration::from_millis(s.propagation_ms),
             kt,
             block_keys,
+            vault_s3: match &s.vault_bucket {
+                Some(b) => {
+                    let mut cfg = s3_config(&s.s3)?;
+                    cfg.bucket.clone_from(b);
+                    Some(songbird_s3::Client::new(cfg)?)
+                }
+                None => None,
+            },
             metrics: self.metrics,
         });
         let (stop_tx, stop_rx) = watch::channel(false);

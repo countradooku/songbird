@@ -93,6 +93,22 @@ filter = "info"
 # reads_per_hour = 7200
 # read_burst = 240
 #
+# The backup vault (Prompt 10, M2, D-0121): encrypted backups found and opened by a key derived
+# from the user's recovery key. Its own bucket on [api.s3]'s endpoint. Absent: 503.
+# [api.vault]
+# secret = { file = "/path/to/vault-secret.hex" }                # 64 hex; same on every api node
+# bucket = "songbird-vault"                                       # also the worker's vault_bucket
+# quota_bytes = 5368709120                                        # 5 GiB per vault until Prompt 11
+# quota_chunks = 100000
+# max_vaults = 2                                                  # a new recovery key's vault + the old one
+# max_manifest = 16777216
+# reads_per_hour = 20000                                          # per vault (a restore reads every chunk)
+# read_burst = 6000
+# writes_per_hour = 20000                                         # per account
+# write_burst = 6000
+# misses_per_hour = 60                                            # unknown vault or wrong secret, per IP range
+# miss_burst = 20
+#
 # Key transparency on akd (Prompt 3, D-0057). Absent: those endpoints answer 503.
 # [api.kt]
 # secret = { file = "/path/to/kt-secret.hex" }                    # 64 hex; same on every api node

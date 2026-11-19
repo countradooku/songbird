@@ -193,6 +193,7 @@ async fn registered_accounts_connect_and_talk_without_an_operator() {
         usernames: None,
         keys: None,
         storage: None,
+        vault: None,
         kt: None,
         profiles: None,
         devices: None,

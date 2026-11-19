@@ -25,6 +25,7 @@ members = [
     "crates/groups",
     "crates/sync",
     "crates/backup-format",
+    "crates/backup-storage",
     "services/delivery",
     "services/api",
     "services/push",
@@ -75,6 +76,7 @@ songbird-content = { path = "crates/content" }
 songbird-groups = { path = "crates/groups" }
 songbird-sync = { path = "crates/sync" }
 songbird-backup-format = { path = "crates/backup-format" }
+songbird-backup-storage = { path = "crates/backup-storage" }
 songbird-calls = { path = "services/calls" }
 
 anyhow = "1.0.104"

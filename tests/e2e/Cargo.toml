@@ -22,6 +22,9 @@ bytes.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "io-util", "macros", "time", "sync"] }
 
 [dev-dependencies]
+# Prompt 10: the backup format and stores against the real vault.
+songbird-backup-format.workspace = true
+songbird-backup-storage.workspace = true
 songbird-accounts.workspace = true
 songbird-jobs.workspace = true
 songbird-s3.workspace = true

@@ -276,6 +276,7 @@ async fn stack(limits: RequestLimits) -> Option<Stack> {
         ),
         profiles: None,
         storage: None,
+        vault: None,
         kt: None,
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -290,6 +291,7 @@ async fn stack(limits: RequestLimits) -> Option<Stack> {
     s3.create_bucket().await.unwrap();
     let worker = songbird_worker::Worker {
         block_keys: Some(keys.clone()),
+        vault_s3: None,
         push_store: Arc::new(
             songbird_accounts::PushStore::beside(&registry)
                 .await

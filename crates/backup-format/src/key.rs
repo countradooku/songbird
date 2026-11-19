@@ -35,8 +35,6 @@ const CHECK_LEN: usize = 8;
 const CHECK_CONTEXT: &[u8] = b"songbird.v1/recovery-key\0";
 const SALT: &[u8] = b"songbird.v1/backup";
 const INFO_PREFIX: &[u8] = b"songbird.v1/backup/";
-/// Context of the vault access hash the Songbird vault stores.
-const ACCESS_CONTEXT: &[u8] = b"songbird.v1/vault-access\0";
 
 /// A recovery key: the 256-bit secret. `Debug` never shows it; it is wiped when dropped.
 #[derive(Clone)]
@@ -288,7 +286,7 @@ impl BackupKeys {
 #[must_use]
 pub fn access_hash(secret: &[u8; 32]) -> [u8; 32] {
     let mut ctx = digest::Context::new(&digest::SHA256);
-    ctx.update(ACCESS_CONTEXT);
+    ctx.update(songbird_proto::vault::ACCESS_CONTEXT);
     ctx.update(secret);
     let mut out = [0u8; 32];
     out.copy_from_slice(ctx.finish().as_ref());

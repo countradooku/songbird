@@ -157,6 +157,12 @@ impl<'a, S: ChunkSink> Writer<'a, S> {
         }
     }
 
+    /// Names the store already holds besides the previous manifest's (for example chunks a
+    /// failed backup uploaded): they are referenced, not uploaded again.
+    pub fn known(&mut self, names: impl IntoIterator<Item = ChunkName>) {
+        self.known.extend(names);
+    }
+
     fn emit(&mut self, which: Which, data: &[u8]) -> Result<(), Error> {
         let name = object::chunk_name(self.keys, data);
         if self.known.insert(name) {

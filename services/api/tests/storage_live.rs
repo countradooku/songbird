@@ -141,6 +141,7 @@ async fn stack(max_records: u32) -> Option<Stack> {
             .unwrap(),
         ),
         kt: None,
+        vault: None,
         profiles: None,
         devices: None,
     });

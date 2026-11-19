@@ -4974,6 +4974,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "songbird-backup-storage"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "getrandom 0.4.3",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rustls",
+ "rustls-pki-types",
+ "serde_json",
+ "songbird-backup-format",
+ "songbird-proto",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "webpki-roots 1.0.12",
+ "zeroize",
+]
+
+[[package]]
 name = "songbird-calls"
 version = "0.1.0"
 dependencies = [
@@ -5100,6 +5125,8 @@ dependencies = [
  "songbird-accounts",
  "songbird-alloc-count",
  "songbird-api",
+ "songbird-backup-format",
+ "songbird-backup-storage",
  "songbird-calls",
  "songbird-client",
  "songbird-content",

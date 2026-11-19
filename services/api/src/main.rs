@@ -277,6 +277,24 @@ fn profiles(
     )?))
 }
 
+/// `[api.vault]` (Prompt 10, M2), if configured: its own bucket on `[api.s3]`'s endpoint.
+fn vault(
+    s: &ApiSettings,
+    metrics: &ApiMetrics,
+) -> Result<Option<songbird_api::vault::Vault>, BoxError> {
+    let Some(v) = &s.vault else {
+        return Ok(None);
+    };
+    let mut cfg = s3_config(&s.s3)?;
+    cfg.bucket.clone_from(&v.bucket);
+    Ok(Some(songbird_api::vault::Vault::new(
+        v.clone(),
+        &*v.secret.resolve_key32()?,
+        songbird_s3::Client::new(cfg)?,
+        metrics.vault.clone(),
+    )?))
+}
+
 /// `[api.storage]` (Prompt 9, M1), if configured.
 fn storage(
     s: &ApiSettings,
@@ -457,6 +475,7 @@ async fn build(
     };
     let profiles = profiles(s, &metrics)?;
     let storage = storage(s, &metrics)?;
+    let vault = vault(s, &metrics)?;
     let kt = transparency(s).await?;
     let reports = reports(s, &metrics)?;
     let calls = calls(s, &metrics)?;
@@ -481,6 +500,7 @@ async fn build(
         devices,
         profiles,
         storage,
+        vault,
         kt,
         calls,
     });

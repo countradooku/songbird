@@ -132,6 +132,7 @@ async fn stack(d: DeviceSettings) -> Option<Stack> {
         usernames: None,
         keys: None,
         storage: None,
+        vault: None,
         kt: Some(
             songbird_api::kt::Transparency::new(
                 songbird_api::config::KtSettings {

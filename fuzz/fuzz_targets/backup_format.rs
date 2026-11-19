@@ -19,6 +19,13 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(s) = std::str::from_utf8(data) {
         let _ = RecoveryKey::parse(s);
     }
+    // The vault's wire rules (Prompt 10, M2, D-0121): what `api` reads from a client.
+    if let Some(n) = songbird_proto::vault::decode_names(data) {
+        assert_eq!(songbird_proto::vault::encode_names(&n), data);
+    }
+    let _ = songbird_proto::vault::decode_page(data);
+    let _ = songbird_proto::vault::chunk_object_ok(data);
+    let _ = songbird_proto::vault::manifest_generation(data, 1 << 20);
     let keys = RecoveryKey::from_secret([5; 32]).derive().unwrap();
     let _ = object::manifest_generation(data);
     let _ = object::open_manifest(&keys, data, None);

@@ -186,6 +186,32 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0121 — Prompt 10, milestone 2: one store interface, a conformance suite, the Songbird vault
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0119; the threat-model rows await the owner
+- Decided by: agent, within the owner's plan
+- Context: `docs/reports/P10-M2.md`.
+- Decision:
+  - `crates/backup-storage`: `BackupStore` (async, `async-trait`, already a workspace
+    dependency) with memory, folder, archive-file and vault adapters; the runs (`run`) and the
+    conformance suite (`conformance`). HTTP behind an `Http` trait; `HyperHttp` on hyper and
+    rustls (both already in the tree).
+  - The vault in `api` (PROTOCOL §11.8): reads by the two headers alone; writes also signed by
+    the owning account's primary; rows and objects keyed by `HMAC(server key, vault ID)`;
+    a random epoch per vault incarnation in the object prefix; turning off deletes the rows at
+    once and leaves `vault_gone` for the worker; one 404 for every miss, counted per range;
+    quotas from `[api.vault]` (5 GiB, 100,000 chunks, two vaults per account, D-0119); shapes
+    checked before counting; chunks recorded before storing; manifest objects under random
+    names, swapped in one transaction, the loser's deleted.
+  - Worker: vaults go with their account and when turned off, every object deleted and the
+    prefix listed empty.
+  - Chunks are buffered in `api` (≤ 8.25 MiB) for the signed body check.
+- Evidence: `crates/backup-storage/tests/conformance.rs`; `tests/e2e/tests/gate_p10.rs` (six
+  live tests); p50/p99 in the report; fuzz `backup_format`.
+- Consequences: M3 adds S3, WebDAV, Google Drive, OneDrive and Dropbox on the same trait and
+  suite.
+
 ## D-0120 — Prompt 10, milestone 1: the backup format
 
 - Date: 2026-11-19

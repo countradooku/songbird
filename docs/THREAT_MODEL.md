@@ -740,6 +740,13 @@ data than of any account, plus the policy row in §1.
 
 ## 6. Open risks
 
+- Prompt 11 (D-0134): Mollie's webhook is unauthenticated by design (billing fetches each
+  payment back), so a flood of made-up payment IDs becomes a flood of Mollie API calls; billing
+  does not budget it, as a per-range budget could refuse Mollie itself. The edge's rate limit on
+  `/v1/billing/mollie/webhook` is the mitigation (`docs/RUNBOOKS/billing.md`). A first purchase's
+  token is redeemed at once, and a first vault backup fetches its pass at once: an observer of
+  both services' live traffic could pair those two moments (nothing stored can).
+
 - Prompt 11, M6 (D-0132): the legal-request process (`docs/RUNBOOKS/legal-requests.md`) awaits
   counsel's review before the first real request; the support key's rotation keeps old keys
   until their tickets close (a manual step); a signed ticket shows the server which account

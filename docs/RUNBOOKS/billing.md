@@ -48,3 +48,11 @@ redeemable for its month and the one before), then drop the old ID from both.
   `push_email`, the audience `push_audience`).
 - Mollie: a test-mode API key for the sandbox, then a live key; the webhook URL is per request.
 - Counsel: VAT records for direct sales (Mollie): Songbird is the merchant of record.
+
+## Webhook floods (D-0134)
+
+Mollie's webhook carries only a payment ID, which billing fetches back from Mollie: made-up IDs
+cost one Mollie API call each. Billing does not budget the path (a budget per range could refuse
+Mollie's own calls). Rate-limit `POST /v1/billing/mollie/webhook` at the edge (Mollie's documented
+retry pace is a few calls per payment); on a flood, lower that limit and watch
+`billing` logs for "provider" errors. Each real payment still counts once, whatever is replayed.

@@ -283,7 +283,9 @@ impl Reports {
                 if verdict.sender_attested && !verdict.group {
                     crate::abuse::on_report(
                         registry,
+                        hot,
                         &self.keys,
+                        &AccountId::from_bytes(reporter),
                         &AccountId::from_bytes(report.sender),
                         songbird_entitlements::today(),
                     )

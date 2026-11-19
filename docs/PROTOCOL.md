@@ -2896,7 +2896,7 @@ providers' credentials. It never sees an account.
 | `POST /v1/billing/tokens` | the app (no account) | `{"proof": {"apple": <signed transaction>} \| {"google": <purchase token>} \| {"mollie": <64 hex subscriber secret>}, "request": <§14.4 request>}` | 200 the §14.4 answer; 400 `body`, `request`; 402 `not_paid`; 403 `proof`; 409 `period`; 429 `cap` or `budget`; 503 `provider` |
 | `POST /v1/billing/apple` | Apple | App Store Server Notifications V2 (`{"signedPayload"}`) | 200 (also for a replay); 400 not Apple's, not 2.0, another app or environment; 503 retry |
 | `POST /v1/billing/google` | Pub/Sub push, `Authorization: Bearer <Google OIDC>` | real-time developer notification | 200 (also for a replay); 401 the token; 400 another package; 503 retry |
-| `POST /v1/billing/mollie/checkout` | the app | `{"plan": "plus" \| "family", "interval": "month" \| "year", "subscriber": <64 hex>}` | 200 `{"checkout": <Mollie URL>}`; 409 `exists` |
+| `POST /v1/billing/mollie/checkout` | the app | `{"plan": "plus" \| "family", "interval": "month" \| "year", "subscriber": <64 hex>}` | 200 `{"checkout": <Mollie URL>}`; 409 `exists`; 409 `revoked` (refunded or charged back: the app starts over with a new subscriber secret) |
 | `POST /v1/billing/mollie/webhook` | Mollie | `id=tr_…` (form) | 200 (unknown IDs too); 503 retry |
 | `POST /v1/billing/mollie/state`, `/cancel` | the app | `{"subscriber"}` | state `{"plan", "interval", "paid_through", "renews", "revoked"}`; cancel 204; 404 |
 
@@ -2904,7 +2904,10 @@ providers' credentials. It never sees an account.
 original transaction ID, Google's purchase token, or the app's Mollie subscriber secret: the
 provider, the plan, the last UTC day paid for, revoked, renews, and the provider time of the
 newest state applied. Apple's and Google's IDs are never stored. Mollie's customer and
-subscription IDs are (they are needed to cancel). `subtok` counts tokens per subscription and
+subscription IDs are (they are needed to cancel). The row's `stamp` is the provider's time of
+a pushed message (an answer from Apple's or Google's API keeps the row's stamp; a transaction the
+app presents counts by its day) and `at` is a whole UTC day: nothing records when a token
+request came, so issuance cannot be joined to a redemption (`ent.at` is a day too; D-0134). `subtok` counts tokens per subscription and
 period; `notif` remembers handled message IDs for 45 days.
 
 **Verification.**
@@ -2926,8 +2929,11 @@ period; `notif` remembers handled message IDs for 45 days.
   e-mail verified, not expired. A voided purchase revokes for good.
 - **Mollie:** customers have no name or e-mail; a webhook's payment is fetched back by ID; the
   first payment's metadata names the row only by its key; a paid first payment starts the
-  subscription (once, even if Mollie calls twice); a paid period moves `paid_through` to the next
-  charge plus 7 days (SEPA Direct Debit takes days); a refund or chargeback revokes.
+  subscription (once, even if Mollie calls twice); **each payment counts once** (its ID kept 400
+  days, however often its webhook is replayed) and moves `paid_through` to a period after the day
+  it was paid (`paidAt`, UTC) plus 7 days (SEPA Direct Debit takes days); only the first payment
+  turns renewal on; a refund or chargeback revokes, and a revoked row takes no new checkout
+  (D-0134).
 
 **Ordering and replays.** A state is applied only if its provider time is not older than the
 row's; an answer from Apple's or Google's API counts as now. Handled message IDs are remembered
@@ -2991,10 +2997,12 @@ lifted), a reason category and its source (`auto` or `moderator`). Changes bump 
 **Signals** (keyed tags, evaluated on arrival; thresholds in `docs/RUNBOOKS/abuse.md`):
 
 - `rsig`: a verified report of a direct message the server attests (`sender_attested`, not a
-  group's shared body), per keyed tag of the sender and day, 31 days.
+  group's shared body), per keyed tag of the sender and day, 31 days; each reporter counts once
+  per sender in that time (a keyed pair mark, `ab:r:`), so a limit needs five people (D-0134).
 - `bsig`: a new block of an account that sent the blocker a message request in the last week
-  (the gate's keyed pair mark `rp`, seven days), per keyed tag and day; weighed against the
-  account's requests per day (`rq`, keyed, eight days).
+  (the gate's keyed pair mark `rp`, seven days, **consumed** by the block it counts: unblocking
+  and blocking again counts nothing), per keyed tag and day; weighed against the account's
+  requests per day (`rq`, keyed, eight days).
 
 Only an automatic `limited` with a reason `reports` or `blocks` is ever set without a moderator;
 it never overrides or shortens a moderator's row.
@@ -3053,5 +3061,6 @@ opens the chat.
 
 **Status.** `POST /v1/invites/status` (signed) `{"codes": [hex SHA-256("songbird.v1/invite\0" ||
 code), …]}` (1 to 50) answers `{"live": [bool, …]}` in order: whether each code still has a use
-left and has not expired or been revoked. The inviter's app counts its invites used from the
-codes it made; the server keeps no per-inviter count (D-0038).
+left and has not expired or been revoked; 60 asks an hour per account (burst 20, keyed). The
+inviter's app counts its invites used from the codes it made; the server keeps no per-inviter
+count (D-0038).

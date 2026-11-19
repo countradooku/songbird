@@ -258,6 +258,22 @@ impl Registry {
         ticket_rows(&v)
     }
 
+    /// One ticket's row, for staff.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn ticket(&self, id: &[u8; 16]) -> Result<Option<TicketRow>, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "SELECT meta::id(id)[0] AS i, kind, account, priority, reply, touched, msgs AS n
+                 FROM ticket:[$i];",
+                vec![var("i", bytes(id))],
+            )
+            .await?;
+        Ok(ticket_rows(&v)?.pop())
+    }
+
     /// The tickets an account attached itself to (its GDPR export; messages stay sealed).
     ///
     /// # Errors

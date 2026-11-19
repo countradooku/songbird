@@ -172,7 +172,7 @@ fn sha256(parts: &[&[u8]]) -> [u8; 32] {
 pub struct RangeBudget {
     per_minute: f64,
     burst: f64,
-    map: Mutex<HashMap<[u8; 6], (f64, u64)>>,
+    map: Mutex<HashMap<[u8; 7], (f64, u64)>>,
 }
 
 impl RangeBudget {
@@ -186,15 +186,16 @@ impl RangeBudget {
         }
     }
 
-    fn range(ip: IpAddr) -> [u8; 6] {
+    fn range(ip: IpAddr) -> [u8; 7] {
         match ip {
             IpAddr::V4(v) => {
                 let o = v.octets();
-                [4, o[0], o[1], o[2], 0, 0]
+                [4, o[0], o[1], o[2], 0, 0, 0]
             }
+            // The whole /48.
             IpAddr::V6(v) => {
                 let o = v.octets();
-                [6, o[0], o[1], o[2], o[3], o[4] ^ o[5]]
+                [6, o[0], o[1], o[2], o[3], o[4], o[5]]
             }
         }
     }
@@ -204,11 +205,25 @@ impl RangeBudget {
         let Ok(mut m) = self.map.lock() else {
             return false;
         };
-        if m.len() > 100_000 {
-            m.clear();
-        }
         let now = now_ms();
-        let e = m.entry(Self::range(ip)).or_insert((self.burst, now));
+        if m.len() > 100_000 {
+            // Forget only ranges whose budget has refilled (idle long enough to be full again);
+            // a busy range keeps its debt, however many others an attacker brings (D-0134).
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::as_conversions,
+                reason = "a refill time in milliseconds, far below u64::MAX"
+            )]
+            let full_after = (self.burst * 60_000.0 / self.per_minute) as u64;
+            m.retain(|_, e| now.saturating_sub(e.1) < full_after);
+        }
+        let range = Self::range(ip);
+        if m.len() > 100_000 && !m.contains_key(&range) {
+            // Still full of busy ranges: a new one waits rather than the map growing.
+            return false;
+        }
+        let e = m.entry(range).or_insert((self.burst, now));
         #[allow(
             clippy::cast_precision_loss,
             clippy::as_conversions,
@@ -374,7 +389,9 @@ impl Billing {
                         .apply(
                             &key,
                             &apple::Apple::state(&t, None, plan),
-                            t.signed_ms,
+                            // The app fetched this transaction just now: its signing time
+                            // would date the token request, so only its day is kept.
+                            Some(t.signed_ms / 86_400_000 * 86_400_000),
                             true,
                         )
                         .await
@@ -396,7 +413,7 @@ impl Billing {
                 };
                 let key = self.store.key("google", purchase_token.as_bytes());
                 self.store
-                    .apply(&key, &p.state, now_ms(), false)
+                    .apply(&key, &p.state, None, false)
                     .await
                     .map_err(store_err)?;
                 if p.needs_ack && g.acknowledge(&p.product, purchase_token).await.is_err() {
@@ -495,7 +512,7 @@ impl Billing {
                 Ok(Some((s, stamp))) => self.store.apply(&key, &s, stamp, true).await.map(|_| ()),
                 Ok(None) => {
                     let s = apple::Apple::state(t, n.renewal, plan);
-                    let applied = self.store.apply(&key, &s, n.signed_ms, true).await;
+                    let applied = self.store.apply(&key, &s, Some(n.signed_ms), true).await;
                     match (n.kind.as_str(), applied) {
                         ("REFUND" | "REVOKE", Ok(_)) => self.store.revoke(&key).await.map(|_| ()),
                         (_, r) => r.map(|_| ()),
@@ -547,7 +564,7 @@ impl Billing {
                         let _ = g.acknowledge(&p.product, token).await;
                     }
                     self.store
-                        .apply(&key, &p.state, now_ms(), false)
+                        .apply(&key, &p.state, None, false)
                         .await
                         .map(|_| ())
                 }
@@ -589,7 +606,10 @@ impl Billing {
         }
         let key = self.store.key("mollie", &secret);
         match self.store.get(&key).await {
-            Ok(Some(r)) if r.subscription.is_some() && !r.state.revoked => {
+            // A row that was ever subscribed, or revoked (a refund, a chargeback), takes no new
+            // checkout: the app starts over with a new subscriber secret (a fresh row).
+            Ok(Some(r)) if r.state.revoked => return error(StatusCode::CONFLICT, "revoked"),
+            Ok(Some(r)) if r.subscription.is_some() => {
                 return error(StatusCode::CONFLICT, "exists");
             }
             Ok(_) => {}
@@ -617,6 +637,10 @@ impl Billing {
 
     /// `POST /v1/billing/mollie/webhook`: `id=tr_…`, fetched back. Mollie retries anything
     /// but 200, so only a failure worth retrying answers otherwise.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one webhook's checks in order: fetch, row, reversal, once per payment, subscribe, store"
+    )]
     async fn mollie_webhook(&self, body: &[u8]) -> Response<Body> {
         let Some(m) = &self.mollie else {
             return empty(StatusCode::NOT_FOUND);
@@ -665,12 +689,23 @@ impl Billing {
         if p.status != "paid" {
             return empty(StatusCode::OK);
         }
+        // Each payment counts once, whoever replays its webhook and whenever (D-0134): the
+        // period runs from the day it was paid, never from the day the webhook came.
+        let Some(paid_day) = p.paid_day else {
+            return empty(StatusCode::OK);
+        };
+        let payment = sha256(&[b"mollie-pay\0", id.as_bytes()]);
+        match self.store.first_time(&payment, today() + 400).await {
+            Ok(true) => {}
+            Ok(false) => return empty(StatusCode::OK),
+            Err(_) => return empty(StatusCode::SERVICE_UNAVAILABLE),
+        }
         let months = if row.interval.as_deref() == Some("year") {
             12
         } else {
             1
         };
-        let next = add_months(today(), months);
+        let next = add_months(paid_day, months);
         let paid = next + MOLLIE_SLACK_DAYS;
         let mut subscription = p.subscription.clone();
         if p.sequence == "first" && row.subscription.is_none() {
@@ -679,7 +714,10 @@ impl Billing {
             match self.store.first_time(&claim, today() + 3_650).await {
                 Ok(true) => {}
                 Ok(false) => return empty(StatusCode::OK),
-                Err(_) => return empty(StatusCode::SERVICE_UNAVAILABLE),
+                Err(_) => {
+                    let _ = self.store.forget(&payment).await;
+                    return empty(StatusCode::SERVICE_UNAVAILABLE);
+                }
             }
             let (Some(customer), Some(interval)) =
                 (row.customer.as_deref(), row.interval.as_deref())
@@ -693,17 +731,20 @@ impl Billing {
                 subscription = Some(id);
             } else {
                 let _ = self.store.forget(&claim).await;
+                let _ = self.store.forget(&payment).await;
                 return empty(StatusCode::SERVICE_UNAVAILABLE);
             }
         }
-        match self
+        if self
             .store
-            .mollie_paid(&key, subscription.as_deref(), paid)
+            .mollie_paid(&key, subscription.as_deref(), paid, p.sequence == "first")
             .await
+            .is_err()
         {
-            Ok(()) => empty(StatusCode::OK),
-            Err(_) => empty(StatusCode::SERVICE_UNAVAILABLE),
+            let _ = self.store.forget(&payment).await;
+            return empty(StatusCode::SERVICE_UNAVAILABLE);
         }
+        empty(StatusCode::OK)
     }
 
     /// `POST /v1/billing/mollie/state` and `…/cancel`.
@@ -827,6 +868,15 @@ mod tests {
         assert!(b.take(ip) && b.take(same) && b.take(ip));
         assert!(!b.take(same), "a /24 shares one budget");
         assert!(b.take(other));
+        // IPv6: one /48 shares a budget; the next /48 has its own (D-0134).
+        let v6 = |s: &str| s.parse::<IpAddr>().unwrap_or(IpAddr::from([0u8; 16]));
+        let b = RangeBudget::new(1, 1);
+        assert!(b.take(v6("2001:db8:1::1")));
+        assert!(!b.take(v6("2001:db8:1:ffff::2")));
+        assert!(b.take(v6("2001:db8:2::1")));
+        // Two /48s whose bytes 4 and 5 XOR alike are not one range.
+        assert!(b.take(v6("2001:db8:0101::1")));
+        assert!(b.take(v6("2001:db8:0202::1")));
     }
 
     #[test]

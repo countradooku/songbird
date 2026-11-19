@@ -360,10 +360,11 @@ impl Google {
 
     async fn keys(&self, refresh: bool) -> Result<Vec<RsaJwk>, ProviderError> {
         let now = now_ms() / 1_000;
-        if !refresh
-            && let Ok(g) = self.certs.lock()
+        // A forced refresh (an unknown key) at most once a minute: forged tokens naming made-up
+        // keys cannot turn into a stream of fetches from Google (D-0134).
+        if let Ok(g) = self.certs.lock()
             && !g.0.is_empty()
-            && g.1 + 3_600 > now
+            && (g.1 + 3_600 > now && (!refresh || g.1 + 60 > now))
         {
             return Ok(g.0.clone());
         }

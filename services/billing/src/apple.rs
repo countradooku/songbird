@@ -258,7 +258,7 @@ impl Apple {
         &self,
         original: &str,
         products: &Products,
-    ) -> Result<Option<(State, u64)>, ProviderError> {
+    ) -> Result<Option<(State, Option<u64>)>, ProviderError> {
         let Some(api) = &self.api else {
             return Ok(None);
         };
@@ -312,6 +312,6 @@ impl Apple {
             Some(2) => s.renews = false,
             _ => {}
         }
-        Ok(Some((s, crate::now_ms())))
+        Ok(Some((s, None)))
     }
 }

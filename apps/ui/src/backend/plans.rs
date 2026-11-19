@@ -32,6 +32,7 @@ const K_FAMILY: &str = "sb.family";
 const K_SEAT: &str = "sb.family_seat";
 const K_TICKETS: &str = "sb.tickets";
 const K_NEXT_TOKEN: &str = "sb.next_token";
+const K_SUPPORT_PIN: &str = "sb.support_pin";
 pub(super) const K_MY_INVITES: &str = "sb.my_invites";
 
 /// The account as the server sees it.
@@ -115,18 +116,32 @@ fn billing_problem(status: u16, body: &[u8]) -> Problem {
 
 /// Starts a checkout: the URL to open in the browser.
 pub async fn checkout(plan: &str, interval: &str) -> Result<String, Problem> {
-    let (st, body) = billing(
-        "/v1/billing/mollie/checkout",
-        &serde_json::json!({ "plan": plan, "interval": interval, "subscriber": subscriber() }),
-    )
-    .await?;
-    if st != 200 {
-        return Err(billing_problem(st, &body));
+    for _ in 0..2 {
+        let (st, body) = billing(
+            "/v1/billing/mollie/checkout",
+            &serde_json::json!({ "plan": plan, "interval": interval, "subscriber": subscriber() }),
+        )
+        .await?;
+        let word = serde_json::from_slice::<Value>(&body)
+            .ok()
+            .and_then(|v| v["error"].as_str().map(str::to_owned));
+        if st == 409 && word.as_deref() == Some("revoked") {
+            // A refunded or charged-back subscription: start over under a new secret (billing
+            // keeps the old row revoked; D-0134).
+            Storage::remove_item(K_SUBSCRIBER);
+            continue;
+        }
+        if st != 200 {
+            return Err(billing_problem(st, &body));
+        }
+        return serde_json::from_slice::<Value>(&body)
+            .ok()
+            .and_then(|v| v["checkout"].as_str().map(str::to_owned))
+            .ok_or_else(|| problem("The payment provider gave no checkout page."));
     }
-    serde_json::from_slice::<Value>(&body)
-        .ok()
-        .and_then(|v| v["checkout"].as_str().map(str::to_owned))
-        .ok_or_else(|| problem("The payment provider gave no checkout page."))
+    Err(problem(
+        "The payment provider refused the checkout. Try again later.",
+    ))
 }
 
 /// A subscription's state, as billing has it.
@@ -187,8 +202,51 @@ pub async fn cancel() -> Result<(), Problem> {
     }
 }
 
-/// `GET /v1/tokens/keys`: the current key, pinned for good on first sight. A server that later
-/// shows another key under the same ID is refused: it could be telling this device apart.
+/// The token keys this build trusts: `(key ID, public key hex)`. A release build ships them
+/// (filled at release from the deployment's `[api.tokens]`, D-0134) and refuses any other, so a
+/// server cannot hand one user a key of their own and recognise their tokens. Empty in
+/// development builds, which pin the first key they see instead (and refuse any other ID).
+pub const SHIPPED_TOKEN_KEYS: &[(u8, &str)] = &[];
+
+/// The support key this build trusts (X25519, hex); see [`SHIPPED_TOKEN_KEYS`].
+pub const SHIPPED_SUPPORT_KEY: Option<&str> = None;
+
+/// Whether `(id, pk)` is a token key this device may use: one shipped with the build, or in a
+/// development build without shipped keys, the first one it ever saw (kept in app storage).
+pub fn trusted_token_key(id: u8, pk: &[u8; 32]) -> Result<(), Problem> {
+    let refused = || {
+        problem(
+            "The server offered a token key this app doesn't trust. Songbird refused it to keep your payment private.",
+        )
+    };
+    if !SHIPPED_TOKEN_KEYS.is_empty() {
+        return SHIPPED_TOKEN_KEYS
+            .iter()
+            .any(|(i, h)| *i == id && wire::unhex(h).as_deref() == Some(pk.as_slice()))
+            .then_some(())
+            .ok_or_else(refused);
+    }
+    if !cfg!(debug_assertions) {
+        return Err(problem(
+            "This build has no token keys, so plans can't be used.",
+        ));
+    }
+    let pin =
+        Storage::get_item(K_TOKEN_PIN).and_then(|s| serde_json::from_str::<(u8, String)>(&s).ok());
+    match pin {
+        Some((i, h)) if i == id && wire::unhex(&h).as_deref() == Some(pk.as_slice()) => Ok(()),
+        Some(_) => Err(refused()),
+        None => {
+            put(
+                K_TOKEN_PIN,
+                &serde_json::to_string(&(id, wire::hex(pk))).unwrap_or_default(),
+            );
+            Ok(())
+        }
+    }
+}
+
+/// `GET /v1/tokens/keys`, checked by [`trusted_token_key`].
 async fn pinned() -> Result<(u8, [u8; 32]), Problem> {
     let (st, body) = send(HttpRequest::get(format!(
         "{}/v1/tokens/keys",
@@ -198,25 +256,38 @@ async fn pinned() -> Result<(u8, [u8; 32]), Problem> {
     let v = ok_json(st, &body)?;
     let (id, pk) =
         parse_keys(&v).ok_or_else(|| problem("The server's token keys are malformed."))?;
-    let pins: Vec<(u8, [u8; 32])> = Storage::get_item(K_TOKEN_PIN)
-        .and_then(|s| serde_json::from_str::<Vec<(u8, String)>>(&s).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|(i, h)| Some((i, wire::unhex(&h)?.try_into().ok()?)))
-        .collect();
-    match pins.iter().find(|(i, _)| *i == id) {
-        Some((_, p)) if *p != pk => Err(problem(
-            "The server's token key changed. Songbird refuses it to keep your payment private.",
+    trusted_token_key(id, &pk)?;
+    Ok((id, pk))
+}
+
+/// The support key: the shipped one, or in a development build the first one seen.
+async fn support_key() -> Result<[u8; 32], Problem> {
+    if let Some(k) = SHIPPED_SUPPORT_KEY {
+        return wire::unhex(k)
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(|| problem("This build's support key is damaged."));
+    }
+    if !cfg!(debug_assertions) {
+        return Err(problem("This build has no support key."));
+    }
+    let (st, body) = send(HttpRequest::get(format!(
+        "{}/v1/support/key",
+        endpoint().api
+    )))
+    .await?;
+    let k: [u8; 32] = ok_json(st, &body)?["key"]
+        .as_str()
+        .and_then(wire::unhex)
+        .and_then(|b| b.try_into().ok())
+        .ok_or_else(|| problem("The server's support key is malformed."))?;
+    match Storage::get_item(K_SUPPORT_PIN) {
+        Some(h) if wire::unhex(&h).as_deref() == Some(k.as_slice()) => Ok(k),
+        Some(_) => Err(problem(
+            "The server's support key changed. Songbird refused it.",
         )),
-        Some(_) => Ok((id, pk)),
         None => {
-            let mut all: Vec<(u8, String)> = pins.iter().map(|(i, p)| (*i, wire::hex(p))).collect();
-            all.push((id, wire::hex(&pk)));
-            put(
-                K_TOKEN_PIN,
-                &serde_json::to_string(&all).unwrap_or_default(),
-            );
-            Ok((id, pk))
+            put(K_SUPPORT_PIN, &wire::hex(&k));
+            Ok(k)
         }
     }
 }
@@ -263,17 +334,29 @@ async fn plan_tokens(month: u32, n: usize) -> Result<Vec<Redemption>, Problem> {
 pub async fn redeem(t: &Redemption) -> Result<(), Problem> {
     let body = serde_json::to_vec(t).map_err(|_| problem("Couldn't prepare the token."))?;
     let (st, b) = signed("POST", "/v1/entitlements/redeem", Some(body), true).await?;
+    let spent = serde_json::from_slice::<Value>(&b)
+        .ok()
+        .is_some_and(|v| v["error"] == "spent");
     match st {
         200 => Ok(()),
-        // Already redeemed (a retry after a lost answer): the plan is there.
-        409 => Ok(()),
+        // Already redeemed (a retry after a lost answer): the plan is there. Any other 409
+        // (`period`, `invalid`) is a refusal.
+        409 if spent => Ok(()),
         _ => Err(super::explain(st, &b)),
     }
 }
 
-/// The month's run after a payment and at each renewal: this month's tokens (one for this
-/// account, one per Family seat), redeemed and sealed into the seats; next month's own token
-/// kept to redeem at a random moment of its first days.
+/// A random moment in the first two days of `month` (Unix ms): when a kept token is redeemed,
+/// never next to its issuance (D-0134).
+fn redeem_moment(month: u32) -> u64 {
+    u64::from(token::first_day(month)) * 86_400_000
+        + u64::from(u32::from_le_bytes(wire::random::<4>()) % 172_800_000)
+}
+
+/// The run after a payment: this month's tokens (one for this account, one per Family seat),
+/// redeemed and sealed into the seats; next month's own token kept to redeem at a random
+/// moment of its first two days. (A first purchase is redeemed at once: the user is waiting
+/// for it. Billing and the registry keep only days, so stored records cannot be joined.)
 pub async fn renew() -> Result<(), Problem> {
     let month = token::month_of(today());
     let seats = family().map(|f| f.seats.len()).unwrap_or(0);
@@ -289,21 +372,25 @@ pub async fn renew() -> Result<(), Problem> {
     if let Ok(mut next) = plan_tokens(month + 1, 1).await
         && let Some(t) = next.pop()
     {
-        put(K_NEXT_TOKEN, &serde_json::to_string(&t).unwrap_or_default());
+        let at = redeem_moment(month + 1);
+        put(
+            K_NEXT_TOKEN,
+            &serde_json::to_string(&(t, at)).unwrap_or_default(),
+        );
     }
     Ok(())
 }
 
-/// Redeems a kept token once its month has come (called at start-up; the moment is the
-/// user's own, not the issuance's).
+/// Redeems a kept token once its moment has come (called at start-up and when the plans page
+/// opens).
 pub async fn redeem_kept() -> Result<(), Problem> {
-    let Some(t) =
-        Storage::get_item(K_NEXT_TOKEN).and_then(|s| serde_json::from_str::<Redemption>(&s).ok())
+    let Some((t, at)) = Storage::get_item(K_NEXT_TOKEN)
+        .and_then(|s| serde_json::from_str::<(Redemption, u64)>(&s).ok())
     else {
         return Ok(());
     };
     let month = token::month_of(today());
-    if t.period > month {
+    if t.period > month || (nsh_core::time::unix_ms() as u64) < at {
         return Ok(());
     }
     if t.period == month {
@@ -581,16 +668,7 @@ pub async fn open_ticket(
     logs: Option<&str>,
     about_account: bool,
 ) -> Result<Ticket, Problem> {
-    let (st, body) = send(HttpRequest::get(format!(
-        "{}/v1/support/key",
-        endpoint().api
-    )))
-    .await?;
-    let support: [u8; 32] = ok_json(st, &body)?["key"]
-        .as_str()
-        .and_then(wire::unhex)
-        .and_then(|b| b.try_into().ok())
-        .ok_or_else(|| problem("The server's support key is malformed."))?;
+    let support = support_key().await?;
     let reply_private = wire::random::<32>();
     let reply = ProvisioningKey::from_private(&reply_private)
         .map_err(|_| problem("Couldn't make a reply key."))?;
@@ -812,6 +890,11 @@ mod tests {
             None
         );
         assert_eq!(day_of(86_400_000 * 3 + 5), 3);
+        // A kept token is redeemed within its month's first two days.
+        let m = token::month_of(20_776);
+        let at = redeem_moment(m);
+        assert_eq!(token::month_of(day_of(at)), m);
+        assert!(day_of(at) < token::first_day(m) + 2);
     }
 
     #[test]

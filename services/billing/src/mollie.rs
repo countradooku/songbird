@@ -81,6 +81,20 @@ pub struct Payment {
     pub row: Option<String>,
     /// Refunded or charged back, wholly or in part.
     pub reversed: bool,
+    /// The UTC day it was paid (`paidAt`), if paid.
+    pub paid_day: Option<u32>,
+}
+
+/// The UTC day of a Mollie timestamp (`2026-11-19T10:20:31+00:00`): its date, in UTC.
+fn paid_day(s: &str) -> Option<u32> {
+    // Mollie answers in UTC with an explicit offset; anything else is refused (the webhook then
+    // falls back to nothing, never to today).
+    let (date, rest) = s.split_once('T')?;
+    if !(rest.ends_with("+00:00") || rest.ends_with('Z')) {
+        return None;
+    }
+    let ms = crate::google::rfc3339_ms(&format!("{date}T00:00:00Z"))?;
+    Some(crate::day_of_ms(ms))
 }
 
 /// Mollie.
@@ -225,6 +239,7 @@ impl Mollie {
             subscription: s("/subscriptionId"),
             row: s("/metadata/row"),
             reversed: nonzero("/amountRefunded/value") || nonzero("/amountChargedBack/value"),
+            paid_day: s("/paidAt").as_deref().and_then(paid_day),
         })
     }
 
@@ -288,6 +303,14 @@ impl Mollie {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paid_days_are_utc_dates_only() {
+        assert_eq!(paid_day("1970-01-02T10:20:31+00:00"), Some(1));
+        assert_eq!(paid_day("2026-11-19T23:59:59Z"), Some(20_776));
+        assert_eq!(paid_day("2026-11-19T10:20:31+02:00"), None);
+        assert_eq!(paid_day("yesterday"), None);
+    }
 
     #[test]
     fn prices_are_checked() {

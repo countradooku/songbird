@@ -699,6 +699,12 @@ async fn production_refuses_test_purchases() {
     assert_eq!(r.tokens(json!({ "apple": t }), month, 1).await.0, 403);
 }
 
+/// Mollie's `paidAt` for a UTC day.
+fn paid_at(day: u32) -> String {
+    let (y, m, d) = token::civil_from_days(i64::from(day));
+    format!("{y:04}-{m:02}-{d:02}T10:20:31+00:00")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mollie_checkout_webhooks_and_cancel() {
     let Some(r) = rig(Env::Sandbox, false).await else {
@@ -729,7 +735,12 @@ async fn mollie_checkout_webhooks_and_cancel() {
         "not paid yet"
     );
     // The payment is paid; Mollie calls twice at once: one subscription.
-    r.world.lock().unwrap().payments.get_mut("tr_1").unwrap()["status"] = json!("paid");
+    {
+        let mut w = r.world.lock().unwrap();
+        let p = w.payments.get_mut("tr_1").unwrap();
+        p["status"] = json!("paid");
+        p["paidAt"] = json!(paid_at(songbird_billing::today()));
+    }
     let (a, b) = tokio::join!(
         r.post("/v1/billing/mollie/webhook", b"id=tr_1", &[]),
         r.post("/v1/billing/mollie/webhook", b"id=tr_1", &[])
@@ -774,6 +785,37 @@ async fn mollie_checkout_webhooks_and_cancel() {
         )
         .await;
     assert_eq!(st, 409);
+    // A recurring payment, its webhook replayed: the period moves once, from the day it was paid
+    // (D-0134).
+    let paid_before = s["paid_through"].as_u64().unwrap();
+    r.world.lock().unwrap().payments.insert(
+        "tr_80".into(),
+        json!({
+            "id": "tr_80", "status": "paid", "sequenceType": "recurring", "subscriptionId": "sub_1",
+            "customerId": "cst_1", "amount": { "currency": "EUR", "value": "4.99" },
+            "paidAt": paid_at(songbird_billing::today() + 30),
+        }),
+    );
+    for _ in 0..3 {
+        assert_eq!(
+            r.post("/v1/billing/mollie/webhook", b"id=tr_80", &[])
+                .await
+                .0,
+            200
+        );
+    }
+    let (_, s2) = r
+        .post(
+            "/v1/billing/mollie/state",
+            json!({ "subscriber": secret }).to_string().as_bytes(),
+            &[],
+        )
+        .await;
+    let moved = s2["paid_through"].as_u64().unwrap();
+    assert!(
+        moved > paid_before && moved <= paid_before + 31,
+        "{paid_before} -> {moved}"
+    );
     // A recurring payment charged back: revoked.
     r.world.lock().unwrap().payments.insert(
         "tr_90".into(),
@@ -790,6 +832,26 @@ async fn mollie_checkout_webhooks_and_cancel() {
         200
     );
     assert_eq!(r.tokens(proof.clone(), next, 1).await.0, 402);
+    // Replaying the first payment's webhook changes nothing now: it was counted once.
+    assert_eq!(
+        r.post("/v1/billing/mollie/webhook", b"id=tr_1", &[])
+            .await
+            .0,
+        200
+    );
+    assert_eq!(r.tokens(proof.clone(), next, 1).await.0, 402);
+    // A revoked row takes no new checkout (which would clear the revocation without paying).
+    let (st, v) = r
+        .post(
+            "/v1/billing/mollie/checkout",
+            json!({ "plan": "plus", "interval": "month", "subscriber": secret })
+                .to_string()
+                .as_bytes(),
+            &[],
+        )
+        .await;
+    assert_eq!((st, v["error"].as_str()), (409, Some("revoked")));
+    assert_eq!(r.tokens(proof.clone(), month, 1).await.0, 402);
     // Unknown and malformed webhooks are acknowledged and change nothing.
     for junk in [&b"id=tr_404"[..], b"id=../../x", b"", b"id=sub_1"] {
         assert_eq!(r.post("/v1/billing/mollie/webhook", junk, &[]).await.0, 200);
@@ -911,6 +973,33 @@ async fn billing_keeps_no_account_and_no_store_identifier() {
     walk(info.get("tables").unwrap(), &mut names, &mut texts);
     names.sort();
     assert_eq!(names, vec!["notif", "sub", "subtok"], "billing's tables");
+    // No row records when a token request came: times are whole days, stamps the provider's
+    // (D-0134), so issuance cannot be joined to a redemption by the clock.
+    let times = db
+        .query1("SELECT VALUE <string> at FROM sub;", Vec::new())
+        .await
+        .unwrap();
+    let times: Vec<String> = times
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t.as_text().map(str::to_owned))
+        .collect();
+    assert_ne!(times.len(), 0);
+    assert!(times.iter().all(|t| t.contains("T00:00:00")), "{times:?}");
+    let stamps = db
+        .query1("SELECT VALUE stamp FROM sub;", Vec::new())
+        .await
+        .unwrap();
+    let now = i64::try_from(now_ms()).unwrap();
+    assert!(
+        stamps
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|x| x.as_i64().is_none_or(|v| (now - v).abs() > 60_000)),
+        "a stamp near now"
+    );
     let mut names = Vec::new();
     let mut texts = Vec::new();
     for table in ["sub", "subtok", "notif"] {
@@ -957,18 +1046,23 @@ async fn lapsed_subscriptions_and_old_marks_are_swept() {
     let old = st.key("apple", b"old");
     let renewing = st.key("apple", b"renewing");
     let recent = st.key("apple", b"recent");
-    st.apply(&old, &mk(today - store::LAPSED_DAYS - 1, false), 1, true)
-        .await
-        .unwrap();
     st.apply(
-        &renewing,
-        &mk(today - store::LAPSED_DAYS - 1, true),
-        1,
+        &old,
+        &mk(today - store::LAPSED_DAYS - 1, false),
+        Some(1),
         true,
     )
     .await
     .unwrap();
-    st.apply(&recent, &mk(today - 30, false), 1, true)
+    st.apply(
+        &renewing,
+        &mk(today - store::LAPSED_DAYS - 1, true),
+        Some(1),
+        true,
+    )
+    .await
+    .unwrap();
+    st.apply(&recent, &mk(today - 30, false), Some(1), true)
         .await
         .unwrap();
     st.spend(&recent, 1, 1, 2, today - 1).await.unwrap();

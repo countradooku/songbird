@@ -39,10 +39,12 @@ pub(crate) enum SupportCmd {
         #[arg(long, default_value_t = 100)]
         limit: usize,
     },
-    /// Decrypt one ticket's messages and print them as JSON lines.
+    /// Decrypt one ticket's messages and print them as JSON lines. Audit-logged.
     Open {
         #[command(flatten)]
         store: store::StoreArgs,
+        #[command(flatten)]
+        guard: audit::Guard,
         /// The support private key file (`keygen`).
         #[arg(long)]
         key: PathBuf,
@@ -50,10 +52,12 @@ pub(crate) enum SupportCmd {
         #[arg(long)]
         ticket: String,
     },
-    /// Reply to a ticket (sealed to its reply key).
+    /// Reply to a ticket (sealed to its reply key). Audit-logged.
     Reply {
         #[command(flatten)]
         store: store::StoreArgs,
+        #[command(flatten)]
+        guard: audit::Guard,
         /// The ticket ID.
         #[arg(long)]
         ticket: String,
@@ -103,6 +107,7 @@ fn line(t: &TicketRow) -> String {
     )
 }
 
+#[allow(clippy::too_many_lines, reason = "one arm per subcommand")]
 pub(crate) fn run(cmd: SupportCmd) -> Result<()> {
     if let SupportCmd::Keygen { out } = &cmd {
         return crate::reports::keygen(out);
@@ -118,23 +123,38 @@ pub(crate) fn run(cmd: SupportCmd) -> Result<()> {
                     println!("{}", line(&t));
                 }
             }
-            SupportCmd::Open { store, key, ticket } => {
+            SupportCmd::Open {
+                store,
+                guard,
+                key,
+                ticket,
+            } => {
                 let id = ticket_id(&ticket)?;
                 let key = crate::reports::read_key(&key)?;
-                let registry = store.registry().await?;
-                let (kind, msgs) = registry.ticket_read(&id, None).await?;
-                let account = registry
-                    .tickets(10_000)
-                    .await?
-                    .into_iter()
-                    .find(|t| t.id == id)
-                    .and_then(|t| t.account);
+                // Reading a user's words is recorded, as every decision is (D-0134).
+                let entry = guard.begin(
+                    "support open",
+                    &crate::target(&store),
+                    &format!("ticket {ticket}"),
+                )?;
+                let r = async {
+                    let registry = store.registry().await?;
+                    let row = registry
+                        .ticket(&id)
+                        .await?
+                        .ok_or_else(|| anyhow!("no such ticket"))?;
+                    let (kind, msgs) = registry.ticket_read(&id, None).await?;
+                    anyhow::Ok((row, kind, msgs))
+                }
+                .await;
+                entry.end(&r, "")?;
+                let (row, kind, msgs) = r?;
                 println!(
                     "{}",
                     serde_json::json!({
                         "ticket": ticket,
                         "kind": kind,
-                        "account": account.map(|a| a.to_hex_unredacted()),
+                        "account": row.account.map(|a| a.to_hex_unredacted()),
                     })
                 );
                 for m in msgs {
@@ -154,23 +174,34 @@ pub(crate) fn run(cmd: SupportCmd) -> Result<()> {
             }
             SupportCmd::Reply {
                 store,
+                guard,
                 ticket,
                 file,
             } => {
                 let id = ticket_id(&ticket)?;
                 let text = std::fs::read_to_string(&file).context("reading the reply")?;
-                let registry = store.registry().await?;
-                let t = registry
-                    .tickets(10_000)
-                    .await?
-                    .into_iter()
-                    .find(|t| t.id == id)
-                    .ok_or_else(|| anyhow!("no such ticket"))?;
-                let sealed = seal_with(Domain::SupportReply, &t.reply_key, &reply_body(&text)?)
-                    .map_err(|_| anyhow!("the ticket's reply key is not usable"))?;
-                registry
-                    .ticket_post(&id, None, &sealed, songbird_entitlements::today())
-                    .await?;
+                let body = reply_body(&text)?;
+                let entry = guard.begin(
+                    "support reply",
+                    &crate::target(&store),
+                    &format!("ticket {ticket}"),
+                )?;
+                let r = async {
+                    let registry = store.registry().await?;
+                    let t = registry
+                        .ticket(&id)
+                        .await?
+                        .ok_or_else(|| anyhow!("no such ticket"))?;
+                    let sealed = seal_with(Domain::SupportReply, &t.reply_key, &body)
+                        .map_err(|_| anyhow!("the ticket's reply key is not usable"))?;
+                    registry
+                        .ticket_post(&id, None, &sealed, songbird_entitlements::today())
+                        .await
+                        .map_err(anyhow::Error::from)
+                }
+                .await;
+                entry.end(&r, "")?;
+                r?;
                 println!("replied");
             }
             SupportCmd::Close {

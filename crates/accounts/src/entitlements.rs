@@ -143,7 +143,7 @@ impl Registry {
             .query(
                 "BEGIN TRANSACTION;
                  IF !record::exists(account:[$a]) OR account:[$a].deleting { THROW 'songbird:none' };
-                 UPSERT ent:[$a] SET level = $l, last = $d, source = $s, at = time::now() RETURN NONE;
+                 UPSERT ent:[$a] SET level = $l, last = $d, source = $s, at = time::floor(time::now(), 1d) RETURN NONE;
                  UPSERT entver:v SET version = (version ?? 1) + 1 RETURN NONE;
                  COMMIT TRANSACTION;",
                 vec![
@@ -187,7 +187,7 @@ impl Registry {
                  LET $live = $h != NONE AND $h.last >= $t;
                  LET $nl = IF $live { math::max([$h.level, $l]) } ELSE { $l };
                  LET $nd = IF $live { math::max([$h.last, $d]) } ELSE { $d };
-                 UPSERT ent:[$a] SET level = $nl, last = $nd, source = $s, at = time::now() RETURN NONE;
+                 UPSERT ent:[$a] SET level = $nl, last = $nd, source = $s, at = time::floor(time::now(), 1d) RETURN NONE;
                  UPSERT entver:v SET version = (version ?? 1) + 1 RETURN NONE;
                  RETURN { a: $ab, level: $nl, last: $nd, source: $s };
                  COMMIT TRANSACTION;",
@@ -288,7 +288,7 @@ impl Registry {
                  LET $live = $h != NONE AND $h.last >= $t;
                  LET $nl = IF $live { math::max([$h.level, $l]) } ELSE { $l };
                  LET $nd = IF $live { math::max([$h.last, $d]) } ELSE { $d };
-                 UPSERT ent:[$a] SET level = $nl, last = $nd, source = 'token', at = time::now()
+                 UPSERT ent:[$a] SET level = $nl, last = $nd, source = 'token', at = time::floor(time::now(), 1d)
                    RETURN NONE;
                  UPSERT entver:v SET version = (version ?? 1) + 1 RETURN NONE;
                  RETURN { a: $ab, level: $nl, last: $nd, source: 'token' };

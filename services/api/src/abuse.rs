@@ -52,13 +52,36 @@ async fn limit(registry: &Registry, account: &AccountId, reason: &str, today: u3
     }
 }
 
-/// A verified report of a direct message `sender` sent.
+/// A verified report of a direct message `sender` sent, by `reporter`. Each reporter counts
+/// once per sender in the window (a keyed pair mark in `valkey-hot`, D-0134): one person
+/// reporting five messages is one signal, so five distinct people are needed.
 pub async fn on_report(
     registry: &Registry,
+    hot: &ValkeyConn,
     keys: &GateKeys,
+    reporter: &AccountId,
     sender: &AccountId,
     today: u32,
 ) -> Verdict {
+    let pair = keys.tag("rpr", &[reporter.as_bytes(), sender.as_bytes()]);
+    let first = hot
+        .query::<Option<String>>(
+            redis::cmd("SET")
+                .arg(format!("ab:r:{}", hex::encode(pair)))
+                .arg(1)
+                .arg("NX")
+                .arg("EX")
+                .arg(31 * 86_400),
+        )
+        .await;
+    match first {
+        Ok(Some(_)) => {}
+        Ok(None) => return Verdict::Fine,
+        Err(e) => {
+            tracing::warn!(error = %e, "report pair not marked");
+            return Verdict::Fine;
+        }
+    }
     let tag = keys.tag("rsig", &[sender.as_bytes()]);
     match registry.count_signal(Signal::Report, &tag, today, 30).await {
         Ok(n) if n >= REPORTS_30D => limit(registry, sender, "reports", today).await,
@@ -71,7 +94,9 @@ pub async fn on_report(
 }
 
 /// A new block of `blocked` by `by`: counted only if `blocked` sent `by` a request in
-/// the last week; limited when such blocks are many and a large share of its requests.
+/// the last week, and only once (the request mark is consumed: blocking, unblocking and
+/// blocking again counts nothing more, D-0134); limited when such blocks are many and a large
+/// share of its requests.
 pub async fn on_block(
     registry: &Registry,
     hot: &ValkeyConn,
@@ -82,11 +107,9 @@ pub async fn on_block(
 ) -> Verdict {
     let mark = songbird_send::gate::request_mark(keys, blocked, by);
     let marked = hot
-        .query::<Option<String>>(redis::cmd("GET").arg(&mark))
+        .query::<i64>(redis::cmd("DEL").arg(&mark))
         .await
-        .ok()
-        .flatten()
-        .is_some();
+        .is_ok_and(|n| n > 0);
     if !marked {
         return Verdict::Fine;
     }

@@ -109,8 +109,22 @@ struct AppPasses {
     server: String,
 }
 
-/// The token key this process pinned: `(key ID, public key)`.
-static PINNED: std::sync::Mutex<Option<(u8, [u8; 32])>> = std::sync::Mutex::new(None);
+/// Day passes fetched ahead (`day → token`), kept in app storage: a pass is fetched days
+/// before the vault sees it, so the server cannot pair the account's signed request with the
+/// vault's write by time (D-0134).
+const K_PASSES: &str = "sb.vault_passes";
+/// Days of passes kept ahead (issuance allows today and six more).
+const PASS_DAYS: u32 = 7;
+
+fn cached_passes() -> std::collections::BTreeMap<u32, Value> {
+    Storage::get_item(K_PASSES)
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_passes(p: &std::collections::BTreeMap<u32, Value>) {
+    put(K_PASSES, &serde_json::to_string(p).unwrap_or_default());
+}
 
 impl AppPasses {
     async fn call(
@@ -168,16 +182,9 @@ impl AppPasses {
             .and_then(wire::unhex)
             .and_then(|b| b.try_into().ok())
             .ok_or(StoreError::Protocol("keys"))?;
-        let mut g = PINNED.lock().map_err(|_| StoreError::Protocol("keys"))?;
-        match *g {
-            Some((pid, ppk)) if pid == id && ppk != pk => {
-                Err(StoreError::Protocol("token key changed"))
-            }
-            _ => {
-                *g = Some((id, pk));
-                Ok((id, pk))
-            }
-        }
+        // The same trust as plans: a key shipped with the build, or (development) the first seen.
+        super::plans::trusted_token_key(id, &pk).map_err(|_| StoreError::Protocol("token key"))?;
+        Ok((id, pk))
     }
 
     /// This account's level today (Free when it can't be read).
@@ -233,9 +240,61 @@ impl AppPasses {
     }
 }
 
+impl AppPasses {
+    /// Tops up the passes kept ahead (called at start-up, never by a backup run).
+    async fn prefetch(&self) -> Result<(), StoreError> {
+        let today = songbird_backup_storage::vault::today();
+        let mut cache = cached_passes();
+        cache.retain(|d, _| *d > today);
+        if cache.len() >= 3 {
+            save_passes(&cache);
+            return Ok(());
+        }
+        let level = self.level().await;
+        for day in today + 1..today + PASS_DAYS {
+            if !cache.contains_key(&day) {
+                let p = self
+                    .one(songbird_tokens::token::Kind::VaultDay, level, day)
+                    .await?;
+                cache.insert(day, p);
+            }
+        }
+        save_passes(&cache);
+        Ok(())
+    }
+}
+
+/// Keeps vault day passes ahead when backups go to Songbird's servers (start-up only).
+pub async fn prefetch_passes() -> Result<(), Problem> {
+    let (device, seed) = super::device_key().ok_or_else(|| problem("Not registered."))?;
+    let http = Arc::new(
+        HyperHttp::new(&[])
+            .map_err(|_| problem("This device couldn't start a secure connection."))?,
+    );
+    let ep = endpoint();
+    AppPasses {
+        http,
+        api: ep.api.clone(),
+        device,
+        seed: Zeroizing::new(seed),
+        server: ep.api_name,
+    }
+    .prefetch()
+    .await
+    .map_err(|_| problem("Couldn't fetch backup passes ahead."))
+}
+
 #[async_trait::async_trait]
 impl Passes for AppPasses {
     async fn day_pass(&self, day: u32) -> Result<Value, StoreError> {
+        let mut cache = cached_passes();
+        cache.retain(|d, _| *d >= day);
+        if let Some(p) = cache.remove(&day) {
+            save_passes(&cache);
+            return Ok(p);
+        }
+        // None kept (a first backup, or a long gap): fetched now, the one case where the
+        // request and the write are close together.
         let level = self.level().await;
         self.one(songbird_tokens::token::Kind::VaultDay, level, day)
             .await

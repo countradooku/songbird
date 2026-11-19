@@ -571,6 +571,21 @@ async fn request_spam_is_slowed_then_limited_and_normal_users_are_not() {
     for p in &strangers[..4] {
         assert_eq!(block(&s, p, &spammer).await, 204);
     }
+    // One of them unblocking and blocking again, over and over, counts once (D-0134).
+    for _ in 0..4 {
+        let st = strangers[0].devices[0]
+            .api(&s)
+            .send(
+                "DELETE",
+                "/v1/blocks",
+                Some(&json(&format!(r#"{{"account":"{}"}}"#, spammer.hex()))),
+            )
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(st, 204);
+        assert_eq!(block(&s, &strangers[0], &spammer).await, 204);
+    }
     assert!(
         s.registry
             .standing_of(&spammer.account)

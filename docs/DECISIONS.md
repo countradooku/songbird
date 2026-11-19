@@ -195,6 +195,36 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0134 — Prompt 11, the security review's fixes
+
+- Date: 2026-11-19
+- Status: accepted by the agent; the threat-model rows changed await the owner
+- Decided by: agent, after an independent read-only review of the whole Prompt 11 diff
+- Context: `docs/reports/P11-gate.md` (the review and what was done about each finding).
+- Decision:
+  - **Mollie**: each payment counts once (its ID remembered 400 days); the period runs from its
+    `paidAt`; only the first payment turns renewal on; a revoked row takes no new checkout
+    (409 `revoked`; the app starts over with a new secret).
+  - **No clock linkage**: billing's `at` and the registry's `ent.at` are whole days; a provider
+    API answer keeps the row's stamp; a transaction presented by the app counts by its day.
+    Kept tokens are redeemed at a random moment of their month's first two days; vault day
+    passes are fetched up to a week ahead at start-up, never by a backup run.
+  - **Trust in keys**: the app trusts only token keys and a support key shipped with the build;
+    a development build without them pins the first seen and refuses any other ID; a release
+    build without them refuses plans and support. Backups use the same pin.
+  - **Abuse signals**: a reporter counts once per sender (keyed pair mark, 31 days); a block
+    consumes the request mark it counts.
+  - **Budgets**: `/v1/invites/status` 60 an hour per account; Google's keys refetched for an
+    unknown key at most once a minute; billing's range budget keys IPv6 on the whole /48 and
+    evicts only idle ranges (new ranges wait when the table is full of busy ones).
+  - **Staff**: `support open` and `reply` need `--confirm` and are audit-logged; tickets are
+    looked up by ID. The app treats only 409 `spent` as already redeemed.
+- Consequences: a release must ship the deployment's token and support public keys in the app
+  (a gate item for Prompt 13's release). Not changed: the app's secrets in plain app storage
+  (the development stand-in for the Keychain / Keystore, like the identity seed); a first
+  purchase's tokens are redeemed at once (the user is waiting), seen only by an observer of both
+  services' live traffic.
+
 ## D-0133 — Prompt 11, milestone 7: the app on real plans
 
 - Date: 2026-11-19

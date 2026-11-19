@@ -1008,6 +1008,23 @@ impl App {
         if row.pending {
             return Ok(pending_refusal());
         }
+        // A budget per account (keyed, never the ID): 60 asks an hour, burst 20 (D-0134).
+        let record = {
+            let k =
+                aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, &self.push_index_secret);
+            let mut ctx = aws_lc_rs::hmac::Context::with_key(&k);
+            ctx.update(b"songbird.v1/invite-status\0");
+            ctx.update(row.account.as_bytes());
+            format!(
+                "t:is:{}",
+                hex::encode(ctx.sign().as_ref().get(..16).unwrap_or_default())
+            )
+        };
+        match registration::Registration::gcra(&self.hot, &record, 60, 20, false).await {
+            Ok(0) => {}
+            Ok(wait) => return Ok(profile_outcome(profiles::Outcome::Throttled(wait))),
+            Err(()) => return Err(unavailable()),
+        }
         let bad = || {
             json(
                 StatusCode::BAD_REQUEST,

@@ -214,7 +214,9 @@ impl Store {
     }
 
     /// Applies a provider's state if it is not older than what the row holds (`stamp`, the
-    /// provider's own time of the message or answer, milliseconds). With `clears` false, a
+    /// provider's own time of the message, milliseconds; `None` for an answer from the
+    /// provider's API, which is the state now and always applies, and keeps the row's stamp: the
+    /// row never records when a token request came, D-0134). With `clears` false, a
     /// revocation already recorded stays (Google: a voided purchase token is over for good);
     /// Apple's newer state may clear it (a later period paid). Returns whether it applied.
     ///
@@ -224,7 +226,7 @@ impl Store {
         &self,
         key: &SubKey,
         s: &State,
-        stamp: u64,
+        stamp: Option<u64>,
         clears: bool,
     ) -> Result<bool, StoreError> {
         let v = self
@@ -232,11 +234,12 @@ impl Store {
                 "BEGIN TRANSACTION;
                  LET $row = (SELECT stamp, revoked FROM ONLY sub:[$k]);
                  LET $old = $row.stamp ?? -1;
-                 LET $go = $s >= $old;
+                 LET $go = $now OR $s >= $old;
+                 LET $keep = IF $now { math::max([$old, 0]) } ELSE { $s };
                  LET $rv = $r OR (!$clear AND ($row.revoked ?? false));
                  IF $go {
                    UPSERT sub:[$k] SET provider = $p, plan = $pl, paid = $d, revoked = $rv,
-                     renews = $n AND !$rv, stamp = $s, at = time::now() RETURN NONE;
+                     renews = $n AND !$rv, stamp = $keep, at = time::floor(time::now(), 1d) RETURN NONE;
                  };
                  RETURN $go;
                  COMMIT TRANSACTION;",
@@ -248,7 +251,8 @@ impl Store {
                         var("d", int(u64::from(s.paid))),
                         var("r", Value::Bool(s.revoked)),
                         var("n", Value::Bool(s.renews)),
-                        var("s", int(stamp)),
+                        var("s", int(stamp.unwrap_or(0))),
+                        var("now", Value::Bool(stamp.is_none())),
                         var("clear", Value::Bool(clears)),
                     ]
                 },
@@ -265,7 +269,7 @@ impl Store {
     pub async fn revoke(&self, key: &SubKey) -> Result<bool, StoreError> {
         let v = self
             .retrying(
-                "UPDATE sub:[$k] SET revoked = true, renews = false, at = time::now();",
+                "UPDATE sub:[$k] SET revoked = true, renews = false, at = time::floor(time::now(), 1d);",
                 || vec![var("k", bytes(key))],
             )
             .await?;
@@ -383,8 +387,8 @@ impl Store {
         self.db
             .query(
                 "UPSERT sub:[$k] SET provider = 'mollie', plan = $pl, paid = paid ?? 0,
-                   revoked = false, renews = false, stamp = stamp ?? 0, interval = $i,
-                   mcust = $c, at = time::now() RETURN NONE;",
+                   revoked = revoked ?? false, renews = false, stamp = stamp ?? 0, interval = $i,
+                   mcust = $c, at = time::floor(time::now(), 1d) RETURN NONE;",
                 vec![
                     var("k", bytes(key)),
                     var("pl", text(plan)),
@@ -406,15 +410,19 @@ impl Store {
         key: &SubKey,
         subscription: Option<&str>,
         paid: u32,
+        first: bool,
     ) -> Result<(), StoreError> {
+        // Only the first payment (which starts the subscription) says it renews; a recurring
+        // one never turns renewal back on after a cancellation.
         self.retrying(
-            "UPDATE sub:[$k] SET paid = math::max([paid, $d]), renews = true,
-                   msub = $s ?? msub, at = time::now() RETURN NONE;",
+            "UPDATE sub:[$k] SET paid = math::max([paid, $d]), renews = IF $f { true } ELSE { renews },
+                   msub = $s ?? msub, at = time::floor(time::now(), 1d) RETURN NONE;",
             || {
                 vec![
                     var("k", bytes(key)),
                     var("d", int(u64::from(paid))),
                     var("s", opt_text(subscription)),
+                    var("f", Value::Bool(first)),
                 ]
             },
         )
@@ -429,7 +437,7 @@ impl Store {
     pub async fn mollie_cancelled(&self, key: &SubKey) -> Result<(), StoreError> {
         self.db
             .query(
-                "UPDATE sub:[$k] SET renews = false, at = time::now() RETURN NONE;",
+                "UPDATE sub:[$k] SET renews = false, at = time::floor(time::now(), 1d) RETURN NONE;",
                 vec![var("k", bytes(key))],
             )
             .await?;

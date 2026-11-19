@@ -297,6 +297,12 @@ impl Store {
         crate::backend::run(async move {
             use crate::backend::plans;
             plans::redeem_kept().await?;
+            // Vault day passes, fetched ahead and away from any backup run (D-0134).
+            if s.settings.with_untracked(|x| {
+                x.backup_on && x.backup_destination == super::BackupDestination::SongbirdServers
+            }) {
+                let _ = crate::backend::backup::prefetch_passes().await;
+            }
             if plans::has_seat() {
                 plans::claim_seat().await?;
             }

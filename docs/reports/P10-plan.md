@@ -2,7 +2,7 @@
 
 - Date: 2026-11-19
 - Prompt: [10-backups.md](../prompts/10-backups.md)
-- Status: **waiting for the owner's approval** (D-0119). Nothing is built until then.
+- Status: **approved by the owner on 2026-11-19** ("Approve all"), every recommendation (D-0119).
 - Base: `main` at `f6b0444` (Prompt 9 merged, PR #67). The camera module (PR #68) is merged too.
 - Way of working (as Prompts 7 to 9): one branch and one PR (`claude/p10-backups-40584b`). Each
   milestone gets its own commit, tests, report `docs/reports/P10-Mn.md`, decision record

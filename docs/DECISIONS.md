@@ -20,10 +20,12 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
-- Prompt 10 plan (`P10-plan.md`, D-0119): **waiting for the owner's approval.** Questions:
-  scope with account recovery, the recovery key's format, the vault owned by an account,
-  recovery's factor, the vault quota until Prompt 11, the third-party clouds in the app, WebDAV
-  in CI, and the agent decisions.
+- Prompt 10 plan (`P10-plan.md`, D-0119): **approved by the owner on 2026-11-19** ("Approve
+  all"), every recommendation: account recovery in scope, the 64-character recovery key with a
+  check, the vault owned by an account (unlinking re-decided in Prompt 11), recovery by the
+  identity key plus the PIN or passkey when set, 5 GiB and 100,000 chunks per vault until Prompt
+  11, third-party clouds' sign-in on desktop once the OAuth apps are registered, `mod_dav` in CI.
+  Still the owner's: registering the Google, Microsoft and Dropbox OAuth apps. M1 is next.
 - Prompt 9 gate (`P09-gate.md`, D-0102 to D-0108; PR #67): **approved by the owner on
   2026-11-18** ("Approve the gate"): M1–M6 and the security review's fixes, with the threat-model
   rows (§1, §3.26, §4, §5). Still open: the GDPR Article 8 ages to confirm with counsel before
@@ -187,7 +189,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0119 — Prompt 10: the plan, and the owner's decisions it needs
 
 - Date: 2026-11-19
-- Status: proposed (waiting for the owner)
+- Status: accepted (owner, 2026-11-19, "Approve all": every recommendation)
 - Decided by: owner, on the agent's plan `docs/reports/P10-plan.md`
 - Context: Prompt 10 asks for a cloud-agnostic backup format (`crates/backup-format`), storage
   adapters (`crates/backup-storage`), the Songbird vault in `api` on RustFS, local export and a

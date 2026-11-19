@@ -2,8 +2,7 @@
 
 - Date: 2026-11-19
 - Prompt: [11-plans-abuse.md](../prompts/11-plans-abuse.md)
-- Status: **proposed, waiting for the owner** (D-0126). Nothing is built until the owner answers
-  "For the owner" below.
+- Status: **approved by the owner on 2026-11-19** ("Approve all"), every recommendation (D-0126).
 - Base: branch `claude/p11-plans-abuse-e05ed3`, cut from Prompt 10's branch
   (`claude/p10-backups-40584b`, PR #69, waiting for its gate). Prompt 11 builds on the vault's
   quotas and on D-0119's promise to re-decide the vault's link to the account. Once #69 is

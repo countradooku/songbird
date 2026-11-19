@@ -20,10 +20,12 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
-- Prompt 11 plan (`P11-plan.md`, D-0126): **waiting for the owner**. Questions 1–14: scope (a
-  separate `billing` service), anonymous tokens for payments, plans and limits, the EU provider
-  (Mollie recommended), unlinked Family seats, unlinking the vault, abuse and suspension rules,
-  support, legal requests, the owner's store and provider accounts, Teams schema only, the app.
+- Prompt 11 plan (`P11-plan.md`, D-0126): **approved by the owner on 2026-11-19** ("Approve
+  all"), every recommendation: a separate `billing` service, anonymous monthly tokens, the plans
+  and limits table, Mollie, unlinked Family seats, the vault unlinked from the account, outreach
+  limits automatic and suspension by moderators, sealed support tickets, the legal tooling,
+  Teams schema only, the app's M7. Still the owner's: App Store Connect, Google Play and Mollie
+  test accounts; counsel on VAT records and legal requests. M1 is next.
 - Prompt 10 gate (`P10-gate.md`, D-0120 to D-0125): **waiting for the owner**. M1–M5 and the
   security review's fixes are done; the gate's items pass. For the owner: approve the gate with
   the threat-model rows (§1, §3.27, §6); register the Google, Microsoft and Dropbox OAuth apps.
@@ -196,7 +198,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 ## D-0126 — Prompt 11: the plan, and the owner's decisions it needs
 
 - Date: 2026-11-19
-- Status: proposed (waiting for the owner)
+- Status: accepted (owner, 2026-11-19, "Approve all": every recommendation)
 - Decided by: owner, on the agent's plan `docs/reports/P11-plan.md`
 - Context: Prompt 11 asks for Free, Plus, Family and (later) Teams plans enforced everywhere,
   payments verified server-side with minimal linkage to accounts, and abuse controlled without
@@ -229,7 +231,7 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   12. Teams as reserved, empty tables;
   13. the app's M7, StoreKit 2 and Play Billing with the native hosts later.
 - Agent decisions, unless the owner objects: in the plan's question 14.
-- Consequences: M1 (entitlements) starts once the owner approves.
+- Consequences: M1 (entitlements) is next.
 
 ## D-0125 — Prompt 10: the security review's fixes
 

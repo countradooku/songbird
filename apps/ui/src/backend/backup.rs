@@ -160,14 +160,19 @@ impl AppPasses {
         let pk: [u8; 32] = v
             .get("keys")
             .and_then(Value::as_array)
-            .and_then(|a| a.iter().find(|k| k.get("id").and_then(Value::as_u64) == Some(u64::from(id))))
+            .and_then(|a| {
+                a.iter()
+                    .find(|k| k.get("id").and_then(Value::as_u64) == Some(u64::from(id)))
+            })
             .and_then(|k| k.get("public").and_then(Value::as_str))
             .and_then(wire::unhex)
             .and_then(|b| b.try_into().ok())
             .ok_or(StoreError::Protocol("keys"))?;
         let mut g = PINNED.lock().map_err(|_| StoreError::Protocol("keys"))?;
         match *g {
-            Some((pid, ppk)) if pid == id && ppk != pk => Err(StoreError::Protocol("token key changed")),
+            Some((pid, ppk)) if pid == id && ppk != pk => {
+                Err(StoreError::Protocol("token key changed"))
+            }
             _ => {
                 *g = Some((id, pk));
                 Ok((id, pk))
@@ -186,16 +191,33 @@ impl AppPasses {
         }
     }
 
-    async fn one(&self, kind: songbird_tokens::token::Kind, level: u8, period: u32) -> Result<Value, StoreError> {
+    async fn one(
+        &self,
+        kind: songbird_tokens::token::Kind,
+        level: u8,
+        period: u32,
+    ) -> Result<Value, StoreError> {
         use songbird_tokens::token::{self, Info, IssueResponse};
         let (id, pk) = self.pinned().await?;
-        let (pending, req) = token::request(id, Info { kind, level, period }, 1)
-            .map_err(|_| StoreError::Protocol("token"))?;
+        let (pending, req) = token::request(
+            id,
+            Info {
+                kind,
+                level,
+                period,
+            },
+            1,
+        )
+        .map_err(|_| StoreError::Protocol("token"))?;
         let body = serde_json::to_vec(&req).map_err(|_| StoreError::Protocol("token"))?;
-        let (st, b) = self.call("POST", "/v1/vault/tokens", Some(body), true).await?;
+        let (st, b) = self
+            .call("POST", "/v1/vault/tokens", Some(body), true)
+            .await?;
         if st != 200 {
             return Err(if st == 429 {
-                StoreError::Throttled { retry_after_ms: 60_000 }
+                StoreError::Throttled {
+                    retry_after_ms: 60_000,
+                }
             } else {
                 StoreError::Unauthorized
             });
@@ -215,7 +237,8 @@ impl AppPasses {
 impl Passes for AppPasses {
     async fn day_pass(&self, day: u32) -> Result<Value, StoreError> {
         let level = self.level().await;
-        self.one(songbird_tokens::token::Kind::VaultDay, level, day).await
+        self.one(songbird_tokens::token::Kind::VaultDay, level, day)
+            .await
     }
 
     async fn creation(&self) -> Result<Value, StoreError> {
@@ -364,7 +387,9 @@ fn store_for(
 
 fn explain_store(e: &RunError) -> Problem {
     problem(match e {
-        RunError::Store(StoreError::Full) => "Your backup space is full.",
+        RunError::Store(StoreError::Full) => {
+            "Your backup space is full. Plus has more room, and nothing already backed up is removed."
+        }
         RunError::Store(StoreError::Unauthorized) => {
             "The backup place refused this device. Check the account details and try again."
         }

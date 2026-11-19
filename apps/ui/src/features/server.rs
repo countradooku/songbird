@@ -46,6 +46,7 @@ fn body() -> impl IntoElement {
     let api_name = signal(ep.api_name.clone());
     let ws_addr = signal(ep.ws_addr.clone());
     let ws_name = signal(ep.ws_name.clone());
+    let billing = signal(ep.billing.clone());
     let invite = signal(String::new());
     let username = signal(String::new());
     let devices = signal(Vec::<backend::RemoteDevice>::new());
@@ -56,6 +57,11 @@ fn body() -> impl IntoElement {
             api_name: api_name.get_untracked().trim().to_string(),
             ws_addr: ws_addr.get_untracked().trim().to_string(),
             ws_name: ws_name.get_untracked().trim().to_string(),
+            billing: billing
+                .get_untracked()
+                .trim()
+                .trim_end_matches('/')
+                .to_string(),
         });
         toast("Server address saved");
     };
@@ -156,6 +162,12 @@ fn body() -> impl IntoElement {
                             "Message delivery name",
                             field("delivery.songbird.chat", ws_name),
                             "The name on the delivery service's certificate.",
+                            || false,
+                        ))
+                        .child(labelled_field(
+                            "Payments address",
+                            field("https://billing.songbird.chat", billing),
+                            "Where desktop payments are checked. It never learns who you are.",
                             || false,
                         ))
                         .child(view().flex_row().child(btn("Save addresses", Variant::Secondary, BtnSize::Md, save)))

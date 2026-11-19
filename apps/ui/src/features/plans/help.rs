@@ -223,6 +223,7 @@ fn contact_page() -> Screen {
     let topic = signal(None::<&'static str>);
     let message = signal(String::new());
     let logs = signal(false);
+    let attach = signal(false);
     let ready = move || topic.get().is_some() && message.with(|m| m.trim().len() >= 10);
     let body = view()
         .w_full()
@@ -253,6 +254,13 @@ fn contact_page() -> Screen {
                 || false,
             )),
         )
+        .child(section_title("Your account"))
+        .child(group([toggle_row(
+            "About my account",
+            Some("Attaches your account so we can look into it. Leave it off to write anonymously."),
+            move || attach.get(),
+            move |v| attach.set(v),
+        )]))
         .child(section_title("Logs"))
         .child(group([
             toggle_row(
@@ -288,7 +296,9 @@ fn contact_page() -> Screen {
                     if !ready() {
                         return;
                     }
-                    s.send_support(t, &message.get_untracked(), logs.get_untracked());
+                    // Exactly the scrubbed text the preview shows, and only with consent.
+                    let log = logs.get_untracked().then(|| scrub(SAMPLE_LOG));
+                    s.send_support(t, &message.get_untracked(), log, attach.get_untracked());
                     nav::pop();
                     toast("Sent. We'll get back to you soon.");
                 })

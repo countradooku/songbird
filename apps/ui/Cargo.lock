@@ -2571,6 +2571,7 @@ dependencies = [
  "nsh-platform-windows",
  "nsh-testing",
  "qrcode",
+ "serde",
  "serde_json",
  "songbird-backup-format",
  "songbird-backup-storage",

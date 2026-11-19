@@ -106,6 +106,7 @@ pub fn chats_tab() -> AnyElement {
                 ))
             },
         ))
+        .child(crate::features::plans::standing_banner())
         .child(
             view()
                 .flex_row()

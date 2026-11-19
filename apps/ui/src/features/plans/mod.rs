@@ -6,6 +6,7 @@
 pub mod catalog;
 mod help;
 mod invites;
+mod standing;
 
 use nsh_core::prelude::*;
 
@@ -17,6 +18,7 @@ use crate::{
 
 pub use help::{contact, help, licences, open_article};
 pub use invites::{invite_friend, invites};
+pub use standing::{standing, standing_banner};
 
 use catalog::{ALWAYS_FREE, PLANS, info, price_label, price_line, provider};
 
@@ -24,11 +26,45 @@ use catalog::{ALWAYS_FREE, PLANS, info, price_label, price_line, provider};
 const PERIOD_END_MONTHLY: &str = "17 December 2026";
 const PERIOD_END_YEARLY: &str = "17 November 2027";
 
-fn period_end(billing: Billing) -> &'static str {
+fn period_end(billing: Billing) -> String {
+    // The real backend: the entitlement's last day; the mock otherwise.
+    if let Some(day) = extras().with_untracked(|e| e.last_day) {
+        return date_of_day(day);
+    }
     match billing {
         Billing::Monthly => PERIOD_END_MONTHLY,
         Billing::Yearly => PERIOD_END_YEARLY,
     }
+    .to_owned()
+}
+
+/// "17 December 2026" for a UTC day number (days since 1970-01-01).
+fn date_of_day(day: u32) -> String {
+    // Howard Hinnant's civil_from_days.
+    let z = i64::from(day) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    const MONTHS: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    format!("{d} {} {y}", MONTHS[usize::try_from(m - 1).unwrap_or(0)])
 }
 
 /// A request to show the paywall, from anywhere in the app.
@@ -56,6 +92,8 @@ pub fn subscription() {
 }
 
 fn plans_page() -> Screen {
+    // The real entitlement each time the page opens (nothing on the mock).
+    store().refresh_plan();
     page("Subscription", plans_body())
 }
 
@@ -579,6 +617,61 @@ pub fn family_page() -> Screen {
                     "With the Family plan, up to 6 people get Plus. Everyone keeps their own private account, and nobody can read anyone else's messages.",
                     Some(btn("See the Family plan", Variant::Primary, BtnSize::Md, nav::pop).into_element()),
                 )
+                .into_element()
+            },
+        ))
+        // A member of someone else's family (real backend): join with their link, or leave.
+        .child(when(
+            move || !is_family() && crate::backend::is_live() && crate::backend::registered(),
+            move || {
+                let link = signal(String::new());
+                let member = signal(crate::backend::plans::has_seat());
+                view()
+                    .child(section_title("In someone's family?"))
+                    .child(when(
+                        move || !member.get(),
+                        move || {
+                            view()
+                                .px_4()
+                                .gap_3()
+                                .child(labelled_field(
+                                    "Family link",
+                                    field("https://songbird.chat/family#…", link),
+                                    "The link the family's manager sent you. Nobody else learns you joined.",
+                                    || false,
+                                ))
+                                .child(view().flex_row().child(
+                                    btn("Join", Variant::Primary, BtnSize::Md, move || {
+                                        s.join_family(&link.get_untracked());
+                                        member.set(true);
+                                        toast("Joined. Plus arrives in a moment.");
+                                    })
+                                    .disabled(move || link.with(|l| l.trim().is_empty())),
+                                ))
+                        },
+                    ))
+                    .child(when(
+                        move || member.get(),
+                        move || {
+                            view().px_4().flex_row().child(btn(
+                                "Leave the family",
+                                Variant::Secondary,
+                                BtnSize::Md,
+                                move || {
+                                    confirm(
+                                        "Leave the family?".to_string(),
+                                        "You keep Plus until the end of this month, then you're on Free.",
+                                        "Leave",
+                                        move || {
+                                            s.leave_family();
+                                            member.set(false);
+                                            toast("You left the family");
+                                        },
+                                    );
+                                },
+                            ))
+                        },
+                    ))
             },
         ))
         .child(when(is_family, move || {
@@ -606,11 +699,23 @@ pub fn family_page() -> Screen {
                                 let m = m.get_untracked();
                                 let id = m.id;
                                 let who = m.name.clone();
+                                let link = m.link.clone();
+                                let copy_label = format!("Copy {who}'s link");
                                 view().child(separator_inset(56.0)).child(
                                     Row::new(m.name.clone())
                                         .leading(avatar(m.name.clone(), id, 36.0))
                                         .subtitle(if m.pending { "Invited · hasn't joined yet" } else { "Member" })
-                                        .trailing(icon_btn(Icon::Close, format!("Remove {who}"), move || {
+                                        .trailing(view().flex_row().items_center().gap_1()
+                                        // The seat's link holds its secret: shared by the owner, by hand.
+                                        .when(link.is_some(), move |v| {
+                                            let link = link.clone().unwrap_or_default();
+                                            v.child(icon_btn(Icon::Copy, copy_label.clone(), move || {
+                                                set_clipboard(link.clone());
+                                                toast("Link copied. Send it to them yourself.");
+                                            })
+                                            .text_color(move || c::muted_fg()))
+                                        })
+                                        .child(icon_btn(Icon::Close, format!("Remove {who}"), move || {
                                             let who = who.clone();
                                             confirm(
                                                 format!("Remove {who}?"),
@@ -622,7 +727,7 @@ pub fn family_page() -> Screen {
                                                 },
                                             );
                                         })
-                                        .text_color(move || c::muted_fg()))
+                                        .text_color(move || c::muted_fg())))
                                         .build(),
                                 )
                             },
@@ -662,7 +767,11 @@ pub fn family_page() -> Screen {
                         }
                         s.family_invite(n.clone());
                         invite_open.set(false);
-                        toast(format!("Invite sent to {n}"));
+                        toast(if crate::backend::is_live() {
+                            format!("{n}'s seat is ready. Copy its link and send it to them.")
+                        } else {
+                            format!("Invite sent to {n}")
+                        });
                     })
                     .disabled(move || name.with(|n| n.trim().is_empty())),
                 ),
@@ -736,4 +845,14 @@ pub fn announcement_card() -> AnyElement {
         },
     )
     .into_element()
+}
+
+#[cfg(test)]
+mod date_tests {
+    #[test]
+    fn days_become_dates() {
+        assert_eq!(super::date_of_day(0), "1 January 1970");
+        assert_eq!(super::date_of_day(20_774), "17 November 2026");
+        assert_eq!(super::date_of_day(20_804), "17 December 2026");
+    }
 }

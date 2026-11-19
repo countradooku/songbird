@@ -309,6 +309,12 @@ impl Plans {
         serde_json::json!({
             "level": level.name(),
             "last_day": entry.map(|e| e.last_day),
+            // The app shows a limited or suspended account why, and offers the appeal (D-0131).
+            "standing": match self.live.standing(account) {
+                songbird_entitlements::Standing::Good => "good",
+                songbird_entitlements::Standing::Limited => "limited",
+                songbird_entitlements::Standing::Suspended => "suspended",
+            },
             "catalog": self.catalog.version,
             "limits": {
                 "linked_devices": l.linked_devices,

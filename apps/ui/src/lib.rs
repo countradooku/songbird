@@ -102,6 +102,8 @@ pub fn App() -> impl IntoElement {
     backend::profile::install(s);
     backend::presence::install(s);
     s.refresh_server_settings();
+    // Prompt 11: the plan and standing from the server; a kept token or a seat redeemed.
+    s.refresh_plan();
     features::lock::install(s);
     theming::follow_settings(s);
     features::desktop::install_shortcuts();

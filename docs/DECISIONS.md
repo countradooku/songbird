@@ -195,6 +195,26 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0133 — Prompt 11, milestone 7: the app on real plans
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0126 (M7)
+- Decided by: agent, within the owner's plan
+- Context: `docs/reports/P11-M7.md`.
+- Decision:
+  - The app pins the token key on first sight (per key ID, kept in app storage) and refuses a
+    different key under the same ID; tokens that fail their proof are refused.
+  - Desktop purchases go through Mollie in the browser with a subscriber secret kept on the
+    device; the app polls billing (5 s, at most 15 minutes) and then redeems this month's token;
+    next month's is kept and redeemed in its month.
+  - A support ticket names the account only when the user turns on "About my account" (and for
+    appeals); logs only with consent, exactly the previewed scrubbed text.
+  - Limited and suspended accounts see a banner and a status page with the appeal; the
+    entitlement answer carries the standing.
+  - Family seats' links are shared by the owner by hand (copy), never sent by Songbird.
+- Consequences: StoreKit 2 and Play Billing wait for the native hosts; the live purchase run waits
+  for a Mollie test account or a locally served emulator.
+
 ## D-0132 — Prompt 11, milestone 6: support, legal requests and invites without a data sink
 
 - Date: 2026-11-19

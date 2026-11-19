@@ -2825,7 +2825,7 @@ through a last day; `revoke` puts it back on Free; `show` prints the row. Both w
 
 | Request | Body | Answer |
 | --- | --- | --- |
-| `GET /v1/entitlements` | signed, a listed device | `{"level": "free" \| "plus", "last_day": <UTC day> \| null, "catalog": <version>, "limits": {...}, "flags": {...}}`; 403 `pending` for a device not yet in the signed list |
+| `GET /v1/entitlements` | signed, a listed device | `{"level": "free" \| "plus", "last_day": <UTC day> \| null, "standing": "good" \| "limited" \| "suspended", "catalog": <version>, "limits": {...}, "flags": {...}}`; 403 `pending` for a device not yet in the signed list |
 | `POST /v1/entitlements/redeem` | signed, a listed device; a token (§14.4) | 200 `{"level", "last_day"}`; 400 `token`, `level`, `kind`; 409 `period` (not this month or the next), `invalid` (not the PRF of its nonce), `spent`; 429 past 30 an hour (burst 10) per account |
 | `GET /v1/tokens/keys` | none | `{"current": id, "keys": [{"id", "public": <64 hex>}]}`, the keys apps pin |
 

@@ -36,3 +36,16 @@ Verified in the running app (macOS, `preview/Screens_extras.test.tsx`): page pus
 and purchase sheets, toasts, switches, segmented controls, the linking panel. Not verified on
 screen: the drop overlay (needs a real drag; `dropFiles` is headless-only on Linux) and the
 tray title (system menu bar, outside the window).
+
+### Prompt 11, M7 (verified in `preview/Screens_plans_p11.test.tsx` screenshots)
+
+| Screen | Change | Motion | Reduced |
+| --- | --- | --- | --- |
+| Chats | Standing banner shows / hides | None: the standing arrives from the server at start-up or on a refresh, not from a user action; it sits with the offline banner, which also appears without motion | Same |
+| Chats | Limited ↔ suspended while shown | Tone and icon swap in place (`dynamic`), no motion | Same |
+| Account status | Push from "What this means" | Native stack transition | Native |
+| Account status | "Send appeal" | Button disabled (opacity fade via disabled style); toast rises 8pt + fades BASE | Toast fades only |
+| Contact us | "About my account" toggle | `toggle_row` switch: thumb slides FAST, track colour fades | Colour fade only |
+| Family | Copy a seat's link | Icon button press scale; toast | Toast fades only |
+| Family | Join / leave (member) | Section swaps (`when`) after the action; leave asks with the native `confirm` | Native |
+| Plans | Waiting for the browser payment | The purchase sheet stays busy ("Confirming…") until billing confirms; then the plan card ring transition BASE | Same |

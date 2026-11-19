@@ -38,6 +38,19 @@ pub struct FamilySeat {
     pub name: String,
     /// Invited, not joined yet.
     pub pending: bool,
+    /// The seat's link to share (real backend only; it holds the seat's secret).
+    pub link: Option<String>,
+}
+
+/// The account's standing (D-0131), as the server reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Standing {
+    #[default]
+    Good,
+    /// New conversations slowed for a while; lifts by itself.
+    Limited,
+    /// Cannot send or call until lifted; receiving, export, deletion and appeals work.
+    Suspended,
 }
 
 /// How the WhatsApp link stands.
@@ -65,6 +78,17 @@ pub struct Extras {
     pub support_sent: u32,
     /// Purchase in progress (the store sheet is busy).
     pub purchasing: bool,
+    /// The account's standing.
+    pub standing: Standing,
+    /// The last UTC day the paid plan holds (real backend).
+    pub last_day: Option<u32>,
+    /// The account's invite codes and their status (real backend).
+    pub invites_live: Option<Vec<InviteCode>>,
+}
+
+/// The real backend is on and this device is registered.
+fn live_ready() -> bool {
+    crate::backend::is_live() && crate::backend::registered()
 }
 
 /// The extras' global.
@@ -112,6 +136,12 @@ impl Store {
     /// session (`invites_used`, `invites_left`).
     /// mock: app-core `invites.list()`.
     pub fn invite_codes(&self) -> Vec<InviteCode> {
+        if let Some(live) = extras().with(|e| e.invites_live.clone()) {
+            // Used ones first, as the mock shows them.
+            let mut v = live;
+            v.sort_by_key(|c| !c.used);
+            return v;
+        }
         let (used, left) = self.session.with(|s| (s.invites_used, s.invites_left));
         let seed = self.me.with(|m| m.seed);
         (0..used + left)
@@ -120,6 +150,32 @@ impl Store {
                 used: i < used,
             })
             .collect()
+    }
+
+    /// Reads this account's invite codes and which are used (real backend).
+    pub fn refresh_invites(&self) {
+        if !live_ready() {
+            return;
+        }
+        let s = *self;
+        crate::backend::run(async move {
+            let codes = crate::backend::plans::invite_codes().await?;
+            let used = codes.iter().filter(|c| c.1).count() as u32;
+            let left = codes.len() as u32 - used;
+            s.session.update(|x| {
+                x.invites_used = used;
+                x.invites_left = left;
+            });
+            extras().update(|e| {
+                e.invites_live = Some(
+                    codes
+                        .into_iter()
+                        .map(|(code, used)| InviteCode { code, used })
+                        .collect(),
+                );
+            });
+            Ok(())
+        });
     }
 
     // ------------------------------------------------------------ plans
@@ -136,6 +192,37 @@ impl Store {
     pub fn purchase(&self, plan: Plan, billing: Billing, done: impl FnOnce() + 'static) {
         let s = *self;
         extras().update(|e| e.purchasing = true);
+        if live_ready() {
+            // The EU provider in the browser: the app keeps only its subscriber secret, then
+            // waits for the payment and fetches its anonymous tokens (D-0129).
+            let (p, i) = (
+                if plan == Plan::Family {
+                    "family"
+                } else {
+                    "plus"
+                },
+                if billing == Billing::Yearly {
+                    "year"
+                } else {
+                    "month"
+                },
+            );
+            extras().update(|e| e.billing = billing);
+            crate::backend::run(async move {
+                match crate::backend::plans::checkout(p, i).await {
+                    Ok(url) => drop(open_url(url)),
+                    // Already paying on this device: fetch this month's tokens instead.
+                    Err(e) if e.0.contains("already has a subscription") => {}
+                    Err(e) => {
+                        extras().update(|x| x.purchasing = false);
+                        return Err(e);
+                    }
+                }
+                s.await_payment(0, Box::new(done));
+                Ok(())
+            });
+            return;
+        }
         set_timeout(Duration::from_millis(900), move || {
             s.settings_update(|x| x.plan = plan);
             extras().update(|e| {
@@ -147,6 +234,7 @@ impl Store {
                         id: 1,
                         name: "Ana Popescu".into(),
                         pending: false,
+                        link: None,
                     }];
                 }
             });
@@ -158,13 +246,125 @@ impl Store {
     /// whether one was found.
     /// mock: app-core `billing.restore()`; nothing to restore here.
     pub fn restore_purchases(&self) -> bool {
+        if live_ready() {
+            let s = *self;
+            crate::backend::run(async move {
+                if crate::backend::plans::subscription().await?.is_some() {
+                    crate::backend::plans::renew().await?;
+                }
+                s.refresh_plan();
+                Ok(())
+            });
+        }
         self.plan() != Plan::Free
+    }
+
+    /// Polls billing every 5 s (for up to 15 minutes) until the payment is confirmed, then
+    /// redeems this month's token and refreshes the plan.
+    fn await_payment(&self, attempt: u32, done: Box<dyn FnOnce()>) {
+        let s = *self;
+        set_timeout(Duration::from_secs(5), move || {
+            crate::backend::run(async move {
+                let today = crate::backend::plans::day_of(nsh_core::time::unix_ms() as u64);
+                let paid = crate::backend::plans::subscription()
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|x| !x.revoked && x.paid_through >= today);
+                if paid {
+                    let r = crate::backend::plans::renew().await;
+                    extras().update(|e| e.purchasing = false);
+                    r?;
+                    s.refresh_plan();
+                    done();
+                } else if attempt < 180 && extras().with_untracked(|e| e.purchasing) {
+                    s.await_payment(attempt + 1, done);
+                } else {
+                    extras().update(|e| e.purchasing = false);
+                }
+                Ok(())
+            });
+        });
+    }
+
+    /// Reads the plan and standing from the server (real backend); redeems a token kept for
+    /// this month and a Family seat's token first.
+    pub fn refresh_plan(&self) {
+        if !live_ready() {
+            return;
+        }
+        let s = *self;
+        crate::backend::run(async move {
+            use crate::backend::plans;
+            plans::redeem_kept().await?;
+            if plans::has_seat() {
+                plans::claim_seat().await?;
+            }
+            let e = plans::entitlement().await?;
+            let plan = match e.level.as_str() {
+                "plus" if plans::family().is_some() => Plan::Family,
+                "plus" => Plan::Plus,
+                _ => Plan::Free,
+            };
+            s.settings_update(|x| x.plan = plan);
+            extras().update(|x| {
+                x.last_day = e.last_day;
+                x.standing = match e.standing.as_str() {
+                    "limited" => Standing::Limited,
+                    "suspended" => Standing::Suspended,
+                    _ => Standing::Good,
+                };
+                if let Some(f) = plans::family() {
+                    x.family = f
+                        .seats
+                        .iter()
+                        .enumerate()
+                        .map(|(i, seat)| FamilySeat {
+                            id: i as u64 + 1,
+                            name: seat.name.clone(),
+                            pending: false,
+                            link: Some(seat.link.clone()),
+                        })
+                        .collect();
+                }
+            });
+            Ok(())
+        });
+    }
+
+    /// Joins someone's family with the link they sent (real backend).
+    pub fn join_family(&self, link: &str) {
+        let s = *self;
+        let link = link.to_owned();
+        crate::backend::run(async move {
+            crate::backend::plans::join_family(&link)?;
+            s.refresh_plan();
+            Ok(())
+        });
+    }
+
+    /// Leaves the family this device holds a seat in.
+    pub fn leave_family(&self) {
+        let s = *self;
+        crate::backend::run(async move {
+            crate::backend::plans::leave_family().await?;
+            s.refresh_plan();
+            Ok(())
+        });
     }
 
     /// Turns off renewal: the plan stays until the end of the period.
     /// mock: on iOS and Android this happens in the store's own page;
     /// app-core `billing.cancel()` for the EU provider.
     pub fn cancel_renewal(&self) {
+        if live_ready() {
+            crate::backend::run(async move {
+                crate::backend::plans::cancel().await?;
+                extras().update(|e| e.cancels_at_period_end = true);
+                Ok(())
+            });
+            return;
+        }
         extras().update(|e| e.cancels_at_period_end = true);
     }
 
@@ -175,6 +375,15 @@ impl Store {
     /// Invites someone to the Family plan (up to six people in all).
     /// mock: app-core `billing.family_invite()` returns a link.
     pub fn family_invite(&self, name: String) {
+        if live_ready() {
+            let s = *self;
+            crate::backend::run(async move {
+                crate::backend::plans::family_invite(&name).await?;
+                s.refresh_plan();
+                Ok(())
+            });
+            return;
+        }
         let id = nsh_core::time::unix_ms() as u64;
         extras().update(|e| {
             if e.family.len() < 5 {
@@ -182,12 +391,28 @@ impl Store {
                     id,
                     name,
                     pending: true,
+                    link: None,
                 });
             }
         });
     }
 
     pub fn family_remove(&self, id: u64) {
+        let link = extras().with_untracked(|e| {
+            e.family
+                .iter()
+                .find(|m| m.id == id)
+                .and_then(|m| m.link.clone())
+        });
+        if let (true, Some(link)) = (live_ready(), link) {
+            let s = *self;
+            crate::backend::run(async move {
+                crate::backend::plans::family_remove(&link).await?;
+                s.refresh_plan();
+                Ok(())
+            });
+            return;
+        }
         extras().update(|e| e.family.retain(|m| m.id != id));
     }
 
@@ -197,9 +422,43 @@ impl Store {
     /// so, and only the scrubbed form they previewed.
     /// mock: app-core `support.send(topic, message, logs)`; nothing leaves
     /// the device here.
-    pub fn send_support(&self, topic: &str, message: &str, include_logs: bool) {
-        let _ = (topic, message, include_logs);
+    pub fn send_support(
+        &self,
+        topic: &str,
+        message: &str,
+        logs: Option<String>,
+        attach_account: bool,
+    ) {
         extras().update(|e| e.support_sent += 1);
+        if !live_ready() {
+            return;
+        }
+        let kind = if topic == "Billing" {
+            "billing"
+        } else {
+            "help"
+        };
+        let text = format!("[{topic}] {message}");
+        crate::backend::run(async move {
+            crate::backend::plans::open_ticket(kind, &text, logs.as_deref(), attach_account)
+                .await
+                .map(drop)
+        });
+    }
+
+    /// Appeals a limit or suspension: a ticket of kind `appeal`, signed (it names the account,
+    /// which the appeal is about).
+    pub fn appeal(&self, message: &str) {
+        extras().update(|e| e.support_sent += 1);
+        if !live_ready() {
+            return;
+        }
+        let text = message.to_owned();
+        crate::backend::run(async move {
+            crate::backend::plans::open_ticket("appeal", &text, None, true)
+                .await
+                .map(drop)
+        });
     }
 
     // ------------------------------------------------------------ announcement

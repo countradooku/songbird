@@ -4949,6 +4949,7 @@ dependencies = [
  "songbird-service",
  "songbird-surreal",
  "songbird-sync",
+ "songbird-tokens",
  "songbird-types",
  "songbird-valkey",
  "tokio",
@@ -5525,6 +5526,20 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "songbird-tokens"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "curve25519-dalek 5.0.0",
+ "getrandom 0.4.3",
+ "hex",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

@@ -480,7 +480,15 @@ async fn build(
     let reports = reports(s, &metrics)?;
     let calls = calls(s, &metrics)?;
     // Plans (D-0127): the snapshot, then its follower.
+    let redeemer = match &s.tokens {
+        Some(t) => Some(Arc::new(songbird_api::plans::Redeemer::new(
+            t.clone(),
+            &*t.secret.resolve_key32()?,
+        )?)),
+        None => None,
+    };
     let plans = songbird_api::plans::Plans {
+        redeemer,
         catalog: s.plans,
         live: Arc::new(songbird_entitlements::Live::from(
             songbird_entitlements::load(&registry).await?,

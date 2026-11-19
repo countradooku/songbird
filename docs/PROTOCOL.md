@@ -2815,6 +2815,8 @@ through a last day; `revoke` puts it back on Free; `show` prints the row. Both w
 | Request | Body | Answer |
 | --- | --- | --- |
 | `GET /v1/entitlements` | signed, a listed device | `{"level": "free" \| "plus", "last_day": <UTC day> \| null, "catalog": <version>, "limits": {...}, "flags": {...}}`; 403 `pending` for a device not yet in the signed list |
+| `POST /v1/entitlements/redeem` | signed, a listed device; a token (§14.4) | 200 `{"level", "last_day"}`; 400 `token`, `level`, `kind`; 409 `period` (not this month or the next), `invalid` (not the PRF of its nonce), `spent`; 429 past 30 an hour (burst 10) per account |
+| `GET /v1/tokens/keys` | none | `{"current": id, "keys": [{"id", "public": <64 hex>}]}`, the keys apps pin |
 
 Plan refusals name the plan so the app can explain the moment (`docs/design/flows/plans-paywall.md`):
 
@@ -2825,3 +2827,49 @@ Plan refusals name the plan so the app can explain the moment (`docs/design/flow
 | `POST /v1/packs` past the plan's new packs | 429 `{"error": "plan", "packs_per_month": n}` with `Retry-After` |
 | `POST /v1/devices/link-token`, `POST /v1/devices/link` at the plan's device limit | 409 `{"error": "limit"}` (unchanged) |
 | Vault writes past the plan's space or chunks | 409 `{"error": "full"}`, as for the quota before (`GET /v1/vault` reports the owner's plan's quota); deletions always pass |
+
+### 14.4 Anonymous tokens (D-0126 §2, D-0128)
+
+Payments and accounts share no identifier. Billing (M3) issues **tokens** for what was paid;
+the account redeems them. The primitive is RFC 9497's **POPRF** with `ristretto255-SHA512`
+(`crates/tokens`, written from the RFC and checked against all of its Appendix A.1 vectors):
+
+- **Keys.** One 32-byte secret, shared by `api` and billing only (`[api.tokens] secret`). Key
+  ID `n`'s pair is `DeriveKeyPair(secret, "songbird.v1/token-key\0" || n)` in POPRF mode. The
+  highest listed ID issues; every listed ID redeems. Apps pin the public keys (`GET
+  /v1/tokens/keys` is how they are first published; a build ships them).
+- **Metadata (`info`).** `"songbird.v1/token\0" || kind u8 || level u8 || period u32` (24
+  bytes, big-endian). Kinds: 1 plan (period: months since January 1970, UTC), 2 a vault day
+  (UTC day), 3 a vault creation (180-day window); 2 and 3 are M4's.
+- **Request** (client → issuer): `{"key", "kind", "level", "period", "blinded": [<64 hex>…]}`,
+  1 to 16 blinded elements, each `blind · HashToGroup(nonce)` for a fresh random 32-byte nonce
+  and blind.
+- **Answer** (issuer → client): `{"evaluated": [<64 hex>…], "proof": <128 hex>}`, one batched
+  DLEQ proof. The client checks it against the **pinned** key tweaked by `info` before
+  unblinding: an issuer evaluating under another key (tagging one user) or other metadata is
+  refused.
+- **Token** (client → redeemer): `{"key", "kind", "level", "period", "nonce": <64 hex>,
+  "output": <128 hex>}`. The redeemer recomputes `Evaluate(sk, nonce, info)` and compares in
+  constant time.
+- **Nullifier**: `SHA-256("songbird.v1/token-nullifier\0" || key || info || nonce)`, kept in
+  `tnull` until the token could no longer be redeemed. Burnt in the same transaction as the
+  entitlement it buys.
+
+**Plan tokens.** One per month per level; a month's token is redeemable during that month and
+the one before (renewals are fetched in the last days of a month). It gives the level through
+the month's last day plus **3 days of grace**. A refund or a chargeback stops further tokens,
+so it costs at most the rest of a month. Caps per subscription per month (billing): Plus 2 (one
+and a spare for a reinstall), Family 7 (six seats and a spare).
+
+**Unlinkability.** The issuer sees the metadata and blinded elements; the redeemer sees the
+metadata, the nonce and the output. With the blind uniformly random, the blinded element is
+independent of the nonce, so the two views share no value and cannot be joined, even by one
+operator holding both databases (RFC 9497 §7.1). What remains is **timing and the network
+address** of an issuance followed by a redemption (neither is logged, invariant 6; the app
+redeems renewals at a random time) and the **metadata itself** (a month and a level are shared
+by everyone on that plan that month).
+
+**Vector** (`crates/tokens/vectors/v1.json`): secret `07…07`, key ID 1, a Plus token for month
+683 (December 2026), nonce `11…11`, blind and proof scalars from 64 bytes of `22` and `33`
+reduced; every intermediate value is listed. `vectors/check.py` reproduces RFC 9497 A.1.3.1 and
+this vector with the Python standard library alone (ristretto255 from RFC 9496).

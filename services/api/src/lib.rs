@@ -388,6 +388,37 @@ impl App {
                 }
                 Ok(json(StatusCode::OK, &self.plans.describe(&row.account)))
             }
+            (&Method::POST, "/v1/entitlements/redeem") => {
+                let r = self
+                    .plans
+                    .redeemer
+                    .clone()
+                    .ok_or(Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?;
+                let (device, body) = self.authenticate_json(req).await?;
+                let row = self
+                    .registry
+                    .device(&device)
+                    .await
+                    .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?
+                    .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))?;
+                if row.pending {
+                    return Ok(pending_refusal());
+                }
+                Ok(profile_outcome(
+                    r.redeem(
+                        &self.registry,
+                        &self.hot,
+                        &row.account,
+                        &body,
+                        songbird_entitlements::today(),
+                    )
+                    .await,
+                ))
+            }
+            (&Method::GET, "/v1/tokens/keys") => match &self.plans.redeemer {
+                Some(r) => Ok(json(StatusCode::OK, &r.public_keys())),
+                None => Ok(empty(StatusCode::SERVICE_UNAVAILABLE)),
+            },
             (&Method::DELETE, "/v1/account") => {
                 let (device, _) = self.authenticate_json(req).await?;
                 self.delete_account(device).await

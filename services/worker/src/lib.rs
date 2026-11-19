@@ -755,17 +755,10 @@ impl Worker {
         Ok(())
     }
 
-    /// One sweep:attachments past 30 days or fully fetched, expired grants, expired invite
-    /// codes, expired KeyPackages, expired link tokens, released usernames whose hold ended, the outbox.
-    pub async fn sweep(&self) {
-        // Queued reports past their retention (Prompt 4, D-0063).
-        if let Ok(n) = self.registry.sweep_reports().await
-            && n > 0
-        {
-            tracing::info!(n, "expired reports deleted");
-        }
-        // Entitlements past their last day (Prompt 11, D-0127). Readers already treat them as
-        // Free; this keeps the table and every snapshot small.
+    /// Entitlements past their last day (Prompt 11, D-0127): readers already treat them as
+    /// Free; this keeps the table and every snapshot small. Nullifiers of tokens that could no
+    /// longer be redeemed (D-0128).
+    async fn sweep_plans(&self) {
         match self
             .registry
             .sweep_entitlements(songbird_entitlements::today())
@@ -775,6 +768,25 @@ impl Worker {
             Ok(_) => {}
             Err(e) => tracing::warn!(error = %e, "entitlement sweep failed"),
         }
+        if let Err(e) = self
+            .registry
+            .sweep_nullifiers(songbird_entitlements::today())
+            .await
+        {
+            tracing::warn!(error = %e, "nullifier sweep failed");
+        }
+    }
+
+    /// One sweep:attachments past 30 days or fully fetched, expired grants, expired invite
+    /// codes, expired KeyPackages, expired link tokens, released usernames whose hold ended, the outbox.
+    pub async fn sweep(&self) {
+        // Queued reports past their retention (Prompt 4, D-0063).
+        if let Ok(n) = self.registry.sweep_reports().await
+            && n > 0
+        {
+            tracing::info!(n, "expired reports deleted");
+        }
+        self.sweep_plans().await;
         match self.registry.expired_attachments(SWEEP_BATCH).await {
             Ok(objects) => {
                 for o in objects {

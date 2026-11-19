@@ -335,6 +335,9 @@ DEFINE FIELD IF NOT EXISTS last ON ent TYPE int;
 DEFINE FIELD IF NOT EXISTS source ON ent TYPE string;
 DEFINE FIELD IF NOT EXISTS at ON ent TYPE datetime;
 DEFINE INDEX IF NOT EXISTS ent_last ON ent FIELDS last;
+DEFINE TABLE IF NOT EXISTS tnull SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS until ON tnull TYPE int;
+DEFINE INDEX IF NOT EXISTS tnull_until ON tnull FIELDS until;
 DEFINE TABLE IF NOT EXISTS entver SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS version ON entver TYPE int;
 UPSERT entver:v SET version = version ?? 1 RETURN NONE;
@@ -396,6 +399,9 @@ pub enum RegistryError {
     /// Only the primary device may do this.
     #[error("not the primary device")]
     NotPrimary,
+    /// An anonymous token already redeemed (its nullifier is held).
+    #[error("token already redeemed")]
+    Spent,
     /// The account has as many devices (and outstanding link tokens) as allowed.
     #[error("device limit reached")]
     DeviceLimit,

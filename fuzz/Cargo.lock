@@ -6289,6 +6289,7 @@ dependencies = [
  "songbird-accounts",
  "songbird-akd",
  "songbird-calls",
+ "songbird-entitlements",
  "songbird-groups",
  "songbird-jobs",
  "songbird-keys",
@@ -6300,6 +6301,7 @@ dependencies = [
  "songbird-s3",
  "songbird-send",
  "songbird-service",
+ "songbird-tokens",
  "songbird-types",
  "songbird-valkey",
  "tokio",
@@ -6391,6 +6393,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "songbird-entitlements"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "serde",
+ "songbird-accounts",
+ "songbird-types",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "songbird-fuzz"
 version = "0.0.0"
 dependencies = [
@@ -6400,6 +6415,7 @@ dependencies = [
  "libfuzzer-sys",
  "prost",
  "serde",
+ "serde_json",
  "songbird-akd",
  "songbird-api",
  "songbird-backup-format",
@@ -6417,6 +6433,7 @@ dependencies = [
  "songbird-send",
  "songbird-surreal",
  "songbird-sync",
+ "songbird-tokens",
  "songbird-types",
 ]
 
@@ -6661,6 +6678,18 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "songbird-tokens"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "curve25519-dalek 5.0.0",
+ "getrandom 0.4.3",
+ "hex",
+ "serde",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

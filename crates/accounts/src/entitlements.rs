@@ -6,6 +6,10 @@
 //! payment: payments live in billing's own database and share no identifier with this one
 //! (D-0126 §2). Every change bumps `entver:v`, which every service polls to reload its snapshot.
 //!
+//! Redeemed tokens leave only their **nullifier** (`tnull:[hash]`, a SHA-256 the token's nonce
+//! went into) until the token could no longer be redeemed: no account, no time. Redemption and
+//! the entitlement it buys are one transaction, so a token is never spent without its effect.
+//!
 //! A row past its last day is ignored by every reader (they compare with the clock) and deleted
 //! by the worker's sweep, so a stopped worker can never extend an entitlement.
 
@@ -241,6 +245,101 @@ impl Registry {
                  IF count($gone) > 0 { UPSERT entver:v SET version = (version ?? 1) + 1 RETURN NONE; };
                  RETURN count($gone);
                  COMMIT TRANSACTION;",
+                vec![var("t", int(u64::from(today)))],
+            )
+            .await?;
+        Ok(v.iter()
+            .rev()
+            .find_map(first_int)
+            .and_then(|n| u64::try_from(n).ok())
+            .unwrap_or(0))
+    }
+
+    /// Redeems a plan token: burns its nullifier (kept through `keep_until`, a UTC day) and
+    /// extends the account's entitlement as [`Registry::extend_entitlement`], in one transaction.
+    ///
+    /// # Errors
+    /// [`RegistryError::Spent`] for a nullifier already held (nothing changes);
+    /// [`RegistryError::NotFound`] for no such account.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the token's nullifier and life, and the entitlement it buys"
+    )]
+    pub async fn redeem_plan_token(
+        &self,
+        nullifier: &[u8; 32],
+        keep_until: u32,
+        account: &AccountId,
+        level: u8,
+        last_day: u32,
+        today: u32,
+    ) -> Result<EntRow, RegistryError> {
+        if level == 0 {
+            return Err(RegistryError::Shape);
+        }
+        let r = self
+            .db
+            .query(
+                "BEGIN TRANSACTION;
+                 IF !record::exists(account:[$a]) OR account:[$a].deleting { THROW 'songbird:none' };
+                 IF record::exists(tnull:[$n]) { THROW 'songbird:spent' };
+                 CREATE tnull:[$n] SET until = $u RETURN NONE;
+                 LET $h = (SELECT level, last FROM ONLY ent:[$a]);
+                 LET $live = $h != NONE AND $h.last >= $t;
+                 LET $nl = IF $live { math::max([$h.level, $l]) } ELSE { $l };
+                 LET $nd = IF $live { math::max([$h.last, $d]) } ELSE { $d };
+                 UPSERT ent:[$a] SET level = $nl, last = $nd, source = 'token', at = time::now()
+                   RETURN NONE;
+                 UPSERT entver:v SET version = (version ?? 1) + 1 RETURN NONE;
+                 RETURN { a: $ab, level: $nl, last: $nd, source: 'token' };
+                 COMMIT TRANSACTION;",
+                vec![
+                    var("a", bytes(account.as_bytes())),
+                    var("ab", bytes(account.as_bytes())),
+                    var("n", bytes(nullifier)),
+                    var("u", int(u64::from(keep_until))),
+                    var("l", int(u64::from(level))),
+                    var("d", int(u64::from(last_day))),
+                    var("t", int(u64::from(today))),
+                ],
+            )
+            .await;
+        match r {
+            Ok(v) => v
+                .into_iter()
+                .rev()
+                .find_map(|x| ent_row(&x))
+                .ok_or(RegistryError::Shape),
+            Err(DbError::Statement(k)) if k == "Thrown:none" => Err(RegistryError::NotFound),
+            Err(DbError::Statement(k)) if k == "Thrown:spent" => Err(RegistryError::Spent),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Whether a nullifier is held (tests, and the vault's token sessions in M4).
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn nullifier_held(&self, nullifier: &[u8; 32]) -> Result<bool, RegistryError> {
+        let v = self
+            .db
+            .query1(
+                "RETURN record::exists(tnull:[$n]);",
+                vec![var("n", bytes(nullifier))],
+            )
+            .await?;
+        Ok(matches!(v, Value::Bool(true)))
+    }
+
+    /// Deletes nullifiers past their day (the worker's sweep); returns how many.
+    ///
+    /// # Errors
+    /// [`RegistryError`].
+    pub async fn sweep_nullifiers(&self, today: u32) -> Result<u64, RegistryError> {
+        let v = self
+            .db
+            .query(
+                "RETURN count((DELETE tnull WHERE until < $t RETURN BEFORE));",
                 vec![var("t", int(u64::from(today)))],
             )
             .await?;

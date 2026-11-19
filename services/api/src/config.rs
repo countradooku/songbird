@@ -192,6 +192,57 @@ pub struct ApiSettings {
     /// How often the entitlements version is polled (the snapshot reloads on a change).
     #[serde(default = "default_entitlements_poll_ms")]
     pub entitlements_poll_ms: u64,
+    /// `[api.tokens]` (Prompt 11, M2, D-0128): redeeming anonymous plan tokens. Absent:
+    /// `POST /v1/entitlements/redeem` and `GET /v1/tokens/keys` answer 503.
+    #[serde(default)]
+    pub tokens: Option<TokenSettings>,
+}
+
+/// `[api.tokens]`: the token keys (shared with billing, which issues) and the redemption budget.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TokenSettings {
+    /// 32 bytes (64 hex characters), the same on every `api` and `billing` node: every token
+    /// key pair is derived from it.
+    pub secret: SecretRef,
+    /// Key IDs redeemed; the highest is the one billing issues under (and apps pin).
+    #[serde(default = "default_token_keys")]
+    pub keys: Vec<u8>,
+    /// Redemptions per account per hour.
+    #[serde(default = "default_redeems_per_hour")]
+    pub redeems_per_hour: u32,
+    /// Their burst.
+    #[serde(default = "default_redeem_burst")]
+    pub redeem_burst: u32,
+}
+
+fn default_token_keys() -> Vec<u8> {
+    vec![1]
+}
+const fn default_redeems_per_hour() -> u32 {
+    30
+}
+const fn default_redeem_burst() -> u32 {
+    10
+}
+
+impl Validate for TokenSettings {
+    fn validate(&self, v: &mut Validator) {
+        let mut ids = self.keys.clone();
+        ids.sort_unstable();
+        ids.dedup();
+        v.check(
+            !ids.is_empty() && ids.len() == self.keys.len() && ids.len() <= 8,
+            "keys",
+            "must list 1 to 8 distinct key IDs",
+        );
+        v.check(
+            (1..=3_600).contains(&self.redeems_per_hour)
+                && (1..=1_000).contains(&self.redeem_burst),
+            "redeems_per_hour",
+            "must be in 1..=3600 (burst 1..=1000)",
+        );
+    }
 }
 
 const fn default_entitlements_poll_ms() -> u64 {
@@ -707,6 +758,9 @@ impl Validate for ApiSettings {
         }
         if let Some(c) = &self.calls {
             v.section("calls", c);
+        }
+        if let Some(t) = &self.tokens {
+            v.section("tokens", t);
         }
         if let Err(e) = self.plans.validate() {
             v.check(false, "plans", e.to_string());

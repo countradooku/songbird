@@ -1,0 +1,365 @@
+//! Plans in `api` against real stores (Prompt 11; D-0127, D-0128): anonymous plan tokens
+//! redeemed once into an entitlement, under their metadata and month only, with a budget; and
+//! issuance and redemption that share no value. Runs when the `api_live` variables are set.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::too_many_lines,
+    clippy::many_single_char_names,
+    reason = "tests"
+)]
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair as _};
+use songbird_accounts::push_token;
+use songbird_accounts::{Db, Registry};
+use songbird_api::client::{ApiClient, unsigned};
+use songbird_api::config::TokenSettings;
+use songbird_api::plans::{GRACE_DAYS, Plans, Redeemer};
+use songbird_api::{ApiMetrics, App};
+use songbird_jobs::{Queue, QueueConfig, Stream};
+use songbird_tokens::token::{self, Info, Kind, Redemption};
+use songbird_types::{AccountId, DeviceId, Secret, SecretRef};
+
+const SERVER: &str = "api.test";
+const SECRET: [u8; 32] = [0x5c; 32];
+
+fn env(name: &str) -> Option<String> {
+    let v = std::env::var(name).ok();
+    assert!(
+        v.is_some() || std::env::var("SONGBIRD_REQUIRE_STACK").is_err(),
+        "SONGBIRD_REQUIRE_STACK is set but {name} is not"
+    );
+    v
+}
+
+struct Stack {
+    app: Arc<App>,
+    addr: std::net::SocketAddr,
+    _stop: tokio::sync::watch::Sender<bool>,
+}
+
+async fn stack(per_hour: u32, burst: u32) -> Option<Stack> {
+    let surreal = env("SONGBIRD_TEST_SURREALDB")?;
+    let hot = env("SONGBIRD_TEST_VALKEY")?;
+    let jobs = env("SONGBIRD_TEST_VALKEY_JOBS")?;
+    let s3 = env("SONGBIRD_TEST_RUSTFS")?;
+    let db = Db::connect(songbird_surreal::Config {
+        addr: surreal,
+        host: "localhost".into(),
+        tls: None,
+        user: std::env::var("SONGBIRD_TEST_SURREALDB_USER").unwrap_or_else(|_| "root".into()),
+        pass: std::env::var("SONGBIRD_TEST_SURREALDB_PASS").unwrap(),
+        namespace: "test".into(),
+        database: format!("plans_{}", DeviceId::random().unwrap().to_hex_unredacted()),
+        timeout: Duration::from_secs(5),
+        max_message_bytes: 16 << 20,
+    })
+    .await
+    .unwrap();
+    let registry = Arc::new(Registry::connect(db).await.unwrap());
+    let s3 = songbird_s3::Client::new(songbird_s3::Config::new(
+        s3,
+        "songbird-plans-test".into(),
+        Secret::new(std::env::var("SONGBIRD_TEST_RUSTFS_ACCESS_KEY").unwrap()),
+        Secret::new(std::env::var("SONGBIRD_TEST_RUSTFS_SECRET_KEY").unwrap()),
+    ))
+    .unwrap();
+    let queue = Queue::connect(
+        redis::Client::open(jobs).unwrap(),
+        &[3; 32],
+        QueueConfig::new("plans-test".into()),
+    )
+    .await
+    .unwrap();
+    queue.ensure_groups(&Stream::ALL).await.unwrap();
+    let hot = songbird_valkey::ValkeyConn::connect(redis::Client::open(hot).unwrap())
+        .await
+        .unwrap();
+    let (_, push_public) = push_token::key_pair(&[0x77; 32]).unwrap();
+    // A secret per test run for the budget records (they live in the shared valkey-hot).
+    let mut secret = SECRET;
+    secret[31] = DeviceId::random().unwrap().as_bytes()[0];
+    let redeemer = Redeemer::new(
+        TokenSettings {
+            secret: SecretRef::Env("SONGBIRD_UNUSED".into()),
+            keys: vec![1, 2],
+            redeems_per_hour: per_hour,
+            redeem_burst: burst,
+        },
+        &secret,
+    )
+    .unwrap();
+    let app = Arc::new(App {
+        plans: Plans {
+            redeemer: Some(Arc::new(redeemer)),
+            ..Plans::default()
+        },
+        requests: None,
+        reports: None,
+        calls: None,
+        server_name: SERVER.into(),
+        push_store: Arc::new(
+            songbird_accounts::PushStore::beside(&registry)
+                .await
+                .unwrap(),
+        ),
+        registry,
+        s3,
+        queue: Arc::new(queue),
+        hot,
+        push_public,
+        push_index_secret: [9; 32],
+        limits: songbird_api::config::AttachmentLimits::default(),
+        media: None,
+        metrics: ApiMetrics::default(),
+        messages: None,
+        registration: None,
+        usernames: None,
+        keys: None,
+        storage: None,
+        vault: None,
+        kt: None,
+        profiles: None,
+        devices: None,
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop, rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(songbird_api::server::serve(
+        listener,
+        None,
+        Arc::clone(&app),
+        64,
+        rx,
+    ));
+    Some(Stack {
+        app,
+        addr,
+        _stop: stop,
+    })
+}
+
+async fn device(s: &Stack) -> (AccountId, ApiClient) {
+    let mut seed = [0u8; 32];
+    aws_lc_rs::rand::fill(&mut seed).unwrap();
+    let kp = Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
+    let mut pk = [0u8; 32];
+    pk.copy_from_slice(kp.public_key().as_ref());
+    let (a, d) = (AccountId::random().unwrap(), DeviceId::random().unwrap());
+    s.app.registry.create_account(&a, &[(d, pk)]).await.unwrap();
+    (a, ApiClient::new(s.addr, SERVER, d, kp))
+}
+
+/// What the issuer and the redeemer each saw.
+struct Issued {
+    issuer_view: Vec<String>,
+    tokens: Vec<Redemption>,
+}
+
+/// Tokens as billing issues them: requested and finished by the client against the key it
+/// pinned from `GET /v1/tokens/keys`.
+async fn issue(s: &Stack, info: Info, n: usize) -> Issued {
+    let (st, b) = unsigned(s.addr, SERVER, "GET", "/v1/tokens/keys", None)
+        .await
+        .unwrap();
+    assert_eq!(st, 200);
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    let current = u8::try_from(v["current"].as_u64().unwrap()).unwrap();
+    let pinned: [u8; 32] = hex::decode(
+        v["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|k| k["id"] == current)
+            .unwrap()["public"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap()
+    .try_into()
+    .unwrap();
+    let keys = s.app.plans.redeemer.as_ref().unwrap().keys();
+    let (pending, req) = token::request(current, info, n).unwrap();
+    let resp = keys.issue(&req).unwrap();
+    let mut issuer_view = req.blinded.clone();
+    issuer_view.extend(resp.evaluated.iter().cloned());
+    issuer_view.push(resp.proof.clone());
+    Issued {
+        issuer_view,
+        tokens: pending.finish(&pinned, &resp).unwrap(),
+    }
+}
+
+async fn redeem(c: &ApiClient, t: &Redemption) -> (u16, serde_json::Value) {
+    let (st, b) = c
+        .send(
+            "POST",
+            "/v1/entitlements/redeem",
+            Some(&serde_json::to_vec(t).unwrap()),
+        )
+        .await
+        .unwrap();
+    (st, serde_json::from_slice(&b).unwrap_or_default())
+}
+
+fn plan(period: u32) -> Info {
+    Info {
+        kind: Kind::Plan,
+        level: 1,
+        period,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plan_token_redeems_once_for_its_month() {
+    let Some(s) = stack(1_000, 100).await else {
+        return;
+    };
+    let today = songbird_entitlements::today();
+    let month = token::month_of(today);
+    let (a, c) = device(&s).await;
+    let issued = issue(&s, plan(month), 2).await;
+    let (st, v) = redeem(&c, &issued.tokens[0]).await;
+    assert_eq!(st, 200, "{v}");
+    let end = token::last_day(month) + GRACE_DAYS;
+    assert_eq!(
+        (v["level"].as_str(), v["last_day"].as_u64()),
+        (Some("plus"), Some(u64::from(end)))
+    );
+    // The snapshot follows the registry: the account is Plus.
+    s.app
+        .plans
+        .live
+        .store(songbird_entitlements::load(&s.app.registry).await.unwrap());
+    let (st, b) = c.send("GET", "/v1/entitlements", None).await.unwrap();
+    assert_eq!(st, 200);
+    let e: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(e["level"], "plus");
+    // Spent: refused, nothing changes, for this account or another.
+    let (st, v) = redeem(&c, &issued.tokens[0]).await;
+    assert_eq!((st, v["error"].as_str()), (409, Some("spent")));
+    let (_, c2) = device(&s).await;
+    assert_eq!(redeem(&c2, &issued.tokens[0]).await.0, 409);
+    // The spare redeems on the second account (a reinstall, or a second account of one person).
+    assert_eq!(redeem(&c2, &issued.tokens[1]).await.0, 200);
+    // Next month's token extends; last month's and a later one's are refused.
+    let next = issue(&s, plan(month + 1), 1).await;
+    let (st, v) = redeem(&c, &next.tokens[0]).await;
+    assert_eq!(st, 200);
+    assert_eq!(
+        v["last_day"].as_u64(),
+        Some(u64::from(token::last_day(month + 1) + GRACE_DAYS))
+    );
+    for p in [month - 1, month + 2] {
+        let t = issue(&s, plan(p), 1).await;
+        let (st, v) = redeem(&c, &t.tokens[0]).await;
+        assert_eq!((st, v["error"].as_str()), (409, Some("period")));
+    }
+    // Tampered tokens.
+    let t = &issue(&s, plan(month), 1).await.tokens[0];
+    let mut bad = t.clone();
+    bad.output = issued.tokens[1].output.clone();
+    assert_eq!(redeem(&c, &bad).await.1["error"], "invalid");
+    let mut bad = t.clone();
+    bad.kind = Kind::VaultDay.as_u8();
+    assert_eq!(redeem(&c, &bad).await.0, 400);
+    let mut bad = t.clone();
+    bad.level = 0;
+    assert_eq!(redeem(&c, &bad).await.0, 400);
+    let mut bad = t.clone();
+    bad.level = 9;
+    assert_eq!(redeem(&c, &bad).await.0, 400);
+    // Nothing but the nullifier stays of a token; the entitlement names no payment.
+    let row = s.app.registry.entitlement_of(&a).await.unwrap().unwrap();
+    assert_eq!(row.source.as_str(), "token");
+    let n = token::nullifier(
+        issued.tokens[0].key,
+        &issued.tokens[0].info().unwrap(),
+        &hex::decode(&issued.tokens[0].nonce)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    );
+    assert!(s.app.registry.nullifier_held(&n).await.unwrap());
+    // Unsigned redemptions are refused.
+    let (st, _) = unsigned(
+        s.addr,
+        SERVER,
+        "POST",
+        "/v1/entitlements/redeem",
+        Some(&serde_json::to_vec(t).unwrap()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(st, 401);
+}
+
+/// Everything the registry keeps after issuances and redemptions shares no value with what the
+/// issuer saw (blinded and evaluated elements, proofs): the two sides cannot be joined.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn issuance_and_redemption_share_no_value() {
+    let Some(s) = stack(1_000, 100).await else {
+        return;
+    };
+    let month = token::month_of(songbird_entitlements::today());
+    let mut issuer_view = Vec::new();
+    for _ in 0..5 {
+        let (_, c) = device(&s).await;
+        let issued = issue(&s, plan(month), 1).await;
+        issuer_view.extend(issued.issuer_view);
+        assert_eq!(redeem(&c, &issued.tokens[0]).await.0, 200);
+    }
+    let dump = s
+        .app
+        .registry
+        .db()
+        .query(
+            "RETURN SELECT * FROM tnull; RETURN SELECT * FROM ent;",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let dump = format!("{dump:?}");
+    // `Debug` hides byte contents; read the raw values too.
+    let raw = s
+        .app
+        .registry
+        .db()
+        .query(
+            "RETURN (SELECT VALUE meta::id(id)[0] FROM tnull);",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let held: Vec<String> = raw[0]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| hex::encode(v.as_bytes().unwrap()))
+        .collect();
+    assert_eq!(held.len(), 5);
+    for x in &issuer_view {
+        assert!(!dump.contains(x.as_str()));
+        for h in &held {
+            assert!(!h.contains(x.as_str()) && !x.contains(h.as_str()));
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn redemptions_have_a_budget() {
+    let Some(s) = stack(1, 2).await else {
+        return;
+    };
+    let month = token::month_of(songbird_entitlements::today());
+    let (_, c) = device(&s).await;
+    let issued = issue(&s, plan(month), 3).await;
+    assert_eq!(redeem(&c, &issued.tokens[0]).await.0, 200);
+    assert_eq!(redeem(&c, &issued.tokens[1]).await.0, 200);
+    assert_eq!(redeem(&c, &issued.tokens[2]).await.0, 429);
+}

@@ -27,6 +27,9 @@ songbird-send = { path = "../crates/send" }
 songbird-sync = { path = "../crates/sync" }
 # The backup format (Prompt 10, D-0120).
 songbird-backup-format = { path = "../crates/backup-format" }
+# Anonymous tokens (Prompt 11, D-0128).
+songbird-tokens = { path = "../crates/tokens" }
+serde_json = "1"
 aws-lc-rs = { version = "1.19.0", default-features = false, features = ["aws-lc-sys"] }
 # The app's camera (D-0110): QR decoding and the still metadata filter.
 songbird-camera = { path = "../apps/camera" }
@@ -272,6 +275,13 @@ bench = false
 [[bin]]
 name = "backup_format"
 path = "fuzz_targets/backup_format.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tokens"
+path = "fuzz_targets/tokens.rs"
 test = false
 doc = false
 bench = false

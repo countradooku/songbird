@@ -166,7 +166,7 @@ async fn stack_with(quota_bytes: u64, catalog: songbird_entitlements::Catalog) -
     let app = Arc::new(App {
         plans: songbird_api::plans::Plans {
             catalog,
-            live: Arc::default(),
+            ..songbird_api::plans::Plans::default()
         },
         calls: None,
         reports: None,

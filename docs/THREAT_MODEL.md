@@ -104,6 +104,9 @@ server in plaintext. Adding to this list requires the owner's approval.
 | **Recovery and hand-over tokens** (Prompt 10, D-0123; `ltoken` with a `kind`): `SHA-256` of the token, the account, the reserved device ID, the expiry; and in memory, the source IP of the recovery request | Let a new device become the primary with the account identity key (and the PIN or a passkey), or with the old primary's consent | Single use, ten minutes; swept with link tokens | Prompt 10 (M4), D-0123; **awaiting the owner's approval** |
 | **Entitlements** (Prompt 11, D-0127; `ent`, `entver`, SurrealDB): per account **not on Free**, its level, the last UTC day it holds it, where it came from (`grant` by an operator or `token` from an anonymous redemption) and when the row was written; in every `api` node's memory, the snapshot of those rows | Enforce each plan's limits (devices, file size, upload bytes, vault space, new packs) | Until the last day, then ignored by every reader and deleted by the worker's sweep; deleted with the account | Prompt 11 (M1), D-0127; **awaiting the owner's approval** |
 | Keyed budget records of new packs per account per level (`m:p:`, `m:p1:` in `valkey-hot`; HMAC of the account under the media key) and of upload bytes per level (`m:b:`, `m:b1:`) | Hold each plan's new packs per 30 days and bytes per day | 30 days (packs), 24 hours (bytes) | Prompt 11 (M1), D-0127; **awaiting the owner's approval** |
+| **Redeemed token nullifiers** (Prompt 11, D-0128; `tnull`): `SHA-256` of a token's key ID, metadata and nonce, and the last day it is kept; **no account, no time**. The account's entitlement row says only `source = token` | Refuse a token redeemed twice | Until the token could no longer be redeemed (its month's end and a day); the worker's sweep | Prompt 11 (M2), D-0128; **awaiting the owner's approval** |
+| Keyed budget records of redemptions per account (`tk:r:` in `valkey-hot`, HMAC of the account under a key derived from the token secret) | Bound redemptions | An hour | Prompt 11 (M2), D-0128; **awaiting the owner's approval** |
+| **The token secret** (`[api.tokens]`, shared by `api` and billing only): derives every token key pair | Issue (billing) and redeem (`api`) tokens | Until rotated (a new key ID) | Prompt 11 (M2), D-0128; **awaiting the owner's approval** |
 | **Teams tables, reserved and empty** (Prompt 11, D-0126 §12; `org`, `org_admin`, `org_member`, `org_device`): defined so Teams can come without a migration; nothing writes them | — | — | Prompt 11 (M1), D-0127; **awaiting the owner's approval** |
 
 Prompt 1 adds two operational views, neither of which is user data on the server:
@@ -634,6 +637,13 @@ These run in apps, over end-to-end encrypted content. The server sees receipts o
 | A misconfigured catalogue (Plus allowing less, a security feature behind a flag) | T, D | Operator error | Strict parsing (unknown fields refused), bounds, monotone levels, no security flag exists to set; refused at start-up | `a_catalogue_from_configuration_is_strict`, `validation_accepts_exactly_the_monotone_catalogues` |
 | Budgets inherited across levels (an upgrade that gives nothing until the old budget refills) | D | Fault | A record per level | `the_plan_sets_file_size_daily_bytes_and_packs` |
 | An operator granting plans silently | R | Insider | `plans grant` and `revoke` need `--confirm` and write the audit log with the account, level and day | `songbird-admin` audit tests |
+| A token redeemed twice, or by two accounts | E | Client, colluding accounts | Its nullifier is burnt in the transaction that extends the entitlement; the second redemption is 409 `spent` and changes nothing | `a_plan_token_redeems_once_for_its_month` |
+| A made-up or altered token (another month, level, kind, key, output) | S, E | Client | The output must be the PRF of its nonce under exactly that metadata (constant-time comparison); only a paid level this build knows, this month or the next | `issued_tokens_redeem_once_under_their_metadata`, the live test; fuzz `tokens` (6.6 million inputs, none redeemed) |
+| Linking a payment to an account through the tokens | I | Server, insider, a seized billing or registry database | The nonce is blinded at issuance (POPRF, RFC 9497 §7.1): the issuer's and the redeemer's records share no value | `issuance_and_redemption_share_no_value` (every stored value compared with everything the issuer saw) |
+| Tagging one user with a key of their own, or other metadata, to follow the token | I | Malicious issuer | The DLEQ proof is checked against the pinned public key tweaked by the metadata before unblinding | `a_server_tagging_a_user_with_another_key_is_caught`, `a_server_evaluating_under_other_metadata_is_caught` |
+| Timing and network correlation of an issuance and the redemption after it | I | Server operator watching both | Not prevented: stated (PROTOCOL §14.4). No IP is logged (invariant 6); renewals are redeemed at a random time; first purchases at once (the user is waiting) | — (§6) |
+| A wrong implementation of the PRF or the proof | T, E | — | Written from RFC 9497 and checked against all of Appendix A.1 (OPRF, VOPRF, POPRF, batches); Songbird's vector re-derived by an independent Python implementation (RFC 9496, 9380, 9497) | `tests/rfc9497.rs`, `vectors/check.py` (CI) |
+| Redemption floods | D | Client | A per-account budget before any work; a batch of at most 16 at issuance | `redemptions_have_a_budget` |
 
 ## 4. Server-enforced settings
 
@@ -682,6 +692,15 @@ data than of any account, plus the policy row in §1.
 
 ## 6. Open risks
 
+- Plans and payments (Prompt 11, D-0128; awaiting the owner's approval): an operator watching
+  both billing and `api` could link a token's issuance to its redemption by **timing and IP
+  address** (nothing is logged; renewals are redeemed at a random time, a first purchase at
+  once). A server could serve **one user a public key of its own** on the first fetch; apps
+  ship the keys in the build and the DLEQ proof binds every issuance to them; publishing the
+  key list in the key transparency log is proposed for Prompt 12. The **metadata** of a token
+  (level, month) is shared by everyone on that plan that month. Apple and Google know which of
+  their accounts pays for Songbird (outside Songbird's control; the app never sets
+  `appAccountToken` or `obfuscatedExternalAccountId`).
 - Backups in third-party clouds (Prompt 10, D-0122): the provider sees that an app folder
   exists, how many objects it holds, their padded sizes and when they change, and the
   account's IP addresses. `WebDAV` servers and Google Drive cannot swap the manifest

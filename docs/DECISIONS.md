@@ -195,6 +195,38 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0128 — Prompt 11, milestone 2: anonymous tokens on RFC 9497's POPRF
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0126 §2; the threat-model rows (§1, §3.28, §6) await
+  the owner
+- Decided by: agent, within the owner's plan
+- Context: D-0126 §2 chose anonymous tokens so billing and accounts share no identifier, and
+  asked for the evaluation of libsignal's credential library. `docs/reports/P11-M2.md`.
+- Options considered: libsignal `zkcredential` (AGPL, a port; hidden attributes not needed for
+  payments); a VOPRF key per level and month (the plan's first idea: many keys to publish and
+  pin, each a chance to tag a user); RFC 9497's POPRF with the metadata as public input; plain
+  linkage in a stricter store (refused by the owner's plan).
+- Decision:
+  - `crates/tokens`: RFC 9497 `ristretto255-SHA512`, all three modes, written from the RFC on
+    `curve25519-dalek` 5 and aws-lc-rs, checked against all of Appendix A.1. No new external
+    dependency.
+  - Tokens on the POPRF: metadata `"songbird.v1/token\0" || kind || level || period`; key ID
+    `n` = `DeriveKeyPair(secret, "songbird.v1/token-key\0" || n)`; the highest ID issues,
+    every listed ID redeems; apps pin the public keys; the client checks the batched DLEQ proof
+    against the pinned key before unblinding; nullifier `SHA-256(context || key || info ||
+    nonce)`.
+  - Plan tokens: one a month per level, redeemable in their month and the one before, Plus
+    through the month's end plus 3 days; nullifier and entitlement in one transaction.
+  - `[api.tokens]` (the secret shared with billing only), `POST /v1/entitlements/redeem`
+    (30 an hour per account), `GET /v1/tokens/keys`.
+  - Songbird's vector re-derived in CI by `vectors/check.py` (Python standard library,
+    ristretto255 from RFC 9496).
+- Evidence: `crates/tokens/tests/rfc9497.rs`; `src/token/tests.rs` (9); `vectors/check.py`;
+  `services/api/tests/plans_live.rs` (3); fuzz `tokens` (6.6 million runs); `tests/bench.rs`.
+- Consequences: M3's billing issues plan tokens under its caps; M4 adds vault tokens (kinds 2
+  and 3). Key transparency for the token keys is proposed for Prompt 12.
+
 ## D-0127 — Prompt 11, milestone 1: entitlements, one snapshot, every limit by plan
 
 - Date: 2026-11-19

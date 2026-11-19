@@ -153,6 +153,14 @@ filter = "info"
 # audio_participants = 128
 # token_ttl_secs = 120
 #
+# Anonymous plan tokens (Prompt 11, D-0128). Absent: POST /v1/entitlements/redeem and
+# GET /v1/tokens/keys answer 503.
+# [api.tokens]
+# secret = { file = "/path/to/token-secret.hex" }                 # 64 hex; the same on every api and billing node
+# keys = [1]                                                      # key IDs redeemed; the highest issues
+# redeems_per_hour = 30                                           # per account
+# redeem_burst = 10
+#
 # Plans (Prompt 11, D-0126 §3, D-0127). Absent: these defaults. A higher level may never allow
 # less than a lower one; security features are never here.
 # [api.plans]

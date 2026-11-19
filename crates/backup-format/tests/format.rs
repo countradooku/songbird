@@ -559,5 +559,6 @@ fn debug_output_never_shows_content() {
         Body::Account(a.clone()),
         ChunkName([0xab; 32])
     );
-    assert!(!s.contains("songbird.42") && !s.contains("ab"), "{s}");
+    // No message: a failure must not print what leaked.
+    assert!(!s.contains("songbird.42") && !s.contains("ab"));
 }

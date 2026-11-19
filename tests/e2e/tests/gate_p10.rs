@@ -626,3 +626,56 @@ async fn vault_latency() {
         pct(&mut swap, 0.99)
     );
 }
+
+/// Prompt 10's gate: the incremental cost on a large simulated history, on the vault (compose
+/// `RustFS`, SurrealDB, Valkey; `api` in process). The same history as
+/// `songbird-backup-storage`'s `incremental_cost_in_memory`.
+///
+/// `cargo test --release -p songbird-e2e --test gate_p10 incremental_cost -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "a measurement: about 1.7 GB into the compose RustFS"]
+async fn incremental_cost_on_the_vault() {
+    let Some(s) = stack(1 << 40).await else {
+        return;
+    };
+    let owner = account(&s, 0).await;
+    let keys = new_keys();
+    let large = Shape {
+        seed: 1_000_000,
+        chats: 2_000,
+        messages_per_chat: 501,
+        media_every: 50,
+        media_sizes: &[20_000, 60_000, 200_000],
+        contacts: 500,
+    };
+    let steps = conformance::incremental_cost(
+        store(&s, &keys, Some(&owner[0])),
+        Arc::clone(&keys),
+        large,
+        1,
+        25,
+    )
+    .await
+    .unwrap();
+    println!(
+        "vault: step | new chunks | new MB | reused chunks | deleted | plaintext MB | seconds"
+    );
+    for st in &steps {
+        println!(
+            "{} | {} | {:.1} | {} | {} | {:.0} | {:.1}",
+            st.what,
+            st.new_chunks,
+            st.new_bytes as f64 / 1e6,
+            st.reused_chunks,
+            st.deleted,
+            st.plaintext as f64 / 1e6,
+            st.seconds
+        );
+    }
+    let vault = VaultStore::new(http(), s.api.clone(), &keys, None);
+    let (generation, bytes, chunks, _, _) = vault.stats().await.unwrap();
+    println!(
+        "vault after: generation {generation}, {:.1} MB in {chunks} chunks",
+        bytes as f64 / 1e6
+    );
+}

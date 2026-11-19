@@ -833,6 +833,10 @@ fn factor_settings() -> DeviceSettings {
     }
 }
 
+fn identity_transcript_with(c: &[u8], r: &LinkRequest) -> Vec<u8> {
+    wire::link_transcript(c, SERVER, &r.token, &r.device, &r.auth_key, &r.identity_key).unwrap()
+}
+
 fn identity_transcript(r: &LinkRequest) -> Vec<u8> {
     wire::link_transcript(
         LINK_IDENTITY_CONTEXT,
@@ -1295,4 +1299,340 @@ fn sha(b: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, b).as_ref());
     out
+}
+
+// ------------------------------------------------------------- account recovery (Prompt 10, M4)
+
+/// A recovery: draws a token (recovery, or `handover` from the primary), then a request signed
+/// by the new keys and by `account_key`, with `factor`, after `tamper`.
+async fn recover(
+    s: &Stack,
+    p: &Primary,
+    account_key: &Ed25519KeyPair,
+    handover: bool,
+    factor: Factor,
+    tamper: impl Fn(&mut wire::RecoverRequest),
+) -> (u16, String, Option<(DeviceId, Ed25519KeyPair, Signer)>) {
+    recover_with(
+        s,
+        p,
+        account_key,
+        if handover { "handover" } else { "recovery" },
+        factor,
+        tamper,
+    )
+    .await
+}
+
+/// As [`recover`], the token drawn from `source`: `recovery`, `handover` or `link` (a link
+/// token, which a recovery must refuse).
+async fn recover_with(
+    s: &Stack,
+    p: &Primary,
+    account_key: &Ed25519KeyPair,
+    source: &str,
+    factor: Factor,
+    tamper: impl Fn(&mut wire::RecoverRequest),
+) -> (u16, String, Option<(DeviceId, Ed25519KeyPair, Signer)>) {
+    let (st, b) = if source == "handover" {
+        p.client
+            .send("POST", "/v1/account/handover", None)
+            .await
+            .unwrap()
+    } else if source == "link" {
+        p.client
+            .send("POST", "/v1/devices/link-token", None)
+            .await
+            .unwrap()
+    } else {
+        let body = format!(r#"{{"account":"{}"}}"#, p.account.to_hex_unredacted());
+        unsigned(
+            s.addr,
+            SERVER,
+            "POST",
+            "/v1/account/recover/token",
+            Some(body.as_bytes()),
+        )
+        .await
+        .unwrap()
+    };
+    if st != 200 {
+        return (st, String::from_utf8_lossy(&b).into_owned(), None);
+    }
+    let v = json(&b);
+    let token: [u8; 32] = hex::decode(v["token"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let device = DeviceId::from_bytes(hex16(&v["device"]));
+    let auth = Ed25519KeyPair::generate().unwrap();
+    let ident = Signer::new(&rand32());
+    let mut link = LinkRequest {
+        token,
+        device,
+        auth_key: pk(&auth),
+        identity_key: ec(&ident),
+        auth_sig: [0; 64],
+        identity_sig: [0; 64],
+        confirm: [0; 32],
+        factor,
+    };
+    let tr = |c, r: &LinkRequest| {
+        wire::link_transcript(c, SERVER, &r.token, &r.device, &r.auth_key, &r.identity_key).unwrap()
+    };
+    let sig = auth.sign(&tr(LINK_AUTH_CONTEXT, &link));
+    link.auth_sig.copy_from_slice(sig.as_ref());
+    link.identity_sig = ident.sign(&tr(LINK_IDENTITY_CONTEXT, &link), &[1; 64]);
+    let mut account_sig = [0u8; 64];
+    account_sig.copy_from_slice(account_key.sign(&tr(wire::RECOVER_CONTEXT, &link)).as_ref());
+    let mut r = wire::RecoverRequest {
+        account: p.account,
+        account_sig,
+        link,
+    };
+    tamper(&mut r);
+    let (st, b) = unsigned(
+        s.addr,
+        SERVER,
+        "POST",
+        "/v1/account/recover",
+        Some(&r.encode()),
+    )
+    .await
+    .unwrap();
+    let body = String::from_utf8_lossy(&b).into_owned();
+    if st != 200 {
+        return (st, body, None);
+    }
+    // The same request again: the token is spent.
+    let (again, _) = unsigned(
+        s.addr,
+        SERVER,
+        "POST",
+        "/v1/account/recover",
+        Some(&r.encode()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(again, 409);
+    (st, body, Some((device, auth, ident)))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_identity_key_recovers_the_account_onto_a_new_primary() {
+    let Some(s) = stack(factor_settings()).await else {
+        return;
+    };
+    let p = primary(&s).await;
+    let (_, linked) = link_flow(&s, &p, |_| {}).await;
+    let l = linked.unwrap();
+    assert_eq!(
+        put_list(&p, &signed_list(&p, 1, &[&l], &p.account_key))
+            .await
+            .0,
+        204
+    );
+
+    // Without the account identity key: refused, and nothing changes.
+    let stranger = Ed25519KeyPair::generate().unwrap();
+    let (st, b, _) = recover(&s, &p, &stranger, false, Factor::None, |_| {}).await;
+    assert_eq!((st, b.as_str()), (400, r#"{"error":"signature"}"#));
+    // A signature over another account or a changed key: refused.
+    let (st, _, _) = recover(&s, &p, &p.account_key, false, Factor::None, |r| {
+        r.link.auth_key[0] ^= 1;
+    })
+    .await;
+    assert_eq!(st, 400);
+    // A link token is not a recovery token (and `link_flow` refuses recovery tokens).
+    let (st, b, _) = recover_with(&s, &p, &p.account_key, "link", Factor::None, |_| {}).await;
+    assert_eq!((st, b.as_str()), (409, r#"{"error":"token"}"#));
+    // A recovery token cannot link a pending device either (it was drawn without the primary).
+    let body = format!(r#"{{"account":"{}"}}"#, p.account.to_hex_unredacted());
+    let (_, b) = unsigned(
+        s.addr,
+        SERVER,
+        "POST",
+        "/v1/account/recover/token",
+        Some(body.as_bytes()),
+    )
+    .await
+    .unwrap();
+    let v = json(&b);
+    let auth = Ed25519KeyPair::generate().unwrap();
+    let ident = Signer::new(&rand32());
+    let mut link = LinkRequest {
+        token: hex::decode(v["token"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        device: DeviceId::from_bytes(hex16(&v["device"])),
+        auth_key: pk(&auth),
+        identity_key: ec(&ident),
+        auth_sig: [0; 64],
+        identity_sig: [0; 64],
+        confirm: [0; 32],
+        factor: Factor::None,
+    };
+    let sig = auth.sign(&identity_transcript_with(LINK_AUTH_CONTEXT, &link));
+    link.auth_sig.copy_from_slice(sig.as_ref());
+    link.identity_sig = ident.sign(&identity_transcript(&link), &[1; 64]);
+    let (st, b) = unsigned(
+        s.addr,
+        SERVER,
+        "POST",
+        "/v1/devices/link",
+        Some(&link.encode()),
+    )
+    .await
+    .unwrap();
+    assert_eq!((st, b.as_ref()), (409, br#"{"error":"token"}"#.as_slice()));
+    assert!(
+        s.app
+            .registry
+            .device(&p.device)
+            .await
+            .unwrap()
+            .is_some_and(|d| d.primary && !d.disabled)
+    );
+
+    // With the identity key: the new device is the primary; the old ones are disabled.
+    let (st, b, new) = recover(&s, &p, &p.account_key, false, Factor::None, |_| {}).await;
+    assert_eq!(st, 200, "{b}");
+    assert_eq!(json(b.as_bytes())["removed"], 2);
+    let (device, auth, ident) = new.unwrap();
+    let row = s.app.registry.device(&device).await.unwrap().unwrap();
+    assert!(row.primary && !row.pending && !row.disabled && row.account == p.account);
+    for old in [p.device, l.device] {
+        assert!(
+            s.app
+                .registry
+                .device(&old)
+                .await
+                .unwrap()
+                .is_none_or(|d| d.disabled)
+        );
+    }
+    // The old primary can no longer act; the new one signs a list naming only itself.
+    assert_eq!(
+        p.client
+            .send("POST", "/v1/devices/link-token", None)
+            .await
+            .unwrap()
+            .0,
+        401
+    );
+    let n = Primary {
+        account: p.account,
+        device,
+        account_key: Ed25519KeyPair::generate().unwrap(),
+        auth_key: pk(&auth),
+        identity: ident,
+        client: ApiClient::new(s.addr, SERVER, device, auth),
+    };
+    assert_eq!(
+        put_list(&n, &signed_list(&n, 2, &[], &p.account_key))
+            .await
+            .0,
+        204
+    );
+    let (st, _) = n
+        .client
+        .send("POST", "/v1/devices/link-token", None)
+        .await
+        .unwrap();
+    assert_eq!(st, 200);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pin_gates_recovery_and_the_primary_hands_over_without_it() {
+    let Some(s) = stack(factor_settings()).await else {
+        return;
+    };
+    let p = primary(&s).await;
+    let pin = |v: &str| format!(r#"{{"pin":"{v}"}}"#);
+    assert_eq!(
+        p.client
+            .send("PUT", "/v1/account/pin", Some(pin("246810").as_bytes()))
+            .await
+            .unwrap()
+            .0,
+        204
+    );
+    // The identity key alone is not enough once a PIN is set.
+    let (st, b, _) = recover(&s, &p, &p.account_key, false, Factor::None, |_| {}).await;
+    assert_eq!((st, b.as_str()), (403, r#"{"error":"factor"}"#));
+    // Wrong PINs are counted and lock, as for linking.
+    for wrong in ["111111", "222222", "333333"] {
+        let (st, _, _) = recover(
+            &s,
+            &p,
+            &p.account_key,
+            false,
+            Factor::Pin(wrong.into()),
+            |_| {},
+        )
+        .await;
+        assert_eq!(st, 403);
+    }
+    let (st, _, _) = recover(
+        &s,
+        &p,
+        &p.account_key,
+        false,
+        Factor::Pin("246810".into()),
+        |_| {},
+    )
+    .await;
+    assert_eq!(st, 403, "locked: even the right PIN waits");
+    // The primary hands over: no PIN needed (it vouches), and only the primary may.
+    let (st, b, new) = recover(&s, &p, &p.account_key, true, Factor::None, |_| {}).await;
+    assert_eq!(st, 200, "{b}");
+    let (device, _, _) = new.unwrap();
+    assert!(
+        s.app
+            .registry
+            .device(&device)
+            .await
+            .unwrap()
+            .unwrap()
+            .primary
+    );
+    assert!(
+        s.app
+            .registry
+            .device(&p.device)
+            .await
+            .unwrap()
+            .is_none_or(|d| d.disabled)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn after_the_lock_the_right_pin_recovers() {
+    let Some(s) = stack(factor_settings()).await else {
+        return;
+    };
+    let p = primary(&s).await;
+    let pin = |v: &str| format!(r#"{{"pin":"{v}"}}"#);
+    assert_eq!(
+        p.client
+            .send("PUT", "/v1/account/pin", Some(pin("135790").as_bytes()))
+            .await
+            .unwrap()
+            .0,
+        204
+    );
+    let (st, b, _) = recover(
+        &s,
+        &p,
+        &p.account_key,
+        false,
+        Factor::Pin("135790".into()),
+        |_| {},
+    )
+    .await;
+    assert_eq!(st, 200, "{b}");
+    // A handover token from a device that is not the primary any more: refused.
+    let (st, _, _) = recover(&s, &p, &p.account_key, true, Factor::None, |_| {}).await;
+    assert_eq!(st, 401);
 }

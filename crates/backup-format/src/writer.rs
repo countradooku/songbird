@@ -245,7 +245,8 @@ impl<'a, S: ChunkSink> Writer<'a, S> {
     /// # Errors
     /// [`Error::Io`] reading `content`; [`Error::TooLarge`] past [`MAX_MEDIA`]; the sink's.
     pub fn media(&mut self, mut meta: Media, content: &mut dyn Read) -> Result<[u8; 32], Error> {
-        let mut head = Zeroizing::new(Vec::with_capacity(SMALL_MEDIA));
+        // Grown as read: a fixed 1 MiB buffer per file was zeroed on drop for every small photo.
+        let mut head = Zeroizing::new(Vec::new());
         content
             .take(u64::try_from(SMALL_MEDIA).unwrap_or(u64::MAX))
             .read_to_end(&mut head)?;

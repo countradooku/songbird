@@ -446,6 +446,9 @@ impl App {
                 | "/v1/supervision",
             ) => self.account_settings(req).await,
             (_, "/v1/supervision/update") => self.supervision_update(req).await,
+            (&Method::POST, "/v1/account/recover/token" | "/v1/account/recover") => {
+                self.recovery(req).await
+            }
             (_, p) if p.starts_with("/v1/account/") => self.factors(req).await,
             (_, p) if p.starts_with("/v1/kt/") => self.kt(req).await,
             (_, p) if p.starts_with("/v1/provisioning") || p.starts_with("/v1/devices") => {
@@ -1082,6 +1085,14 @@ impl App {
                 None => not_primary(),
             },
             (&Method::GET, "/v1/account/factors") => d.factors(&self.registry, &row.account).await,
+            // Prompt 10: the primary hands the account over to its replacement.
+            (&Method::POST, "/v1/account/handover") => match primary {
+                Some(a) => {
+                    d.handover_token(&self.registry, &self.hot, &a, &device)
+                        .await
+                }
+                None => not_primary(),
+            },
             // GDPR (M7): the export and the inactivity period, the primary's.
             (&Method::GET, "/v1/account/export") => match primary {
                 Some(a) => match self.export(&a).await {
@@ -1165,6 +1176,27 @@ impl App {
     }
 
     /// `/v1/provisioning…` and `/v1/devices…` ([`devices`]).
+    /// Account recovery (Prompt 10, M4, D-0123): unsigned, the new device has no account yet.
+    async fn recovery(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let d = self.devices.as_ref().ok_or_else(unavailable)?;
+        let peer = req
+            .extensions()
+            .get::<registration::Peer>()
+            .map(|p| p.0)
+            .ok_or_else(unavailable)?;
+        let out = if req.uri().path() == "/v1/account/recover/token" {
+            let body = bounded_body(req, 128).await?;
+            d.recover_token(&self.registry, &self.hot, peer, &body)
+                .await
+        } else {
+            let body = bounded_body(req, songbird_proto::devices::MAX_RECOVER_LEN).await?;
+            d.recover(&self.registry, &self.hot, &self.server_name, peer, body)
+                .await
+        };
+        Ok(device_outcome(out))
+    }
+
     async fn devices(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
         let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
         let d = self.devices.as_ref().ok_or_else(unavailable)?;

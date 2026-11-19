@@ -382,3 +382,77 @@ pub async fn run(
     rep.checks += 1;
     Ok(rep)
 }
+
+/// One step of [`incremental_cost`].
+#[derive(Debug, Clone)]
+pub struct Step {
+    /// What changed.
+    pub what: &'static str,
+    /// Chunks uploaded.
+    pub new_chunks: u64,
+    /// Object bytes uploaded.
+    pub new_bytes: u64,
+    /// Chunks reused.
+    pub reused_chunks: u64,
+    /// Chunks deleted afterwards.
+    pub deleted: u64,
+    /// Plaintext bytes in the backup.
+    pub plaintext: u64,
+    /// Wall time.
+    pub seconds: f64,
+}
+
+/// The incremental cost of backups on a large history (Prompt 10's gate): a first backup,
+/// the same again, a day of new messages in every chat, and deletions of old messages.
+///
+/// # Errors
+/// A message naming the step that failed.
+pub async fn incremental_cost(
+    store: Arc<dyn BackupStore>,
+    keys: Arc<BackupKeys>,
+    shape: Shape,
+    day: u32,
+    drop_oldest: u32,
+) -> Result<Vec<Step>, String> {
+    store.destroy().await.map_err(|e| fail("destroy", e))?;
+    let mut seen = None;
+    let mut out = vec![];
+    for (what, extra, drop) in [
+        ("first backup", 0, 0),
+        ("nothing changed", 0, 0),
+        ("a day of messages in every chat", day, 0),
+        (
+            "the oldest messages of every chat deleted",
+            day,
+            drop_oldest,
+        ),
+    ] {
+        let t = std::time::Instant::now();
+        let opts = Options {
+            concurrency: 8,
+            app_version: "cost".into(),
+            platform: Platform::Linux,
+            now_ms: 1,
+        };
+        let done = run::backup(
+            Arc::clone(&store),
+            Arc::clone(&keys),
+            seen,
+            opts,
+            move |w| synth::write_edited(w, &shape, extra, drop).map(|_| ()),
+        )
+        .await
+        .map_err(|e| fail(what, e))?;
+        seen = Some(done.seen);
+        out.push(Step {
+            what,
+            new_chunks: done.stats.new_chunks,
+            new_bytes: done.stats.new_bytes,
+            reused_chunks: done.stats.reused_chunks,
+            deleted: done.deleted,
+            plaintext: done.stats.plaintext_bytes,
+            seconds: t.elapsed().as_secs_f64(),
+        });
+    }
+    Ok(out)
+}

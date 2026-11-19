@@ -186,6 +186,30 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Decisions
 
+## D-0123 — Prompt 10, milestone 4: account recovery, the transfer, and messages by time
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0119 (§1, §4, §10); the threat-model rows await the
+  owner
+- Decided by: agent, within the owner's plan
+- Context: `docs/reports/P10-M4.md`.
+- Decision:
+  - Account recovery (PROTOCOL §4.11) on the link request: a recovery token (unsigned,
+    throttled) or a hand-over token (the primary's), the account identity key's signature over
+    the link transcript under `"songbird.v1/recover-account\0"`, the PIN or a passkey for a
+    recovery token; one transaction disables every old device and creates the new primary.
+    Tokens carry their kind (`ltoken.kind`).
+  - The transfer (§11.9): Noise `NNpsk0_25519_ChaChaPoly_SHA256` written on aws-lc-rs (no Noise
+    library), the QR payload as prologue, a 6-digit comparison code, the backup format under a
+    one-time key, `OK` only after the new phone verified everything.
+  - **Records ordered by time across chats** (§11.5): the measurement showed chat-by-chat order
+    re-uploads the whole messages stream for one message in every chat (158 MB a day on the
+    large history); by time it is 1.5 to 3.7 MB. v1's vectors were regenerated (unpublished).
+- Evidence: `services/api/tests/devices_live.rs` (three recovery tests, the existing eight
+  unchanged); `crates/backup-storage/tests/{transfer,platforms,cost}.rs`; `gate_p10`'s
+  `incremental_cost_on_the_vault`; `transfer_check.py`.
+- Consequences: M5 wires recovery, restore and the transfer into the app.
+
 ## D-0122 — Prompt 10, milestone 3: the third-party stores; `WebDAV` and Drive without an atomic swap
 
 - Date: 2026-11-19

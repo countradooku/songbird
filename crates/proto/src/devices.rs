@@ -63,6 +63,9 @@ pub const LINK_AUTH_CONTEXT: &[u8] = b"songbird.v1/link-device-auth\0";
 pub const LINK_IDENTITY_CONTEXT: &[u8] = b"songbird.v1/link-device-identity\0";
 /// Link token length.
 pub const TOKEN_LEN: usize = 32;
+/// Context of the account identity key's signature in an account recovery (Prompt 10, D-0123):
+/// over [`link_transcript`] with this context.
+pub const RECOVER_CONTEXT: &[u8] = b"songbird.v1/recover-account\0";
 /// Link request length without a second factor (the factor kind byte included).
 pub const LINK_LEN: usize = 1 + TOKEN_LEN + ID_LEN + 32 + IDENTITY_LEN + 64 + 64 + 32 + 1;
 /// Longest link request (with a passkey assertion).
@@ -496,6 +499,55 @@ impl Provision {
         })
     }
 }
+
+/// An account recovery (Prompt 10, M4, D-0123; PROTOCOL §4.9):
+/// `account [16] | account_sig [64] | link request` (§4.6, its token a recovery or hand-over
+/// token). `account_sig` is Ed25519 by the account identity key over
+/// [`link_transcript`]`(`[`RECOVER_CONTEXT`]`, …)`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RecoverRequest {
+    /// The account being recovered.
+    pub account: AccountId,
+    /// The account identity key's signature.
+    pub account_sig: [u8; 64],
+    /// The new device's keys, proofs and (for a recovery token) second factor.
+    pub link: LinkRequest,
+}
+
+impl std::fmt::Debug for RecoverRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RecoverRequest(<redacted>)")
+    }
+}
+
+impl RecoverRequest {
+    /// The wire bytes.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut b = Vec::with_capacity(80 + LINK_LEN);
+        b.extend_from_slice(self.account.as_bytes());
+        b.extend_from_slice(&self.account_sig);
+        b.extend_from_slice(&self.link.encode());
+        b
+    }
+
+    /// Decodes a whole request.
+    ///
+    /// # Errors
+    /// [`DevicesError::Malformed`].
+    pub fn decode(input: &[u8]) -> Result<Self, DevicesError> {
+        let (account, rest) = input.split_at_checked(16).ok_or(DevicesError::Malformed)?;
+        let (sig, rest) = rest.split_at_checked(64).ok_or(DevicesError::Malformed)?;
+        Ok(Self {
+            account: AccountId::from_slice(account).map_err(|_| DevicesError::Malformed)?,
+            account_sig: sig.try_into().map_err(|_| DevicesError::Malformed)?,
+            link: LinkRequest::decode(rest)?,
+        })
+    }
+}
+
+/// Longest recovery request.
+pub const MAX_RECOVER_LEN: usize = 16 + 64 + MAX_LINK_LEN;
 
 /// The bytes each new key signs: `context || u8 len(server_name) || server_name || token [32]
 /// || device [16] || auth_key [32] || identity_key [33]`.

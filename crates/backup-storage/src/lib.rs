@@ -16,7 +16,8 @@
 //! | Dropbox's app folder | [`dropbox`] |
 //! | iCloud Drive (the interface; the native half is the app's) | [`icloud`] |
 //!
-//! [`oauth`] signs the user in to the three clouds (PKCE, on the device).
+//! [`oauth`] signs the user in to the three clouds (PKCE, on the device). [`transfer`] moves a
+//! backup straight to a new phone over the local network.
 //!
 //! [`run`] makes and restores backups over any of them; [`conformance`] is the suite every
 //! adapter passes.
@@ -38,6 +39,7 @@ pub mod onedrive;
 pub mod run;
 pub mod s3;
 pub mod store;
+pub mod transfer;
 pub mod vault;
 pub mod webdav;
 

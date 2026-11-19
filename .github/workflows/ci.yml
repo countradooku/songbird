@@ -73,6 +73,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # D-0120: the published vectors from the specification alone (Python standard library).
       - run: python3 crates/backup-format/vectors/check.py crates/backup-format/vectors/v1/vectors.json
+      - run: python3 crates/backup-storage/vectors/transfer_check.py crates/backup-storage/vectors/transfer.json
       # The same bytes on a 64-bit and a 32-bit target (macOS arm64 is checked locally, D-0120).
       - run: cargo test --locked -p songbird-backup-format --test vectors
       - name: i686 (32-bit usize)

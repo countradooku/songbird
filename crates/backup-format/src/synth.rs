@@ -121,6 +121,24 @@ pub fn write<S: ChunkSink>(
     shape: &Shape,
     extra: u32,
 ) -> Result<Vec<Body>, Error> {
+    write_edited(w, shape, extra, 0)
+}
+
+/// As [`write`], with the oldest `drop_oldest` messages of every chat deleted, as a later backup
+/// after the user cleared old messages.
+///
+/// # Errors
+/// The writer's.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one generator, in the canonical order"
+)]
+pub fn write_edited<S: ChunkSink>(
+    w: &mut Writer<'_, S>,
+    shape: &Shape,
+    extra: u32,
+    drop_oldest: u32,
+) -> Result<Vec<Body>, Error> {
     let mut out = vec![];
     let mut put = |w: &mut Writer<'_, S>, b: Body| -> Result<(), Error> {
         out.push(b.clone());
@@ -167,6 +185,9 @@ pub fn write<S: ChunkSink>(
             }),
         )?;
     }
+    // Canonical order (PROTOCOL §11.5): every chat, then every message by time, so a day of new
+    // messages lands at the end of the stream and old ones deleted at its start.
+    let mut chats = vec![];
     for c in 0..shape.chats {
         let mut cg = Gen::new(shape.seed ^ (u64::from(c) << 20) ^ 0xc4a7);
         let chat_id = cg.id();
@@ -180,7 +201,18 @@ pub fn write<S: ChunkSink>(
                 ..Chat::default()
             }),
         )?;
-        for n in 0..shape.messages_per_chat + extra {
+        chats.push((cg, chat_id));
+    }
+    for n in 0..shape.messages_per_chat + extra {
+        for (c, (cg, chat_id)) in (0u32..).zip(chats.iter_mut()) {
+            if n < drop_oldest {
+                // Deleted: the generator advances exactly as for a written message, so later
+                // messages are unchanged.
+                let words = usize::try_from(4 + cg.next_u64() % 30).unwrap_or(4);
+                let _ = cg.id();
+                let _ = cg.text(words);
+                continue;
+            }
             let mut media = vec![];
             if let Some(bytes) = media_of(shape, c, n) {
                 let r = w.media(

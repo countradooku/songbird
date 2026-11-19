@@ -163,7 +163,7 @@ impl Registry {
         let sql = "BEGIN TRANSACTION;
              LET $tok = (DELETE ONLY ltoken:[$t] RETURN BEFORE);
              IF $tok = NONE OR $tok.expires <= time::now() OR $tok.device != $d
-               { THROW 'songbird:token' };
+               OR $tok.kind != NONE { THROW 'songbird:token' };
              LET $a = $tok.account;
              IF account:[$a].deleting != false { THROW 'songbird:token' };
              UPDATE account:[$a] SET dgen = (dgen ?? 0) + 1 RETURN NONE;
@@ -599,7 +599,8 @@ impl Registry {
         let v = self
             .db
             .query1(
-                "SELECT VALUE account FROM ONLY ltoken:[$t] WHERE expires > time::now();",
+                "SELECT VALUE account FROM ONLY ltoken:[$t] WHERE expires > time::now()
+                   AND kind = NONE;",
                 vec![var("t", bytes(token_hash))],
             )
             .await?;

@@ -834,6 +834,38 @@ Decision D-0056 (M7).
     app wakes, makes a request, and the clock restarts.
   - At the end, the account is deleted exactly as if it had asked.
 
+### 4.11 Account recovery and the hand-over to a new phone (Prompt 10, D-0123)
+
+The account identity key is in the user's backup (§11.5), so a brand-new device holding only
+the recovery key can become the account's primary again; the transfer to a new phone (§11.9)
+uses the same call with the old primary's consent instead of the second factor.
+
+1. A **token**: `POST /v1/account/recover/token` (unsigned, `{"account": hex}`; throttled per
+   IP range and per account) for a recovery, or `POST /v1/account/handover` (signed by the
+   enabled primary) for a hand-over. Either answers `{"token", "device", "expires_in"}` like a
+   link token (§4.6): 32 random bytes stored only as their hash, single use, ten minutes,
+   reserving a device ID. The token's kind is stored with it: a link never accepts a
+   recovery or hand-over token, and a recovery never accepts a link token.
+2. `POST /v1/account/recover` (unsigned):
+   `account [16] | account_sig [64] | link request` (§4.6, with the second factor of §4.7 when
+   the token is a recovery token). `account_sig` is Ed25519 by the **account identity key** over
+   `link_transcript("songbird.v1/recover-account\0", …)`, the same bytes the new keys sign.
+3. The server checks, before anything changes: the range throttle; the new authentication and
+   device identity keys' two proofs; `account_sig` under the account's stored identity key (an
+   unknown account and a wrong signature: one answer, 400 `signature`); the token (unexpired,
+   this account, this device, a recovery kind; 409 `token`); for a recovery token the PIN or a
+   passkey when the account has one (counted and locked exactly as for linking, 403 `factor`,
+   403 `locked`).
+4. In one transaction: the token is consumed; **every enabled device of the account is
+   disabled** (marked for removal from its groups, as a list removal does) and a
+   `DeleteDevices` job goes to the outbox; other outstanding tokens are dropped; the new device
+   is created as the enabled, non-pending primary. 200 `{"account", "device", "removed"}`.
+5. The new primary signs a device list naming itself (version above the stored one, §4.6), and
+   restores its backup. Contacts see a device change and the **same** safety number.
+
+The recovery key is therefore the account unless a PIN or passkey is set; the app asks for a
+PIN when backups are turned on (threat model §3.27).
+
 ## 5. Encrypted content schemas (Prompt 4)
 
 Decision D-0059 (M1). Specification: `crates/content/proto/content.proto`; Rust types, padding,
@@ -2396,10 +2428,13 @@ a forged one; threat model §6).
 | small media (at most one) | Length-delimited `Blob`s: media files under 1 MiB, each once |
 | media (one per file) | The bytes of one media file of 1 MiB or more, ID = its reference |
 
-The records stream follows a canonical order, so equal content gives equal chunks: the
-`Account`, the `Profile`, the `Setting`s, the `Contact`s, the `Group`s, then each `Chat`
-followed by its `Message`s oldest first, each message's `Media` record just before the first
-message that shows it. A media file is stored once however often it is forwarded: a small one
+The records stream follows a canonical order, so equal content gives equal chunks and a new
+backup changes as few chunks as possible: the `Account`, the `Profile`, the `Setting`s, the
+`Contact`s, the `Group`s, every `Chat`, then **every `Message` of every chat by time** (sent
+time, then chat ID, then message ID), each message's `Media` record just before the first
+message that shows it. New messages then land at the end of the stream and cleared old ones at
+its start: ordering messages chat by chat instead made one new message in each of 2,000 chats
+re-upload the whole messages stream (D-0123). A media file is stored once however often it is forwarded: a small one
 under `HMAC-SHA256(chunk-name key, "songbird.v1/backup-media\0" || bytes)`, a streamed one under
 `HMAC-SHA256(chunk-name key, "songbird.v1/backup-media-stream\0" || length u64 || its chunk
 names)`.
@@ -2514,6 +2549,29 @@ public client IDs, no secret; a random `state`; the loopback redirect on desktop
 tokens kept in the app's keychain; a 401 refreshes once. Scopes: Google
 `drive.appdata`, Microsoft `Files.ReadWrite.AppFolder offline_access`, Dropbox an App Folder
 app with `files.content.read files.content.write`.
+
+### 11.9 Device-to-device transfer (M4, D-0123)
+
+The new phone listens on the local network and shows a QR code; the old phone scans it,
+connects over TCP and streams a backup straight to it (`crates/backup-storage::transfer`):
+
+- **Code**: `songbird-transfer:` and base64url (no padding) of
+  `"SBT" | 1 | psk [32] | port u16 | n u8 (1..=8) | n × (family u8 (4 | 6) | address [4 | 16])`.
+- **Channel**: Noise `NNpsk0_25519_ChaChaPoly_SHA256` (revision 34) on aws-lc-rs, prologue
+  `"songbird.v1/transfer\0" || the code's payload`, the old phone initiating. Only a phone that
+  read the code completes the handshake; a connection with another code is dropped and the new
+  phone keeps listening. Both show a 6-digit code, `u32(SHA-256("songbird.v1/transfer-code\0"
+  || handshake hash)[0..4]) mod 10⁶`, for the user to compare. Transport messages are Noise's
+  (`len u16 | ciphertext`, at most 65,535 bytes), carrying a byte stream of records
+  `kind u8 | len u32 | body` (at most 9 MiB): `1 HELLO` (account, hand-over token, its device ID,
+  a one-time recovery key's secret), `2 CHUNK` (name and object), `3 MANIFEST`, `4 DONE`, and
+  `5 OK` from the new phone once **every chunk is verified and the backup restored** (§11.6).
+- The backup is the format of §11 under the one-time key, written by the same run as every
+  store. Then the new phone recovers the account with the hand-over token (§4.11): no PIN, the
+  old primary consented. Nothing passes through Songbird's servers except that call.
+- Vector: `crates/backup-storage/vectors/transfer.json`, re-derived from the Noise
+  specification by `vectors/transfer_check.py` (X25519, ChaCha20-Poly1305 and HMAC written from
+  RFC 7748, RFC 8439 and RFC 2104 with the Python standard library).
 
 ## 12. Versioning and compatibility rules
 

@@ -24,6 +24,12 @@ songbird-client = { path = "../../crates/client" }
 # formats the app writes: profile, presence, supervision.
 songbird-sync = { path = "../../crates/sync" }
 songbird-content = { path = "../../crates/content" }
+# Backups (Prompt 10): the format, the stores, the runs and the transfer. They run on NSH's
+# tokio runtime (`background`).
+songbird-backup-format = { path = "../../crates/backup-format" }
+songbird-backup-storage = { path = "../../crates/backup-storage" }
+tokio = { version = "1.54.1", default-features = false, features = ["net", "sync"] }
+zeroize = "1.9.1"
 aws-lc-rs = { version = "1.19.0", default-features = false, features = ["aws-lc-sys"] }
 # The camera (D-0110): one interface over each platform's camera; all `unsafe` lives there.
 songbird-camera = { path = "../camera" }

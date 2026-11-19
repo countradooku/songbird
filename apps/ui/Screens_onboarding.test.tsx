@@ -4,6 +4,12 @@
 import { open, test } from "nsh/test";
 
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** The last group of the recovery key the screen shows (16 groups of four). */
+const lastGroup = (app: any): string => {
+  const groups = app.texts().filter((t: string) => /^[0-9A-HJKMNP-TV-Z]{4}$/.test(t));
+  return groups[groups.length - 1];
+};
+
 const DESKTOP: [number, number] = [1180, 780];
 const PHONE: [number, number] = [390, 844];
 
@@ -46,7 +52,7 @@ async function newUser(prefix: string, size: [number, number], scheme: "light" |
   await app.press("Continue");
   await pause(500);
   await shot("09-recovery");
-  await app.type("Last 4 characters", "2KBG");
+  await app.type("Last 4 characters", lastGroup(app));
   await pause(300);
   await shot("10-recovery-confirmed");
   await app.press("Continue");
@@ -100,7 +106,8 @@ async function returningUser(prefix: string, size: [number, number], scheme: "li
   await shot("r1-returning");
   await app.press("Restore from a backup");
   await pause(500);
-  await app.type("XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX", "SB4K7Q2MXN8P3HVAR9TELW6CJD5F2KBG");
+  // 64 characters with a typo: the key's own check refuses it before anything is fetched.
+  await app.type("XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-…", "SB4K7Q2MXN8P3HVAR9TELW6CJD5F2KBGSB4K7Q2MXN8P3HVAR9TELW6CJD5F2KBG");
   await pause(300);
   await shot("r2-restore-key");
   // Debug builds only: the damaged-backup path has no button, only a key.
@@ -111,6 +118,9 @@ async function returningUser(prefix: string, size: [number, number], scheme: "li
   await shot("r4-restore-failed");
   await app.press("Try again");
   await pause(500);
+  // Debug builds only: back this device up to its folder and fill in its key.
+  await app.keyboard.press("mod+alt+b");
+  await pause(4000);
   await app.press("Restore");
   await pause(2600);
   await shot("r5-restore-progress");
@@ -204,7 +214,7 @@ for (const [size, scheme] of [[DESKTOP, "light"], [PHONE, "dark"]] as const) {
       await app.press("Continue");
       await pause(500);
       await shot("backups-wizard-key");
-      await app.type("Last 4 characters", "2KBG");
+      await app.type("Last 4 characters", lastGroup(app));
       await app.press("Continue");
       await pause(500);
       await app.press("Turn on backups");

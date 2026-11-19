@@ -259,6 +259,7 @@ async fn account_deletion_is_verified_across_every_store() {
         usernames: None,
         keys: None,
         storage: None,
+        vault: None,
         kt: None,
         profiles: None,
         devices: None,
@@ -372,6 +373,7 @@ async fn account_deletion_is_verified_across_every_store() {
     journal_s3.create_bucket_locked().await.unwrap();
     let worker = Worker {
         block_keys: None,
+        vault_s3: None,
         push_store: Arc::new(
             songbird_accounts::PushStore::beside(&registry)
                 .await
@@ -593,6 +595,7 @@ async fn device_removal_is_verified_across_every_store_and_spares_the_rest() {
         usernames: None,
         keys: None,
         storage: None,
+        vault: None,
         kt: None,
         profiles: None,
         devices: Some(
@@ -690,6 +693,7 @@ async fn device_removal_is_verified_across_every_store_and_spares_the_rest() {
     // The worker runs the job.
     let worker = Worker {
         block_keys: None,
+        vault_s3: None,
         push_store: Arc::new(
             songbird_accounts::PushStore::beside(&registry)
                 .await
@@ -874,6 +878,7 @@ async fn an_offline_device_receives_a_push_end_to_end() {
         usernames: None,
         keys: None,
         storage: None,
+        vault: None,
         kt: None,
         profiles: None,
         devices: None,
@@ -1171,6 +1176,7 @@ async fn m5_numbers() {
         usernames: None,
         keys: None,
         storage: None,
+        vault: None,
         kt: None,
         profiles: None,
         devices: None,

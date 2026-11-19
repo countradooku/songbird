@@ -20,6 +20,15 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
 
 ## Open owner decisions
 
+- Prompt 10 gate (`P10-gate.md`, D-0120 to D-0125): **waiting for the owner**. M1–M5 and the
+  security review's fixes are done; the gate's items pass. For the owner: approve the gate with
+  the threat-model rows (§1, §3.27, §6); register the Google, Microsoft and Dropbox OAuth apps.
+- Prompt 10 plan (`P10-plan.md`, D-0119): **approved by the owner on 2026-11-19** ("Approve
+  all"), every recommendation: account recovery in scope, the 64-character recovery key with a
+  check, the vault owned by an account (unlinking re-decided in Prompt 11), recovery by the
+  identity key plus the PIN or passkey when set, 5 GiB and 100,000 chunks per vault until Prompt
+  11, third-party clouds' sign-in on desktop once the OAuth apps are registered, `mod_dav` in CI.
+  Still the owner's: registering the Google, Microsoft and Dropbox OAuth apps. M1 is next.
 - Prompt 9 gate (`P09-gate.md`, D-0102 to D-0108; PR #67): **approved by the owner on
   2026-11-18** ("Approve the gate"): M1–M6 and the security review's fixes, with the threat-model
   rows (§1, §3.26, §4, §5). Still open: the GDPR Article 8 ages to confirm with counsel before
@@ -179,6 +188,249 @@ newest first. Performance decisions cite the benchmark run (hardware, kernel, co
   (`docker buildx imagetools inspect rustfs/rustfs:1.0.5`).
 
 ## Decisions
+
+## D-0125 — Prompt 10: the security review's fixes
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0119; the threat-model rows (§3.27, "review") await
+  the owner
+- Decided by: agent, within the owner's plan
+- Context: an independent, read-only review of the whole Prompt 10 diff (by a separate agent
+  given the code, not this session's conclusions) found no critical issue (the format's
+  cryptography, the Noise handshake against revision 34, the vault's authorization and the token
+  kinds held) and these problems, each fixed with a test:
+  1. **Medium–high: the transfer's six digits could be ground.** A man in the middle who knew the
+     code (filmed, or copied with "Copy code") could finish a handshake with the new phone, then
+     try responder keys against the old phone until its digits matched (about 2^20 tries); and the
+     new phone applied what it received without its user's confirmation.
+  2. **Medium: the vault quota could be exceeded** by two uploads racing for one name (one counted
+     small, the other stored large), or by an upload landing after its chunk was forgotten.
+  3. **Medium: objects written after a vault was turned off survived it** (an upload between
+     reservation and store, or after the worker's last listing), and a stale manifest swap could
+     land in a re-created vault.
+  4. **Medium: strangers could block a primary's hand-over and linking** (one shared per-account
+     throttle; recovery tokens counted towards the device limit), and the recovery endpoint told
+     whether an account exists.
+  5. Low: a connection that sent one byte stalled the transfer listener forever.
+  6. Low: a malicious store could make a restore keep huge objects (64 MiB each, or 4 GiB archive
+     entries) before any size check.
+  7. Low: two backup runs on one device could leave a backup naming a chunk the other collected.
+  8. Low: WebDAV took `http://`, sending the app password in clear.
+  9. Info: rollback and fork were judged on the unauthenticated header; the transfer's record
+     limit (9 MiB) was below the largest manifest; the recovery key alone taking over an account
+     without a PIN deserved saying in the app; OAuth `state` is not checked yet (nothing calls
+     the OAuth flow yet: checked when the redirect handler is wired, Prompt 10 follow-up).
+- Options considered (1): a longer code (more digits to compare, still grindable in principle);
+  SAS with a commitment (ZRTP, Bluetooth numeric comparison); removing "Copy code". Chosen: the
+  commitment, the new phone's own confirmation, and keeping "Copy code" (desktops have no
+  camera), now harmless on its own: the code gives one attempt at 10⁻⁶.
+- Options considered (4): cap outstanding recovery tokens per account, replacing older ones.
+  Rejected: a stranger could then cancel a recovery in progress; since recovery tokens no
+  longer count towards the device limit, the per-account throttle (20 an hour) bounds them.
+- Decision:
+  1. The new phone sends `SHA-256("songbird.v1/transfer-commit\0" || e_pub)` before the first
+     message; the old phone refuses a reply with another key. The vector gains the commitment
+     (the Noise messages are unchanged) and `transfer_check.py` re-derives it. The new phone asks
+     "Does your old phone show this code?" and answers `OK`, recovers and applies only after
+     "They match"; "They don't match" ends it with nothing changed.
+  2. A chunk's reservation returns the size recorded for an existing name; another size is 409
+     `size`. After storing, the upload checks its chunk is still recorded in the same epoch, and
+     deletes its object if not.
+  3. Reservation and manifest swap check the vault's epoch inside their transactions (gone
+     otherwise). `vault_gone` rows carry their time; the worker deletes the prefix at every sweep
+     and forgets the row only after `VAULT_GRACE` (15 minutes).
+  4. Hand-overs throttle per primary (`ht`), recovery tokens per account (`rt`); the device limit
+     counts only link tokens; an unknown or deleting account gets a token that is never stored.
+  5. `accept` runs up to eight handshakes at once, each with 20 seconds; the old phone's
+     handshake has the same timeout.
+  6. A restore refuses an object larger than `max_chunk_object()` before staging it; archive
+     index entries are bounded the same way.
+  7. Backup runs to one kind of store take turns in a process; before the swap, every chunk the
+     run reused from the listing is checked to be still there.
+  8. WebDAV and S3 take `http://` only to the device itself (`localhost`, loopback).
+  9. `open_manifest` checks the tag before judging rollback and fork; the transfer's record limit
+     is the largest chunk or manifest object; the app says where it shows the key that it can
+     move the account, and the Settings help says the key without a PIN is a takeover.
+- Evidence: `a_reply_must_carry_the_key_committed_to_before_the_first_message`,
+  `a_connection_that_stalls_does_not_hold_up_the_old_phone`, the vector and `transfer_check.py`;
+  `Screens_backups.test.tsx` (the new phone waits for its own "They match");
+  `a_name_keeps_its_size_and_late_uploads_leave_nothing`, the extended
+  `turning_backups_off_and_deleting_the_account_leave_nothing`;
+  `strangers_asking_for_recovery_tokens_block_neither_hand_over_nor_linking`;
+  `an_oversized_object_is_refused_before_it_is_kept`,
+  `runs_at_once_never_leave_a_backup_naming_missing_chunks`;
+  `a_password_never_goes_over_plain_http_to_another_computer`,
+  `plain_http_only_to_this_computer`; the garbage-manifest case in
+  `a_store_cannot_roll_back_or_fork_a_device_that_has_seen_a_backup`.
+- Consequences: the transfer protocol gains one message (PROTOCOL §11.9); the vault answers 409
+  `size` (§11.8); the hand-over flow on the new phone has one more tap. Still open and stated:
+  the recovery secret and credentials sit in NSH app storage until app-core's keychain (A0);
+  the OAuth `state` check comes with the redirect handler.
+
+## D-0124 — Prompt 10, milestone 5: the app's backups, restore and transfer
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0119; the threat-model rows await the owner
+- Decided by: agent, within the owner's plan
+- Context: `docs/reports/P10-M5.md`.
+- Decision:
+  - The recovery key is real (D-0119 §2), made once and kept on the device; the onboarding
+    shows 16 groups; restore checks the key's own check before fetching.
+  - Backups go to the vault, an encrypted folder (the user's Documents in release builds, the
+    app's data folder in debug builds), S3 and Nextcloud; the three OAuth clouds and iCloud say
+    "Coming soon" (D-0119 §6).
+  - Restore tries the chosen place, then the Songbird server, then this device's folder;
+    applies only a fully verified backup; recovers the account when the device has none.
+  - The transfer compares six digits on the old phone before sending; the new phone verifies
+    the whole backup before saying yes and recovers with the hand-over.
+  - Debug builds only: mod+alt+b on the restore screen backs this device up and fills in its
+    key, for review and screenshots.
+- Evidence: `apps/ui/src/backend/backup.rs` tests; `apps/ui/Screens_backups.test.tsx` (9 tests,
+  headless and macOS); the app's 201 tests.
+- Consequences: M6 is the gate.
+
+## D-0123 — Prompt 10, milestone 4: account recovery, the transfer, and messages by time
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0119 (§1, §4, §10); the threat-model rows await the
+  owner
+- Decided by: agent, within the owner's plan
+- Context: `docs/reports/P10-M4.md`.
+- Decision:
+  - Account recovery (PROTOCOL §4.11) on the link request: a recovery token (unsigned,
+    throttled) or a hand-over token (the primary's), the account identity key's signature over
+    the link transcript under `"songbird.v1/recover-account\0"`, the PIN or a passkey for a
+    recovery token; one transaction disables every old device and creates the new primary.
+    Tokens carry their kind (`ltoken.kind`).
+  - The transfer (§11.9): Noise `NNpsk0_25519_ChaChaPoly_SHA256` written on aws-lc-rs (no Noise
+    library), the QR payload as prologue, a 6-digit comparison code, the backup format under a
+    one-time key, `OK` only after the new phone verified everything.
+  - **Records ordered by time across chats** (§11.5): the measurement showed chat-by-chat order
+    re-uploads the whole messages stream for one message in every chat (158 MB a day on the
+    large history); by time it is 1.5 to 3.7 MB. v1's vectors were regenerated (unpublished).
+- Evidence: `services/api/tests/devices_live.rs` (three recovery tests, the existing eight
+  unchanged); `crates/backup-storage/tests/{transfer,platforms,cost}.rs`; `gate_p10`'s
+  `incremental_cost_on_the_vault`; `transfer_check.py`.
+- Consequences: M5 wires recovery, restore and the transfer into the app.
+
+## D-0122 — Prompt 10, milestone 3: the third-party stores; `WebDAV` and Drive without an atomic swap
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0119 (§6, §7); the threat-model rows await the owner
+- Decided by: agent, within the owner's plan
+- Context: `docs/reports/P10-M3.md`.
+- Decision:
+  - Adapters for S3, `WebDAV`, Google Drive, OneDrive and Dropbox in `crates/backup-storage`,
+    each on the device, over the `Http` trait; OAuth with PKCE (RFC 8252, RFC 7636), public
+    client IDs, refresh once on a 401; the iCloud interface as `ICloudBridge` with its contract
+    and a reference bridge that passes the suite.
+  - `BackupStore::atomic_swap`: `false` for `WebDAV` (the suite showed Apache `mod_dav`'s
+    `If-Match` and even its exclusive `LOCK` let racers through) and Google Drive (no
+    conditional write); the run reads the manifest back after a swap; overtaken devices see a
+    fork. The owner's alternative, if this is not acceptable: drop `WebDAV` and Drive, or warn
+    in the app when a second primary appears.
+  - Apache `httpd:2.4.66` (Debian, by digest `sha256:89a0b59e…cbea`) with `mod_dav` in compose
+    for CI (Alpine's has no DBM driver); `WEBDAV_PASSWORD` in `.env`.
+  - Emulators for Drive, OneDrive and Dropbox written from the documented APIs; the real
+    providers are checked once the owner registers the OAuth apps.
+- Evidence: `crates/backup-storage/tests/{clouds,adapters_live,conformance}.rs`; a manual run
+  on Nextcloud 31.0.14.
+- Consequences: M4 builds account recovery and the transfer on these stores.
+
+## D-0121 — Prompt 10, milestone 2: one store interface, a conformance suite, the Songbird vault
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0119; the threat-model rows await the owner
+- Decided by: agent, within the owner's plan
+- Context: `docs/reports/P10-M2.md`.
+- Decision:
+  - `crates/backup-storage`: `BackupStore` (async, `async-trait`, already a workspace
+    dependency) with memory, folder, archive-file and vault adapters; the runs (`run`) and the
+    conformance suite (`conformance`). HTTP behind an `Http` trait; `HyperHttp` on hyper and
+    rustls (both already in the tree).
+  - The vault in `api` (PROTOCOL §11.8): reads by the two headers alone; writes also signed by
+    the owning account's primary; rows and objects keyed by `HMAC(server key, vault ID)`;
+    a random epoch per vault incarnation in the object prefix; turning off deletes the rows at
+    once and leaves `vault_gone` for the worker; one 404 for every miss, counted per range;
+    quotas from `[api.vault]` (5 GiB, 100,000 chunks, two vaults per account, D-0119); shapes
+    checked before counting; chunks recorded before storing; manifest objects under random
+    names, swapped in one transaction, the loser's deleted.
+  - Worker: vaults go with their account and when turned off, every object deleted and the
+    prefix listed empty.
+  - Chunks are buffered in `api` (≤ 8.25 MiB) for the signed body check.
+- Evidence: `crates/backup-storage/tests/conformance.rs`; `tests/e2e/tests/gate_p10.rs` (six
+  live tests); p50/p99 in the report; fuzz `backup_format`.
+- Consequences: M3 adds S3, WebDAV, Google Drive, OneDrive and Dropbox on the same trait and
+  suite.
+
+## D-0120 — Prompt 10, milestone 1: the backup format
+
+- Date: 2026-11-19
+- Status: accepted by the agent within D-0119 (the owner's plan); the threat-model rows await
+  the owner
+- Decided by: agent, within the owner's plan
+- Context: Prompt 10 asks for a versioned, chunked, encrypted, incremental, verified backup
+  format readable on every platform, with byte-exact vectors and a cross-platform determinism
+  test. `docs/reports/P10-M1.md`.
+- Decision:
+  - `crates/backup-format` (PROTOCOL §11.1–11.7): the 64-character recovery key with a 64-bit
+    check; HKDF-SHA256 keys (vault ID, vault access, manifest, chunk, chunk name, chunker);
+    XChaCha20-Poly1305 chunks and manifests with Padmé padding, the name or the vault ID in the
+    AAD; chunk names by HMAC-SHA256 of the plaintext; the manifest's generation in the clear and
+    authenticated, the previous manifest's hash inside.
+  - Three stream kinds instead of a section per content type: one records stream in a
+    canonical order (so the chunker resynchronises after an edit and small chats share chunks),
+    one small-media stream of blobs under 1 MiB, and one stream per larger media file; each file
+    stored once.
+  - The keyed `FastCDC` chunker at 1/2/8 MiB (3.7 GB/s, 2.35 MiB average on an Apple M5 Pro).
+  - A two-phase reader: verify into memory or an encrypted staging folder, then read with every
+    chunk checked again.
+  - New dependency: `chacha20poly1305` 0.10.1 (already in the lock and cargo-vet exempt; the
+    exemption notes now name this use). `chacha20`, `poly1305` and this crate are optimised in
+    dev builds (tests 41 s → 2 s).
+  - Determinism: vectors in `vectors/v1/`, checked on macOS arm64 locally and on Linux x86_64
+    and i686 in a new CI job, plus `vectors/check.py`, an independent re-derivation with the
+    Python standard library.
+- Evidence: `crates/backup-format/tests/{format,props,vectors,no_service_links_backups}.rs`;
+  fuzz `backup_format` (about 1 million runs, no failure); `tests/bench.rs`.
+- Consequences: M2 builds the stores on `ChunkSink` and `ChunkSource`. The vault's access hash
+  moves to `songbird-proto` so that `api` can use it without linking the format.
+
+## D-0119 — Prompt 10: the plan, and the owner's decisions it needs
+
+- Date: 2026-11-19
+- Status: accepted (owner, 2026-11-19, "Approve all": every recommendation)
+- Decided by: owner, on the agent's plan `docs/reports/P10-plan.md`
+- Context: Prompt 10 asks for a cloud-agnostic backup format (`crates/backup-format`), storage
+  adapters (`crates/backup-storage`), the Songbird vault in `api` on RustFS, local export and a
+  device-to-device transfer. What exists: an empty PROTOCOL §11, a mocked backup and transfer
+  flow in the app with a 32-character mock key, our own S3 client, RustFS in compose, Padmé
+  padding, the account deletion job. Missing: everything the prompt names, a WebDAV server and
+  provider mocks for tests, and **account recovery**, which PROTOCOL §4.7 assigned to Prompt 10
+  and without which a restore on a brand-new device cannot become a working account.
+  aws-lc-rs has no XChaCha20-Poly1305.
+- Options considered and evidence: in the plan ("What Prompt 10 starts from", "Findings").
+- Decisions asked of the owner (recommendations first):
+  1. the milestones as written, account recovery included;
+  2. a 64-character Crockford base32 recovery key (256-bit secret, 64-bit check), created with
+     the account and kept on the primary;
+  3. the vault owned by an account (size, chunk count and generation known to the server, no
+     times); unlinking re-decided with Prompt 11's anonymous credentials;
+  4. recovery by the identity key's signature plus the PIN or a passkey when set; the transfer
+     by a handover token from the old primary;
+  5. a vault quota of 5 GiB and 100,000 chunks until Prompt 11;
+  6. Google Drive, OneDrive and Dropbox adapters with mock servers now, the app's desktop sign-in
+     once the owner registers the OAuth apps, mobile sign-in with the host projects;
+  7. Apache httpd `mod_dav` as the WebDAV server in CI, one manual Nextcloud run.
+- Agent decisions, unless the owner objects: `chacha20poly1305` 0.10.1 for XChaCha20-Poly1305;
+  a keyed content-defined chunker (1/2/8 MiB), media per file, Padmé padding; chunk names by
+  HMAC; the manifest's generation in the clear with the previous manifest's hash inside;
+  protobuf sections with a minimum reader version; two-phase restore; backups by the primary
+  only; an `Http` trait for adapters, SigV4 from `songbird-s3`; vault chunks streamed through
+  `api` into a dedicated bucket; Noise `NNpsk0` on aws-lc-rs for the transfer; a new recovery
+  key means a new vault; determinism checked on Linux x86_64, Linux i686 and macOS arm64; one
+  branch and one PR.
+- Consequences: M1 (`crates/backup-format`) starts once the owner approves.
 
 ## D-0118 — Camera: the `unsafe` exception marked for Semgrep, as D-0033's
 

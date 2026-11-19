@@ -131,7 +131,7 @@ pub(crate) fn wizard_body(
                                 .child(hero_icon(Icon::Key))
                                 .child(flow_title("Confirm your recovery key"))
                                 .child(flow_lead(
-                                    "Backups are locked with your recovery key. Type its last group of four to show you still have it.",
+                                    "Backups are locked with your recovery key, and it can move your account to a new phone, so guard it like a password. Type its last group of four to show you still have it.",
                                 ))
                                 .child(labelled_field(
                                     "Last group of your recovery key",

@@ -257,6 +257,7 @@ async fn stack(limits: RequestLimits) -> Option<Stack> {
         devices: None,
         profiles: Some(profiles),
         storage: None,
+        vault: None,
         kt: None,
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

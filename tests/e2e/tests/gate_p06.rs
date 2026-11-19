@@ -151,12 +151,14 @@ async fn stack() -> Option<Stack> {
         usernames: None,
         keys: None,
         storage: None,
+        vault: None,
         kt: None,
         profiles: None,
         devices: None,
     });
     let worker = Worker {
         block_keys: None,
+        vault_s3: None,
         push_store: Arc::new(
             songbird_accounts::PushStore::beside(&registry)
                 .await

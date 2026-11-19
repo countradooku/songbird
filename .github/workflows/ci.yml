@@ -59,6 +59,29 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  backup-determinism:
+    name: backup format determinism (x86_64, i686, independent re-derivation)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # D-0120: the published vectors from the specification alone (Python standard library).
+      - run: python3 crates/backup-format/vectors/check.py crates/backup-format/vectors/v1/vectors.json
+      - run: python3 crates/backup-storage/vectors/transfer_check.py crates/backup-storage/vectors/transfer.json
+      # The same bytes on a 64-bit and a 32-bit target (macOS arm64 is checked locally, D-0120).
+      - run: cargo test --locked -p songbird-backup-format --test vectors
+      - name: i686 (32-bit usize)
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q gcc-multilib g++-multilib
+          rustup target add i686-unknown-linux-gnu
+          cargo test --locked -p songbird-backup-format --target i686-unknown-linux-gnu --test vectors --test format
+
   compose:
     name: integration environment (docker compose)
     runs-on: ubuntu-24.04
@@ -73,7 +96,7 @@ jobs:
           # Pull requests restore main's cache but never save their own (D-0045): per-branch
           # caches went past the free 10 GB of Actions cache.
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: start SurrealDB, Iggy, valkey-hot, valkey-jobs, RustFS, LiveKit and wait for health
+      - name: start SurrealDB, Iggy, valkey-hot, valkey-jobs, RustFS, WebDAV, LiveKit and wait for health
         run: cargo xtask compose up
       - run: cargo xtask compose ps
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
@@ -103,6 +126,9 @@ jobs:
           export SONGBIRD_TEST_RUSTFS_ACCESS_KEY="$RUSTFS_ACCESS_KEY"
           export SONGBIRD_TEST_RUSTFS_SECRET_KEY="$RUSTFS_SECRET_KEY"
           export SONGBIRD_REQUIRE_RUSTFS=1
+          # Backups (Prompt 10): the WebDAV adapter against Apache mod_dav.
+          export SONGBIRD_TEST_WEBDAV="http://127.0.0.1:${SB_PORT_WEBDAV:-47980}"
+          export SONGBIRD_TEST_WEBDAV_PASSWORD="$WEBDAV_PASSWORD"
           # Calls (Prompt 7): the compose LiveKit and its development key.
           export SONGBIRD_TEST_LIVEKIT="http://127.0.0.1:${SB_PORT_LIVEKIT:-47880}"
           export SONGBIRD_TEST_LIVEKIT_KEY="$LIVEKIT_API_KEY"
@@ -112,7 +138,7 @@ jobs:
           export SONGBIRD_REQUIRE_STACK=1
           # Backups (M6): restore against tampering on RustFS and SurrealDB with the age tool.
           export SONGBIRD_TEST_AGE="$RUNNER_TEMP/age"
-          cargo nextest run --locked --profile ci -p songbird-surreal -p songbird-mailbox -p songbird-router -p songbird-s3 -p songbird-e2e -p songbird-accounts -p songbird-admin -p songbird-akd
+          cargo nextest run --locked --profile ci -p songbird-surreal -p songbird-mailbox -p songbird-router -p songbird-s3 -p songbird-e2e -p songbird-accounts -p songbird-admin -p songbird-akd -p songbird-backup-storage
           # These share the job streams (one consumer group; some wipe them): one crate at a
           # time, one test at a time.
           cargo nextest run --locked --profile ci -p songbird-api -j 1

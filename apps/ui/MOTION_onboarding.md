@@ -25,6 +25,11 @@ lands at its end at once with reduced motion, or is gated on
 | Scanners (connect, link from a phone, safety number, transfer) | Scan line | Sweeps down and back, 1800ms ease-in-out, alternate, looping | Line rests at the top |
 | Backup wizard, restore, transfer | Page changes | Slides 24pt (wizard, transfer) or rises 8pt (restore) and fades, `BASE`, ease-out | Instant |
 | Progress bars (backup now, restore, transfer) | Value grows | Fill scales on x from the left, `BASE`, ease-out (transform, not width) | Jumps |
+| Transfer (Prompt 10) | Compare and Waiting screens, a failure | The same page change as the other transfer pages (slide 24pt and fade, `BASE`); the six digits appear with the page, never animated on their own | Instant |
+| Transfer, new phone (D-0125) | "They match" pressed → waiting for the old phone | The button leaves and the indeterminate bar appears in place, no movement of the page (as the QR's bar) | Instant |
+| Transfer, new phone | Code being prepared → QR shown | The indeterminate bar (as "Creating your account") gives way to the QR in place; no movement of the page | Static bar |
+| Restore, new device | A typo in the key | Status line appears below the field (icon + sentence, Problem tone), no shake, no layout jump of the field | Same |
+| Backups | A problem after a real run | The warning banner and its button appear in the status card in place of the progress bar, colour only | Same |
 | Restore stages | Stage done | Circle fills with primary and shows a check, colour `BASE`; "Done" / "In progress" text | Same (colour) |
 | Destination rows | Selected | Radio fills primary with a check, `FAST`, "Selected" label | Same |
 | Every button, row, chip | Hover / press | From `ui`: wash `INSTANT`, press 0.97 `FAST` settle | Opacity only |

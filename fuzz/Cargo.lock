@@ -6310,6 +6310,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "songbird-backup-format"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "chacha20poly1305",
+ "getrandom 0.4.3",
+ "prost",
+ "songbird-proto",
+ "thiserror 2.0.21",
+ "zeroize",
+]
+
+[[package]]
 name = "songbird-calls"
 version = "0.1.0"
 dependencies = [
@@ -6372,6 +6385,7 @@ dependencies = [
  "aws-lc-rs",
  "prost",
  "songbird-proto",
+ "songbird-types",
  "thiserror 2.0.21",
  "zeroize",
 ]
@@ -6381,12 +6395,14 @@ name = "songbird-fuzz"
 version = "0.0.0"
 dependencies = [
  "akd",
+ "aws-lc-rs",
  "bytes",
  "libfuzzer-sys",
  "prost",
  "serde",
  "songbird-akd",
  "songbird-api",
+ "songbird-backup-format",
  "songbird-calls",
  "songbird-camera",
  "songbird-content",

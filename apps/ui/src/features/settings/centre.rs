@@ -149,7 +149,7 @@ fn content() -> AnyElement {
             Icon::Key,
             "How your backups are protected",
             "Backups are locked on your device with a recovery key only you have. Songbird stores the locked copy and can't open it.",
-            "Lose the recovery key and nobody can restore the backup, us included. Keep it somewhere safe, like a password manager.",
+            "Lose the recovery key and nobody can restore the backup, us included. Anyone who has it can restore your chats and, without a PIN, take over your account. Keep it somewhere safe, like a password manager.",
             Some(("Backup settings", backup_action)),
         ))
         .child(topic(

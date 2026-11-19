@@ -307,6 +307,28 @@ async fn put_list(keep: &[Listed], version: u64) -> Result<(), Problem> {
     }
 }
 
+/// On a device that just became the main phone (an account recovery, Prompt 10): signs a list
+/// naming only itself, above the stored version.
+pub(crate) async fn sign_self_list() -> Result<(), Problem> {
+    let me = live()
+        .with_untracked(|l| l.device.clone())
+        .and_then(|d| wire::unhex(&d))
+        .ok_or_else(|| problem("This device isn't registered yet."))?;
+    let (devices, version) = listed().await?;
+    let mine: Vec<Listed> = devices
+        .into_iter()
+        .filter(|d| d.device.as_slice() == me.as_slice())
+        .map(|mut d| {
+            d.primary = true;
+            d
+        })
+        .collect();
+    if mine.is_empty() {
+        return Err(problem("The server doesn't list this device yet."));
+    }
+    put_list(&mine, version + 1).await
+}
+
 /// On the main phone: links the device whose code `text` is.
 pub async fn link_from_code(text: &str) -> Result<(), Problem> {
     let Some(codes::Scanned::Link {

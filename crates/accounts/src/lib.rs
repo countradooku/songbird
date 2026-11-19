@@ -57,13 +57,16 @@ pub mod journal;
 pub mod kt;
 pub mod packs;
 pub mod profile;
+pub mod recovery;
 pub mod reports;
 pub mod settings;
 pub mod storage;
 pub mod supervision;
+pub mod vault;
 pub use db::{Db, DbError, SurrealSettings};
 pub use push_store::PushStore;
 pub use storage::{StorageCaps, StorageWriteError};
+pub use vault::{VaultError, VaultQuota, VaultRow};
 
 /// Ed25519 public key length.
 pub const AUTH_KEY_LEN: usize = 32;
@@ -142,6 +145,7 @@ DEFINE TABLE IF NOT EXISTS ltoken SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS account ON ltoken TYPE bytes;
 DEFINE FIELD IF NOT EXISTS device ON ltoken TYPE bytes;
 DEFINE FIELD IF NOT EXISTS expires ON ltoken TYPE datetime;
+DEFINE FIELD IF NOT EXISTS kind ON ltoken TYPE option<int>;
 DEFINE INDEX IF NOT EXISTS ltoken_account ON ltoken FIELDS account;
 DEFINE INDEX IF NOT EXISTS ltoken_expires ON ltoken FIELDS expires;
 DEFINE FIELD IF NOT EXISTS pin ON account TYPE option<bytes>;
@@ -292,6 +296,25 @@ DEFINE INDEX IF NOT EXISTS srec_account ON srec FIELDS account;
 DEFINE TABLE IF NOT EXISTS sobj SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS account ON sobj TYPE bytes;
 DEFINE INDEX IF NOT EXISTS sobj_account ON sobj FIELDS account;
+DEFINE TABLE IF NOT EXISTS vault SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS access ON vault TYPE bytes;
+DEFINE FIELD IF NOT EXISTS epoch ON vault TYPE bytes;
+DEFINE FIELD IF NOT EXISTS gen ON vault TYPE int;
+DEFINE FIELD IF NOT EXISTS man ON vault TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS mbytes ON vault TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS bytes ON vault TYPE int;
+DEFINE FIELD IF NOT EXISTS chunks ON vault TYPE int;
+DEFINE TABLE IF NOT EXISTS vault_gone SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS vault ON vault_gone TYPE bytes;
+DEFINE FIELD IF NOT EXISTS at ON vault_gone TYPE datetime DEFAULT time::now();
+DEFINE TABLE IF NOT EXISTS vault_owner SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS account ON vault_owner TYPE bytes;
+DEFINE INDEX IF NOT EXISTS vault_owner_account ON vault_owner FIELDS account;
+DEFINE TABLE IF NOT EXISTS vchunk SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS vault ON vchunk TYPE bytes;
+DEFINE FIELD IF NOT EXISTS name ON vchunk TYPE bytes;
+DEFINE FIELD IF NOT EXISTS size ON vchunk TYPE int;
+DEFINE INDEX IF NOT EXISTS vchunk_vault ON vchunk FIELDS vault, name;
 DEFINE FIELD IF NOT EXISTS hidden ON account TYPE option<bool>;
 DEFINE FIELD IF NOT EXISTS grp_contacts ON account TYPE option<bool>;
 DEFINE FIELD IF NOT EXISTS sv_requests ON account TYPE option<bool>;
@@ -664,7 +687,8 @@ pub struct Remnants {
     pub group_requests: u64,
     /// Group prune marks still naming the devices (D-0075).
     pub group_marks: u64,
-    /// Storage records and storage object records of the account (Prompt 9, D-0102).
+    /// Storage records and storage object records of the account (Prompt 9, D-0102), and
+    /// its backup vaults (Prompt 10, D-0121).
     pub storage: u64,
 }
 
@@ -2061,7 +2085,8 @@ impl Registry {
                  RETURN count(SELECT id FROM grp_prune WHERE gone CONTAINSANY $ds);
                  RETURN count(SELECT id FROM srec WHERE account = $a)
                    + count(SELECT id FROM sobj WHERE account = $a)
-                   + count(SELECT id FROM superv:[$a]);",
+                   + count(SELECT id FROM superv:[$a])
+                   + count(SELECT id FROM vault_owner WHERE account = $a);",
                 vec![
                     var("a", bytes(account.as_bytes())),
                     var("ds", Value::Array(ds)),

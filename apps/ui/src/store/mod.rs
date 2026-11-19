@@ -218,6 +218,8 @@ impl Store {
             settings: signal(seed.settings),
             session: signal(Session {
                 onboarded,
+                // The real recovery key (Prompt 10): made once, kept on this device.
+                recovery_key: crate::backend::backup::shown_key(),
                 ..seed.session
             }),
             on_arrival: stored(None),

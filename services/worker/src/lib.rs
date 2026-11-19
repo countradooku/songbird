@@ -126,6 +126,8 @@ pub struct WorkerMetrics {
     pub devices_deleted: Counter,
     /// Accounts whose deletion started for inactivity.
     pub inactive_deleted: Counter,
+    /// Backup vaults deleted (turned off, or with their account; Prompt 10).
+    pub vaults_deleted: Counter,
 }
 
 impl WorkerMetrics {
@@ -178,6 +180,11 @@ impl WorkerMetrics {
                 "Packs deleted (expired, unfinished, or with their device)",
                 &self.packs_deleted,
             ),
+            (
+                "worker_vaults_deleted",
+                "Backup vaults deleted (turned off, or with their account)",
+                &self.vaults_deleted,
+            ),
         ] {
             m.register(name, help, c.clone())?;
         }
@@ -210,8 +217,27 @@ pub struct Worker {
     /// The keys of block rows (Prompt 4, D-0062): an account's blocks are found by its keyed
     /// owner tag. `None` only in development (no blocks exist without `[api.requests]`).
     pub block_keys: Option<songbird_accounts::blocks::GateKeys>,
+    /// The backup vaults' bucket (Prompt 10, D-0121): a vault's objects go with its account, or
+    /// when it is turned off. `None` only in development without `[api.vault]`.
+    pub vault_s3: Option<songbird_s3::Client>,
     /// Metrics.
     pub metrics: WorkerMetrics,
+}
+
+/// How long a turned-off vault's prefix is listed again by every sweep before it is forgotten:
+/// longer than any request the api serves.
+pub const VAULT_GRACE: Duration = Duration::from_mins(15);
+
+/// The prefix of a vault incarnation's objects (as `api` writes them,
+/// `songbird_api::vault::prefix`).
+fn vault_prefix(vk: &[u8; 32], epoch: &[u8; 16]) -> String {
+    let mut p = ObjectKey(*vk).to_hex_unredacted();
+    p.push('/');
+    for b in epoch {
+        let _ = std::fmt::Write::write_fmt(&mut p, format_args!("{b:02x}"));
+    }
+    p.push('/');
+    p
 }
 
 /// The deletion journal's writer (D-0041): before an account is deleted, an empty, write-once
@@ -398,6 +424,18 @@ impl Worker {
         self.delete_packs_of(&devices).await?;
         // Encrypted avatars (Prompt 3, M5) and storage objects (Prompt 9, M1).
         let uploaded = self.delete_owned_objects(account).await?;
+        // Backup vaults (Prompt 10, M2): retired (rows gone), then every object. A retry finds
+        // what an earlier attempt retired in `vault_gone` and finishes it in the sweep.
+        for vk in self
+            .registry
+            .vaults_of(account)
+            .await
+            .map_err(unavailable)?
+        {
+            if let Some(epoch) = self.registry.vault_retire(&vk).await.map_err(unavailable)? {
+                self.delete_vault_objects(&vk, &epoch).await?;
+            }
+        }
         // Every delivery node has dropped the devices: forget again what a racing send stored.
         tokio::time::sleep(self.propagation).await;
         self.delivery.forget(&devices).await?;
@@ -673,6 +711,50 @@ impl Worker {
         }
     }
 
+    /// Deletes a turned-off backup vault's objects (Prompt 10, M2, D-0121): everything under
+    /// its incarnation's prefix, found by listing (so an upload recorded but never finished, or an
+    /// object a failed delete left, goes too), verified by listing again; then forgets it.
+    ///
+    /// # Errors
+    /// [`Left`]: what is still there; retried by the job or the next sweep.
+    pub async fn delete_vault_objects(&self, vk: &[u8; 32], epoch: &[u8; 16]) -> Result<(), Left> {
+        if let Some(s3) = &self.vault_s3 {
+            let prefix = vault_prefix(vk, epoch);
+            loop {
+                let page = s3
+                    .list_objects_v2(&prefix, None, 1000)
+                    .await
+                    .map_err(|_| Left::Unavailable)?;
+                if page.objects.is_empty() {
+                    break;
+                }
+                for o in &page.objects {
+                    s3.delete_object(&o.key)
+                        .await
+                        .map_err(|_| Left::Unavailable)?;
+                }
+            }
+            let left = s3
+                .list_objects_v2(&prefix, None, 1)
+                .await
+                .map_err(|_| Left::Unavailable)?;
+            if !left.objects.is_empty() {
+                return Err(Left::Objects);
+            }
+        }
+        // Forgotten only after a grace longer than any request, so an upload in flight when the
+        // vault was turned off, landing after this listing, is found by a later sweep (D-0125).
+        if self
+            .registry
+            .vault_gone_done(epoch, VAULT_GRACE)
+            .await
+            .map_err(|_| Left::Unavailable)?
+        {
+            self.metrics.vaults_deleted.inc();
+        }
+        Ok(())
+    }
+
     /// One sweep:attachments past 30 days or fully fetched, expired grants, expired invite
     /// codes, expired KeyPackages, expired link tokens, released usernames whose hold ended, the outbox.
     pub async fn sweep(&self) {
@@ -734,6 +816,21 @@ impl Worker {
                 }
             }
             Err(e) => tracing::warn!(error = %e, "avatar sweep failed"),
+        }
+        // Backup vaults turned off (Prompt 10, M2).
+        match self
+            .registry
+            .vaults_gone(u64::try_from(SWEEP_BATCH).unwrap_or(100))
+            .await
+        {
+            Ok(vaults) => {
+                for (vk, epoch) in vaults {
+                    if let Err(left) = self.delete_vault_objects(&vk, &epoch).await {
+                        tracing::warn!(?left, "vault deletion incomplete; next sweep");
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "vault sweep failed"),
         }
         self.inactivity().await;
         self.supervision().await;

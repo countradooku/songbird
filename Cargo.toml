@@ -24,6 +24,8 @@ members = [
     "crates/content",
     "crates/groups",
     "crates/sync",
+    "crates/backup-format",
+    "crates/backup-storage",
     "services/delivery",
     "services/api",
     "services/push",
@@ -73,6 +75,8 @@ songbird-keys = { path = "crates/keys" }
 songbird-content = { path = "crates/content" }
 songbird-groups = { path = "crates/groups" }
 songbird-sync = { path = "crates/sync" }
+songbird-backup-format = { path = "crates/backup-format" }
+songbird-backup-storage = { path = "crates/backup-storage" }
 songbird-calls = { path = "services/calls" }
 
 anyhow = "1.0.104"
@@ -138,6 +142,11 @@ argon2 = { version = "=0.6.0", default-features = false, features = ["alloc"] }
 # (D-0047: implement the protocols on permissive crates, D-0048). BSD-3-Clause; default features off.
 curve25519-dalek = { version = "=5.0.0", default-features = false }
 
+# XChaCha20-Poly1305 for backups (Prompt 10, D-0119; the prompt names the cipher): aws-lc-rs has
+# only the 12-byte-nonce ChaCha20-Poly1305. RustCrypto, MIT OR Apache-2.0, already in the lock
+# through OpenMLS's crypto provider and exempted in cargo-vet; no default features.
+chacha20poly1305 = { version = "=0.10.1", default-features = false }
+
 # Test-only
 proptest = "1.12.0"
 tempfile = "3.27.0"
@@ -179,6 +188,16 @@ panic = "abort"
 strip = "symbols"
 debug = false
 incremental = false
+
+# Backup tests encrypt hundreds of megabytes; RustCrypto's ChaCha20 and Poly1305 are 30 times
+# slower unoptimised (Prompt 10, D-0120), and so is the chunker's per-byte loop. Only these crates
+# are optimised in dev builds.
+[profile.dev.package.songbird-backup-format]
+opt-level = 3
+[profile.dev.package.chacha20]
+opt-level = 3
+[profile.dev.package.poly1305]
+opt-level = 3
 
 # Release with debug info for perf/flamegraphs (cargo xtask bench --profile profiling).
 [profile.profiling]

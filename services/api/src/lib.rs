@@ -54,6 +54,7 @@ pub mod requests;
 pub mod server;
 pub mod storage;
 pub mod usernames;
+pub mod vault;
 
 use std::sync::Arc;
 
@@ -112,6 +113,8 @@ pub struct ApiMetrics {
     pub profiles: profiles::ProfileMetrics,
     /// The account record store (Prompt 9).
     pub storage: storage::StorageMetrics,
+    /// The backup vault (Prompt 10).
+    pub vault: vault::VaultMetrics,
     /// Blocks and the request policy.
     pub blocks: requests::RequestsMetrics,
     /// Reports.
@@ -178,6 +181,7 @@ impl ApiMetrics {
         self.devices.register(m)?;
         self.profiles.register(m)?;
         self.storage.register(m)?;
+        self.vault.register(m)?;
         self.blocks.register(m)?;
         self.reports.register(m)?;
         self.media.register(m)?;
@@ -224,6 +228,8 @@ pub struct App {
     pub profiles: Option<profiles::Profiles>,
     /// The account record store (absent: those endpoints answer 503).
     pub storage: Option<storage::Storage>,
+    /// The backup vault (Prompt 10; absent: those endpoints answer 503).
+    pub vault: Option<vault::Vault>,
     /// Key transparency (absent: those endpoints answer 503).
     pub kt: Option<kt::Transparency>,
     /// Blocks and the message-request policy (absent: those endpoints answer 503).
@@ -373,6 +379,7 @@ impl App {
             (_, p) if p == "/v1/storage" || p.starts_with("/v1/storage/") => {
                 self.storage(req).await
             }
+            (_, p) if p == "/v1/vault" || p.starts_with("/v1/vault/") => self.vault(req).await,
             (_, p)
                 if p == "/v1/messages/sealed"
                     || p == "/v1/ephemeral/sealed"
@@ -439,6 +446,9 @@ impl App {
                 | "/v1/supervision",
             ) => self.account_settings(req).await,
             (_, "/v1/supervision/update") => self.supervision_update(req).await,
+            (&Method::POST, "/v1/account/recover/token" | "/v1/account/recover") => {
+                self.recovery(req).await
+            }
             (_, p) if p.starts_with("/v1/account/") => self.factors(req).await,
             (_, p) if p.starts_with("/v1/kt/") => self.kt(req).await,
             (_, p) if p.starts_with("/v1/provisioning") || p.starts_with("/v1/devices") => {
@@ -634,6 +644,130 @@ impl App {
         Ok(profile_outcome(out))
     }
 
+    /// `/v1/vault…` ([`vault`]): reads by the vault's credentials alone; writes also signed by
+    /// the primary of the owning account.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the vault's dispatch table: one arm per endpoint"
+    )]
+    async fn vault(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let v = self.vault.as_ref().ok_or_else(unavailable)?;
+        let peer = req
+            .extensions()
+            .get::<registration::Peer>()
+            .ok_or_else(unavailable)?
+            .0;
+        // Without both credentials there is no vault to name: one 404, as for any miss.
+        let creds =
+            vault::credentials(req.headers()).ok_or(Refusal::Status(StatusCode::NOT_FOUND))?;
+        let method = req.method().clone();
+        let path = req.uri().path().to_owned();
+        let query = req.uri().query().map(str::to_owned);
+        let device_row = |device: DeviceId| async move {
+            self.registry
+                .device(&device)
+                .await
+                .map_err(|_| Refusal::Status(StatusCode::SERVICE_UNAVAILABLE))?
+                .ok_or(Refusal::Status(StatusCode::UNAUTHORIZED))
+        };
+        // Signed requests: the signature is checked before the vault is looked up.
+        let signed = match (&method, path.as_str()) {
+            (&Method::POST | &Method::DELETE, "/v1/vault") => {
+                Some(self.authenticate_json(req).await?)
+            }
+            (&Method::POST, "/v1/vault/chunks/delete") => Some(
+                self.authenticate_body(req, 2 + songbird_proto::vault::MAX_NAMES * 32)
+                    .await?,
+            ),
+            (&Method::PUT, "/v1/vault/manifest") => {
+                let expected = req
+                    .headers()
+                    .get(songbird_proto::vault::EXPECTED_HEADER)
+                    .and_then(|h| h.to_str().ok())
+                    .and_then(|h| h.parse::<u64>().ok())
+                    .ok_or(Refusal::Status(StatusCode::BAD_REQUEST))?;
+                let (device, body) = self.authenticate_body(req, v.settings.max_manifest).await?;
+                let row = device_row(device).await?;
+                let o = match v.open(&self.registry, &self.hot, peer, &creds).await {
+                    Ok(o) => o,
+                    Err(out) => return Ok(profile_outcome(out)),
+                };
+                if let Err(out) = v.write_allowed(&self.hot, &row, &o.row).await {
+                    return Ok(profile_outcome(out));
+                }
+                return Ok(profile_outcome(
+                    v.put_manifest(&self.registry, &o, expected, body).await,
+                ));
+            }
+            (&Method::PUT, p) if p.starts_with("/v1/vault/chunks/") => {
+                let name = vault::chunk_name(p).ok_or(Refusal::Status(StatusCode::NOT_FOUND))?;
+                let max = usize::try_from(songbird_proto::vault::max_chunk_object())
+                    .unwrap_or(usize::MAX);
+                let (device, body) = self.authenticate_body(req, max).await?;
+                let row = device_row(device).await?;
+                let o = match v.open(&self.registry, &self.hot, peer, &creds).await {
+                    Ok(o) => o,
+                    Err(out) => return Ok(profile_outcome(out)),
+                };
+                if let Err(out) = v.write_allowed(&self.hot, &row, &o.row).await {
+                    return Ok(profile_outcome(out));
+                }
+                return Ok(profile_outcome(
+                    v.put_chunk(&self.registry, &o, &name, body).await,
+                ));
+            }
+            (&Method::GET, "/v1/vault" | "/v1/vault/manifest" | "/v1/vault/chunks") => None,
+            (&Method::GET, p) if p.starts_with("/v1/vault/chunks/") => None,
+            _ => return Err(Refusal::Status(StatusCode::NOT_FOUND)),
+        };
+        if let Some((device, _)) = &signed
+            && method == Method::POST
+            && path == "/v1/vault"
+        {
+            let row = device_row(*device).await?;
+            return Ok(profile_outcome(
+                v.create(&self.registry, &self.hot, &row, &creds).await,
+            ));
+        }
+        let o = match v.open(&self.registry, &self.hot, peer, &creds).await {
+            Ok(o) => o,
+            Err(out) => return Ok(profile_outcome(out)),
+        };
+        if let Some((device, body)) = signed {
+            let row = device_row(device).await?;
+            if let Err(out) = v.write_allowed(&self.hot, &row, &o.row).await {
+                return Ok(profile_outcome(out));
+            }
+            let out = match path.as_str() {
+                "/v1/vault" => v.delete(&self.registry, &o).await,
+                _ => v.delete_chunks(&self.registry, &o, &body).await,
+            };
+            return Ok(profile_outcome(out));
+        }
+        if let Err(out) = v.read_budget(&self.hot, &o.vk).await {
+            return Ok(profile_outcome(out));
+        }
+        match path.as_str() {
+            "/v1/vault" => Ok(profile_outcome(v.stats(&o))),
+            "/v1/vault/manifest" => match v.manifest_name(&o) {
+                Some(name) => self.serve_from(&v.s3, &name).await,
+                None => Ok(empty(StatusCode::NO_CONTENT)),
+            },
+            "/v1/vault/chunks" => Ok(profile_outcome(match vault::after(query.as_deref()) {
+                Ok(after) => v.list(&self.registry, &o, after).await,
+                Err(out) => out,
+            })),
+            p => {
+                let name = vault::chunk_name(p).ok_or(Refusal::Status(StatusCode::NOT_FOUND))?;
+                match v.chunk_recorded(&self.registry, &o, &name).await {
+                    Ok(object) => self.serve_from(&v.s3, &object).await,
+                    Err(out) => Ok(profile_outcome(out)),
+                }
+            }
+        }
+    }
+
     /// `/v1/kt/…` ([`kt`]): signed like every device request.
     async fn kt(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
         let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
@@ -677,7 +811,16 @@ impl App {
 
     /// An object from `RustFS`, streamed.
     async fn serve_object(&self, name: &str) -> Result<Response<Body>, Refusal> {
-        let got = match self.s3.get_object(name, None).await {
+        self.serve_from(&self.s3, name).await
+    }
+
+    /// An object from a bucket, streamed.
+    async fn serve_from(
+        &self,
+        s3: &songbird_s3::Client,
+        name: &str,
+    ) -> Result<Response<Body>, Refusal> {
+        let got = match s3.get_object(name, None).await {
             Ok(g) => g,
             Err(songbird_s3::Error::NotFound) => {
                 return Err(Refusal::Status(StatusCode::NOT_FOUND));
@@ -710,7 +853,19 @@ impl App {
             Some(r) => Some(self.registry.block_count(&r.owner(account)).await?),
             None => None,
         };
+        // Backup vaults (Prompt 10): what the server holds of each, never the vault ID.
+        let mut vaults = vec![];
+        for vk in self.registry.vaults_of(account).await? {
+            if let Some(r) = self.registry.vault(&vk).await? {
+                vaults.push(serde_json::json!({
+                    "generation": r.generation,
+                    "bytes": r.bytes,
+                    "chunks": r.chunks,
+                }));
+            }
+        }
         if let Some(o) = v.as_object_mut() {
+            o.insert("backup_vaults".into(), serde_json::Value::Array(vaults));
             o.insert(
                 "message_requests".into(),
                 serde_json::json!({
@@ -930,6 +1085,14 @@ impl App {
                 None => not_primary(),
             },
             (&Method::GET, "/v1/account/factors") => d.factors(&self.registry, &row.account).await,
+            // Prompt 10: the primary hands the account over to its replacement.
+            (&Method::POST, "/v1/account/handover") => match primary {
+                Some(a) => {
+                    d.handover_token(&self.registry, &self.hot, &a, &device)
+                        .await
+                }
+                None => not_primary(),
+            },
             // GDPR (M7): the export and the inactivity period, the primary's.
             (&Method::GET, "/v1/account/export") => match primary {
                 Some(a) => match self.export(&a).await {
@@ -1013,6 +1176,27 @@ impl App {
     }
 
     /// `/v1/provisioning…` and `/v1/devices…` ([`devices`]).
+    /// Account recovery (Prompt 10, M4, D-0123): unsigned, the new device has no account yet.
+    async fn recovery(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
+        let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
+        let d = self.devices.as_ref().ok_or_else(unavailable)?;
+        let peer = req
+            .extensions()
+            .get::<registration::Peer>()
+            .map(|p| p.0)
+            .ok_or_else(unavailable)?;
+        let out = if req.uri().path() == "/v1/account/recover/token" {
+            let body = bounded_body(req, 128).await?;
+            d.recover_token(&self.registry, &self.hot, peer, &body)
+                .await
+        } else {
+            let body = bounded_body(req, songbird_proto::devices::MAX_RECOVER_LEN).await?;
+            d.recover(&self.registry, &self.hot, &self.server_name, peer, body)
+                .await
+        };
+        Ok(device_outcome(out))
+    }
+
     async fn devices(&self, req: Request<Incoming>) -> Result<Response<Body>, Refusal> {
         let unavailable = || Refusal::Status(StatusCode::SERVICE_UNAVAILABLE);
         let d = self.devices.as_ref().ok_or_else(unavailable)?;

@@ -164,6 +164,10 @@ pub struct ApiSettings {
     /// endpoints answer 503.
     #[serde(default)]
     pub storage: Option<StorageSettings>,
+    /// `[api.vault]`: the Songbird backup vault (Prompt 10, M2, D-0121). Absent: those endpoints
+    /// answer 503.
+    #[serde(default)]
+    pub vault: Option<VaultSettings>,
     /// `[api.kt]`: key transparency (Prompt 3, M6, D-0055). Absent: those endpoints answer 503.
     #[serde(default)]
     pub kt: Option<KtSettings>,
@@ -281,6 +285,143 @@ impl Validate for KtSettings {
         ] {
             v.check((1..=3_600_000).contains(&n), name, "must be in 1..=3600000");
         }
+    }
+}
+
+/// `[api.vault]` (Prompt 10, M2, D-0121): the Songbird backup vault, in its own bucket on
+/// `[api.s3]`'s endpoint.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VaultSettings {
+    /// 32 bytes (64 hex characters), the same on every `api` and `worker` node: keys the vault
+    /// rows and objects (`HMAC(secret, vault ID)`) and the throttle records.
+    pub secret: SecretRef,
+    /// The vaults' bucket (not the attachments').
+    pub bucket: String,
+    /// Bytes per vault (chunks and manifest) until Prompt 11's entitlements (D-0119: 5 GiB).
+    #[serde(default = "default_vault_bytes")]
+    pub quota_bytes: u64,
+    /// Chunks per vault (D-0119: 100,000).
+    #[serde(default = "default_vault_chunks")]
+    pub quota_chunks: u64,
+    /// Vaults per account: two, so a new recovery key's vault fills before the old one goes.
+    #[serde(default = "default_vault_count")]
+    pub max_vaults: u64,
+    /// Largest manifest object.
+    #[serde(default = "default_vault_manifest")]
+    pub max_manifest: usize,
+    /// Requests that open a vault (reads) per hour per vault, and their burst: a restore of a
+    /// full vault reads every chunk.
+    #[serde(default = "default_vault_reads")]
+    pub reads_per_hour: u32,
+    /// Their burst.
+    #[serde(default = "default_vault_read_burst")]
+    pub read_burst: u32,
+    /// Writes (chunks, manifests, deletes) per hour per account.
+    #[serde(default = "default_vault_writes")]
+    pub writes_per_hour: u32,
+    /// Their burst: a first backup of a full vault.
+    #[serde(default = "default_vault_write_burst")]
+    pub write_burst: u32,
+    /// Failed opens (an unknown vault or a wrong secret) per hour per IP range.
+    #[serde(default = "default_vault_misses")]
+    pub misses_per_hour: u32,
+    /// Their burst.
+    #[serde(default = "default_vault_miss_burst")]
+    pub miss_burst: u32,
+    /// IPv4 prefix of a range.
+    #[serde(default = "default_v4_prefix")]
+    pub ipv4_prefix: u8,
+    /// IPv6 prefix of a range.
+    #[serde(default = "default_v6_prefix")]
+    pub ipv6_prefix: u8,
+}
+
+const fn default_vault_bytes() -> u64 {
+    5 << 30
+}
+const fn default_vault_chunks() -> u64 {
+    100_000
+}
+const fn default_vault_count() -> u64 {
+    2
+}
+const fn default_vault_manifest() -> usize {
+    16 << 20
+}
+const fn default_vault_reads() -> u32 {
+    20_000
+}
+const fn default_vault_read_burst() -> u32 {
+    6_000
+}
+const fn default_vault_writes() -> u32 {
+    20_000
+}
+const fn default_vault_write_burst() -> u32 {
+    6_000
+}
+const fn default_vault_misses() -> u32 {
+    60
+}
+const fn default_vault_miss_burst() -> u32 {
+    20
+}
+const fn default_v4_prefix() -> u8 {
+    24
+}
+const fn default_v6_prefix() -> u8 {
+    48
+}
+
+impl Validate for VaultSettings {
+    fn validate(&self, v: &mut Validator) {
+        v.check(
+            (3..=63).contains(&self.bucket.len()),
+            "bucket",
+            "must be 3 to 63 characters",
+        );
+        v.check(
+            ((64 << 20)..=(1 << 40)).contains(&self.quota_bytes),
+            "quota_bytes",
+            "must be in 64 MiB..=1 TiB",
+        );
+        v.check(
+            (100..=10_000_000).contains(&self.quota_chunks),
+            "quota_chunks",
+            "must be in 100..=10000000",
+        );
+        v.check(
+            (1..=4).contains(&self.max_vaults),
+            "max_vaults",
+            "must be in 1..=4",
+        );
+        v.check(
+            ((1 << 20)..=(48 << 20)).contains(&self.max_manifest),
+            "max_manifest",
+            "must be in 1 MiB..=48 MiB (the format's bound)",
+        );
+        for (ok, name) in [
+            (
+                self.reads_per_hour > 0 && self.read_burst > 0,
+                "reads_per_hour",
+            ),
+            (
+                self.writes_per_hour > 0 && self.write_burst > 0,
+                "writes_per_hour",
+            ),
+            (
+                self.misses_per_hour > 0 && self.miss_burst > 0,
+                "misses_per_hour",
+            ),
+        ] {
+            v.check(ok, name, "rates and bursts must be positive");
+        }
+        v.check(
+            (8..=32).contains(&self.ipv4_prefix) && (16..=128).contains(&self.ipv6_prefix),
+            "ipv4_prefix",
+            "must be in 8..=32 (IPv6 16..=128)",
+        );
     }
 }
 
@@ -580,6 +721,9 @@ impl Validate for ApiSettings {
         }
         if let Some(p) = &self.profiles {
             v.section("profiles", p);
+        }
+        if let Some(vs) = &self.vault {
+            v.section("vault", vs);
         }
         if let Some(st) = &self.storage {
             v.section("storage", st);

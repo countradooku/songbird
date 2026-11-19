@@ -117,6 +117,9 @@ pub(crate) fn dest_icon(d: BackupDestination) -> Icon {
 
 pub(crate) fn dest_note(d: BackupDestination) -> &'static str {
     use BackupDestination::*;
+    if !crate::backend::backup::available(d) {
+        return crate::backend::backup::unavailable_reason(d);
+    }
     match d {
         SongbirdServers => "Kept by Songbird, which can't open it.",
         EncryptedFile => "A file you keep yourself, on a drive or a computer.",
@@ -202,7 +205,7 @@ pub(crate) fn dest_fields(s: Store, d: BackupDestination) -> Option<View> {
                         |b, v| b.nextcloud_url = v,
                     )
                     .keyboard_type(KeyboardType::Url),
-                    "Your Nextcloud's address. Songbird asks for an app password next.",
+                    "Your Nextcloud's address. Backups go in a Songbird folder there.",
                     || false,
                 ))
                 .child(labelled_field(
@@ -214,6 +217,18 @@ pub(crate) fn dest_fields(s: Store, d: BackupDestination) -> Option<View> {
                         |b, v| b.nextcloud_user = v,
                     ),
                     "",
+                    || false,
+                ))
+                .child(labelled_field(
+                    "App password",
+                    extra_field(
+                        s,
+                        "App password",
+                        |b| b.nextcloud_password.clone(),
+                        |b, v| b.nextcloud_password = v,
+                    )
+                    .masked(true),
+                    "Make one in Nextcloud under Settings → Security. It stays on this device.",
                     || false,
                 )),
         ),
@@ -251,7 +266,30 @@ pub(crate) fn dest_fields(s: Store, d: BackupDestination) -> Option<View> {
                         |b| b.s3_key.clone(),
                         |b, v| b.s3_key = v,
                     ),
-                    "The secret key is asked for next and kept in this device's keychain.",
+                    "",
+                    || false,
+                ))
+                .child(labelled_field(
+                    "Secret access key",
+                    extra_field(
+                        s,
+                        "Secret access key",
+                        |b| b.s3_secret.clone(),
+                        |b, v| b.s3_secret = v,
+                    )
+                    .masked(true),
+                    "It stays on this device. Give the key access to this bucket only.",
+                    || false,
+                ))
+                .child(labelled_field(
+                    "Region",
+                    extra_field(
+                        s,
+                        "us-east-1",
+                        |b| b.s3_region.clone(),
+                        |b, v| b.s3_region = v,
+                    ),
+                    "Leave empty unless your provider needs one.",
                     || false,
                 )),
         ),
@@ -263,14 +301,17 @@ pub(crate) fn dest_fields(s: Store, d: BackupDestination) -> Option<View> {
 pub(crate) fn dest_ready(s: Store, d: BackupDestination) -> bool {
     s.backup_extra().with(|b| match d {
         BackupDestination::Nextcloud => {
-            b.nextcloud_url.starts_with("https://") && !b.nextcloud_user.trim().is_empty()
+            b.nextcloud_url.starts_with("https://")
+                && !b.nextcloud_user.trim().is_empty()
+                && !b.nextcloud_password.is_empty()
         }
         BackupDestination::S3 => {
             b.s3_endpoint.starts_with("https://")
                 && !b.s3_bucket.trim().is_empty()
                 && !b.s3_key.trim().is_empty()
+                && !b.s3_secret.is_empty()
         }
-        _ => true,
+        d => crate::backend::backup::available(d),
     })
 }
 
@@ -381,8 +422,12 @@ fn more_rows(s: Store, on: bool) -> View {
     group(rows)
 }
 
-fn problem_text(p: BackupProblem, dest: &str) -> String {
+fn problem_text(p: BackupProblem, dest: &str, note: Option<String>) -> String {
     match p {
+        BackupProblem::Other => format!(
+            "Your last backup didn't finish. {}",
+            note.unwrap_or_else(|| "Try again.".into())
+        ),
         BackupProblem::StorageFull => {
             format!(
                 "Your last backup didn't finish because {dest} is full. Free up space there, or choose another place."
@@ -471,18 +516,22 @@ fn backups_on(s: Store) -> View {
                     .gap_2()
                     .child(banner(Tone::Warning, Icon::Alert, move || {
                         problem()
-                            .map(|p| problem_text(p, dest().label()))
+                            .map(|p| {
+                                problem_text(p, dest().label(), extra.with(|b| b.note.clone()))
+                            })
                             .unwrap_or_default()
                     }))
                     .child(view().flex_row().child(btn(
                         move || match problem() {
                             Some(BackupProblem::SignedOut) => "Sign in again",
+                            Some(BackupProblem::Other) => "Try again",
                             _ => "Fix",
                         },
                         Variant::Primary,
                         BtnSize::Sm,
                         move || match problem() {
                             Some(BackupProblem::StorageFull) => choose_open.set(true),
+                            Some(BackupProblem::Other) => s.back_up_now(),
                             _ => {
                                 // mock: the provider's sign-in sheet (app-core `connect_destination`).
                                 s.back_up_now();

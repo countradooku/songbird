@@ -834,6 +834,42 @@ Decision D-0056 (M7).
     app wakes, makes a request, and the clock restarts.
   - At the end, the account is deleted exactly as if it had asked.
 
+### 4.11 Account recovery and the hand-over to a new phone (Prompt 10, D-0123)
+
+The account identity key is in the user's backup (§11.5), so a brand-new device holding only
+the recovery key can become the account's primary again; the transfer to a new phone (§11.9)
+uses the same call with the old primary's consent instead of the second factor.
+
+1. A **token**: `POST /v1/account/recover/token` (unsigned, `{"account": hex}`; throttled per
+   IP range and per account) for a recovery, or `POST /v1/account/handover` (signed by the
+   enabled primary; throttled per primary, apart from strangers' recovery requests) for a
+   hand-over. Either answers `{"token", "device", "expires_in"}` like a link token (§4.6): 32
+   random bytes stored only as their hash, single use, ten minutes, reserving a device ID. The
+   token's kind is stored with it: a link never accepts a recovery or hand-over token, a
+   recovery never accepts a link token, and only link tokens count towards the device limit.
+   For an unknown or deleting account the recovery endpoint answers the same way with a token
+   it never stores, so it tells a stranger nothing (D-0125).
+2. `POST /v1/account/recover` (unsigned):
+   `account [16] | account_sig [64] | link request` (§4.6, with the second factor of §4.7 when
+   the token is a recovery token). `account_sig` is Ed25519 by the **account identity key** over
+   `link_transcript("songbird.v1/recover-account\0", …)`, the same bytes the new keys sign.
+3. The server checks, before anything changes: the range throttle; the new authentication and
+   device identity keys' two proofs; `account_sig` under the account's stored identity key (an
+   unknown account and a wrong signature: one answer, 400 `signature`); the token (unexpired,
+   this account, this device, a recovery kind; 409 `token`); for a recovery token the PIN or a
+   passkey when the account has one (counted and locked exactly as for linking, 403 `factor`,
+   403 `locked`).
+4. In one transaction: the token is consumed; **every enabled device of the account is
+   disabled** (marked for removal from its groups, as a list removal does) and a
+   `DeleteDevices` job goes to the outbox; other outstanding tokens are dropped; the new device
+   is created as the enabled, non-pending primary. 200 `{"account", "device", "removed"}`.
+5. The new primary signs a device list naming itself (version above the stored one, §4.6), and
+   restores its backup. Contacts see a device change and the **same** safety number.
+
+The recovery key is therefore the account unless a PIN or passkey is set: whoever holds it alone
+can take the account over and sign out every device. The app asks for a PIN when backups are
+turned on and says so where it shows the key (threat model §3.27).
+
 ## 5. Encrypted content schemas (Prompt 4)
 
 Decision D-0059 (M1). Specification: `crates/content/proto/content.proto`; Rust types, padding,
@@ -2296,6 +2332,269 @@ hours. Only the two devices read it; the child's app enforces it and shows it.
 - `GET /v1/account/settings` reports `"supervised"`.
 
 ## 11. Backup format and vault access (Prompt 10)
+
+Decisions D-0119 (the owner's plan) and D-0120 (M1). The library is `crates/backup-format`;
+`proto/backup.proto` specifies the plaintext schemas; `vectors/v1/vectors.json` holds the
+byte-exact vectors and `vectors/check.py` re-derives them with the Python standard library alone.
+A backup is the same on every platform: nothing in it depends on the operating system, the
+locale, the time zone or the width of native integers.
+
+### 11.1 The recovery key and the key schedule
+
+A recovery key is 64 characters of Crockford base32 (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`), most
+significant bit first, encoding 40 bytes: a 32-byte **secret** and an 8-byte **check**,
+`SHA-256("songbird.v1/recovery-key\0" || secret)[0..8]`. It is shown as 16 groups of four
+joined by `-`. A reader ignores case, whitespace and `-`, reads `I` and `L` as `1` and `O` as
+`0`, refuses any other character (`U` included) and anything but 64 symbols, and refuses a key
+whose check does not match before any request (a typo, not a missing backup).
+
+Keys: `PRK = HKDF-Extract(salt = "songbird.v1/backup", secret)`, then
+`HKDF-Expand(PRK, "songbird.v1/backup/" || label, n)`:
+
+| Label | n | Use |
+| --- | --- | --- |
+| `vault-id` | 32 | The vault's ID on every store (§11.8) |
+| `vault-access` | 32 | The Songbird vault's bearer secret; the vault stores `SHA-256("songbird.v1/vault-access\0" \|\| it)` |
+| `manifest` | 32 | XChaCha20-Poly1305 key of manifests |
+| `chunk` | 32 | XChaCha20-Poly1305 key of chunks |
+| `chunk-name` | 32 | HMAC-SHA256 key of chunk names and media references |
+| `chunker` | 2,048 | The gear table: 256 big-endian `u64` |
+
+A new recovery key is a new vault (a full backup, then the old vault is deleted). The transfer to
+a new phone (§11.9) uses a one-time key of the same form.
+
+### 11.2 Chunks
+
+```text
+chunk object = "SBC" | version u8 (1) | nonce [24] | ciphertext | tag [16]
+ciphertext   = XChaCha20-Poly1305(chunk key, nonce, padded, AAD = the 28 header bytes || name [32])
+padded       = length u32 | plaintext | zeros, to Padmé(max(4 + length, 1024)) bytes
+name         = HMAC-SHA256(chunk-name key, plaintext)
+```
+
+Integers are big-endian; Padmé is §7.1's. A chunk's plaintext is at most 8 MiB. A reader opens a
+chunk only against the name and plaintext length the manifest gives: the ciphertext length must
+be exactly the padded length of that plaintext length (a truncated or extended object fails as
+damaged before decryption), the tag must verify, the padding must be zeros, the length field must
+match, and the HMAC of the plaintext must equal the name. A store serving one chunk under
+another's name fails the tag (the name is in the AAD). Names are written as 64 lowercase hex
+characters.
+
+### 11.3 Cutting streams into chunks
+
+Content is written as byte streams (§11.5) and cut with FastCDC (normalized chunking, level 2):
+for each stream, from the start of the unchunked rest,
+
+```text
+if rest <= 1 MiB: the rest is the last chunk (only at the stream's end)
+h = 0; for i from 1 MiB, h = (h << 1) + gear[byte[i]] (wrapping, u64):
+  before 2 MiB: cut after byte i when h & (!0 << 41) == 0   (top 23 bits zero)
+  from 2 MiB:   cut after byte i when h & (!0 << 45) == 0   (top 19 bits zero)
+  at 8 MiB:     cut
+```
+
+The hash at byte `i` depends only on the 64 bytes before it, so a writer may start it 64 bytes
+before 1 MiB. The table is keyed (§11.1): boundaries reveal nothing about content to the store,
+while the same content cuts the same way in every backup of the same key, so new messages change
+only the chunks near them. Measured on an Apple M5 Pro: 3.4 GB/s, chunks of 2.35 MiB on average
+(D-0120). Readers accept any chunk of 1 byte to 8 MiB; only writers follow these sizes.
+
+### 11.4 The manifest
+
+```text
+manifest object = "SBM" | version u8 (1) | generation u64 | nonce [24] | ciphertext | tag [16]
+ciphertext      = XChaCha20-Poly1305(manifest key, nonce, padded protobuf `Manifest`,
+                                     AAD = the 36 header bytes || vault ID [32])
+```
+
+`generation` is the only field in the clear: stores compare-and-swap on it (§11.8). It is
+authenticated, so a store cannot relabel a manifest, and the vault ID in the AAD keeps one vault's
+manifest from opening as another's. The plaintext (`Manifest`, at most 48 MiB) holds the writer's
+format version and the oldest reader version that may read it (`min_reader_version`), the time,
+the app's version and platform (informational only), `previous` (the SHA-256 of the previous
+manifest object, empty for the first) and the streams: each with its kind, its ID (a media
+reference for a media stream), its length, its SHA-256, and its chunks in order (name and
+plaintext length). Bounds a reader checks: at most 2^20 streams and 2^21 chunk references, names
+of 32 bytes, chunk lengths of 1 byte to 8 MiB adding up to the stream's length, exactly one
+records stream and at most one small-media stream.
+
+**Rollback.** A device keeps, per vault, the generation and hash of the newest manifest it has
+read. It refuses an older generation (`Rollback`), the same generation with another hash
+(`Fork`), and the next generation unless its `previous` is the hash it kept (`Fork`). A brand-new
+device has nothing to compare with, so a store can serve it an older backup of the same key (never
+a forged one; threat model §6).
+
+### 11.5 Streams and records
+
+| Stream | Holds |
+| --- | --- |
+| records (exactly one) | Length-delimited `Record`s (a protobuf varint length, then the message), at most 4 MiB each |
+| small media (at most one) | Length-delimited `Blob`s: media files under 1 MiB, each once |
+| media (one per file) | The bytes of one media file of 1 MiB or more, ID = its reference |
+
+The records stream follows a canonical order, so equal content gives equal chunks and a new
+backup changes as few chunks as possible: the `Account`, the `Profile`, the `Setting`s, the
+`Contact`s, the `Group`s, every `Chat`, then **every `Message` of every chat by time** (sent
+time, then chat ID, then message ID), each message's `Media` record just before the first
+message that shows it. New messages then land at the end of the stream and cleared old ones at
+its start: ordering messages chat by chat instead made one new message in each of 2,000 chats
+re-upload the whole messages stream (D-0123). A media file is stored once however often it is forwarded: a small one
+under `HMAC-SHA256(chunk-name key, "songbird.v1/backup-media\0" || bytes)`, a streamed one under
+`HMAC-SHA256(chunk-name key, "songbird.v1/backup-media-stream\0" || length u64 || its chunk
+names)`.
+
+**What a backup holds**: the account (account ID, the account identity key's Ed25519 seed, the
+profile key, the record store's storage key, the access key, the username and username key, the
+device list's version, the server name); the profile; settings (the record store's logical keys
+with their values, and device-only settings under `d/`); contacts; groups (ID, name, metadata
+key, members, role: enough to rejoin by re-add or external commit, §6); chats; messages (the
+content protobuf of §5 as sent or received, with media references, status and star); media.
+**Never**: ratchet sessions, prekeys, device identity keys, MLS epoch secrets, KeyPackages. A
+restored device starts fresh sessions.
+
+### 11.6 Restoring
+
+Two phases. **Verify**: fetch every chunk the manifest names, open and check each (§11.2), keep
+the still-encrypted objects in a staging area (memory or a folder), then read every stream
+through, checking its length and SHA-256 and decoding every record and blob. **Apply**: only
+after verify succeeded, read the backup from staging (each chunk opened and checked again) and
+write it to an empty store in one transaction. Any failure stops the restore with a named error
+(`Missing`, `Damaged`, `WrongName`, `StreamMismatch`, `Malformed`, `TooNew`, `Rollback`,
+`Fork`) and the device keeps what it had.
+
+### 11.7 Versions
+
+Readers ignore unknown fields, stream kinds and record bodies. A writer adding something an
+older reader must not skip raises `min_reader_version`; an older reader then refuses the whole
+backup ("update Songbird") instead of restoring part of it. Every published version's vectors
+stay in `vectors/v*/` and are restored by every later reader
+(`this_reader_restores_every_published_version`).
+
+### 11.8 Stores and the Songbird vault (M2, D-0121)
+
+A backup lives in any **store** (`crates/backup-storage`): one interface, `BackupStore`, with
+`open`, `put`/`get`/`list`/`delete` of chunk objects by name, `manifest`, `swap_manifest(expected,
+object)` (stored only if the current manifest's generation is `expected`, 0 for none, and the
+object's own generation is `expected + 1`; otherwise a conflict with the current generation;
+of racing writers exactly one wins each generation) and `destroy`. Adapters run on the device
+only. A backup run reads the manifest and the chunk list, uploads only chunks the store lacks,
+swaps the manifest after every chunk is stored (and every chunk it reused from the listing is
+still there), then deletes chunks no manifest references; a run that stops anywhere leaves the
+previous backup intact. Runs to one kind of store take turns on a device. A restore refuses
+an object larger than a chunk can be before keeping it. WebDAV and S3 take `https://` only,
+except to the device itself. One conformance suite
+(`songbird_backup_storage::conformance`) checks every rule on every adapter.
+
+Local export: a folder (`chunks/<hex>`, `manifest`, a `manifest.lock` held while swapping and
+broken after five minutes), and a single `.songbird-backup` file:
+`"SBX" | 1 | manifest_len u32 | manifest | n u32 | n × (name [32] | len u32) | objects`; a file
+whose length does not match its index is refused before anything is read.
+
+**The Songbird vault** (`api`, objects in their own RustFS bucket). Every request carries the
+vault ID and the access secret (§11.1), both from the recovery key:
+
+| Header | Value |
+| --- | --- |
+| `x-songbird-vault` | the vault ID, 64 hex |
+| `x-songbird-vault-access` | the access secret, 64 hex |
+| `x-songbird-vault-expected` | (manifest writes) the generation replaced, decimal |
+
+| Request | Signed by | Answer |
+| --- | --- | --- |
+| `POST /v1/vault` | the account's primary | 200 `{"created"}`; 409 `{"error": "exists"}` (the account has `max_vaults`, or the ID is another account's); 403 `primary` |
+| `GET /v1/vault` | — | 200 `{"generation", "bytes", "chunks", "quota_bytes", "quota_chunks"}` |
+| `DELETE /v1/vault` | the owner's primary | 204: the vault is gone at once; its objects are deleted by the worker |
+| `GET /v1/vault/manifest` | — | 200 the manifest object; 204 before the first |
+| `PUT /v1/vault/manifest` | the owner's primary | 200 `{"generation"}`; 409 `{"error": "generation", "generation"}`; 409 `full`; 400 `manifest`/`generation` |
+| `PUT /v1/vault/chunks/<name>` | the owner's primary | 204; 409 `full`; 409 `size`; 400 `chunk` |
+| `GET /v1/vault/chunks/<name>` | — | 200 the object; 404 |
+| `GET /v1/vault/chunks?after=<name>` | — | 200 `n u16 \| name [32] × n \| more u8`, at most 1,000 names in order |
+| `POST /v1/vault/chunks/delete` | the owner's primary | `n u16 (1..=1000) \| name [32] × n` → 204 |
+
+- The server never stores the vault ID: rows and objects are keyed by `HMAC(server key, vault
+  ID)`, objects named `<that>/<epoch>/c/<name>` and `<that>/<epoch>/m/<random>`, where the
+  epoch is random per vault incarnation (a vault turned off and opened again with the same key
+  never shares objects with the old one). It stores `SHA-256("songbird.v1/vault-access\0" ||
+  secret)` and compares in constant time. No time is stored.
+- **Reads need only the two headers**, so a new device with only the recovery key finds and
+  restores its backup before it has an account. An unknown vault and a wrong secret answer the
+  same 404 after the same lookup and count against the requester's IP range (`misses_per_hour`,
+  /24 and /48); past it, every vault request from the range waits (429).
+- **Writes** also need a signature (§2.4) by the **primary** of the account that owns the vault
+  (403 `primary` for a linked or pending device, 403 `owner` for another account). The owner is
+  in its own table (`vault_owner`), so Prompt 11 can unlink vaults from accounts without
+  changing the format.
+- The server checks only shapes: a chunk object starts `SBC 01` and its length is a header, a
+  Padmé length of at least 1,024 and a tag, at most the largest chunk; a manifest starts
+  `SBM 01`, is at most `max_manifest`, and its generation is `expected + 1`. A chunk is recorded
+  with its size (and counted against the quota) before its object is stored, and checked to be
+  still recorded after: an upload whose chunk was forgotten, or whose vault was turned off,
+  meanwhile deletes its object again. A name already recorded must come with the same size
+  (409 `{"error": "size"}`), so uploads racing for one name can't store more than they count. A
+  manifest object is stored under a fresh random name before the compare-and-swap, and the
+  loser's object is deleted. Every write checks the vault incarnation (epoch) it opened is still
+  the current one (D-0125).
+- Quotas per vault (D-0119): 5 GiB and 100,000 chunks, `max_vaults` = 2 per account, until
+  Prompt 11's entitlements. Budgets (GCRA in `valkey-hot` under keyed records): reads per vault,
+  writes per account, misses per range.
+- Deleting the account deletes its vaults (the worker: rows, then every object under the
+  prefixes, verified by listing). A vault turned off is listed again by every sweep for 15
+  minutes (longer than any request) before it is forgotten, so an upload in flight when it was
+  turned off is deleted too. The GDPR export lists each vault's generation, bytes and chunk
+  count, never its ID.
+
+**Third-party stores** (M3, D-0122), each on the device with the user's own credentials:
+
+| Store | Where | Compare-and-swap | Atomic |
+| --- | --- | --- | --- |
+| S3 (any compatible bucket) | `<prefix>chunks/<hex>`, `<prefix>manifest`; SigV4 | `If-None-Match: *`, then `If-Match: <ETag>` (412: lost) | yes, where the provider honours conditional writes (the conformance race checks it; RustFS 1.0.5 does) |
+| `WebDAV` | `chunks/<hex>`, `manifest`, `manifest.lock` | an exclusive `LOCK`, then `If-None-Match: *` / `If-Match` | **no**: Apache `mod_dav` lets racers through both checks |
+| Google Drive | `appDataFolder`, flat: `<prefix>c.<hex>`, `<prefix>m.<generation 20 digits>.<random>` | create the next generation's file, keep the first name of that generation | **no**: Drive v3 has no conditional write |
+| OneDrive | `special/approot`: `<root>/chunks/<hex>`, `<root>/manifest` | `conflictBehavior=fail`, then `If-Match: <eTag>`; upload sessions above 4 MiB; downloads follow the redirect without the token | yes |
+| Dropbox | App Folder: `<root>/chunks/<hex>`, `<root>/manifest` | `files/upload` `mode: add`, then `mode: update(rev)` | yes |
+| iCloud Drive | the native bridge's `chunks/<hex>`, `manifest` | `replace_if` in one coordinated write (the interface the app's native half must meet) | yes, by contract |
+
+Where a swap is not atomic, the run reads the manifest back and reports a conflict if it was
+overtaken; a device overtaken after that sees a fork at its next run (§11.4), never a silent
+loss. Only the primary writes, so such a race needs two primaries (around an account recovery).
+
+**Signing in to the clouds** (OAuth 2.0 for native apps, RFC 8252, with PKCE S256, RFC 7636):
+public client IDs, no secret; a random `state`; the loopback redirect on desktop; refresh
+tokens kept in the app's keychain; a 401 refreshes once. Scopes: Google
+`drive.appdata`, Microsoft `Files.ReadWrite.AppFolder offline_access`, Dropbox an App Folder
+app with `files.content.read files.content.write`.
+
+### 11.9 Device-to-device transfer (M4, D-0123)
+
+The new phone listens on the local network and shows a QR code; the old phone scans it,
+connects over TCP and streams a backup straight to it (`crates/backup-storage::transfer`):
+
+- **Code**: `songbird-transfer:` and base64url (no padding) of
+  `"SBT" | 1 | psk [32] | port u16 | n u8 (1..=8) | n × (family u8 (4 | 6) | address [4 | 16])`.
+- **Commitment**: on each connection the new phone first sends `len u16 | 32 bytes`,
+  `SHA-256("songbird.v1/transfer-commit\0" || its ephemeral public key)`, before it sees the
+  old phone's; the old phone refuses a reply whose key doesn't match. Without it a man in the
+  middle who had seen the code could try keys until both phones showed the same six digits
+  (about 2²⁰ tries, seconds); with it each try is one connection with a one-in-a-million chance
+  (D-0125).
+- **Channel**: Noise `NNpsk0_25519_ChaChaPoly_SHA256` (revision 34) on aws-lc-rs, prologue
+  `"songbird.v1/transfer\0" || the code's payload`, the old phone initiating. Only a phone that
+  read the code completes the handshake; a connection with another code, or one silent for 20
+  seconds, is dropped and the new phone keeps listening (several handshakes at once, so one
+  stalled connection holds up nothing). Both show a 6-digit code,
+  `u32(SHA-256("songbird.v1/transfer-code\0" || handshake hash)[0..4]) mod 10⁶`, and the user
+  confirms it on **both**: the old phone sends nothing before, and the new phone answers `OK`
+  and applies nothing before. Transport messages are Noise's (`len u16 | ciphertext`, at most
+  65,535 bytes), carrying a byte stream of records `kind u8 | len u32 | body` (at most the
+  largest manifest object): `1 HELLO` (account, hand-over token, its device ID,
+  a one-time recovery key's secret), `2 CHUNK` (name and object), `3 MANIFEST`, `4 DONE`, and
+  `5 OK` from the new phone once **every chunk is verified and the backup restored** (§11.6).
+- The backup is the format of §11 under the one-time key, written by the same run as every
+  store. Then the new phone recovers the account with the hand-over token (§4.11): no PIN, the
+  old primary consented. Nothing passes through Songbird's servers except that call.
+- Vector: `crates/backup-storage/vectors/transfer.json`, re-derived from the Noise
+  specification by `vectors/transfer_check.py` (X25519, ChaCha20-Poly1305 and HMAC written from
+  RFC 7748, RFC 8439 and RFC 2104 with the Python standard library).
 
 ## 12. Versioning and compatibility rules
 

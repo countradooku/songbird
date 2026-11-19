@@ -7,6 +7,9 @@
 //! | `PUT /v1/provisioning/<channel>` | a device | Its one sealed message (at most 4 KiB) |
 //! | `GET /v1/provisioning/<channel>` | the channel's holder | Waits up to 25 s for the message; it is handed out once |
 //! | `POST /v1/devices/link-token` | the primary | A single-use link token reserving a device ID |
+//! | `POST /v1/account/recover/token` | anyone (throttled) | A recovery token for an account (Prompt 10) |
+//! | `POST /v1/account/handover` | the primary | A hand-over token: its replacement needs no second factor |
+//! | `POST /v1/account/recover` | the new device (unsigned) | Becomes the primary: the account identity key's signature, and the PIN or a passkey for a recovery token |
 //! | `POST /v1/devices/link` | the new device (per IP range) | Links with the token, both keys proven |
 //! | `GET /v1/devices` | a device | Its account's devices, the pending ones with their confirmation tags |
 //! | `PUT /v1/devices/list` | a device | A list signed by the account identity key |
@@ -78,6 +81,8 @@ pub struct DeviceMetrics {
     pub refused: songbird_service::telemetry::sharded::ShardedCounter,
     /// Requests refused by a throttle.
     pub throttled: songbird_service::telemetry::sharded::ShardedCounter,
+    /// Accounts recovered onto a new primary (Prompt 10).
+    pub recovered: songbird_service::telemetry::sharded::ShardedCounter,
 }
 
 impl DeviceMetrics {
@@ -97,6 +102,11 @@ impl DeviceMetrics {
                 &self.lists,
             ),
             ("api_devices_removed", "Devices removed", &self.removed),
+            (
+                "api_accounts_recovered",
+                "Accounts recovered onto a new primary",
+                &self.recovered,
+            ),
             (
                 "api_device_refused",
                 "Device requests refused",
@@ -1053,6 +1063,215 @@ impl Devices {
         }
         self.notify(messages, &account, &remaining).await;
         Outcome::Done
+    }
+
+    // ----- account recovery and the hand-over (Prompt 10, M4, D-0123) -----
+
+    /// Draws a recovery token (`issuer` `None`, unsigned, anyone) or a hand-over token (`issuer`
+    /// the signing primary) for `account`.
+    async fn recovery_token(
+        &self,
+        registry: &Registry,
+        hot: &ValkeyConn,
+        account: &AccountId,
+        issuer: Option<&DeviceId>,
+        peer: Option<IpAddr>,
+    ) -> Outcome {
+        let s = &self.settings;
+        if let Some(p) = peer
+            && let Err(o) = self
+                .throttle(hot, "r", &self.range(p), s.links_per_hour, s.link_burst)
+                .await
+        {
+            return o;
+        }
+        // Strangers asking for recovery tokens are throttled per account; the primary's
+        // hand-overs on their own budget, keyed by the primary, so strangers can't use them up
+        // (D-0125).
+        let (kind, subject) = match issuer {
+            None => ("rt", account.as_bytes().as_slice()),
+            Some(p) => ("ht", p.as_bytes().as_slice()),
+        };
+        if let Err(o) = self
+            .throttle(hot, kind, subject, s.tokens_per_hour, s.token_burst)
+            .await
+        {
+            return o;
+        }
+        for _ in 0..4 {
+            let mut token = [0u8; wire::TOKEN_LEN];
+            let mut device = [0u8; 16];
+            if getrandom::fill(&mut token).is_err() || getrandom::fill(&mut device).is_err() {
+                return Outcome::Unavailable;
+            }
+            let device = DeviceId::from_bytes(device);
+            match registry
+                .create_recovery_token(
+                    account,
+                    issuer,
+                    &token_hash(&token),
+                    &device,
+                    Duration::from_secs(s.link_token_ttl_secs),
+                )
+                .await
+            {
+                Ok(()) => {
+                    return Outcome::Json(serde_json::json!({
+                        "token": hex::encode(token),
+                        "device": device.to_hex_unredacted(),
+                        "expires_in": s.link_token_ttl_secs,
+                    }));
+                }
+                Err(RegistryError::Exists) => {}
+                // A stranger learns nothing about whether the account exists: a token that is
+                // never stored, refused later as any wrong token is (D-0125).
+                Err(RegistryError::NotFound) if issuer.is_none() => {
+                    return Outcome::Json(serde_json::json!({
+                        "token": hex::encode(token),
+                        "device": device.to_hex_unredacted(),
+                        "expires_in": s.link_token_ttl_secs,
+                    }));
+                }
+                Err(RegistryError::NotFound) => return self.refused(Outcome::NotFound),
+                Err(RegistryError::NotPrimary) => {
+                    return self.refused(Outcome::Conflict("primary"));
+                }
+                Err(_) => return Outcome::Unavailable,
+            }
+        }
+        Outcome::Unavailable
+    }
+
+    /// `POST /v1/account/recover/token` (unsigned): `{"account": hex}`.
+    pub async fn recover_token(
+        &self,
+        registry: &Registry,
+        hot: &ValkeyConn,
+        peer: IpAddr,
+        body: &[u8],
+    ) -> Outcome {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Body {
+            account: String,
+        }
+        let Some(account) = serde_json::from_slice::<Body>(body)
+            .ok()
+            .and_then(|b| AccountId::parse_hex(&b.account).ok())
+        else {
+            return self.refused(Outcome::Malformed("request"));
+        };
+        self.recovery_token(registry, hot, &account, None, Some(peer))
+            .await
+    }
+
+    /// `POST /v1/account/handover` by the primary: a token its replacement recovers with, no
+    /// second factor needed (the primary vouches).
+    pub async fn handover_token(
+        &self,
+        registry: &Registry,
+        hot: &ValkeyConn,
+        account: &AccountId,
+        primary: &DeviceId,
+    ) -> Outcome {
+        self.recovery_token(registry, hot, account, Some(primary), None)
+            .await
+    }
+
+    /// `POST /v1/account/recover` (unsigned): the new device becomes the account's primary.
+    ///
+    /// Checked before anything changes: the throttle per range, the new keys' two proofs, the
+    /// account identity key's signature over the same transcript, the token (unexpired, this
+    /// account, this device), and for a recovery token the account's PIN or passkey (counted
+    /// and locked as for linking).
+    pub async fn recover(
+        &self,
+        registry: &Registry,
+        hot: &ValkeyConn,
+        server_name: &str,
+        peer: IpAddr,
+        body: Bytes,
+    ) -> Outcome {
+        let s = &self.settings;
+        if let Err(o) = self
+            .throttle(hot, "l", &self.range(peer), s.links_per_hour, s.link_burst)
+            .await
+        {
+            return o;
+        }
+        let Ok(r) = wire::RecoverRequest::decode(&body) else {
+            return self.refused(Outcome::Malformed("request"));
+        };
+        let identity = match registry.account_identity(&r.account).await {
+            Ok(Some(k)) => k,
+            // One answer for an unknown account and a refused signature.
+            Ok(None) => return self.refused(Outcome::Malformed("signature")),
+            Err(_) => return Outcome::Unavailable,
+        };
+        let name = server_name.to_owned();
+        let link = r.link.clone();
+        let account_sig = r.account_sig;
+        let checked = tokio::task::spawn_blocking(move || {
+            verify_link(&link, &name)?;
+            let t = wire::link_transcript(
+                wire::RECOVER_CONTEXT,
+                &name,
+                &link.token,
+                &link.device,
+                &link.auth_key,
+                &link.identity_key,
+            )
+            .map_err(|_| "request")?;
+            if songbird_keys::ed25519_verify(&identity, &t, &account_sig) {
+                Ok(())
+            } else {
+                Err("signature")
+            }
+        })
+        .await;
+        match checked {
+            Ok(Ok(())) => {}
+            Ok(Err(why)) => return self.refused(Outcome::Malformed(why)),
+            Err(_) => return Outcome::Unavailable,
+        }
+        let hash = token_hash(&r.link.token);
+        let kind = match registry.recovery_token(&hash).await {
+            Ok(Some((a, k))) if a == r.account => k,
+            Ok(_) => return self.refused(Outcome::Conflict("token")),
+            Err(_) => return Outcome::Unavailable,
+        };
+        if kind == songbird_accounts::recovery::TokenKind::Recovery
+            && let Err(o) = self
+                .second_factor(registry, &r.account, &r.link, server_name)
+                .await
+        {
+            return self.refused(o);
+        }
+        let Ok(job) = Job::new(Work::DeleteDevices { account: r.account }) else {
+            return Outcome::Unavailable;
+        };
+        match registry
+            .recover_account(
+                &hash,
+                &r.account,
+                &r.link.device,
+                &r.link.auth_key,
+                &r.link.identity_key,
+                &job,
+            )
+            .await
+        {
+            Ok(removed) => {
+                self.metrics.recovered.inc();
+                Outcome::Json(serde_json::json!({
+                    "account": r.account.to_hex_unredacted(),
+                    "device": r.link.device.to_hex_unredacted(),
+                    "removed": removed.len(),
+                }))
+            }
+            Err(RegistryError::LinkToken) => self.refused(Outcome::Conflict("token")),
+            Err(_) => Outcome::Unavailable,
+        }
     }
 
     /// A `DeviceListChanged` notice to `devices` (best effort: clients also see the change at
